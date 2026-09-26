@@ -898,10 +898,18 @@ async fn terminal_socket_protocol() {
     );
 
     // Client-initiated close: the server answers it.
+    // Output already in flight (e.g. a shell prompt) may arrive before the reply.
     a.close(None).await.unwrap();
-    let reply = tokio::time::timeout(Duration::from_secs(5), a.next())
-        .await
-        .unwrap();
+    let reply = tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            match a.next().await {
+                Some(Ok(Message::Binary(_) | Message::Text(_))) => continue,
+                other => break other,
+            }
+        }
+    })
+    .await
+    .unwrap();
     assert!(matches!(reply, Some(Ok(Message::Close(_)))), "{reply:?}");
 
     // Server-initiated close after the exit frame: 1000 "exited".
