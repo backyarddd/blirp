@@ -163,11 +163,22 @@ fn sign_in(app: &AppHandle, shell: &Shell, info: &RuntimeInfo) {
         .filter(|u| shell.is_daemon_url(u));
     let url = login_url(info, route.as_ref());
     // The origin first: navigation to it is only allowed once it is known.
-    *lock(&shell.origin) = Some(info.base_url());
-    shell.set_phase(Phase::Ready);
-    // The token only once the window is on its way there, so a failed
-    // navigation is retried by the next check instead of looking done.
-    *lock(&shell.token) = navigate(app, &url).then(|| info.token.clone());
+    let previous = lock(&shell.origin).replace(info.base_url());
+    if navigate(app, &url) {
+        *lock(&shell.token) = Some(info.token.clone());
+        shell.set_phase(Phase::Ready);
+        return;
+    }
+    // Not signed in: the next focus, reopen or page load tries again. The
+    // window still shows the old origin (or the loading page), which must
+    // stay allowed.
+    *lock(&shell.token) = None;
+    *lock(&shell.origin) = previous.clone();
+    if previous.is_none() {
+        shell.set_phase(Phase::Failed {
+            message: "the blirp UI could not be opened in this window; see the desktop log".into(),
+        });
+    }
 }
 
 /// Sign the window in again when the daemon restarted since it was signed in
@@ -184,8 +195,9 @@ async fn refresh_sign_in(app: &AppHandle, shell: &Shell) {
         .get_webview_window(MAIN)
         .and_then(|w| w.url().ok())
         .is_some_and(|u| shell.is_daemon_url(&u));
-    // The loading page belongs to `start`, which signs in when it is done.
-    if !on_ui {
+    // The loading page belongs to `start`, which signs in when it is done,
+    // unless that sign-in failed (not signed in, nothing starting): retry.
+    if !on_ui && lock(&shell.token).is_some() {
         return;
     }
     let current = |info: &RuntimeInfo| {
