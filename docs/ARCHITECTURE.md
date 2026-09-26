@@ -549,7 +549,7 @@ Layout mirrors the reference (Xirp-style):
 - Web: `pnpm -C web check` (svelte-check, strict TS, no `any`), `pnpm -C web test` (vitest), `pnpm -C web build`. `pnpm -C web e2e` (not part of `test`) builds the SPA, starts the real daemon on a temp `BLIRP_HOME` and drives the UI with Playwright in the installed Edge (`BLIRP_E2E_CHANNEL` picks another browser, `BLIRP_E2E_KEEP=1` keeps the temp dir and `daemon.log`).
 - Every adapter, redaction rule, migration, the distill JSON contract, project resolution, pairing, and replication have tests. An integration test starts a daemon on a temp `BLIRP_HOME`, launches a PTY session running a shell echo, attaches over WS, and asserts snapshot + stream.
 - CI matrix: windows-latest, macos-latest, ubuntu-latest.
-- Logs never contain transcript text or secrets.
+- Logs never contain transcript text or secrets. Targets that can repeat one line at steady state (`blirp::log_limit::LIMITED_TARGETS`: swarm-discovery's mDNS sends, iroh, the sync loops, the status tick, keep-awake, the ingest and distill schedulers) are rate limited: a line (target, level, message and fields) is logged once, repeats within 10 minutes are dropped and counted, and the first one after that is logged with the count appended.
 
 ## 17. Distribution and updates
 

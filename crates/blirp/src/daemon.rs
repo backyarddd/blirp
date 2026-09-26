@@ -636,6 +636,7 @@ fn spawn_background(
 
 /// Tracing to `logs/blirpd.<date>.log` (daily, keep 7) and stderr.
 pub fn init_logging(paths: &Paths) -> anyhow::Result<tracing_appender::non_blocking::WorkerGuard> {
+    use crate::log_limit::{LogLimit, WithSuppressedCount};
     use tracing_subscriber::layer::SubscriberExt as _;
     use tracing_subscriber::util::SubscriberInitExt as _;
     use tracing_subscriber::{EnvFilter, fmt};
@@ -654,12 +655,22 @@ pub fn init_logging(paths: &Paths) -> anyhow::Result<tracing_appender::non_block
     // manager stderr is captured to a file of its own (launchd.log, the
     // journal), which would duplicate every line, with color codes.
     use std::io::IsTerminal as _;
-    let console = std::io::stderr()
-        .is_terminal()
-        .then(|| fmt::layer().with_writer(std::io::stderr));
+    let console = std::io::stderr().is_terminal().then(|| {
+        fmt::layer()
+            .with_writer(std::io::stderr)
+            .event_format(WithSuppressedCount(fmt::format()))
+    });
     tracing_subscriber::registry()
         .with(filter)
-        .with(fmt::layer().with_writer(file).with_ansi(false))
+        // Lines that repeat at steady state (mDNS without the macOS Local
+        // Network permission, retry loops): once per 10 min with a count.
+        .with(LogLimit::default())
+        .with(
+            fmt::layer()
+                .with_writer(file)
+                .with_ansi(false)
+                .event_format(WithSuppressedCount(fmt::format())),
+        )
         .with(console)
         .try_init()
         .context("install log subscriber")?;
