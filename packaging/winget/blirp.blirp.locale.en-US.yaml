@@ -4,7 +4,7 @@ PackageIdentifier: blirp.blirp
 PackageVersion: {{VERSION}}
 PackageLocale: en-US
 Publisher: blirp contributors
-PublisherUrl: https://github.com/blirp
+PublisherUrl: https://github.com/backyarddd
 PackageName: blirp
 PackageUrl: https://github.com/backyarddd/blirp
 License: Apache-2.0
