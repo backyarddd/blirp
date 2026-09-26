@@ -546,6 +546,34 @@ async fn pair_replicate_proxy_revoke_and_portal() {
             ),
         }
     }
+    // A file pasted into the remote terminal is saved on A, the machine
+    // running it, through the same proxy (bigger than axum's 2 MB default).
+    let big = vec![7u8; 3 << 20];
+    let r = b
+        .http
+        .post(format!(
+            "{}/api/sessions/{}/uploads?name=shot.png",
+            b.base, session.id
+        ))
+        .bearer_auth(b.daemon.token())
+        .body(big.clone())
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(r.status(), 201, "{:?}", r.text().await);
+    let up: blirp_core::model::UploadedFile = r.json().await.unwrap();
+    let a_uploads = std::path::absolute(
+        a.daemon
+            .state
+            .paths
+            .session_uploads_dir(&session.id)
+            .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(std::path::Path::new(&up.path).parent().unwrap(), a_uploads);
+    assert_eq!(std::fs::read(&up.path).unwrap(), big);
+    assert!(!b.daemon.state.paths.uploads_dir().exists());
+
     let r = b
         .req(
             Method::POST,
@@ -572,6 +600,18 @@ async fn pair_replicate_proxy_revoke_and_portal() {
         r.json::<ErrorBody>().await.unwrap().error.code,
         "control_not_allowed"
     );
+    // Nor paste files into its terminals.
+    let resp = blirp::sync::forward_body(
+        &a.daemon.state,
+        &b.id(),
+        &Principal::local(),
+        Method::POST,
+        "/api/sessions/any/uploads?name=a.png",
+        Some(("application/octet-stream", vec![1u8; 8].into())),
+    )
+    .await
+    .unwrap();
+    assert_eq!(resp.status(), 403);
     let resp = blirp::sync::forward(
         &a.daemon.state,
         &b.id(),

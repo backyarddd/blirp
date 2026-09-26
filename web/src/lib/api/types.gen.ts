@@ -372,6 +372,26 @@ export type OpenTarget = "folder" | "editor";
 
 export type OpenSession = { target: OpenTarget, };
 
+/**
+ * `POST /api/sessions/:id/uploads`: a file pasted or dropped into the
+ * session's terminal, saved on the machine that runs the session.
+ */
+export type UploadedFile = { 
+/**
+ * Absolute path on that machine.
+ */
+path: string, 
+/**
+ * `path` as a terminal drop would type it on that machine: in double
+ * quotes on Windows, with backslash escapes elsewhere, unchanged when
+ * it needs neither.
+ */
+quoted: string, 
+/**
+ * Bytes stored.
+ */
+size: number, };
+
 export type EventsPage = { items: Array<Event>, 
 /**
  * Pass as `after` to fetch the next page; null on the last page.

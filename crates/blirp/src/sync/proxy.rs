@@ -85,6 +85,19 @@ pub async fn forward(
     path: &str,
     json: Option<Vec<u8>>,
 ) -> ApiResult<Response> {
+    let body = json.map(|b| ("application/json", bytes::Bytes::from(b)));
+    forward_body(state, machine, principal, method, path, body).await
+}
+
+/// `forward` with a body of any content type (terminal uploads).
+pub async fn forward_body(
+    state: &SharedState,
+    machine: &str,
+    principal: &Principal,
+    method: Method,
+    path: &str,
+    body: Option<(&'static str, bytes::Bytes)>,
+) -> ApiResult<Response> {
     let stream = open(state, machine, principal).await?;
     let (mut sender, conn) = hyper::client::conn::http1::handshake(TokioIo::new(stream))
         .await
@@ -98,9 +111,9 @@ pub async fn forward(
         .method(method)
         .uri(path)
         .header(header::HOST, "blirp.remote");
-    let body = match json {
-        Some(b) => {
-            req = req.header(header::CONTENT_TYPE, "application/json");
+    let body = match body {
+        Some((content_type, b)) => {
+            req = req.header(header::CONTENT_TYPE, content_type);
             Body::from(b)
         }
         None => Body::empty(),

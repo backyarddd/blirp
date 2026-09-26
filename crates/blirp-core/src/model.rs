@@ -816,6 +816,20 @@ pub struct OpenSession {
     pub target: OpenTarget,
 }
 
+/// `POST /api/sessions/:id/uploads`: a file pasted or dropped into the
+/// session's terminal, saved on the machine that runs the session.
+#[derive(Debug, Clone, Serialize, Deserialize, TS)]
+pub struct UploadedFile {
+    /// Absolute path on that machine.
+    pub path: String,
+    /// `path` as a terminal drop would type it on that machine: in double
+    /// quotes on Windows, with backslash escapes elsewhere, unchanged when
+    /// it needs neither.
+    pub quoted: String,
+    /// Bytes stored.
+    pub size: u64,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, TS)]
 pub struct EventsPage {
     pub items: Vec<Event>,
@@ -1229,7 +1243,7 @@ mod tests {
             PatchProject, MergeProject, ProjectMemory, PutBrief, RevertBrief, CreateRecord,
             PatchRecord, CreateWikiPage, PutWikiPage, CreateResource, PatchResource,
             GitStatusEntry, GitStatus, GitDiff, FileEntry, DirListing, FileContent, SessionsPage, SessionDetail,
-            LaunchSession, PatchSession, RemoveWorktree, OpenTarget, OpenSession, EventsPage, SearchHit, SearchResults, AgentInfo,
+            LaunchSession, PatchSession, RemoveWorktree, OpenTarget, OpenSession, UploadedFile, EventsPage, SearchHit, SearchResults, AgentInfo,
             AgentIntegration, AgentAuth, AgentToken, SetAgentToken, MachineDirs, MachineDir, CloneRepo, CloneJob, Injection, SummaryItem, DistillFailure, SessionSummary,
             SettingsView, SettingsPatch, Capabilities, DistillStatus, DistillPause, SyncStatus, SyncInvite, JoinHub, JoinPreviewRequest, JoinPreview, LeftHub, WsTicketRequest, WsTicket, BrowserInvite, PatchDevice,
             ServerEvent, TerminalServerMessage, TerminalClientMessage,

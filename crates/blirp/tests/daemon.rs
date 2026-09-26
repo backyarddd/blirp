@@ -490,6 +490,110 @@ async fn shutdown_endpoint_requests_stop() {
     h.daemon.shutdown().await.unwrap();
 }
 
+async fn upload(h: &Harness, id: &str, name: &str, body: Vec<u8>) -> reqwest::Response {
+    let mut url = reqwest::Url::parse(&h.url(&format!("/api/sessions/{id}/uploads"))).unwrap();
+    url.query_pairs_mut().append_pair("name", name);
+    h.http
+        .post(url)
+        .bearer_auth(&h.token)
+        .header("content-type", "application/octet-stream")
+        .body(body)
+        .send()
+        .await
+        .unwrap()
+}
+
+// Files pasted or dropped into a terminal land in the session's upload
+// folder on this machine, and go away with the session.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn terminal_uploads() {
+    let h = Harness::start().await;
+    let proj = h._home.path().join("paste");
+    std::fs::create_dir(&proj).unwrap();
+    let r = h
+        .send(
+            reqwest::Method::POST,
+            "/api/sessions",
+            json!({"cwd": proj, "agent": "shell"}),
+        )
+        .await;
+    assert_eq!(r.status(), 201);
+    let session: Session = r.json().await.unwrap();
+    let dir = std::path::absolute(
+        h.daemon
+            .state
+            .paths
+            .session_uploads_dir(&session.id)
+            .unwrap(),
+    )
+    .unwrap();
+
+    let png = b"\x89PNG\r\n\x1a\nfake".to_vec();
+    let r = upload(&h, &session.id, "../../Screen Shot.png", png.clone()).await;
+    assert_eq!(r.status(), 201, "{:?}", r.text().await);
+    let up: blirp_core::model::UploadedFile = r.json().await.unwrap();
+    let saved = std::path::PathBuf::from(&up.path);
+    assert_eq!(saved.parent().unwrap(), dir);
+    assert!(up.path.ends_with("-Screen_Shot.png"), "{}", up.path);
+    assert_eq!(std::fs::read(&saved).unwrap(), png);
+    assert_eq!(up.size, png.len() as u64);
+    assert!(up.quoted.contains("Screen_Shot.png"));
+
+    // One byte over the limit is refused before anything is written, by its
+    // declared length or while reading. In-process: over TCP the early
+    // answer races the client still sending the body.
+    let app = blirp::api::proxy_router(h.daemon.state.clone())
+        .layer(axum::Extension(blirp::api::Principal::local()));
+    for declared in [true, false] {
+        use tower::ServiceExt as _;
+        let mut req = axum::http::Request::builder()
+            .method("POST")
+            .uri(format!("/api/sessions/{}/uploads?name=big.bin", session.id));
+        if declared {
+            req = req.header("content-length", blirp::uploads::MAX_BYTES + 1);
+        }
+        let body = axum::body::Body::from(vec![0; blirp::uploads::MAX_BYTES + 1]);
+        let resp = app.clone().oneshot(req.body(body).unwrap()).await.unwrap();
+        assert_eq!(resp.status(), 413, "declared {declared}");
+        let bytes = axum::body::to_bytes(resp.into_body(), 1 << 20)
+            .await
+            .unwrap();
+        let err: ErrorBody = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(err.error.code, "file_too_large");
+    }
+    assert_eq!(std::fs::read_dir(&dir).unwrap().count(), 1);
+
+    // Only running sessions take uploads.
+    let r = upload(&h, "no-such-session", "a.png", png.clone()).await;
+    assert_eq!(r.status(), 404);
+    let err: ErrorBody = r.json().await.unwrap();
+    assert_eq!(err.error.code, "terminal_not_found");
+
+    let stop = format!("/api/sessions/{}/stop", session.id);
+    assert_eq!(
+        h.send(reqwest::Method::POST, &stop, json!({}))
+            .await
+            .status(),
+        202
+    );
+    wait_status(&h, &session.id, SessionStatus::Completed).await;
+    wait_no_terminal(&h, &session.id).await;
+    let r = upload(&h, &session.id, "late.png", png).await;
+    assert_eq!(r.status(), 404);
+
+    let r = h
+        .send(
+            reqwest::Method::DELETE,
+            &format!("/api/sessions/{}", session.id),
+            json!({}),
+        )
+        .await;
+    assert_eq!(r.status(), 204);
+    assert!(!dir.exists(), "uploads removed with the session");
+    let Harness { daemon, _home, .. } = h;
+    daemon.shutdown().await.unwrap();
+}
+
 async fn wait_no_terminal(h: &Harness, id: &str) {
     let deadline = Instant::now() + Duration::from_secs(20);
     while h.daemon.state.terminals.get(id).is_some() {
@@ -646,6 +750,7 @@ async fn subagent_children_are_filtered_and_counted() {
         (reqwest::Method::POST, "/api/sessions/theirs/stop"),
         (reqwest::Method::POST, "/api/sessions/theirs/resume"),
         (reqwest::Method::DELETE, "/api/sessions/theirs"),
+        (reqwest::Method::POST, "/api/sessions/theirs/uploads"),
     ] {
         let r = h.send(method, path, json!({})).await;
         assert_eq!(r.status(), 409, "{path}");
@@ -773,6 +878,7 @@ const MUTATING_ROUTES: &[(&str, &str, Need)] = &[
     ("POST", "/api/sessions/s1/stop", Need::Control),
     ("POST", "/api/sessions/s1/resume", Need::Control),
     ("POST", "/api/sessions/s1/distill", Need::Control),
+    ("POST", "/api/sessions/s1/uploads", Need::Control),
     ("POST", "/api/projects", Need::Control),
     ("PATCH", "/api/projects/p1", Need::Control),
     ("DELETE", "/api/projects/p1", Need::Control),

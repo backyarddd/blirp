@@ -19,6 +19,7 @@ pub mod state;
 pub mod static_files;
 pub mod sync;
 pub mod update;
+pub mod uploads;
 
 /// Install ring as the process-wide rustls provider. iroh turns on
 /// reqwest's rustls backend without a provider, so every reqwest client

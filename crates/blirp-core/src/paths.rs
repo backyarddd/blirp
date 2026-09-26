@@ -107,6 +107,18 @@ impl Paths {
         }
         Ok(self.home.join("launch").join(session_id))
     }
+    /// Files pasted or dropped into terminals (§3). Never in the database,
+    /// so never replicated; pruned after a week.
+    pub fn uploads_dir(&self) -> PathBuf {
+        self.home.join("uploads")
+    }
+    /// `uploads/<session_id>/`, with the same id check as `launch_dir`.
+    pub fn session_uploads_dir(&self, session_id: &str) -> Result<PathBuf, PathsError> {
+        if !crate::is_safe_id(session_id) {
+            return Err(PathsError::InvalidId(session_id.to_string()));
+        }
+        Ok(self.uploads_dir().join(session_id))
+    }
 
     /// Create the data dir and its fixed subdirectories. On unix the data dir
     /// (tokens, transcripts, identity key) is owner-only, 0700, tightened if an

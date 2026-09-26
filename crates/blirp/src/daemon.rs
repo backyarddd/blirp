@@ -252,6 +252,7 @@ impl Daemon {
         state.sync.set_identity(identity);
         crate::sessions::mark_detached(&state)?;
         crate::memory::distill::Distiller::start(state.clone());
+        crate::uploads::start_pruning(state.clone());
 
         let app = crate::api::router(state.clone());
         let mut server_shutdown = shutdown_rx.clone();

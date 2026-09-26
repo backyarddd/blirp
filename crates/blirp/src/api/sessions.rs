@@ -80,7 +80,7 @@ async fn launch(
 }
 
 /// The machine a session runs on when that is not this one.
-async fn remote_machine(s: &SharedState, id: &str) -> ApiResult<Option<String>> {
+pub(super) async fn remote_machine(s: &SharedState, id: &str) -> ApiResult<Option<String>> {
     if s.terminals.get(id).is_some() {
         return Ok(None);
     }
@@ -207,6 +207,7 @@ async fn remove(
         {
             tracing::warn!(session = %sid, error = %e, "removing launch files failed");
         }
+        crate::uploads::remove_session(&paths, &sid);
         Ok(())
     })
     .await?;

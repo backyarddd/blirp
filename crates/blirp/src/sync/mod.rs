@@ -4,7 +4,7 @@
 
 mod proxy;
 
-pub use proxy::{connect_terminal, forward, launch_remote, relay_terminal};
+pub use proxy::{connect_terminal, forward, forward_body, launch_remote, relay_terminal};
 
 use crate::api::{Admin, ApiError, ApiJson, ApiPath, ApiResult, Principal, blocking};
 use crate::state::SharedState;
