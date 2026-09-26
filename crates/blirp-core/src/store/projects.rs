@@ -285,8 +285,9 @@ impl Store {
                 }
                 None => (cwd.clone(), None),
             };
-            // 3. Home dir and filesystem roots are never project roots.
-            if root.parent().is_none() || home == Some(root.as_path()) {
+            // 3. Home dir, its ancestors (`C:\Users`, `/home`) and filesystem
+            // roots are never project roots.
+            if root.parent().is_none() || home.is_some_and(|h| h.starts_with(&root)) {
                 return Ok(ResolvedProject {
                     project: home_project(tx, machine_name)?,
                     root: cwd.clone(),
@@ -580,6 +581,13 @@ mod tests {
             .unwrap();
         assert!(b.is_home);
         assert_eq!(a.project.id, b.project.id);
+        // Any ancestor of home (`C:\Users`, `/home`) is not a project either.
+        let parent = home.parent().unwrap();
+        let p = store
+            .resolve_project_with_home("m1", "box", parent, Some(&home))
+            .unwrap();
+        assert!(p.is_home && !p.created);
+        assert_eq!(p.project.id, a.project.id);
         assert_eq!(
             store.home_project_id().unwrap().as_deref(),
             Some(a.project.id.as_str())
