@@ -97,3 +97,63 @@ jobs:
         run: |
           cargo test --locked -p blirp-core export_bindings
           git diff --exit-code -- web/src/lib/api/types.gen.ts
+
+
+  e2e:
+    name: e2e (ubuntu-latest)
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+
+      - name: Rust toolchain from rust-toolchain.toml
+        run: |
+          channel=$(sed -n 's/^channel = "\([^"]*\)".*/\1/p' rust-toolchain.toml)
+          rustup toolchain install "$channel" --profile minimal
+
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+
+      - uses: pnpm/action-setup@fc06bc1257f339d1d5d8b3a19a8cae5388b55320 # v4.4.0
+        with:
+          version: ${{ env.PNPM_VERSION }}
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: 22
+          cache: pnpm
+          cache-dependency-path: web/pnpm-lock.yaml
+      - run: pnpm -C web install --frozen-lockfile --ignore-scripts
+
+      # Browsers are cached per Playwright version; their system libraries
+      # come from apt on every run.
+      - name: Playwright version
+        id: playwright
+        run: echo "version=$(pnpm -C web exec playwright --version | awk '{print $2}')" >> "$GITHUB_OUTPUT"
+      - uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+        id: browsers
+        with:
+          path: ~/.cache/ms-playwright
+          key: playwright-${{ runner.os }}-${{ steps.playwright.outputs.version }}-chromium
+      - name: Install Chromium
+        if: steps.browsers.outputs.cache-hit != 'true'
+        run: pnpm -C web exec playwright install --with-deps chromium
+      - name: Install Chromium's system libraries
+        if: steps.browsers.outputs.cache-hit == 'true'
+        run: pnpm -C web exec playwright install-deps chromium
+
+      # Builds the UI and a debug daemon, then drives it (web/e2e/global-setup.ts).
+      - name: Playwright e2e
+        env:
+          BLIRP_E2E_CHANNEL: chromium
+          # Leaves the temp dir with daemon.log for the upload below.
+          BLIRP_E2E_KEEP: "1"
+        run: pnpm -C web e2e
+      - name: Keep the traces and the daemon log
+        if: failure()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: e2e-test-results
+          path: |
+            web/test-results
+            /tmp/blirp-e2e-*/daemon.log
+          retention-days: 7
+          if-no-files-found: ignore
