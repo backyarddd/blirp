@@ -628,7 +628,12 @@ test('mobile width (390px) keeps sessions and project pages inside the viewport'
   expect(await overflow()).toBeLessThanOrEqual(0);
   await page.getByRole('button', { name: 'Show sessions list' }).click();
   await expect(page.getByRole('complementary', { name: 'Sessions' }).locator(`a[href="/sessions/${sessionId}"]`)).toBeInViewport();
-  await page.getByRole('button', { name: 'Close sessions list' }).click();
+  // The open drawer (320px) covers the scrim's middle; tap the strip beside it, as a finger would.
+  const scrim = page.getByRole('button', { name: 'Close sessions list' });
+  const box = await scrim.boundingBox();
+  if (!box) throw new Error('the sessions scrim is not laid out');
+  await scrim.click({ position: { x: box.width - 8, y: box.height / 2 } });
+  await expect(scrim).toHaveCount(0);
 
   for (const path of [plainProjectUrl, `${plainProjectUrl}/memory`, `${repoProjectUrl}/git`, '/projects', '/settings/memory']) {
     await page.goto(`${env.url}${path}`);
