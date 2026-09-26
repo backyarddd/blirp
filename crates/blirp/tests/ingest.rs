@@ -228,6 +228,55 @@ fn put_claude(h: &H) -> PathBuf {
     )
 }
 
+// Hooks report transcript paths as the agent spells them; on Windows that
+// may differ from the watched root in case and separators. The hint must
+// still reach the adapter and continue the known source (not start a second
+// one under the other spelling).
+#[cfg(windows)]
+#[test]
+fn claude_hint_paths_match_case_insensitively() {
+    let h = H::new();
+    let rel = format!(".claude/projects/C--work-proj/{CLAUDE_SID}.jsonl");
+    let line = |uuid: &str, text: &str| format!("{}\n", claude_line(uuid, text, &h));
+    let path = h.put(&rel, line("u-1", "first prompt").as_bytes());
+    h.pass();
+    let s = h.session("claude", CLAUDE_SID);
+    let before = h.events(&s).len();
+    append(&path, line("u-2", "second prompt").as_bytes());
+
+    let hinted = PathBuf::from(path.to_string_lossy().to_uppercase().replace('\\', "/"));
+    let ix = h
+        .engine
+        .adapter_for(&hinted)
+        .expect("hinted path outside every root");
+    assert_eq!(h.engine.adapters()[ix].id(), "claude");
+    let mut work = Work::default();
+    work.paths.entry(ix).or_default().insert(hinted.clone());
+    h.engine.run(&work);
+
+    assert_eq!(h.events(&s).len(), before + 1);
+    let key = |p: &Path| p.to_string_lossy().into_owned();
+    assert!(
+        h.store
+            .get_cursor("claude", &key(&hinted))
+            .unwrap()
+            .is_none()
+    );
+    // The source as the scan spells it.
+    let scanned = h
+        .home
+        .join(".claude")
+        .join("projects")
+        .join("C--work-proj")
+        .join(format!("{CLAUDE_SID}.jsonl"));
+    assert!(
+        h.store
+            .get_cursor("claude", &key(&scanned))
+            .unwrap()
+            .is_some()
+    );
+}
+
 #[test]
 fn claude_sessions_subagents_resume_partial_truncation() {
     let h = H::new();
