@@ -248,12 +248,30 @@ async fn install(paths: &Paths) -> anyhow::Result<ExitCode> {
     Ok(ExitCode::SUCCESS)
 }
 
-fn uninstall() -> anyhow::Result<ExitCode> {
-    if platform::uninstall()? {
-        println!("Autostart removed. A running daemon keeps running.");
-    } else {
-        println!("Autostart was not installed.");
+/// What removing the autostart entry did to a running daemon.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Removed {
+    NotInstalled,
+    /// The entry is gone; a running daemon was left alone.
+    DaemonKept,
+    /// Unloading the service stopped its daemon (macOS `launchctl bootout`).
+    #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+    DaemonStopped,
+}
+
+fn uninstall_message(r: Removed) -> &'static str {
+    match r {
+        Removed::NotInstalled => "Autostart was not installed.",
+        Removed::DaemonKept => "Autostart removed. A running daemon keeps running.",
+        Removed::DaemonStopped => {
+            "Autostart removed. Unloading it stopped the daemon it had started \
+             (live sessions ended as detached); run `blirp daemon --detach` to start one."
+        }
     }
+}
+
+fn uninstall() -> anyhow::Result<ExitCode> {
+    println!("{}", uninstall_message(platform::uninstall()?));
     Ok(ExitCode::SUCCESS)
 }
 
@@ -339,15 +357,23 @@ mod platform {
         Ok(())
     }
 
-    pub fn uninstall() -> anyhow::Result<bool> {
+    pub fn uninstall() -> anyhow::Result<Removed> {
         let plist = plist_path()?;
-        if loaded()? {
+        // bootout also stops the service's running daemon.
+        let stopped = if loaded()? {
             must(
                 "launchctl",
                 &["bootout", &format!("{}/{LAUNCHD_LABEL}", domain())],
             )?;
-        }
-        remove_if_exists(&plist)
+            true
+        } else {
+            false
+        };
+        Ok(match (remove_if_exists(&plist)?, stopped) {
+            (_, true) => Removed::DaemonStopped,
+            (true, false) => Removed::DaemonKept,
+            (false, false) => Removed::NotInstalled,
+        })
     }
 
     pub fn status() -> anyhow::Result<Option<String>> {
@@ -425,17 +451,17 @@ mod platform {
         Ok(())
     }
 
-    pub fn uninstall() -> anyhow::Result<bool> {
+    pub fn uninstall() -> anyhow::Result<Removed> {
         let unit = unit_path()?;
         if !unit.exists() {
-            return Ok(false);
+            return Ok(Removed::NotInstalled);
         }
         // `disable` alone keeps a running daemon alive, matching Windows/macOS
         // where removing autostart does not stop the daemon either.
         systemctl(&["disable", SYSTEMD_UNIT])?;
         remove_if_exists(&unit)?;
         systemctl(&["daemon-reload"])?;
-        Ok(true)
+        Ok(Removed::DaemonKept)
     }
 
     pub fn status() -> anyhow::Result<Option<String>> {
@@ -509,12 +535,12 @@ mod platform {
         Ok(())
     }
 
-    pub fn uninstall() -> anyhow::Result<bool> {
+    pub fn uninstall() -> anyhow::Result<Removed> {
         if current()?.is_none() {
-            return Ok(false);
+            return Ok(Removed::NotInstalled);
         }
         must(&reg(), &["delete", RUN_KEY, "/v", RUN_VALUE, "/f"])?;
-        Ok(true)
+        Ok(Removed::DaemonKept)
     }
 
     pub fn status() -> anyhow::Result<Option<String>> {
@@ -525,6 +551,14 @@ mod platform {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn uninstall_messages_match_what_happened() {
+        assert!(uninstall_message(Removed::DaemonKept).contains("keeps running"));
+        let stopped = uninstall_message(Removed::DaemonStopped);
+        assert!(stopped.contains("stopped") && !stopped.contains("keeps running"));
+        assert!(uninstall_message(Removed::NotInstalled).contains("not installed"));
+    }
 
     #[test]
     fn plist_contents() {
