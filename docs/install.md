@@ -25,7 +25,7 @@ The app folder also contains `blirp.exe` (the CLI) plus `conpty.dll` and `x64\Op
 
 **Standalone.** Unzip `blirp-<version>-x86_64-pc-windows-msvc.zip` somewhere permanent (for example `%LOCALAPPDATA%\Programs\blirp`) and add it to `PATH`. Keep `conpty.dll` and the `x64` folder next to `blirp.exe`; without them blirp falls back to the system ConPTY.
 
-**winget.** Manifests are generated for every release (`winget-*.yaml` assets). Until the package is accepted into `microsoft/winget-pkgs`, use the installer directly.
+**winget.** Manifests are generated for every release (`winget-*.yaml` assets) but are not in `microsoft/winget-pkgs` yet; use the installer directly.
 
 Unsigned builds: if a release was built without a code-signing certificate, SmartScreen shows "Windows protected your PC"; choose **More info > Run anyway** after verifying the checksum.
 
@@ -44,12 +44,7 @@ tar -xzf blirp-<version>-aarch64-apple-darwin.tar.gz
 install -m 0755 blirp-<version>-aarch64-apple-darwin/blirp /usr/local/bin/blirp
 ```
 
-**Homebrew.** A formula (CLI) and a cask (app, which also links `blirp`) are generated for every release (`homebrew-*.rb` assets). Once they are published in a tap:
-
-```sh
-brew install blirp/tap/blirp          # CLI / daemon
-brew install --cask blirp/tap/blirp   # desktop app
-```
+**Homebrew.** Every release attaches a rendered formula (CLI) and cask (app) as `homebrew-formula-blirp.rb` and `homebrew-cask-blirp.rb`. They are not published in a tap yet, so `brew install blirp` does not work; use the archive or the DMG above.
 
 Unsigned builds: if a release was built without an Apple Developer ID, macOS refuses to open it. Right-click the app, choose **Open**, confirm; or run `xattr -dr com.apple.quarantine /Applications/blirp.app`. Archives downloaded with `curl` are not quarantined.
 
@@ -111,6 +106,4 @@ The database migrates forward automatically on first start of a newer version.
 
 ## Troubleshooting
 
-- **The app shows "blirp could not start its daemon".** The page shows the error and the log folder (`~/.blirp/logs`: `blirpd.*.log` for the daemon, `desktop.*.log` for the app). Common causes: an invalid `~/.blirp/config.toml` (the error names the key), or another daemon for the same `BLIRP_HOME` started by a different blirp version.
-- **An agent is missing from the new-session dialog.** Run `blirp doctor` in the same environment the daemon runs in. For autostarted daemons, re-run `blirp service install` from a shell where the agent is on `PATH`.
-- **Port 47770 is taken.** The daemon falls back to a free port and writes it to `~/.blirp/runtime.json`; `blirp status` shows it. Set `[daemon] port` in `config.toml` to pick one.
+See [troubleshooting.md](troubleshooting.md): daemon does not start, port in use, agents not detected (PATH from the Dock), ConPTY on Windows, logs.
