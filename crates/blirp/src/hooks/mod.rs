@@ -212,8 +212,12 @@ pub fn handle(
                 parent_session_id: None,
                 stopped_by_user: false,
             };
-            store.insert_session(&s)?;
-            created = true;
+            // Ingest may have created it since the lookup: use that row.
+            let (s, inserted) = store.insert_session_unless_known(&s)?;
+            if s.machine_id != state.machine.id {
+                return Ok(HookReply::default());
+            }
+            created = inserted;
             s
         }
     };

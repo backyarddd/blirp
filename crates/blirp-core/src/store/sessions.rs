@@ -121,6 +121,27 @@ impl Store {
         self.apply(Change::Session(s.clone())).map(|_| ())
     }
 
+    /// Insert `s` unless a session with its `(agent, agent_session_id)`
+    /// already exists (ingest may create it between a caller's lookup and
+    /// this insert), in one write transaction. Returns the stored session
+    /// and whether `s` was inserted.
+    pub fn insert_session_unless_known(&self, s: &Session) -> Result<(Session, bool)> {
+        self.write(|tx| {
+            if let Some(asid) = &s.agent_session_id
+                && let Some(existing) = one(
+                    tx,
+                    "SELECT * FROM sessions WHERE agent = ?1 AND agent_session_id = ?2",
+                    params![s.agent, asid],
+                    session_row,
+                )?
+            {
+                return Ok((existing, false));
+            }
+            apply_in(tx, &Change::Session(s.clone()))?;
+            Ok((s.clone(), true))
+        })
+    }
+
     /// Read-modify-write a session in one transaction.
     ///
     /// Live status flips (working/idle/waiting and the activity time that
@@ -445,6 +466,28 @@ mod tests {
     use super::super::tests::temp_store;
     use super::*;
     use crate::model::{EventKind, Record, RecordKind, RecordStatus, SessionOrigin};
+
+    #[test]
+    fn insert_unless_known_never_violates_the_agent_id() {
+        let (_d, store) = temp_store();
+        let first = Session {
+            agent_session_id: Some("a1".into()),
+            ..session("s1", "p", 1)
+        };
+        store.insert_session(&first).unwrap();
+        // What a hook did when ingest created the row after its lookup.
+        let racing = Session {
+            agent_session_id: Some("a1".into()),
+            ..session("s2", "p", 2)
+        };
+        assert!(store.insert_session(&racing).is_err());
+        let (got, inserted) = store.insert_session_unless_known(&racing).unwrap();
+        assert_eq!((got.id.as_str(), inserted), ("s1", false));
+        let (got, inserted) = store
+            .insert_session_unless_known(&session("s3", "p", 3))
+            .unwrap();
+        assert_eq!((got.id.as_str(), inserted), ("s3", true));
+    }
 
     pub(crate) fn session(id: &str, project: &str, started_at: i64) -> Session {
         Session {
