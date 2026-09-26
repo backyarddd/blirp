@@ -864,7 +864,7 @@ async fn portal_follows_settings_live() {
     assert!(!listening(p2).await);
 
     // A port that is taken is reported, and the setting is kept.
-    let taken = std::net::TcpListener::bind("0.0.0.0:0").unwrap();
+    let taken = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
     let busy = taken.local_addr().unwrap().port();
     let mut view: Value = a.get("/api/settings").await;
     view["config"]["portal"] = json!({"lan": true, "lan_port": busy});

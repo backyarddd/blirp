@@ -142,6 +142,10 @@ blirp service uninstall   # removes exactly that entry
 
 On Windows the entry runs `conhost.exe --headless blirp.exe daemon --detach`, so no console window appears at login. If you use a custom `BLIRP_HOME` on Windows, set it as a user environment variable so the login entry sees it.
 
+### Windows Firewall
+
+A standalone daemon only listens on `127.0.0.1`, so Windows asks nothing. Windows Defender Firewall asks once, the first time `blirp.exe` listens on the network: when you enable the hub, pair with a hub, or turn on the LAN portal. Allow it on **Private networks**. The rule belongs to the path of `blirp.exe`; `blirp update` and the install script put the new version at the same path, so it keeps applying after updates. If you clicked Cancel, see [troubleshooting.md](troubleshooting.md#windows-firewall-blocks-sync-or-the-portal).
+
 ## Updating
 
 ```sh
@@ -169,4 +173,4 @@ Installed with a classic installer instead: `blirp service uninstall` and `blirp
 
 ## Troubleshooting
 
-See [troubleshooting.md](troubleshooting.md): `blirp` not found after installing (PATH), antivirus warnings, "blirp is damaged", the daemon does not start, agents not detected.
+See [troubleshooting.md](troubleshooting.md): `blirp` not found after installing (PATH), antivirus warnings, Windows Firewall, "blirp is damaged", the daemon does not start, agents not detected.

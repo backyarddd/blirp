@@ -190,13 +190,17 @@ pub async fn sync_with_config(state: &SharedState) -> anyhow::Result<()> {
 
 async fn start(state: &SharedState) -> anyhow::Result<()> {
     let port = state.config().portal.lan_port;
-    let ip = lan_ip();
+    let (ip, bind_ip) = if blirp_sync::loopback_only() {
+        (IpAddr::V4(Ipv4Addr::LOCALHOST), Ipv4Addr::LOCALHOST)
+    } else {
+        (lan_ip(), Ipv4Addr::UNSPECIFIED)
+    };
     let dir = state.paths.home().join("tls");
     let (cert, key) = tokio::task::spawn_blocking(move || load_or_create_cert(&dir, ip)).await??;
     let fp = fingerprint(&cert);
     let tls = tls_config(cert, key)?;
-    let listener = crate::bind_exclusive(SocketAddr::from((Ipv4Addr::UNSPECIFIED, port)))
-        .with_context(|| format!("bind 0.0.0.0:{port} for the LAN portal"))?;
+    let listener = crate::bind_exclusive(SocketAddr::from((bind_ip, port)))
+        .with_context(|| format!("bind {bind_ip}:{port} for the LAN portal"))?;
     let server = axum_server::from_tcp_rustls(
         listener,
         axum_server::tls_rustls::RustlsConfig::from_config(Arc::new(tls)),

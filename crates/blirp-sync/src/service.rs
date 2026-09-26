@@ -9,11 +9,14 @@ use crate::{
 };
 use blirp_core::model::{Device, DeviceKind, Machine, MachineRole};
 use blirp_core::store::{Change, Store};
-use iroh::endpoint::{Connection, Incoming, RecvStream, SendStream, VarInt, presets};
+use iroh::endpoint::{
+    Connection, Incoming, PortmapperConfig, RecvStream, SendStream, VarInt, presets,
+};
 use iroh::{Endpoint, EndpointAddr, EndpointId, RelayMode, SecretKey};
 use iroh_mdns_address_lookup::{DiscoveryEvent, MdnsAddressLookup};
 use std::collections::HashMap;
 use std::future::Future;
+use std::net::Ipv4Addr;
 use std::pin::Pin;
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::time::{Duration, Instant};
@@ -141,6 +144,12 @@ async fn bind(
     alpns: Vec<Vec<u8>>,
     hub: bool,
 ) -> Result<(Endpoint, Option<MdnsAddressLookup>)> {
+    let loopback = crate::loopback_only();
+    let (relay, lan_discovery) = if loopback {
+        ("disabled", false)
+    } else {
+        (relay, lan_discovery)
+    };
     let mut builder = match relay {
         // n0 relays plus n0 DNS address publishing/lookup, so peers are found
         // by id alone.
@@ -155,6 +164,15 @@ async fn bind(
     }
     .secret_key(secret.clone())
     .alpns(alpns);
+    if loopback {
+        // IPv4 loopback only: `[::1]` is missing on some CI hosts, and the
+        // default wildcard sockets are what raise firewall prompts.
+        builder = builder
+            .clear_ip_transports()
+            .bind_addr((Ipv4Addr::LOCALHOST, 0))
+            .map_err(|e| SyncError::Bind(e.to_string()))?
+            .portmapper_config(PortmapperConfig::Disabled);
+    }
     let mdns = if lan_discovery {
         match MdnsAddressLookup::builder()
             .service_name(MDNS_SERVICE)
@@ -212,7 +230,7 @@ impl SyncService {
             ep,
             store: opts.store,
             own_id,
-            relays: opts.relay != "disabled",
+            relays: opts.relay != "disabled" && !crate::loopback_only(),
             machine: opts.machine,
             role: opts.role,
             invites: InviteBook::default(),
@@ -960,5 +978,34 @@ async fn node_session(inner: &Arc<Inner>, hub: &EndpointAddr) -> Result<()> {
             "this machine was revoked by the hub; pair it again".into(),
         )),
         (r, _) => r,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // `.cargo/config.toml` sets BLIRP_LOOPBACK_ONLY for every `cargo test`.
+    #[tokio::test]
+    async fn loopback_only_binds_and_advertises_loopback() {
+        assert!(
+            crate::loopback_only(),
+            "run through cargo so BLIRP_LOOPBACK_ONLY=1 is set"
+        );
+        let secret = SecretKey::from_bytes(&[7; 32]);
+        let (ep, mdns) = bind(&secret, "default", true, Vec::new(), true)
+            .await
+            .unwrap();
+        assert!(mdns.is_none(), "mDNS started");
+        let bound = ep.bound_sockets();
+        assert!(!bound.is_empty());
+        assert!(bound.iter().all(|a| a.ip().is_loopback()), "{bound:?}");
+        let addr = ep.addr();
+        assert!(addr.relay_urls().next().is_none(), "relay configured");
+        assert!(
+            addr.ip_addrs().all(|a| a.ip().is_loopback()),
+            "advertised {addr:?}"
+        );
+        ep.close().await;
     }
 }

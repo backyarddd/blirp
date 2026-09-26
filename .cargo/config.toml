@@ -1,0 +1,6 @@
+# Processes cargo starts (`cargo test`, `cargo run`) keep every listener on
+# loopback and never reach relays or mDNS: no firewall prompts per rebuilt test
+# binary. Installed builds never see this. Override with BLIRP_LOOPBACK_ONLY=0
+# to try LAN pairing or the LAN portal from source (docs/development.md).
+[env]
+BLIRP_LOOPBACK_ONLY = "1"

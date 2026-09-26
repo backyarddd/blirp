@@ -150,6 +150,18 @@ If `blirp doctor` says `CLAUDE_CODE_OAUTH_TOKEN from the environment`, the daemo
 - If `~/.blirp/identity.key` was deleted or replaced, the machine has a new identity: the hub no longer knows it. Leave and pair again.
 - Keep hub and nodes on the same blirp version (`unsupported_version` in the log otherwise).
 
+## Windows Firewall blocks sync or the portal
+
+Windows Defender Firewall asks once, the first time `blirp.exe` listens on the network (enabling the hub, pairing, or the LAN portal); a standalone daemon only listens on `127.0.0.1` and never triggers it. Choose **Private networks**. The rule is tied to the path of `blirp.exe`, which `blirp update` keeps, so it survives updates.
+
+If you clicked Cancel, Windows added a rule that blocks blirp: other machines cannot pair or sync with this hub and browsers cannot reach the portal. Fix it in **Windows Security > Firewall & network protection > Allow an app through firewall > Change settings**: tick **Private** for every `blirp.exe` entry. Or, in PowerShell as administrator (default install path; adjust it for other installs):
+
+```powershell
+$exe = "$env:LOCALAPPDATA\Programs\blirp\blirp.exe"   # elevated as another account: type your full path
+Get-NetFirewallApplicationFilter -Program $exe | Get-NetFirewallRule | Remove-NetFirewallRule
+New-NetFirewallRule -DisplayName "blirp" -Direction Inbound -Program $exe -Profile Private -Action Allow
+```
+
 ## `error sending mDNS: No route to host` in the log (macOS)
 
 Hubs and nodes announce and find each other on the local network with mDNS (`sync.lan_discovery`, on by default). macOS allows that, and direct connections to other machines on the LAN, only for programs that have the Local Network permission; without it every send fails with "No route to host". The daemon logs the first failure, then one line every 10 minutes with the number of repeats, and `blirp doctor` reports it on its `LAN discovery` line while the running daemon keeps logging it (a failure line in the last 11 minutes).

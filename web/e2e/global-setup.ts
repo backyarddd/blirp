@@ -85,6 +85,8 @@ export default async function globalSetup(): Promise<() => Promise<void>> {
       XDG_DATA_HOME: join(userHome, '.local', 'share'),
       APPDATA: join(userHome, 'AppData', 'Roaming'),
       RUST_LOG: process.env.RUST_LOG ?? 'info',
+      // Loopback-only sockets, no relays or mDNS: no firewall prompt for this debug binary.
+      BLIRP_LOOPBACK_ONLY: '1',
     },
     stdio: ['ignore', 'pipe', 'pipe'],
   });

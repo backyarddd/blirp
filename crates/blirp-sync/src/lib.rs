@@ -32,6 +32,17 @@ pub const MDNS_SERVICE: &str = "blirp";
 /// mDNS user data marking an endpoint as a blirp hub.
 pub const HUB_MARKER: &str = "blirp-hub";
 
+/// Development and test switch, not user configuration (see
+/// docs/development.md): `1` keeps every listener on 127.0.0.1 and turns off
+/// relays, mDNS and port mapping, so test runs never touch the network or
+/// raise firewall prompts. Cargo sets it for `cargo test` / `cargo run`.
+pub const LOOPBACK_ONLY_ENV: &str = "BLIRP_LOOPBACK_ONLY";
+
+/// `BLIRP_LOOPBACK_ONLY=1` is set.
+pub fn loopback_only() -> bool {
+    std::env::var_os(LOOPBACK_ONLY_ENV).is_some_and(|v| v == "1")
+}
+
 /// Highest protocol version both sides support.
 pub fn negotiate(theirs: &[u32]) -> Option<u32> {
     PROTOCOL_VERSIONS

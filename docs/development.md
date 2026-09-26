@@ -62,6 +62,12 @@ PowerShell: `$env:BLIRP_HOME = "$env:TEMP\blirp-dev"; cargo run -p blirp -- daem
 
 The daemon still ingests your real agent transcripts (it reads `~/.claude`, `~/.codex`, ...). Point the agents' own overrides (`CLAUDE_CONFIG_DIR`, `CODEX_HOME`, `XDG_DATA_HOME`, ...) at empty folders for the daemon process if you want an empty instance. Use `--port 0` to run next to an installed daemon.
 
+### Loopback-only networking (`BLIRP_LOOPBACK_ONLY`)
+
+A development and test switch, not user configuration. With `BLIRP_LOOPBACK_ONLY=1` the iroh endpoint binds only `127.0.0.1` with relays, mDNS and port mapping off, and the LAN portal binds `127.0.0.1` too, so nothing reaches the network. Every freshly built test binary or `target/debug/blirp` path would otherwise make Windows Defender Firewall ask again. `.cargo/config.toml` sets it for everything cargo starts (`cargo test`, `cargo run`, `pnpm -C app tauri dev`), and the e2e setup sets it for the daemon it spawns. Installed builds never see it.
+
+To try LAN pairing, relays or the LAN portal from source, override it: `BLIRP_LOOPBACK_ONLY=0 cargo run -p blirp -- daemon` (expect the firewall question on Windows).
+
 ### UI development with hot reload
 
 ```sh
