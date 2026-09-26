@@ -7,12 +7,15 @@
   import Play from '@lucide/svelte/icons/play';
   import Brain from '@lucide/svelte/icons/brain';
   import Clock from '@lucide/svelte/icons/clock';
-  import { api } from '../api/client';
+  import Trash from '@lucide/svelte/icons/trash-2';
+  import FolderX from '@lucide/svelte/icons/folder-x';
+  import { ApiError, api, errorMessage } from '../api/client';
   import type { Session } from '../api/types.gen';
   import { app } from '../app.svelte';
   import { agentLabel, canResume, isLive, sessionTitle } from '../status';
   import { formatElapsed } from '../time';
   import Menu, { type MenuItem } from './Menu.svelte';
+  import Modal from './Modal.svelte';
 
   let { session }: { session: Session } = $props();
 
@@ -49,6 +52,43 @@
   const resumable = $derived(canResume(session));
   // Opening a folder shows a window on this machine's desktop: local clients, local sessions.
   const canOpen = $derived(app.admin && session.machine_id === app.health?.machine.id);
+
+  // Ended sessions only: the daemon refuses live ones (409 `session_live`).
+  async function remove(): Promise<void> {
+    const msg = `Delete "${sessionTitle(session)}"? Its transcript and subagent sessions are removed on every synced machine. Memory records it produced stay.`;
+    if (!confirm(msg)) return;
+    // The `session_deleted` event may unmount this toolbar before the reply arrives.
+    const id = session.id;
+    busy = true;
+    const ok = await app.act(() => api.sessions.delete(id).then(() => true), 'Session deleted');
+    busy = false;
+    if (ok) app.removeSession(id);
+  }
+
+  // The worktree lives on this machine under BLIRP_HOME/worktrees; the daemon refuses others.
+  const canRemoveWorktree = $derived(session.worktree !== null && session.machine_id === app.health?.machine.id);
+  /** Set when the worktree has uncommitted changes: the daemon's message, for the force prompt. */
+  let dirty: string | null = $state(null);
+
+  async function removeWorktree(force: boolean): Promise<void> {
+    if (!force && !confirm(`Remove the git worktree of "${sessionTitle(session)}"? The folder is deleted; its branch is kept.`)) return;
+    busy = true;
+    try {
+      app.upsertSession(await api.sessions.removeWorktree(session.id, force));
+      dirty = null;
+      app.toast('Worktree removed', 'info');
+    } catch (e) {
+      if (!force && e instanceof ApiError && e.code === 'worktree_dirty') {
+        dirty = e.message;
+      } else {
+        dirty = null;
+        app.noteForbidden(e);
+        app.toast(`Could not remove the worktree: ${errorMessage(e)}`);
+      }
+    } finally {
+      busy = false;
+    }
+  }
 
   async function resume(): Promise<void> {
     busy = true;
@@ -97,6 +137,16 @@
   >
     <Brain size={17} />
   </button>
+  {#if app.control && !live}
+    {#if canRemoveWorktree}
+      <button type="button" class="icon-btn" aria-label="Remove worktree" title="Remove worktree" onclick={() => removeWorktree(false)} disabled={busy}>
+        <FolderX size={17} />
+      </button>
+    {/if}
+    <button type="button" class="icon-btn" aria-label="Delete session" title="Delete session" onclick={remove} disabled={busy}>
+      <Trash size={17} />
+    </button>
+  {/if}
   {#if !app.control}
     <!-- View-only device: stop and resume would be refused (403 control_not_allowed). -->
   {:else if live && session.origin === 'blirp'}
@@ -105,6 +155,18 @@
     <button type="button" class="btn sm primary" onclick={resume} disabled={busy}><Play size={12} fill="currentColor" aria-hidden="true" />Resume</button>
   {/if}
 </div>
+
+<Modal open={dirty !== null} title="Uncommitted changes" onclose={() => (dirty = null)}>
+  <p>Git reports: {dirty}.</p>
+  <p class="muted">
+    Force remove deletes the worktree folder with its uncommitted changes and untracked files. This cannot be undone. The
+    <code>blirp/…</code> branch and its commits are kept.
+  </p>
+  {#snippet footer()}
+    <button type="button" class="btn" onclick={() => (dirty = null)}>Cancel</button>
+    <button type="button" class="btn danger" onclick={() => removeWorktree(true)} disabled={busy}>Force remove</button>
+  {/snippet}
+</Modal>
 
 <style>
   .toolbar {

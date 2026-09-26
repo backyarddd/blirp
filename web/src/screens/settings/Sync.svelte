@@ -61,10 +61,7 @@
     e.preventDefault();
     const name = machineName.trim();
     if (!name) return;
-    const s = await app.act(
-      () => api.settings.patch({ config: { ...settings.config, machine: { ...settings.config.machine, name } } }),
-      'Machine name saved',
-    );
+    const s = await app.saveSettings({ config: { ...settings.config, machine: { ...settings.config.machine, name } } }, 'Machine name saved');
     if (s) onsaved(s);
   }
 
@@ -165,9 +162,11 @@
   <form class="row wrap name" onsubmit={saveName}>
     <label class="field grow">
       <span>Machine name</span>
-      <input class="input" bind:value={machineName} required />
+      <input class="input" bind:value={machineName} required readonly={!app.admin} />
     </label>
-    <button type="submit" class="btn" disabled={machineName.trim() === settings.config.machine.name}>Save</button>
+    {#if app.admin}
+      <button type="submit" class="btn" disabled={machineName.trim() === settings.config.machine.name}>Save</button>
+    {/if}
   </form>
   {#if !status}
     <p class="muted small">Loading sync status…</p>

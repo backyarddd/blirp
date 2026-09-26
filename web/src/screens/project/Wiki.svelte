@@ -102,7 +102,7 @@
     <div class="row side-head">
       <h2 class="h">Pages</h2>
       <span class="spacer"></span>
-      <button type="button" class="icon-btn sm" aria-label="New page" title="New page" onclick={startNew}><Plus size={15} /></button>
+      {#if app.control}<button type="button" class="icon-btn sm" aria-label="New page" title="New page" onclick={startNew}><Plus size={15} /></button>{/if}
     </div>
     <Loadable
       loading={pages.loading}
@@ -122,7 +122,7 @@
   </aside>
 
   <section class="card content">
-    {#if mode !== 'view'}
+    {#if mode !== 'view' && app.control}
       <form onsubmit={save}>
         <div class="row wrap">
           <label class="field grow">
@@ -165,18 +165,20 @@
         <h2 class="title">{current.title}</h2>
         <span class="spacer"></span>
         <span class="hint">{current.updated_by} · {formatRelative(current.updated_at)}</span>
-        <button type="button" class="btn sm" onclick={() => startEdit(current)}><Pencil size={14} aria-hidden="true" />Edit</button>
-        <button type="button" class="btn sm ghost" onclick={() => remove(current)}><Trash size={14} aria-hidden="true" />Delete</button>
+        {#if app.control}
+          <button type="button" class="btn sm" onclick={() => startEdit(current)}><Pencil size={14} aria-hidden="true" />Edit</button>
+          <button type="button" class="btn sm ghost" onclick={() => remove(current)}><Trash size={14} aria-hidden="true" />Delete</button>
+        {/if}
       </div>
       <Markdown source={current.body_md || '_This page is empty._'} />
     {:else if slug && pages.data}
       <p class="muted">No page named <code>{slug}</code>.</p>
-      <button type="button" class="btn" onclick={startNew}>Create a page</button>
+      {#if app.control}<button type="button" class="btn" onclick={startNew}>Create a page</button>{/if}
     {:else}
       <div class="intro">
         <h2 class="h">Project wiki</h2>
         <p class="muted">Longer-lived docs for this project: setup, architecture notes, runbooks. Agents can read them through blirp's memory tools.</p>
-        <button type="button" class="btn primary" onclick={startNew}><Plus size={14} aria-hidden="true" />New page</button>
+        {#if app.control}<button type="button" class="btn primary" onclick={startNew}><Plus size={14} aria-hidden="true" />New page</button>{/if}
       </div>
     {/if}
   </section>

@@ -29,6 +29,7 @@ import type {
   SearchHitKind,
   SearchResults,
   Session,
+  SessionDetail,
   SessionStatus,
   SessionsPage,
   SettingsPatch,
@@ -215,7 +216,7 @@ export const api = {
   sessions: {
     list: (q: SessionQuery = {}) => request<SessionsPage>('GET', '/api/sessions', undefined, { ...q }),
     launch: (body: LaunchSession) => request<Session>('POST', '/api/sessions', body),
-    get: (id: string) => request<Session>('GET', s(id)),
+    get: (id: string) => request<SessionDetail>('GET', s(id)),
     events: (id: string, after: number, limit: number) =>
       request<EventsPage>('GET', `${s(id)}/events`, undefined, { after, limit }),
     /** 202: the kill is under way; the final status arrives as a `session_updated` event. */
@@ -224,6 +225,10 @@ export const api = {
     distill: (id: string) => request<void>('POST', `${s(id)}/distill`),
     rename: (id: string, title: string | null) => request<Session>('PATCH', s(id), { title }),
     open: (id: string, target: OpenTarget) => request<void>('POST', `${s(id)}/open`, { target }),
+    /** Ended sessions only (409 `session_live`); other clients hear `session_deleted`. */
+    delete: (id: string) => request<void>('DELETE', s(id)),
+    /** 409 `worktree_dirty` unless `force`; the `blirp/<name>` branch is kept. */
+    removeWorktree: (id: string, force = false) => request<Session>('POST', `${s(id)}/worktree/remove`, { force }),
   },
   search: (q: SearchQuery) => request<SearchResults>('GET', '/api/search', undefined, { ...q }),
   agents: {

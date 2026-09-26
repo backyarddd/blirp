@@ -133,9 +133,9 @@
                   </summary>
                   <div class="ver-body"><Markdown source={v.body_md || '_Empty_'} /></div>
                 </details>
-                {#if v.version !== brief?.version}
+                {#if v.version !== brief?.version && app.control}
                   <button type="button" class="btn sm" onclick={() => revert(v.version)}>Revert</button>
-                {:else}
+                {:else if v.version === brief?.version}
                   <span class="badge accent">current</span>
                 {/if}
               </li>
@@ -169,12 +169,14 @@
             </div>
             {#if s.rationale}<p class="small rationale">{s.rationale}</p>{/if}
             <div class="proposal"><Markdown source={proposalMarkdown(s)} class="small" /></div>
-            <div class="row">
-              <span class="spacer"></span>
-              <button type="button" class="btn sm ghost" onclick={() => decide(s, 'dismiss')}>Dismiss</button>
-              <button type="button" class="btn sm" onclick={() => decide(s, 'reject')}>Reject</button>
-              <button type="button" class="btn sm primary" onclick={() => decide(s, 'accept')}>Accept</button>
-            </div>
+            {#if app.control}
+              <div class="row">
+                <span class="spacer"></span>
+                <button type="button" class="btn sm ghost" onclick={() => decide(s, 'dismiss')}>Dismiss</button>
+                <button type="button" class="btn sm" onclick={() => decide(s, 'reject')}>Reject</button>
+                <button type="button" class="btn sm primary" onclick={() => decide(s, 'accept')}>Accept</button>
+              </div>
+            {/if}
           </li>
         {/each}
       </ul>
@@ -191,9 +193,11 @@
         <option value="archived">Archived</option>
         <option value="all">All</option>
       </select>
-      <button type="button" class="btn sm primary" onclick={() => (creating = !creating)} aria-expanded={creating}>
-        <Plus size={14} aria-hidden="true" />New record
-      </button>
+      {#if app.control}
+        <button type="button" class="btn sm primary" onclick={() => (creating = !creating)} aria-expanded={creating}>
+          <Plus size={14} aria-hidden="true" />New record
+        </button>
+      {/if}
     </div>
     <div class="pills kinds" role="tablist" aria-label="Record kind">
       <button type="button" role="tab" class="pill" aria-selected={kind === 'all'} onclick={() => (kind = 'all')}>All {counts.all ?? 0}</button>
@@ -202,7 +206,7 @@
       {/each}
     </div>
 
-    {#if creating}
+    {#if creating && app.control}
       <form class="create" onsubmit={create}>
         <div class="row wrap">
           <select class="select kind-sel" bind:value={newKind} aria-label="Kind">

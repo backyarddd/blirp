@@ -1,9 +1,21 @@
+import { SvelteSet } from 'svelte/reactivity';
 import { ApiError, api, errorMessage, eventsWsPath, onUnauthorized, wsUrl } from './api/client';
-import type { AgentInfo, Health, LaunchSession, ProjectSummary, ServerEvent, Session, SyncStatus } from './api/types.gen';
+import type {
+  AgentInfo,
+  Health,
+  LaunchSession,
+  ProjectSummary,
+  ServerEvent,
+  Session,
+  SettingsPatch,
+  SettingsView,
+  SyncStatus,
+} from './api/types.gen';
 import { backoffDelay } from './terminal/protocol';
 import { hasTerminal, isSubagent, notifiableTransition, sessionStatusInfo, sessionTitle } from './status';
 import { readPref, writePref } from './prefs';
-import { navigate } from './router.svelte';
+import { NONE_DENIED, denyFor, rightsFrom, type Denied } from './capabilities';
+import { nav, navigate } from './router.svelte';
 import { href } from './router';
 
 export type AuthState = 'checking' | 'ok' | 'unauthorized' | 'offline';
@@ -23,6 +35,7 @@ const byStartedDesc = (a: Session, b: Session): number => b.started_at - a.start
 const EVENT_TYPES: ReadonlySet<string> = new Set([
   'session_created',
   'session_updated',
+  'session_deleted',
   'project_updated',
   'memory_updated',
   'sync_updated',
@@ -32,9 +45,10 @@ const EVENT_TYPES: ReadonlySet<string> = new Set([
 /** Shallow check of a daemon frame; payloads are generated DTOs from the same-origin daemon. */
 function isServerEvent(v: unknown): v is ServerEvent {
   if (typeof v !== 'object' || v === null) return false;
-  const o = v as { type?: unknown; session?: unknown; project_id?: unknown; status?: unknown };
+  const o = v as { type?: unknown; session?: unknown; session_id?: unknown; project_id?: unknown; status?: unknown };
   if (typeof o.type !== 'string' || !EVENT_TYPES.has(o.type)) return false;
   if (o.type === 'session_created' || o.type === 'session_updated') return typeof o.session === 'object' && o.session !== null;
+  if (o.type === 'session_deleted') return typeof o.session_id === 'string';
   if (o.type === 'sync_updated') return typeof o.status === 'object' && o.status !== null;
   if (o.type === 'resync') return true;
   return typeof o.project_id === 'string';
@@ -59,20 +73,15 @@ class AppState {
   sync: SyncStatus | null = $state.raw(null);
   /** Bumped on every sync status change so views refetch machines and devices. */
   syncTick = $state(0);
-  /**
-   * Served over the hub's LAN portal to a browser device (§13). Such devices never have
-   * `admin`, so admin-only actions are hidden. The daemon exposes no capability flag; the
-   * portal is recognized as HTTPS on the port of `portal_url` (the local listener is plain
-   * HTTP, and `tailscale serve` in front of it answers on its own port).
-   */
-  portal = $derived(
-    location.protocol === 'https:' && this.sync?.portal_url != null && portOf(this.sync.portal_url) === location.port,
-  );
-  #adminDenied = $state(false);
-  /** Hub, pairing, devices, global integration, open folder and daemon shutdown (§11). */
-  admin = $derived(!this.portal && !this.#adminDenied);
-  /** May type into terminals and launch, stop or distill sessions (§11). */
-  control = $state(true);
+  /** 403s seen since capabilities were last read (fallback for stale capabilities). */
+  #denied: Denied = $state(NONE_DENIED);
+  #rights = $derived(rightsFrom(this.health?.capabilities, this.#denied));
+  /** Settings, hub, pairing, devices, invites, global integration, open folder/editor (§11). */
+  admin = $derived(this.#rights.admin);
+  /** Launch, stop, resume, delete sessions, type into terminals, change memory (§11). */
+  control = $derived(this.#rights.control);
+  /** This machine's own client: may stop the daemon. */
+  local = $derived(this.#rights.local);
 
   conn: ConnState = $state('connecting');
   /** Bumped per project when the daemon reports a memory change; views re-fetch on change. */
@@ -85,6 +94,9 @@ class AppState {
   // Defaults to open only where it fits beside the terminal; an explicit choice is remembered.
   memoryPanel = $state(MEMORY_PANEL_PREF === 'unset' ? window.innerWidth > 1100 : MEMORY_PANEL_PREF === 'open');
   notify = $state(readPref('blirp.notify', ['on', 'off'], 'off') === 'on');
+
+  /** Deleted this run: views holding their own fetched session lists filter these out. */
+  readonly deletedSessions = new SvelteSet<string>();
 
   projectById: Map<string, ProjectSummary> = $derived(new Map(this.projects.map((p) => [p.id, p])));
   sessionById: Map<string, Session> = $derived(new Map(this.sessions.map((s) => [s.id, s])));
@@ -116,7 +128,6 @@ class AppState {
     this.auth = 'ok';
     this.startStream();
     await Promise.all([this.refreshProjects(), this.refreshSessions(), this.refreshAgents(), this.refreshSync()]);
-    await this.#probeControl();
   }
 
   async refreshSync(): Promise<void> {
@@ -134,29 +145,11 @@ class AppState {
     if (this.health && this.health.role !== status.role) void this.refreshHealth();
   }
 
-  /**
-   * Portal devices control terminals only when allowed in Settings > Devices, and the daemon
-   * does not tell a client which applies to it. Stopping a session id that cannot exist is
-   * refused with 403 `control_not_allowed` before anything else happens and otherwise fails
-   * harmlessly (409 `not_running`), so it answers the question without side effects.
-   */
-  async #probeControl(): Promise<void> {
-    if (!this.portal) {
-      this.control = true;
-      return;
-    }
-    try {
-      await api.sessions.stop('control-probe');
-      this.control = true;
-    } catch (e) {
-      this.control = !(e instanceof ApiError && e.code === 'control_not_allowed');
-    }
-  }
-
-  /** Role/name changes (hub enable, pairing) show up in the top bar. */
+  /** Role/name changes (hub enable, pairing) and this client's capabilities. */
   async refreshHealth(): Promise<void> {
     try {
       this.health = await api.health();
+      this.#denied = NONE_DENIED;
     } catch (e) {
       this.toast(`Could not refresh machine status: ${errorMessage(e)}`);
     }
@@ -202,6 +195,16 @@ class AppState {
       ? this.sessions.map((x) => (x.id === s.id ? s : x))
       : [s, ...this.sessions].sort(byStartedDesc);
     if (prev) this.#maybeNotify(prev, s);
+  }
+
+  /** A deleted session (here or on another client) leaves every list, with its subagents. */
+  removeSession(id: string): void {
+    const gone = this.sessionById.get(id);
+    this.deletedSessions.add(id);
+    this.sessions = this.sessions.filter((s) => s.id !== id && !(isSubagent(s) && s.parent_session_id === id));
+    if (nav.route.name === 'sessions' && nav.route.sessionId === id) navigate(href.sessions(), { replace: true });
+    // Session counts are part of the project summary; the daemon only reports the delete.
+    if (gone) void this.refreshProject(gone.project_id);
   }
 
   /** `project_updated` only carries the id: refetch it; a 404 means it was deleted or merged away. */
@@ -251,11 +254,41 @@ class AppState {
     }
   }
 
-  /** A 403 teaches the UI what this client may not do, so those actions are hidden from then on. */
+  /**
+   * Fallback for stale capabilities: a 403 hides those actions until capabilities are read
+   * again, which happens right away so a changed device right shows up everywhere.
+   */
   noteForbidden(e: unknown): void {
     if (!(e instanceof ApiError) || e.status !== 403) return;
-    if (e.code === 'admin_only') this.#adminDenied = true;
-    if (e.code === 'control_not_allowed') this.control = false;
+    this.#denied = denyFor(e.code, this.#denied);
+    void this.refreshHealth();
+  }
+
+  /**
+   * `PATCH /api/settings` (admin). Every write re-applies the LAN portal config, and a portal
+   * that cannot start answers 409 `portal_failed` with the config already saved (§13): the
+   * saved settings are reloaded and the reason shown.
+   */
+  async saveSettings(patch: SettingsPatch, success: string): Promise<SettingsView | undefined> {
+    try {
+      const s = await api.settings.patch(patch);
+      this.toast(success, 'info');
+      return s;
+    } catch (e) {
+      if (!(e instanceof ApiError && e.code === 'portal_failed')) {
+        this.noteForbidden(e);
+        this.toast(errorMessage(e));
+        return undefined;
+      }
+      this.toast(`Settings saved, but ${e.message}. Pick another port under Settings > Machines & Sync > LAN portal.`);
+      void this.refreshSync();
+      try {
+        return await api.settings.get();
+      } catch (err) {
+        this.toast(`Could not reload settings: ${errorMessage(err)}`);
+        return undefined;
+      }
+    }
   }
 
   /** Manual distill (§9). The 409s are expected outcomes and read as information. */
@@ -286,6 +319,10 @@ class AppState {
 
   openNewSession(projectId: string | null = null): void {
     this.paletteOpen = false;
+    if (!this.control) {
+      this.toast('This device may not start sessions. Allow terminal control for it under Settings > Machines & Sync on the hub.', 'info');
+      return;
+    }
     this.newSession = { open: true, projectId };
   }
 
@@ -347,9 +384,9 @@ class AppState {
     ws.onopen = () => {
       this.conn = 'open';
       // Catch up on anything missed while disconnected; the stream only carries deltas.
-      // Changing a device's rights closes its sockets (§10), so a reconnect re-checks control.
+      // Changing a device's rights closes its sockets (§11), so a reconnect re-reads capabilities.
       if (reconnecting) {
-        void Promise.all([this.refreshSessions(), this.refreshProjects(), this.refreshSync(), this.#probeControl()]);
+        void Promise.all([this.refreshSessions(), this.refreshProjects(), this.refreshSync(), this.refreshHealth()]);
       }
       this.#attempt = 0;
     };
@@ -382,6 +419,9 @@ class AppState {
       case 'session_updated':
         this.upsertSession(msg.session);
         break;
+      case 'session_deleted':
+        this.removeSession(msg.session_id);
+        break;
       case 'project_updated':
         void this.refreshProject(msg.project_id);
         break;
@@ -393,18 +433,10 @@ class AppState {
         break;
       case 'resync':
         // The daemon dropped events for this client; everything may be stale.
-        void Promise.all([this.refreshSessions(), this.refreshProjects(), this.refreshSync()]);
+        void Promise.all([this.refreshSessions(), this.refreshProjects(), this.refreshSync(), this.refreshHealth()]);
         for (const p of this.projects) this.bumpMemory(p.id);
         break;
     }
-  }
-}
-
-function portOf(url: string): string | null {
-  try {
-    return new URL(url).port;
-  } catch {
-    return null;
   }
 }
 

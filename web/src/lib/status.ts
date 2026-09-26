@@ -22,24 +22,11 @@ export function statusInfo(status: SessionStatus): StatusInfo {
   return INFO[status];
 }
 
-/**
- * Session fields newer daemons add to the DTO; optional so the UI works with daemons that
- * do not send them yet.
- */
-export interface SessionExtras {
-  /** Ended by the user's Stop rather than on its own. */
-  stopped_by_user?: boolean;
-  /** Subagent sessions under this one (their rows are hidden from lists by default). */
-  children_count?: number;
-}
-
-export type SessionLike = Pick<Session, 'status'> & SessionExtras;
-
 const STOPPED: StatusInfo = { label: 'Stopped', tone: 'idle', pulse: false };
 
 /** Status chip for a session: an ended session the user stopped reads "Stopped". */
-export function sessionStatusInfo(s: SessionLike): StatusInfo {
-  return s.stopped_by_user === true && !isLive(s.status) ? STOPPED : INFO[s.status];
+export function sessionStatusInfo(s: Pick<Session, 'status' | 'stopped_by_user'>): StatusInfo {
+  return s.stopped_by_user && !isLive(s.status) ? STOPPED : INFO[s.status];
 }
 
 /**
@@ -48,12 +35,6 @@ export function sessionStatusInfo(s: SessionLike): StatusInfo {
  */
 export function isSubagent(s: Pick<Session, 'origin' | 'parent_session_id'>): boolean {
   return s.origin === 'external' && s.parent_session_id !== null;
-}
-
-/** Subagent count: the daemon's `children_count`, else counted from the loaded sessions. */
-export function childCount(s: Session & SessionExtras, loaded: readonly Session[]): number {
-  if (typeof s.children_count === 'number') return s.children_count;
-  return loaded.filter((c) => c.parent_session_id === s.id && isSubagent(c)).length;
 }
 
 const LIVE: ReadonlySet<SessionStatus> = new Set(['starting', 'working', 'idle', 'waiting']);

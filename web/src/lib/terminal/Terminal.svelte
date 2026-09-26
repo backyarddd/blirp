@@ -86,9 +86,11 @@
     if (term) term.options.theme = theme.resolved === 'dark' ? DARK : LIGHT;
   });
 
-  // Devices without terminal control get a view-only stream: the daemon drops their input and
-  // resize frames without telling the client, so say so here instead of swallowing keys.
-  const viewOnly = $derived(!app.control);
+  // Clients without terminal control get a view-only stream: the daemon says so with a
+  // `readonly` frame and drops their input and resize frames, so say so here instead of
+  // swallowing keys. Capabilities cover it before the frame arrives.
+  let readonlyFrame = $state(false);
+  const viewOnly = $derived(!app.control || readonlyFrame);
   $effect(() => {
     if (term && exit === null) term.options.disableStdin = viewOnly;
   });
@@ -165,6 +167,7 @@
 
     const connect = (): void => {
       conn = attempt === 0 ? 'connecting' : 'reconnecting';
+      readonlyFrame = false; // access may have changed (the daemon closes with 1001 then)
       const sock = new WebSocket(wsUrl(terminalWsPath(id)));
       sock.binaryType = 'arraybuffer';
       ws = sock;
@@ -188,6 +191,9 @@
             break;
           case 'output':
             t.write(frame.data);
+            break;
+          case 'readonly':
+            readonlyFrame = true;
             break;
           case 'resize':
             // Last resize wins (§6): mirror the PTY size so output wraps the way the app drew it.
@@ -284,7 +290,7 @@
 
   const exitText = $derived(
     exit
-      ? `Process exited · ${sessionStatusInfo({ ...app.sessionById.get(sid), status: exit.status }).label}${exit.exit_code !== null ? ` (exit code ${exit.exit_code})` : ''}`
+      ? `Process exited · ${sessionStatusInfo({ status: exit.status, stopped_by_user: app.sessionById.get(sid)?.stopped_by_user ?? false }).label}${exit.exit_code !== null ? ` (exit code ${exit.exit_code})` : ''}`
       : '',
   );
 </script>
@@ -303,7 +309,8 @@
     </div>
   {:else if viewOnly}
     <div class="banner view-only" role="status" data-testid="terminal-view-only">
-      View only: this device may not type into terminals. Allow it under Settings &gt; Machines &amp; Sync on the hub.
+      Read-only: typing here is disabled because this device may not control terminals. Allow it under Settings &gt;
+      Machines &amp; Sync on the hub.
     </div>
   {/if}
 </div>

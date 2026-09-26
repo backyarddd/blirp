@@ -5,7 +5,6 @@
   import { app } from '../../lib/app.svelte';
   import Loadable from '../../lib/components/Loadable.svelte';
   import SessionRow from '../../lib/components/SessionRow.svelte';
-  import { isSubagent } from '../../lib/status';
 
   let { project }: { project: ProjectSummary } = $props();
   const pid = $derived(project.id);
@@ -75,7 +74,7 @@
     onretry={() => load(true)}
   >
     <ul class="list">
-      {#each items.filter((s) => !isSubagent(s)) as s (s.id)}
+      {#each items.filter((s) => !app.deletedSessions.has(s.id)) as s (s.id)}
         <li><SessionRow session={app.sessionById.get(s.id) ?? s} /></li>
       {/each}
     </ul>

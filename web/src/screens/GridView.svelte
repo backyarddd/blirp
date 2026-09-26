@@ -21,7 +21,7 @@
     onretry={() => app.refreshSessions()}
   >
     {#snippet emptyAction()}
-      <button type="button" class="btn primary" onclick={() => app.openNewSession()}>New session</button>
+      {#if app.control}<button type="button" class="btn primary" onclick={() => app.openNewSession()}>New session</button>{/if}
     {/snippet}
     <div class="grid">
       {#each tiles as s (s.id)}

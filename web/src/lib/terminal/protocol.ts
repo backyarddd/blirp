@@ -1,12 +1,13 @@
 // Terminal attach framing (ARCHITECTURE §6), isolated here so a framing change is one file.
 // Server -> client: JSON text frames `TerminalServerMessage` (`snapshot` first and again
-// whenever this client fell behind, `resize` when any client resized, `exit` right before the
+// whenever this client fell behind, `readonly` right after the first snapshot when this client
+// may not control the terminal, `resize` when another client resized, `exit` right before the
 // socket closes) and binary frames of raw PTY output. Client -> server: binary frames of raw
 // input bytes and JSON text `{"type":"resize","cols":N,"rows":N}` (1-1000 each).
 //
-// Close codes: the daemon never sends a custom close code. It closes without a status (1005)
-// after `exit` or on daemon shutdown, and a refused upgrade (404 `terminal_not_found`, 401)
-// surfaces as 1006. So the `exit` frame, not the close code, says the process ended.
+// Close codes: 1000 after `exit`, 1001 on daemon shutdown or when this client's access changed
+// (reconnect), 1011 when a relayed terminal's machine is unreachable; a refused upgrade
+// (404 `terminal_not_found`, 401) surfaces as 1006. The `exit` frame says the process ended.
 import type { SessionStatus, TerminalClientMessage, TerminalServerMessage } from '../api/types.gen';
 
 export type ServerFrame =
@@ -44,6 +45,8 @@ export function decodeServerFrame(raw: string | ArrayBuffer | Uint8Array): Serve
       if (isSize(f.cols) && isSize(f.rows) && typeof f.data === 'string')
         return { type: 'snapshot', cols: f.cols, rows: f.rows, data: f.data };
       break;
+    case 'readonly':
+      return { type: 'readonly' };
     case 'resize':
       if (isSize(f.cols) && isSize(f.rows)) return { type: 'resize', cols: f.cols, rows: f.rows };
       break;

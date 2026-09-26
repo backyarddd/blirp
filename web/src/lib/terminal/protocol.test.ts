@@ -10,6 +10,9 @@ describe('decodeServerFrame', () => {
       data: '\u001bc$ ',
     });
   });
+  it('decodes the readonly frame', () => {
+    expect(decodeServerFrame('{"type":"readonly"}')).toEqual({ type: 'readonly' });
+  });
   it('decodes resize and exit', () => {
     expect(decodeServerFrame('{"type":"resize","cols":80,"rows":24}')).toEqual({ type: 'resize', cols: 80, rows: 24 });
     expect(decodeServerFrame('{"type":"exit","status":"completed","exit_code":0}')).toEqual({

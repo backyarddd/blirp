@@ -88,6 +88,7 @@
       {#if showKind}<span class="badge">{KIND_LABEL[record.kind]}</span>{/if}
       {#if record.status !== 'active'}<span class="badge">{record.status}</span>{/if}
       <span class="spacer"></span>
+      {#if app.control}
       <div class="acts">
         <button
           type="button"
@@ -111,6 +112,7 @@
         <button type="button" class="icon-btn sm" aria-label="Edit" title="Edit" disabled={busy} onclick={edit}><Pencil size={14} /></button>
         <button type="button" class="icon-btn sm" aria-label="Delete" title="Delete" disabled={busy} onclick={remove}><Trash size={14} /></button>
       </div>
+      {/if}
     </div>
     {#if record.body.trim()}<Markdown source={record.body} class="body small" />{/if}
     <div class="meta hint">

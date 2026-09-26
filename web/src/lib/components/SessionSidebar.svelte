@@ -10,7 +10,8 @@
   import Loadable from './Loadable.svelte';
   import Subagents from './Subagents.svelte';
 
-  let { selectedId }: { selectedId: string | null } = $props();
+  /** `selectedChildren`: subagent count of the selected session (lists leave subagents out). */
+  let { selectedId, selectedChildren }: { selectedId: string | null; selectedChildren: number } = $props();
 
   let filter = $state('');
 
@@ -38,19 +39,21 @@
       onretry={() => app.refreshSessions()}
     >
       {#snippet emptyAction()}
-        {#if !filter}<button class="btn primary sm" type="button" onclick={() => app.openNewSession()}>New session</button>{/if}
+        {#if !filter && app.control}<button class="btn primary sm" type="button" onclick={() => app.openNewSession()}>New session</button>{/if}
       {/snippet}
       {#each groups as g (g.projectId)}
         <section class="group" aria-label={g.name}>
           <header>
             <a class="gname ellipsis" href={href.project(g.projectId)}>{g.name}</a>
-            <button
-              type="button"
-              class="icon-btn sm"
-              aria-label="New session in {g.name}"
-              title="New session in {g.name}"
-              onclick={() => app.openNewSession(g.projectId)}><Plus size={14} /></button
-            >
+            {#if app.control}
+              <button
+                type="button"
+                class="icon-btn sm"
+                aria-label="New session in {g.name}"
+                title="New session in {g.name}"
+                onclick={() => app.openNewSession(g.projectId)}><Plus size={14} /></button
+              >
+            {/if}
           </header>
           <ul class="list-plain">
             {#each g.sessions as s (s.id)}
@@ -75,7 +78,9 @@
                   </span>
                   <span class="sub faint">{agentLabel(s.agent)} · {formatRelative(s.last_activity_at)}{s.origin === 'external' ? ' · external' : ''}</span>
                 </a>
-                <Subagents parent={s} onnavigate={() => (app.sidebarOpen = false)} />
+                {#if s.id === selectedId}
+                  <Subagents parentId={s.id} count={selectedChildren} onnavigate={() => (app.sidebarOpen = false)} />
+                {/if}
               </li>
             {/each}
           </ul>

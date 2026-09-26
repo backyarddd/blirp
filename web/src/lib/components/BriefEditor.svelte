@@ -38,7 +38,7 @@
 </script>
 
 <div class="brief" class:compact>
-  {#if editing}
+  {#if editing && app.control}
     <div class="pills" role="tablist" aria-label="Brief editor mode">
       <button type="button" class="pill" role="tab" aria-selected={!preview} onclick={() => (preview = false)}>Write</button>
       <button type="button" class="pill" role="tab" aria-selected={preview} onclick={() => (preview = true)}>Preview</button>
@@ -60,7 +60,7 @@
         <span class="hint">v{brief.version} · {brief.updated_by} · {formatRelative(brief.updated_at)}</span>
       {/if}
       <span class="spacer"></span>
-      <button type="button" class="btn sm ghost" onclick={edit}><Pencil size={14} aria-hidden="true" />Edit</button>
+      {#if app.control}<button type="button" class="btn sm ghost" onclick={edit}><Pencil size={14} aria-hidden="true" />Edit</button>{/if}
     </div>
     {#if brief?.body_md.trim()}
       <Markdown source={brief.body_md} />

@@ -37,24 +37,41 @@
   });
   const showTerminal = $derived(session !== undefined && (hasTerminal(session) || terminalFor === session.id));
 
-  // Sessions older than the sidebar window are fetched on demand.
+  // The detail carries the subagent count (lists leave subagents out); it is re-read when the
+  // status changes, since subagents are ingested while the parent works. Sessions older than
+  // the sidebar window come from here too.
   let missing: string | null = $state(null);
+  let childrenCount = $state(0);
+  const status = $derived(session?.status);
   $effect(() => {
     const id = sessionId;
-    missing = null;
-    if (!id || !app.sessionsLoaded || untrack(() => app.sessionById.has(id))) return;
-    api.sessions
-      .get(id)
-      .then((s) => app.upsertSession(s))
-      .catch((e: unknown) => {
-        if (id === sessionId) missing = errorMessage(e);
-      });
+    void status;
+    if (!id || !app.sessionsLoaded) return;
+    untrack(() => {
+      missing = null;
+      api.sessions
+        .get(id)
+        .then(({ children_count, ...s }) => {
+          if (id !== sessionId) return;
+          childrenCount = children_count;
+          if (!app.sessionById.has(id)) app.upsertSession(s);
+        })
+        .catch((e: unknown) => {
+          if (id !== sessionId) return;
+          if (app.sessionById.has(id)) console.warn(`blirp: could not read session ${id}`, e);
+          else missing = errorMessage(e);
+        });
+    });
+  });
+  $effect(() => {
+    void sessionId;
+    childrenCount = 0;
   });
 </script>
 
 <div class="layout" class:with-memory={session && app.memoryPanel}>
   <aside class="sidebar" class:open={app.sidebarOpen} aria-label="Sessions">
-    <SessionSidebar selectedId={sessionId} />
+    <SessionSidebar selectedId={sessionId} selectedChildren={childrenCount} />
   </aside>
   {#if app.sidebarOpen}
     <button type="button" class="scrim" aria-label="Close sessions list" onclick={() => (app.sidebarOpen = false)}></button>
@@ -110,7 +127,7 @@
           <p class="muted">
             Choose a session on the left, or start a new one. Every new session starts with this project's memory.
           </p>
-          <button type="button" class="btn primary" onclick={() => app.openNewSession()}>New session</button>
+          {#if app.control}<button type="button" class="btn primary" onclick={() => app.openNewSession()}>New session</button>{/if}
         </div>
       {/if}
     </div>

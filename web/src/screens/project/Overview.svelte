@@ -63,6 +63,7 @@
 
 <div class="grid">
   <div class="col">
+    {#if app.control}
     <form class="card panel-pad start" onsubmit={start}>
       <label for="ov-prompt" class="h">Start a session</label>
       <textarea
@@ -92,6 +93,7 @@
         <button type="submit" class="btn primary" disabled={starting || !agent}><Send size={14} aria-hidden="true" />{starting ? 'Starting…' : 'Start'}</button>
       </div>
     </form>
+    {/if}
 
     <section class="card panel-pad">
       <h2 class="h">Brief</h2>
@@ -130,7 +132,7 @@
         emptyText="No sessions in this project yet."
       >
         <ul class="list">
-          {#each memory.data?.recent_sessions ?? [] as s (s.id)}
+          {#each (memory.data?.recent_sessions ?? []).filter((s) => !app.deletedSessions.has(s.id)) as s (s.id)}
             <li><SessionRow session={app.sessionById.get(s.id) ?? s} /></li>
           {/each}
         </ul>

@@ -164,11 +164,13 @@
         <div class="row">
           <h3 class="section-title">Open threads</h3>
           <span class="spacer"></span>
-          <button type="button" class="icon-btn sm" aria-label="Add open thread" title="Add open thread" onclick={() => (adding = !adding)}>
-            <Plus size={15} />
-          </button>
+          {#if app.control}
+            <button type="button" class="icon-btn sm" aria-label="Add open thread" title="Add open thread" onclick={() => (adding = !adding)}>
+              <Plus size={15} />
+            </button>
+          {/if}
         </div>
-        {#if adding}
+        {#if adding && app.control}
           <form class="add" onsubmit={addThread}>
             <input class="input" placeholder="What is still open?" aria-label="Thread title" bind:value={newTitle} required />
             <textarea class="textarea" rows="3" placeholder="Details (optional)" aria-label="Thread details" bind:value={newBody}></textarea>

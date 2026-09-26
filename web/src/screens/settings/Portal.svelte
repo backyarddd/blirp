@@ -17,10 +17,11 @@
   async function patchPortal(p: Partial<PortalConfig>): Promise<void> {
     saving = true;
     const config = { ...settings.config, portal: { ...settings.config.portal, ...p } };
-    const s = await app.act(() => api.settings.patch({ config }), 'Portal settings saved');
+    const s = await app.saveSettings({ config }, 'Portal settings saved');
     saving = false;
     if (s) {
       onsaved(s);
+      port = s.config.portal.lan_port;
       void app.refreshSync();
     }
   }
@@ -47,7 +48,7 @@
     sign in by scanning a one-time QR code from a screen that is already signed in. Prefer <code>tailscale serve</code> for access
     from outside your network.
   </p>
-  {#if !app.portal}
+  {#if app.admin}
     <label class="check">
       <input type="checkbox" checked={settings.config.portal.lan} disabled={saving} onchange={(e) => patchPortal({ lan: e.currentTarget.checked })} />
       <span>Serve the portal on the local network</span>
@@ -59,7 +60,7 @@
       </label>
       <button type="submit" class="btn" disabled={saving || port === settings.config.portal.lan_port}>Save port</button>
     </form>
-    <p class="hint">The portal runs while this machine is the hub. Changes apply the next time the hub is enabled or the daemon starts.</p>
+    <p class="hint">The portal runs while this machine is the hub. Changes apply right away; if the port is taken the setting is kept and the portal stays off until you pick a free one.</p>
   {/if}
   {#if running && status}
     <dl class="facts">
@@ -74,7 +75,7 @@
   {/if}
 </section>
 
-{#if running}
+{#if running && app.admin}
   <section class="card panel-pad">
     <div class="row">
       <h2 class="h">Sign in a phone or browser</h2>

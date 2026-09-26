@@ -68,7 +68,7 @@
 
   // PATCH replaces the whole config, so every change starts from the loaded one.
   async function saveConfig(change: (c: Config) => Config): Promise<void> {
-    const s = await app.act(() => api.settings.patch({ config: change(settings.config) }), 'Saved');
+    const s = await app.saveSettings({ config: change(settings.config) }, 'Saved');
     if (s) onsaved(s);
   }
 </script>
@@ -160,6 +160,7 @@
     <span>Default agent for new sessions</span>
     <select
       class="select narrow"
+      disabled={!app.admin}
       value={settings.config.agents.default}
       onchange={(e) => {
         const value = e.currentTarget.value;
@@ -174,6 +175,7 @@
   <label class="check">
     <input
       type="checkbox"
+      disabled={!app.admin}
       checked={settings.config.sessions.worktree_default}
       onchange={(e) => {
         const on = e.currentTarget.checked;

@@ -37,7 +37,9 @@
   const items: Item[] = $derived.by(() => {
     const q = query.trim();
     const actions: Item[] = [
-      { id: 'a:new', group: 'Actions', label: 'New session', hint: shortcutLabel('T', isMac), run: () => app.openNewSession() },
+      ...(app.control
+        ? [{ id: 'a:new', group: 'Actions' as const, label: 'New session', hint: shortcutLabel('T', isMac), run: () => app.openNewSession() }]
+        : []),
       ...(q ? [{ id: 'a:search', group: 'Actions' as const, label: `Search memory for "${q}"`, hint: '', run: go(href.search(q)) }] : []),
       {
         id: 'a:grid',

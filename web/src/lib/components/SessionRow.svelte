@@ -6,7 +6,6 @@
   import { agentLabel, basename, sessionTitle } from '../status';
   import { formatRelative } from '../time';
   import StatusChip from './StatusChip.svelte';
-  import Subagents from './Subagents.svelte';
 
   let { session }: { session: Session } = $props();
 </script>
@@ -25,7 +24,6 @@
   </span>
   <StatusChip {session} />
 </a>
-<Subagents parent={session} />
 
 <style>
   .srow {

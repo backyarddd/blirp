@@ -42,6 +42,7 @@
     <a class="pill" href={href.sessions()} aria-current={section === 'sessions' ? 'page' : undefined}>Sessions</a>
   </nav>
 
+  {#if app.control}
   <button
     type="button"
     class="new"
@@ -51,6 +52,7 @@
   >
     <Plus size={18} strokeWidth={2.5} />
   </button>
+  {/if}
 
   <span class="spacer"></span>
 

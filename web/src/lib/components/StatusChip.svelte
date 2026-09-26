@@ -1,7 +1,8 @@
 <script lang="ts">
-  import { sessionStatusInfo, type SessionLike } from '../status';
+  import type { Session } from '../api/types.gen';
+  import { sessionStatusInfo } from '../status';
 
-  let { session }: { session: SessionLike } = $props();
+  let { session }: { session: Pick<Session, 'status' | 'stopped_by_user'> } = $props();
   const info = $derived(sessionStatusInfo(session));
 </script>
 

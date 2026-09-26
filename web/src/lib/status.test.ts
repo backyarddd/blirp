@@ -4,7 +4,6 @@ import {
   agentLabel,
   basename,
   canResume,
-  childCount,
   groupSessions,
   hasTerminal,
   isLive,
@@ -80,6 +79,7 @@ describe('groupSessions', () => {
     tokens_out: 0,
     cost_usd: 0,
     parent_session_id: null,
+    stopped_by_user: false,
   });
   const alpha: ProjectSummary = {
     id: 'a',
@@ -96,17 +96,14 @@ describe('groupSessions', () => {
   };
   it('shows Stopped only for ended sessions the user stopped', () => {
     expect(sessionStatusInfo({ status: 'completed', stopped_by_user: true }).label).toBe('Stopped');
-    expect(sessionStatusInfo({ status: 'completed' }).label).toBe('Completed');
+    expect(sessionStatusInfo({ status: 'completed', stopped_by_user: false }).label).toBe('Completed');
     expect(sessionStatusInfo({ status: 'idle', stopped_by_user: true }).label).toBe('Idle');
   });
-  it('treats only ingested children as subagents and counts them', () => {
-    const parent = mk('p', 'a');
+  it('treats only ingested children as subagents', () => {
     const sub = { ...mk('c1', 'a'), origin: 'external' as const, parent_session_id: 'p' };
     const fork = { ...mk('c2', 'a'), parent_session_id: 'p' };
     expect(isSubagent(sub)).toBe(true);
     expect(isSubagent(fork)).toBe(false);
-    expect(childCount(parent, [parent, sub, fork])).toBe(1);
-    expect(childCount({ ...parent, children_count: 4 }, [parent, sub])).toBe(4);
   });
   it('groups by project in first-seen order', () => {
     const groups = groupSessions([mk('1', 'b'), mk('2', 'a'), mk('3', 'b')], new Map([['a', alpha]]));

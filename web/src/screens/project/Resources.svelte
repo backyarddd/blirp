@@ -92,7 +92,7 @@
   <div class="row">
     <h2 class="h">Resources</h2>
     <span class="spacer"></span>
-    <button type="button" class="btn sm primary" onclick={startNew}><Plus size={14} aria-hidden="true" />Add resource</button>
+    {#if app.control}<button type="button" class="btn sm primary" onclick={startNew}><Plus size={14} aria-hidden="true" />Add resource</button>{/if}
   </div>
   <p class="hint">Links and references that belong to this project: repos, PRs, issues, docs.</p>
   {#if editingId === 'new'}{@render editor()}{/if}
@@ -118,8 +118,10 @@
               {/if}
               <span class="url mono small faint ellipsis" title={r.url}>{r.url}</span>
             </span>
-            <button type="button" class="icon-btn sm" aria-label="Edit {r.title}" onclick={() => startEdit(r)}><Pencil size={14} /></button>
-            <button type="button" class="icon-btn sm" aria-label="Remove {r.title}" onclick={() => remove(r)}><Trash size={14} /></button>
+            {#if app.control}
+              <button type="button" class="icon-btn sm" aria-label="Edit {r.title}" onclick={() => startEdit(r)}><Pencil size={14} /></button>
+              <button type="button" class="icon-btn sm" aria-label="Remove {r.title}" onclick={() => remove(r)}><Trash size={14} /></button>
+            {/if}
           {/if}
         </li>
       {/each}

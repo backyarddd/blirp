@@ -59,7 +59,9 @@
         <p class="muted sub">Any folder is a project. Git is optional.</p>
       </div>
       <span class="spacer"></span>
-      <button type="button" class="btn primary" onclick={openAdd}><FolderPlus size={16} aria-hidden="true" />Add folder</button>
+      {#if app.control}
+        <button type="button" class="btn primary" onclick={openAdd}><FolderPlus size={16} aria-hidden="true" />Add folder</button>
+      {/if}
     </div>
 
     <Loadable

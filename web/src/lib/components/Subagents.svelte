@@ -4,13 +4,13 @@
   import type { Session } from '../api/types.gen';
   import { app } from '../app.svelte';
   import { href } from '../router';
-  import { childCount, isSubagent, sessionTitle, type SessionExtras } from '../status';
+  import { sessionTitle } from '../status';
   import { formatRelative } from '../time';
   import StatusChip from './StatusChip.svelte';
 
-  let { parent, onnavigate }: { parent: Session & SessionExtras; onnavigate?: () => void } = $props();
+  /** `count` is the parent's `SessionDetail.children_count`; lists leave subagents out. */
+  let { parentId, count, onnavigate }: { parentId: string; count: number; onnavigate?: () => void } = $props();
 
-  const count = $derived(childCount(parent, app.sessions));
   let open = $state(false);
   let children: Session[] = $state.raw([]);
   let loading = $state(false);
@@ -18,16 +18,9 @@
   async function toggle(): Promise<void> {
     open = !open;
     if (!open) return;
-    // Daemons that send `children_count` hide children from lists and filter by `parent`;
-    // older ones reject that query but list children with everything else.
-    if (typeof parent.children_count !== 'number') {
-      children = app.sessions.filter((c) => c.parent_session_id === parent.id && isSubagent(c));
-      return;
-    }
     loading = true;
     try {
-      const page = await api.sessions.list({ parent: parent.id, limit: 100 });
-      children = page.items.filter((c) => c.parent_session_id === parent.id);
+      children = (await api.sessions.list({ parent: parentId, limit: 100 })).items;
     } catch (e) {
       app.toast(`Could not load subagents: ${errorMessage(e)}`);
       open = false;
