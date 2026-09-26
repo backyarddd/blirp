@@ -4,7 +4,7 @@
 use rusqlite::Connection;
 
 /// Index `i` holds the migration that moves the schema from version `i` to `i + 1`.
-pub(crate) const MIGRATIONS: &[&str] = &[V1, V2, V3, V4, V5, V6];
+pub(crate) const MIGRATIONS: &[&str] = &[V1, V2, V3, V4, V5, V6, V7];
 
 /// Schema of §5. Note on the FTS tables: they are external-content tables keyed
 /// by the implicit rowid of `events`/`records`. blirp never runs `VACUUM`
@@ -277,6 +277,16 @@ CREATE INDEX brief_history_project ON brief_history(project_id, updated_at, id);
 ALTER TABLE briefs ADD COLUMN history_id TEXT NOT NULL DEFAULT '';
 ALTER TABLE briefs ADD COLUMN machine_id TEXT NOT NULL DEFAULT '';
 UPDATE briefs SET history_id = 'legacy-' || project_id || '-' || version;
+"#;
+
+/// Deleted sessions stay deleted (§5): a tombstone per deleted session id
+/// (written wherever the delete is applied, so it replicates with it);
+/// later writes of that session or its events are ignored.
+const V7: &str = r#"
+CREATE TABLE deleted_sessions(
+    id         TEXT PRIMARY KEY,
+    deleted_at INTEGER NOT NULL
+);
 "#;
 
 #[derive(Debug, thiserror::Error)]

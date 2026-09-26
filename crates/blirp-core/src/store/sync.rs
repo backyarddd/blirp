@@ -537,8 +537,11 @@ impl Store {
                                 continue;
                             }
                         };
-                        // Events are append-only; everything else is LWW.
+                        // Events are append-only and a session delete always
+                        // wins (tombstone); everything else is LWW.
+                        let delete_wins = matches!(change, Change::DeleteSession { .. });
                         if entry.op != "insert"
+                            && !delete_wins
                             && later_own.exists(params![entry.entity, entry.key, own_seen])?
                         {
                             // Our later brief stays current, but the other
@@ -807,6 +810,56 @@ mod tests {
                     .collect::<Vec<_>>(),
                 [3, 2, 1]
             );
+        }
+    }
+
+    // A deleted session never comes back: not from a late write of its
+    // machine, not from another machine's unpushed retitle, not by events.
+    #[test]
+    fn deleted_sessions_stay_deleted() {
+        use crate::model::{Event, EventKind};
+        let (_h, hub) = temp_store();
+        let (_a, a) = temp_store();
+        let (_b, b) = temp_store();
+        a.apply(project("p", "shared")).unwrap();
+        let s = session_of("s1", "A");
+        a.apply(Change::Session(s.clone())).unwrap();
+        push(&a, "A", &hub, "H");
+        pull(&b, "B", &hub, "H");
+        // B retitles it (unpushed) while A deletes it.
+        b.apply(Change::Session(crate::model::Session {
+            title: Some("renamed".into()),
+            ..s.clone()
+        }))
+        .unwrap();
+        a.delete_session("s1").unwrap();
+        push(&a, "A", &hub, "H");
+        pull(&b, "B", &hub, "H");
+        assert!(b.get_session("s1").unwrap().is_none(), "delete wins on B");
+        push(&b, "B", &hub, "H");
+        let ev = Event {
+            session_id: "s1".into(),
+            seq: 1,
+            ts: 1,
+            kind: EventKind::User,
+            text: "late".into(),
+            meta: None,
+        };
+        // A late write on the owner is ignored and not queued.
+        let head = a.outbox_head().unwrap();
+        assert!(!a.apply(Change::Session(s.clone())).unwrap());
+        assert!(!a.apply(Change::Event(ev.clone())).unwrap());
+        assert_eq!(a.outbox_head().unwrap(), head);
+        // And replicated ones are ignored everywhere.
+        let late = [
+            wire(1000, &Change::Session(s.clone())),
+            wire(1001, &Change::Event(ev)),
+        ];
+        hub.hub_ingest("H", "A", &late).unwrap();
+        pull(&b, "B", &hub, "H");
+        for st in [&hub, &a, &b] {
+            assert!(st.get_session("s1").unwrap().is_none());
+            assert_eq!(st.max_event_seq("s1").unwrap(), 0);
         }
     }
 

@@ -120,6 +120,8 @@ suggestions(id TEXT PK, project_id TEXT, target TEXT CHECK(target IN ('brief','r
 resources(id TEXT PK, project_id TEXT, kind TEXT CHECK(kind IN ('link','repo','pr','issue','doc','file')),
           url TEXT, title TEXT, meta_json TEXT NULL, created_at INT, deleted INT DEFAULT 0)
 
+deleted_sessions(id TEXT PK, deleted_at INT)   -- tombstones (migration 7), see Change::DeleteSession
+
 ingest_cursors(adapter TEXT, source TEXT, cursor_json TEXT, PRIMARY KEY(adapter, source))
 settings(key TEXT PK, value_json TEXT)
 devices(id TEXT PK, name TEXT, kind TEXT CHECK(kind IN ('machine','browser')),
@@ -408,7 +410,11 @@ DELETE /api/sessions/:id                 204; only when not running (409 `sessio
                                          continue/fork sessions lose their parent link. Replicated as a `sessions` delete
                                          (`Change::DeleteSession`); emits `session_deleted`. Retention is otherwise
                                          permanent (§8): an ingested session whose transcript grows later comes back
-                                         with only the new events.
+                                         with only the new events, as a new session. The deleted ids get tombstones
+                                         (`deleted_sessions`, written wherever the delete is applied): later writes of
+                                         that session or its events (a late ingest batch, another machine's unpushed
+                                         retitle) are ignored and never queued, and a node applies a pulled session
+                                         delete even when it has a later write of its own for that row.
 POST /api/sessions/:id/open              {target: "folder"|"editor"}: session folder in the OS file manager, or in
                                          $VISUAL / $EDITOR / `code` (first on PATH), else the OS default; 204
 GET  /api/terminals/:id/ws               terminal attach (§6)

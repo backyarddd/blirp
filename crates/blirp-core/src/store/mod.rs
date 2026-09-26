@@ -328,7 +328,8 @@ pub(crate) fn apply_in(tx: &Transaction<'_>, change: &Change) -> Result<bool> {
     let redacted = redact_memory(change);
     let change = redacted.as_ref().unwrap_or(change);
     let written = write_row(tx, change)?;
-    if written == 0 && matches!(change, Change::Event(_)) {
+    if written == 0 && matches!(change, Change::Event(_) | Change::Session(_)) {
+        // A duplicate event, or a write of a deleted session: nothing to queue.
         return Ok(false);
     }
     let (entity, op, key) = change.describe();
@@ -419,6 +420,7 @@ fn write_row(tx: &Transaction<'_>, change: &Change) -> Result<usize> {
             "DELETE FROM project_paths WHERE machine_id=?1 AND path=?2",
             params![machine_id, path],
         )?,
+        Change::Session(s) if tombstoned(tx, &s.id)? => 0,
         Change::Session(s) => tx.execute(
             "INSERT INTO sessions(id, project_id, machine_id, agent, agent_session_id, origin, cwd, title,
                status, branch, worktree, transcript_path, started_at, ended_at, last_activity_at, exit_code,
@@ -445,6 +447,14 @@ fn write_row(tx: &Transaction<'_>, change: &Change) -> Result<usize> {
             // The session and its ingested subagents (§8).
             const DOOMED: &str = "SELECT id FROM sessions WHERE id = ?1
                  OR (parent_session_id = ?1 AND origin = 'external')";
+            // Tombstones first: nothing may bring these rows back.
+            tx.execute(
+                &format!(
+                    "INSERT OR IGNORE INTO deleted_sessions(id, deleted_at)
+                     SELECT id, ?2 FROM ({DOOMED}) UNION SELECT ?1, ?2"
+                ),
+                params![id, crate::now_ms()],
+            )?;
             // The FTS triggers drop the events' full-text rows.
             tx.execute(
                 &format!("DELETE FROM events WHERE session_id IN ({DOOMED})"),
@@ -474,6 +484,7 @@ fn write_row(tx: &Transaction<'_>, change: &Change) -> Result<usize> {
                 params![id],
             )?
         }
+        Change::Event(e) if tombstoned(tx, &e.session_id)? => 0,
         Change::Event(e) => tx.execute(
             "INSERT INTO events(session_id, seq, ts, kind, text, meta_json) VALUES (?1,?2,?3,?4,?5,?6)
              ON CONFLICT(session_id, seq) DO NOTHING",
@@ -521,6 +532,17 @@ fn write_row(tx: &Transaction<'_>, change: &Change) -> Result<usize> {
             params![r.id, r.project_id, r.kind, r.url, r.title, json_text(&r.meta), r.created_at, r.deleted],
         )?,
     })
+}
+
+/// Whether session `id` was deleted (see migration 7).
+fn tombstoned(c: &Connection, id: &str) -> Result<bool> {
+    Ok(one(
+        c,
+        "SELECT 1 FROM deleted_sessions WHERE id = ?1",
+        params![id],
+        |_| Ok(()),
+    )?
+    .is_some())
 }
 
 /// `SELECT` helper returning at most one mapped row.
