@@ -622,6 +622,22 @@ pub struct PatchSession {
     pub title: Option<String>,
 }
 
+/// Where `POST /api/sessions/:id/open` shows the session folder.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "lowercase")]
+pub enum OpenTarget {
+    /// The OS file manager.
+    Folder,
+    /// `$VISUAL`, `$EDITOR` or `code` when on PATH, else the OS default handler.
+    Editor,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, TS)]
+#[serde(deny_unknown_fields)]
+pub struct OpenSession {
+    pub target: OpenTarget,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, TS)]
 pub struct EventsPage {
     pub items: Vec<Event>,
@@ -776,7 +792,7 @@ mod tests {
             PatchProject, MergeProject, ProjectMemory, PutBrief, RevertBrief, CreateRecord,
             PatchRecord, CreateWikiPage, PutWikiPage, CreateResource, PatchResource,
             GitStatusEntry, GitStatus, GitDiff, FileEntry, DirListing, FileContent, SessionsPage,
-            LaunchSession, PatchSession, EventsPage, SearchHit, SearchResults, AgentInfo,
+            LaunchSession, PatchSession, OpenTarget, OpenSession, EventsPage, SearchHit, SearchResults, AgentInfo,
             SettingsView, SettingsPatch, ServerEvent, TerminalServerMessage, TerminalClientMessage,
             Config, DaemonConfig, MachineConfig, AgentsConfig, CustomAgent, SessionsConfig,
             Summarizer, BriefMode, MemoryConfig, SyncConfig, PortalConfig,

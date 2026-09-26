@@ -326,6 +326,8 @@ POST /api/sessions                       launch (§7)
 GET  /api/sessions/:id                   detail incl. summary; GET .../events?after=&limit=
 POST /api/sessions/:id/stop | /resume | /distill
 PATCH /api/sessions/:id                  {title}
+POST /api/sessions/:id/open              {target: "folder"|"editor"}: session folder in the OS file manager, or in
+                                         $VISUAL / $EDITOR / `code` (first on PATH), else the OS default; 204
 GET  /api/terminals/:id/ws               terminal attach (§6)
 GET  /api/search?q=&project=&kind=       FTS over events + records
 GET  /api/agents                         detected agents + versions + integration status

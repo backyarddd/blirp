@@ -3,6 +3,7 @@
 mod files;
 mod memory;
 mod misc;
+mod open;
 mod projects;
 mod sessions;
 mod terminal;
@@ -132,6 +133,7 @@ pub fn router(state: SharedState) -> Router {
         .merge(memory::routes())
         .merge(files::routes())
         .merge(sessions::routes())
+        .merge(open::routes())
         .route("/api/terminals/{id}/ws", get(terminal::attach))
         .merge(later_phase_routes())
         .route("/api/{*rest}", any(api_not_found))
