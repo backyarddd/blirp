@@ -457,7 +457,7 @@ async fn doctor(paths: &Paths) -> anyhow::Result<ExitCode> {
     let config = cfg.unwrap_or_default();
     println!(
         "[info] LAN discovery: {}",
-        lan_discovery_line(&config, paths)
+        lan_discovery_line(&config, paths, daemon.is_some())
     );
     let agents = tokio::task::spawn_blocking(move || crate::agents::detect_all(&config)).await?;
     let found: Vec<String> = agents
@@ -505,9 +505,13 @@ async fn doctor(paths: &Paths) -> anyhow::Result<ExitCode> {
     })
 }
 
-/// LAN discovery (mDNS) state for `blirp doctor`, with what the running
-/// daemon's log says about sending it.
-fn lan_discovery_line(config: &blirp_core::config::Config, paths: &Paths) -> String {
+/// LAN discovery (mDNS) state for `blirp doctor`, with a current mDNS send
+/// failure from the running daemon's log.
+fn lan_discovery_line(
+    config: &blirp_core::config::Config,
+    paths: &Paths,
+    daemon_running: bool,
+) -> String {
     use blirp_core::model::MachineRole;
     if !config.sync.lan_discovery {
         return "off (sync.lan_discovery = false); pairing needs the hub's invite".into();
@@ -516,7 +520,10 @@ fn lan_discovery_line(config: &blirp_core::config::Config, paths: &Paths) -> Str
         MachineRole::Standalone => "on; used once this machine is a hub or paired".to_string(),
         _ => "on".to_string(),
     };
-    if let Some(failure) = lifecycle::mdns_send_failure(paths) {
+    if let Some(failure) = daemon_running
+        .then(|| lifecycle::recent_mdns_failure(paths))
+        .flatten()
+    {
         line.push_str(&format!("; the daemon cannot send mDNS ({failure})"));
     }
     if cfg!(target_os = "macos") {

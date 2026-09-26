@@ -179,21 +179,31 @@ fn tail(path: &Path, n: usize) -> anyhow::Result<(String, u64)> {
     Ok((out, start + buf.len() as u64))
 }
 
-/// The first mDNS send failure the daemon logged since it last started, from
-/// the end of the current log (`swarm_discovery`: "error sending mDNS...").
-/// macOS reports "No route to host" there when blirp lacks the Local Network
-/// permission.
-pub(super) fn mdns_send_failure(paths: &Paths) -> Option<String> {
+/// While mDNS sends keep failing, the log limiter (`log_limit::WINDOW`,
+/// 10 min) still writes the line about every 10 minutes; one newer than
+/// this means the failure is current.
+const MDNS_FAILURE_RECENT: chrono::TimeDelta = chrono::TimeDelta::minutes(11);
+
+/// The daemon's latest mDNS send failure (`swarm_discovery`: "error sending
+/// mDNS..."), if it logged one since it started and within the last
+/// [`MDNS_FAILURE_RECENT`]. macOS reports "No route to host" there when
+/// blirp lacks the Local Network permission.
+pub(super) fn recent_mdns_failure(paths: &Paths) -> Option<String> {
     let (text, _) = tail(&current_log(&paths.logs_dir())?, 20_000).ok()?;
-    mdns_failure_since_start(&text).map(str::to_string)
+    recent_mdns_failure_in(&text, chrono::Utc::now()).map(str::to_string)
 }
 
-fn mdns_failure_since_start(log: &str) -> Option<&str> {
+fn recent_mdns_failure_in(log: &str, now: chrono::DateTime<chrono::Utc>) -> Option<&str> {
     const START: &str = "blirp daemon listening";
     const FAILURE: &str = "error sending mDNS";
     let run = log.rfind(START).map_or(log, |i| &log[i..]);
-    run.lines()
-        .find_map(|l| l.find(FAILURE).map(|i| l[i..].trim_end()))
+    let line = run.lines().rev().find(|l| l.contains(FAILURE))?;
+    // Lines start with an RFC 3339 UTC timestamp.
+    let at = chrono::DateTime::parse_from_rfc3339(line.split_whitespace().next()?).ok()?;
+    if now.signed_duration_since(at) > MDNS_FAILURE_RECENT {
+        return None;
+    }
+    line.find(FAILURE).map(|i| line[i..].trim_end())
 }
 
 /// `blirp logs [-n N] [-f]`: the end of the current daemon log; `-f`
@@ -265,21 +275,41 @@ mod tests {
     }
 
     #[test]
-    fn finds_mdns_failures_of_the_current_run_only() {
-        let old = "T  WARN swarm_discovery::socket: error sending mDNS: No route to host\n";
-        let start = "T  INFO blirp::daemon: blirp daemon listening on 127.0.0.1 port=47770\n";
-        let fail = "T ERROR swarm_discovery::socket: error sending mDNS on interface 192.0.2.14: \
-                    No route to host (os error 65)\n";
-        assert_eq!(mdns_failure_since_start(""), None);
-        assert_eq!(mdns_failure_since_start(&format!("{old}{start}")), None);
+    fn finds_recent_mdns_failures_of_the_current_run_only() {
+        let now = chrono::DateTime::parse_from_rfc3339("2026-09-26T12:00:00Z")
+            .unwrap()
+            .to_utc();
+        let old = "2026-09-26T11:50:00.1Z  WARN swarm_discovery::socket: \
+                   error sending mDNS: No route to host\n";
+        let start = "2026-09-26T11:51:00.1Z  INFO blirp::daemon: blirp daemon listening\n";
+        let first =
+            "2026-09-26T11:51:01.1Z  WARN swarm_discovery::socket: error sending mDNS: first\n";
+        let last = "2026-09-26T11:55:00.1Z ERROR swarm_discovery::socket: error sending mDNS on \
+                    interface 192.0.2.14: No route to host (os error 65)\n";
+        let other = "2026-09-26T11:56:00.1Z  INFO blirp::daemon: other\n";
+        assert_eq!(recent_mdns_failure_in("", now), None);
+        // Failures before the daemon's last start do not count.
+        assert_eq!(recent_mdns_failure_in(&format!("{old}{start}"), now), None);
+        // The latest failure is reported.
         assert_eq!(
-            mdns_failure_since_start(&format!("{old}{start}{fail}")),
+            recent_mdns_failure_in(&format!("{old}{start}{first}{last}{other}"), now),
             Some("error sending mDNS on interface 192.0.2.14: No route to host (os error 65)")
         );
         // A log cut before the daemon's start line still counts.
         assert_eq!(
-            mdns_failure_since_start(old),
+            recent_mdns_failure_in(old, now),
             Some("error sending mDNS: No route to host")
+        );
+        // Nothing for over 11 minutes: resolved.
+        let later = now + chrono::TimeDelta::minutes(7);
+        assert_eq!(
+            recent_mdns_failure_in(&format!("{start}{first}{last}"), later),
+            None
+        );
+        // Unparsable timestamps are not reported.
+        assert_eq!(
+            recent_mdns_failure_in("T WARN x: error sending mDNS: y\n", now),
+            None
         );
     }
 

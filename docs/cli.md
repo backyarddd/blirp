@@ -78,7 +78,7 @@ Shows the daemon log (`~/.blirp/logs/blirpd.<date>.log`). Run `blirp logs --help
 
 ## blirp doctor
 
-Checks, one line each, `[ ok ]` or `[FAIL]`: data directory writable, `config.toml` valid, database opens and passes `quick_check` (schema version shown), daemon reachable, `git` on PATH. Then `[info]` lines: LAN discovery (on or off, mDNS send failures the running daemon logged, and on macOS a hint about the Local Network permission), detected agents with versions, and per transcript adapter the store it found, the number of sources and the time of the last ingest. Exit code 1 if any check failed. Works without the daemon; run it in the same environment the daemon runs in (PATH matters for agent detection).
+Checks, one line each, `[ ok ]` or `[FAIL]`: data directory writable, `config.toml` valid, database opens and passes `quick_check` (schema version shown), daemon reachable, `git` on PATH. Then `[info]` lines: LAN discovery (on or off, the running daemon's latest mDNS send failure when it logged one in the last 11 minutes, and on macOS a hint about the Local Network permission), detected agents with versions, and per transcript adapter the store it found, the number of sources and the time of the last ingest. Exit code 1 if any check failed. Works without the daemon; run it in the same environment the daemon runs in (PATH matters for agent detection).
 
 ## blirp mem
 
