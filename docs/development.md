@@ -101,6 +101,14 @@ pnpm -C web e2e
 
 Builds the SPA and `cargo build -p blirp`, starts the real daemon on a temporary `BLIRP_HOME` with a temporary git repository, and drives the UI with Playwright in the installed Microsoft Edge (no browser download). `BLIRP_E2E_CHANNEL=chrome` (or another Playwright channel) picks another browser; `BLIRP_E2E_KEEP=1` keeps the temp directory and `daemon.log` for inspection. Not part of `pnpm -C web test`; CI runs it on Linux with Playwright's Chromium (`BLIRP_E2E_CHANNEL=chromium`, after `pnpm -C web exec playwright install --with-deps chromium`).
 
+### README screenshots
+
+```sh
+pnpm -C web screenshots
+```
+
+Regenerates `docs/images/*.png` from `web/e2e/screenshots.ts`: builds the SPA and `cargo build -p blirp`, starts the daemon on port 47791 with `BLIRP_LOOPBACK_ONLY=1` and a fresh demo root (`C:\demo` on Windows, `/tmp/demo` elsewhere; `BLIRP_SHOTS_ROOT` picks another, which must not exist yet). `HOME`, `USERPROFILE`, `APPDATA`, `LOCALAPPDATA`, the XDG directories and every agent data directory point inside that root, and `PATH` entries under your real home are dropped, so no real transcript, project or path under your home can show up; the script fails unless exactly the seeded projects and sessions exist. It seeds three projects (`acme-api`, `infra`, `design-notes`), memory, a Claude Code transcript and shell sessions through the API, captures headless in dark mode 1440 px wide (390 px for the phone shot), then removes the root (`BLIRP_SHOTS_KEEP=1` keeps it). Browser as for e2e (`BLIRP_E2E_CHANNEL`). Look at every image before committing it.
+
 ## Adding an agent adapter
 
 A new agent touches these places. Look at an existing agent with the same shape (JSONL file per session: `pi`, `claude`; SQLite store: `opencode`; JSON document: `amp`) and copy its structure.

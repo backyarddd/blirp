@@ -9,7 +9,8 @@
     "preview": "vite preview",
     "check": "svelte-check --tsconfig ./tsconfig.json --fail-on-warnings && tsc -p tsconfig.node.json",
     "test": "vitest run",
-    "e2e": "vite build && playwright test"
+    "e2e": "vite build && playwright test",
+    "screenshots": "vite build && node --experimental-strip-types e2e/screenshots.ts"
   },
   "dependencies": {
     "@lucide/svelte": "^1.48.0",
