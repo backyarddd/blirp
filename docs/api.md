@@ -138,19 +138,21 @@ Text fields are limited to 256 KiB.
 | `POST /api/sync/hub/enable` | admin. Become the hub (starts the portal if `portal.lan`); `SyncStatus`. 409 `paired_node`. |
 | `POST /api/sync/hub/disable` | admin. Back to standalone; `SyncStatus`. 409 `not_hub`. |
 | `POST /api/sync/invite` | admin, hub. `{invite, code, uri, expires_at}` |
-| `POST /api/sync/join` | admin. `{invite, code}`; `invite` may be a `blirp://join/...` link (its code is used when `code` is empty) or `""` to find the hub on the LAN. `SyncStatus`. 409 `already_synced`. |
+| `POST /api/sync/join/preview` | admin. `{invite}` (invite, join link or `""`) -> `JoinPreview {hub_id}`: the hub's machine id read from the invite, nothing contacted; `null` for a LAN join. The hub's name is only exchanged after the code is verified. |
+| `POST /api/sync/join` | admin. `{invite, code, allow_hub_control?}`; `invite` may be a `blirp://join/...` link (its code is used when `code` is empty) or `""` to find the hub on the LAN. `allow_hub_control` sets `sync.allow_hub_control` with the new role (left out: unchanged). `SyncStatus`. 409 `already_synced`. |
 | `GET /api/devices` | `Device[]`: `{id, name, kind (machine\|browser), node_id, created_at, last_seen, revoked, can_control_terminals}` |
 | `PATCH /api/devices/:id` | admin. `{can_control_terminals}`; closes the device's connections so they reopen with the new rights |
 | `DELETE /api/devices/:id` | admin. Revoke; 204 |
 | `POST /api/devices/browser-invite` | `{url, expires_at}`: one-time portal login link (5 minutes). 409 `portal_disabled` when the portal is not running. |
 | `GET /device-login?invite=` | portal listener only: redeem a login link, set the device cookie, redirect to `/` |
-| `GET /auth?token=` | local listener: exchange the runtime token for the `blirp_session` cookie, redirect to `/` |
+| `POST /api/ws-ticket` | local listener only. `{path}` (a WebSocket path under `/api/`) -> `{ticket}`: single use, 30 s, that path only |
+| `GET /auth?token=` | local listener: old login links; redirects to `/#token=<token>`, sets no cookie |
 
 ## WebSockets
 
 ### Terminal: `GET /api/terminals/:id/ws`
 
-Attach to a live terminal (`:id` is the session id). 404 `terminal_not_found` when the session has no live process; use the session's events instead. Sessions on another machine are relayed through the hub. Several clients may attach.
+Attach to a live terminal (`:id` is the session id). Browsers authenticate the upgrade with `?ticket=` (see [Listeners and authentication](#listeners-and-authentication)). 404 `terminal_not_found` when the session has no live process; use the session's events instead. Sessions on another machine are relayed through the hub. Several clients may attach.
 
 Server to client:
 

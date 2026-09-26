@@ -15,6 +15,7 @@ import type {
   Health,
   Injection,
   JoinHub,
+  JoinPreview,
   LaunchSession,
   Machine,
   OpenTarget,
@@ -258,6 +259,8 @@ export const api = {
     invite: () => request<SyncInvite>('POST', '/api/sync/invite'),
     /** `invite` may be a `blirp://join` URI, or empty to find the hub on the local network. */
     join: (body: JoinHub) => request<SyncStatus>('POST', '/api/sync/join', body),
+    /** The hub an invite points at, read from the invite alone (nothing is contacted). */
+    previewJoin: (invite: string) => request<JoinPreview>('POST', '/api/sync/join/preview', { invite }),
   },
   devices: {
     list: () => request<Device[]>('GET', '/api/devices'),

@@ -109,6 +109,7 @@ async fn patch_settings(
     ApiJson(patch): ApiJson<SettingsPatch>,
 ) -> ApiResult<Json<SettingsView>> {
     let state = s.clone();
+    let hub_control_before = s.config().sync.allow_hub_control;
     blocking(move || {
         if let Some(cfg) = patch.config {
             cfg.validate()
@@ -128,6 +129,9 @@ async fn patch_settings(
         Ok(())
     })
     .await?;
+    if s.config().sync.allow_hub_control != hub_control_before {
+        crate::sync::proxied_rights_changed(&s);
+    }
     // Apply portal changes (portal.lan, lan_port) now, not at the next start.
     crate::sync::apply_portal_config(&s).await?;
     get_settings(State(s)).await

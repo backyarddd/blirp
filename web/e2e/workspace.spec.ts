@@ -477,13 +477,8 @@ test('distill with the none summarizer pauses distilling; subagents sit under th
   await expect(panel.getByTestId('distill-error')).toHaveCount(0);
 });
 
-test('sync: a join deep link prefills the form; enabling the hub gives an invite with QR', async () => {
-  await page.goto(`${env.url}/settings/sync?join=blirp1-e2eticket&code=ABCD-EFGH`);
-  const joinForm = page.getByRole('form', { name: 'Join a hub' });
-  await expect(joinForm.getByLabel(/^Invite/)).toHaveValue('blirp1-e2eticket');
-  await expect(joinForm.getByLabel('Pairing code')).toHaveValue('ABCD-EFGH');
-  await expect(page).toHaveURL(`${env.url}/settings/sync`); // the code does not stay in history
-
+test('sync: enabling the hub gives an invite with QR; a join link only prefills and asks first', async () => {
+  await page.goto(`${env.url}/settings/sync`);
   await confirmNextDialog();
   await page.getByRole('button', { name: 'Enable hub' }).click();
   await expect(page.getByTestId('sync-role')).toHaveText('hub');
@@ -494,8 +489,30 @@ test('sync: a join deep link prefills the form; enabling the hub gives an invite
   await expect(page.getByLabel('Join link', { exact: true })).toHaveValue(/^blirp:\/\/join\//);
   await expect(page.getByTestId('expiry')).toContainText(/Expires in (9|10)m/);
 
+  const invite = await page.getByLabel('Invite', { exact: true }).inputValue();
+  const code = (await page.getByTestId('pairing-code').textContent()) ?? '';
+
   await confirmNextDialog();
   await page.getByRole('button', { name: 'Disable hub' }).click();
+  await expect(page.getByTestId('sync-role')).toHaveText('standalone');
+
+  // A deep link (any web page can open one) prefills the form and never pairs on its own.
+  await page.goto(`${env.url}/settings/sync?join=${invite}&code=${code}`);
+  const joinForm = page.getByRole('form', { name: 'Join a hub' });
+  await expect(joinForm.getByLabel(/^Invite/)).toHaveValue(invite);
+  await expect(joinForm.getByLabel('Pairing code')).toHaveValue(code);
+  await expect(page).toHaveURL(`${env.url}/settings/sync`); // the code does not stay in history
+  const dialog = page.getByRole('dialog', { name: 'Pair with this hub?' });
+  await expect(dialog).toHaveCount(0);
+  await joinForm.getByRole('button', { name: 'Pair with hub' }).click();
+  await expect(dialog.getByRole('alert')).toContainText('opened from outside blirp');
+  // The invite names the hub it was created on: this machine.
+  const me = await apiCall<{ machine_id: string }>('GET', '/api/sync/status');
+  await expect(dialog.getByTestId('hub-fingerprint')).toHaveText(me.machine_id.match(/.{1,4}/g)?.join(' ') ?? '');
+  const control = dialog.getByRole('checkbox', { name: 'Allow this hub to start and control terminals on this machine' });
+  await expect(control).not.toBeChecked();
+  await dialog.getByRole('button', { name: 'Cancel' }).click();
+  await expect(dialog).toHaveCount(0);
   await expect(page.getByTestId('sync-role')).toHaveText('standalone');
 });
 

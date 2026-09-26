@@ -434,7 +434,11 @@ GET  /api/sync/status                    SyncStatus {role, machine_id, hub, conn
                                          portal_url, portal_cert_fingerprint}
 POST /api/sync/hub/enable | /hub/disable SyncStatus (admin); enable fails with 409 `paired_node` on a node
 POST /api/sync/invite                    SyncInvite {invite, code, uri, expires_at} (admin, hub)
-POST /api/sync/join {invite, code}       SyncStatus (admin); invite may be a join URI, or "" to find the hub on the LAN
+POST /api/sync/join {invite, code, allow_hub_control?}   SyncStatus (admin); invite may be a join URI, or "" to find
+                                         the hub on the LAN; allow_hub_control is written with the node role
+POST /api/sync/join/preview {invite}     JoinPreview {hub_id} (admin): the hub id from the invite, nothing contacted
+                                         (null for a LAN join). The hub's name is exchanged only after the code is
+                                         proven (§10), so the UI shows the id and asks before pairing
 GET  /api/devices                        Device[] ; DELETE /api/devices/:id (admin, revoke)
 PATCH /api/devices/:id {can_control_terminals}   Device (admin)
 POST /api/devices/browser-invite         BrowserInvite {url, expires_at}: one-time login link/QR for a browser (hub portal)
@@ -479,7 +483,9 @@ The loopback listener answers only requests whose `Host` is `127.0.0.1:<port>`, 
 [sync]     role = "standalone" | "hub" | "node"
            hub = "<node id>"
            relay = "default" | "disabled" | "<url>"
-           allow_hub_control = false   # node: accept control relayed by the hub
+           allow_hub_control = false   # node: accept control relayed by the hub; set by the join dialog
+                                       # (unchecked by default) or Settings; reset when leaving the hub;
+                                       # changing it closes relayed WebSockets so they reopen with the new rights
 [portal]   lan = false          # hub: serve portal on LAN with HTTPS
            lan_port = 47771
 [update]   check = true         # GET /api/update may ask GitHub for the latest release
