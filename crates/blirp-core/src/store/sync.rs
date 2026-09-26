@@ -541,6 +541,11 @@ impl Store {
                         if entry.op != "insert"
                             && later_own.exists(params![entry.entity, entry.key, own_seen])?
                         {
+                            // Our later brief stays current, but the other
+                            // machine's version still joins the history.
+                            if let Change::Brief(b) = &change {
+                                super::memory::insert_brief_history(tx, b)?;
+                            }
                             continue;
                         }
                         match savepoint(tx, || write_row(tx, &change))? {
@@ -761,6 +766,47 @@ mod tests {
         pull(&a, "A", &hub, "H");
         for s in [&hub, &a, &b] {
             assert_eq!(name_of(s, "p"), "v6");
+        }
+    }
+
+    // Two machines writing the next brief version at once: both versions
+    // stay in every history (append-only, unique ids), and the current
+    // brief is the one later in hub order everywhere.
+    #[test]
+    fn concurrent_brief_versions_both_survive() {
+        let (_h, hub) = temp_store();
+        let (_a, a) = temp_store();
+        let (_b, b) = temp_store();
+        a.apply(project("p", "shared")).unwrap();
+        a.put_brief("p", "v1", "user").unwrap();
+        push(&a, "A", &hub, "H");
+        pull(&b, "B", &hub, "H");
+        a.put_brief("p", "from a", "user").unwrap();
+        b.put_brief("p", "from b", "user").unwrap();
+        push(&a, "A", &hub, "H");
+        push(&b, "B", &hub, "H");
+        pull(&a, "A", &hub, "H");
+        pull(&b, "B", &hub, "H");
+        pull(&a, "A", &hub, "H");
+        for s in [&hub, &a, &b] {
+            let mut bodies: Vec<String> = s
+                .brief_history("p")
+                .unwrap()
+                .into_iter()
+                .map(|h| h.body_md)
+                .collect();
+            bodies.sort();
+            assert_eq!(bodies, ["from a", "from b", "v1"]);
+            let cur = s.get_brief("p").unwrap().unwrap();
+            assert_eq!(cur.body_md, "from b");
+            assert_eq!(
+                s.brief_history("p")
+                    .unwrap()
+                    .iter()
+                    .map(|h| h.version)
+                    .collect::<Vec<_>>(),
+                [3, 2, 1]
+            );
         }
     }
 

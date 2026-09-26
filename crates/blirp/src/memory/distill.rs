@@ -846,7 +846,7 @@ pub async fn run_distill<S: Summarize>(
             BriefMode::Auto => BriefApply::Write,
             BriefMode::Review => BriefApply::Suggest,
         },
-        brief_base_version: brief.as_ref().map(|b| b.version),
+        brief_base: brief.as_ref().map(|b| b.id.clone()),
     };
     blocking(move || store.apply_distill(&plan)).await
 }

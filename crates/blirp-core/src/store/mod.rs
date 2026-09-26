@@ -88,7 +88,8 @@ pub enum Change {
     DeleteRecord {
         id: String,
     },
-    /// Writes the brief and its `brief_history` row.
+    /// Writes the current brief and appends its `brief_history` row (history
+    /// rows are insert-only, keyed by `Brief::id`).
     Brief(Brief),
     WikiPage(WikiPage),
     Resource(Resource),
@@ -374,7 +375,10 @@ pub(crate) fn check_ids(change: &Change) -> Result<()> {
             Some(&r.project_id),
             r.source_session_id.as_deref(),
         ],
-        Change::Brief(b) => vec![Some(&b.project_id)],
+        Change::Brief(b) => vec![
+            Some(&b.project_id),
+            Some(b.id.as_str()).filter(|i| !i.is_empty()),
+        ],
         Change::WikiPage(w) => vec![Some(&w.id), Some(&w.project_id)],
         Change::Resource(r) => vec![Some(&r.id), Some(&r.project_id)],
     };
@@ -489,18 +493,15 @@ fn write_row(tx: &Transaction<'_>, change: &Change) -> Result<usize> {
         )?,
         Change::DeleteRecord { id } => tx.execute("DELETE FROM records WHERE id=?1", params![id])?,
         Change::Brief(b) => {
+            let id = memory::insert_brief_history(tx, b)?;
+            // The current brief is last-writer-wins by hub order like any row.
             tx.execute(
-                "INSERT INTO brief_history(project_id, version, body_md, updated_at, updated_by)
-                 VALUES (?1,?2,?3,?4,?5)
-                 ON CONFLICT(project_id, version) DO UPDATE SET body_md=excluded.body_md,
-                   updated_at=excluded.updated_at, updated_by=excluded.updated_by",
-                params![b.project_id, b.version, b.body_md, b.updated_at, b.updated_by],
-            )?;
-            tx.execute(
-                "INSERT INTO briefs(project_id, body_md, version, updated_at, updated_by) VALUES (?1,?2,?3,?4,?5)
+                "INSERT INTO briefs(project_id, body_md, version, updated_at, updated_by, history_id, machine_id)
+                 VALUES (?1,?2,?3,?4,?5,?6,?7)
                  ON CONFLICT(project_id) DO UPDATE SET body_md=excluded.body_md, version=excluded.version,
-                   updated_at=excluded.updated_at, updated_by=excluded.updated_by",
-                params![b.project_id, b.body_md, b.version, b.updated_at, b.updated_by],
+                   updated_at=excluded.updated_at, updated_by=excluded.updated_by,
+                   history_id=excluded.history_id, machine_id=excluded.machine_id",
+                params![b.project_id, b.body_md, b.version, b.updated_at, b.updated_by, id, b.machine_id],
             )?
         }
         Change::WikiPage(w) => tx.execute(
@@ -605,6 +606,45 @@ pub(crate) mod tests {
             .read(|c| Ok(c.query_row("PRAGMA journal_mode", [], |r| r.get(0))?))
             .unwrap();
         assert_eq!(mode.to_lowercase(), "wal");
+    }
+
+    // Migration 6 keeps every brief version under a deterministic id and
+    // points the current brief at its row.
+    #[test]
+    fn brief_history_migrates_to_unique_ids() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("blirp.db");
+        let c = Connection::open(&path).unwrap();
+        for sql in &migrations::MIGRATIONS[..5] {
+            c.execute_batch(sql).unwrap();
+        }
+        c.pragma_update(None, "user_version", 5).unwrap();
+        c.execute_batch(
+            "INSERT INTO brief_history VALUES ('p', 1, 'one', 10, 'user'), ('p', 2, 'two', 20, 'distiller');
+             INSERT INTO briefs VALUES ('p', 'two', 2, 20, 'distiller');",
+        )
+        .unwrap();
+        drop(c);
+        let store = Store::open(&path).unwrap();
+        let hist = store.brief_history("p").unwrap();
+        assert_eq!(
+            hist.iter()
+                .map(|h| (h.id.as_str(), h.version, h.body_md.as_str()))
+                .collect::<Vec<_>>(),
+            [("legacy-p-2", 2, "two"), ("legacy-p-1", 1, "one")]
+        );
+        let cur = store.get_brief("p").unwrap().unwrap();
+        assert_eq!((cur.id.as_str(), cur.version), ("legacy-p-2", 2));
+        let next = store.put_brief("p", "three", "user").unwrap();
+        assert_eq!(next.version, 3);
+        assert!(crate::is_safe_id(&next.id));
+        assert_eq!(
+            store
+                .revert_brief_to("p", "legacy-p-1", "user")
+                .unwrap()
+                .body_md,
+            "one"
+        );
     }
 
     #[test]

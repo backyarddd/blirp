@@ -76,7 +76,22 @@ updated_by: string, };
 /**
  * A project brief; also used for entries of the brief history.
  */
-export type Brief = { project_id: string, body_md: string, version: number, updated_at: number, updated_by: string, };
+export type Brief = { 
+/**
+ * Id of this version's `brief_history` row: a UUIDv7, unique across
+ * machines, so versions written concurrently on two machines never
+ * overwrite each other. Empty in changes from older blirp versions.
+ */
+id: string, project_id: string, body_md: string, 
+/**
+ * Position in the project's history (1 = oldest, by time), derived
+ * when read; for display and revert only.
+ */
+version: number, updated_at: number, updated_by: string, 
+/**
+ * Machine that wrote this version (empty when unknown).
+ */
+machine_id: string, };
 
 export type WikiPage = { id: string, project_id: string, slug: string, title: string, body_md: string, updated_at: number, updated_by: string, deleted: boolean, };
 
@@ -148,7 +163,16 @@ records: Array<Record>, recent_sessions: Array<Session>, };
 
 export type PutBrief = { body_md: string, };
 
-export type RevertBrief = { version: number, };
+export type RevertBrief = { 
+/**
+ * History entry to restore, by its `version` number...
+ */
+version?: number, 
+/**
+ * ...or by its id (preferred: numbers can shift when versions written
+ * earlier on another machine arrive).
+ */
+id?: string, };
 
 export type CreateRecord = { kind: RecordKind, title: string, body: string, status?: RecordStatus, pinned?: boolean, };
 

@@ -45,10 +45,10 @@ pub struct DistillPlan {
     pub resolve_record_ids: Vec<String>,
     pub brief_md: Option<String>,
     pub brief_apply: BriefApply,
-    /// Version of the brief the summarizer was shown (`None`: no brief).
+    /// Version id of the brief the summarizer was shown (`None`: no brief).
     /// If the brief changed since (e.g. a user edit during the run), a
     /// written brief becomes a suggestion instead of overwriting it.
-    pub brief_base_version: Option<i64>,
+    pub brief_base: Option<String>,
 }
 
 /// Events for one distill run (§9), selected in SQL: the first events
@@ -434,7 +434,7 @@ impl Store {
                 let current = get_brief_in(tx, &pid)?;
                 // Edited while the summarizer ran: the edit wins, the
                 // distiller's version is only proposed.
-                let moved = current.as_ref().map(|b| b.version) != plan.brief_base_version;
+                let moved = current.as_ref().map(|b| &b.id) != plan.brief_base.as_ref();
                 let apply = if moved {
                     BriefApply::Suggest
                 } else {

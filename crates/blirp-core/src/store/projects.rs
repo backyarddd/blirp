@@ -535,11 +535,8 @@ impl Store {
                 changes.push(Change::WikiPage(w));
             }
             let dst_brief = super::memory::get_brief_in(tx, into)?;
-            if let (None, Some(mut b)) = (dst_brief, super::memory::get_brief_in(tx, from)?) {
-                b.project_id = into.to_string();
-                b.version = 1;
-                b.updated_at = now;
-                changes.push(Change::Brief(b));
+            if let (None, Some(b)) = (dst_brief, super::memory::get_brief_in(tx, from)?) {
+                super::memory::put_brief_in(tx, into, &b.body_md, &b.updated_by)?;
             }
             for c in &changes {
                 apply_in(tx, c)?;

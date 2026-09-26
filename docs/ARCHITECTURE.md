@@ -106,9 +106,11 @@ records(id TEXT PK, project_id TEXT,
         created_at INT, updated_at INT, updated_by TEXT)   -- 'user' | 'distiller' | machine id
 records_fts USING fts5(title, body, content='records', ...)
 
-briefs(project_id TEXT PK, body_md TEXT, version INT, updated_at INT, updated_by TEXT)
-brief_history(project_id TEXT, version INT, body_md TEXT, updated_at INT, updated_by TEXT,
-              PRIMARY KEY(project_id, version))
+briefs(project_id TEXT PK, body_md TEXT, version INT, updated_at INT, updated_by TEXT,
+       history_id TEXT, machine_id TEXT)          -- current version = its brief_history row (migration 6)
+brief_history(id TEXT PK,                   -- UUIDv7 (legacy rows: 'legacy-<project>-<old version>')
+              project_id TEXT, body_md TEXT, updated_at INT, updated_by TEXT,
+              machine_id TEXT)              -- append-only; version numbers derived by (updated_at, id)
 
 wiki_pages(id TEXT PK, project_id TEXT, slug TEXT, title TEXT, body_md TEXT,
            updated_at INT, updated_by TEXT, deleted INT DEFAULT 0, UNIQUE(project_id, slug))
@@ -351,7 +353,7 @@ Replication (`blirp/sync/1`): the node dials the hub and opens one bidirectional
 - Push: node sends outbox entries after `last_pushed_origin_seq` in batches (<= 500 entries or 4 MiB). Hub, in one transaction: first logs its own pending local writes into `hub_log`, then inserts each entry (idempotent on `(origin_machine, origin_seq)`), applies it to its tables and advances the node's cursor; acks the highest origin_seq. Entries whose payload does not match their declared entity/op/key, or `machines` rows for another machine than the sender, are rejected (logged, never retried). An entry that fails to apply on the hub (constraint) is still logged.
 - Pull: node requests `hub_log` after `last_pulled_hub_seq`. The page carries other machines' entries in full and the requester's own entries only as position markers, plus `own_seen` (the requester's highest origin_seq logged before the page). The node applies the page and moves its cursor in one transaction.
 - Ownership (checked by the hub before an entry is logged, and again by a node for every pulled entry, against the entry's origin machine): `project_paths` rows, sessions and events belong to their machine (`machine_id`; an event to its session's machine). Another machine may only re-point an existing folder or session to another project (merge: `git_remote`, `cwd`, `agent`, `agent_session_id`, `origin`, `worktree`, `transcript_path`, `parent_session_id` and `machine_id` unchanged), retitle a session or change its status fields, and remove folders of a project that is already deleted (`delete_project` marks the project deleted before removing its folders). `machines` rows are written by their own machine, or by the hub (pairing, revocation) on a node's pull; `DeleteMachine` is never accepted from another machine. Entries over 4 MiB or with invalid ids are rejected. Records, briefs, wiki pages, resources and projects are shared by design. Rejected entries are logged at warn and never retried. `DELETE /api/sessions/:id` for another machine's session is forwarded to that machine.
-- Conflict rule: rows are last-writer-wins by `hub_seq` order. The hub's tables always equal `hub_log` replayed in order. A node skips a pulled remote upsert/delete for a row it wrote itself later (a local outbox entry for the same entity/key with origin_seq > own_seen: unpushed, or pushed after the remote entry, or a deferred status write for it), because that write will be (or was) logged after it. `events` are append-only and keyed by (session_id, seq). Local deletion of an agent transcript never deletes anything (ingest-only).
+- Conflict rule: rows are last-writer-wins by `hub_seq` order. The hub's tables always equal `hub_log` replayed in order. A node skips a pulled remote upsert/delete for a row it wrote itself later (a local outbox entry for the same entity/key with origin_seq > own_seen: unpushed, or pushed after the remote entry, or a deferred status write for it), because that write will be (or was) logged after it. `events` are append-only and keyed by (session_id, seq). A `briefs` change carries its `brief_history` row (unique id, origin machine): the current brief is last-writer-wins by hub order like any row, while the history row is inserted (never overwritten) everywhere, also on a node that skips the change because its own later brief wins, so versions written concurrently on two machines both stay in the history. Version numbers are derived when read (1 = oldest by `updated_at`, then id; a new version is stamped after the newest known one); revert takes a history id (or a derived number). Local deletion of an agent transcript never deletes anything (ingest-only).
 - Crash safety: every apply commits together with its cursor; re-sent batches are ignored. Offline nodes queue in the outbox; the node reconnects with exponential backoff (1 s .. 60 s, jitter). Local writes are picked up by polling the outbox head every 500 ms.
 - Hub itself is also a normal machine with its own sessions; its own writes enter `hub_log` within 500 ms (or before any push/pull is served).
 
@@ -376,7 +378,7 @@ PATCH/DELETE /api/projects/:id           rename / soft delete: the project is hi
                                          database (a later session in such a folder registers a new project);
                                          POST /api/projects/:id/merge {into}
 GET  /api/projects/:id/memory            brief, records, recent sessions
-PUT  /api/projects/:id/brief             {body_md}; GET .../brief/history; POST .../brief/revert {version}
+PUT  /api/projects/:id/brief             {body_md}; GET .../brief/history; POST .../brief/revert {id | version}
 CRUD /api/projects/:id/records[/:rid]
 CRUD /api/projects/:id/wiki[/:slug]
 CRUD /api/projects/:id/resources[/:id]

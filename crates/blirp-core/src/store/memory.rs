@@ -25,13 +25,37 @@ pub(super) fn record_row(r: &Row<'_>) -> rusqlite::Result<Record> {
 
 fn brief_row(r: &Row<'_>) -> rusqlite::Result<Brief> {
     Ok(Brief {
+        id: r.get("id")?,
         project_id: r.get("project_id")?,
         body_md: r.get("body_md")?,
         version: r.get("version")?,
         updated_at: r.get("updated_at")?,
         updated_by: r.get("updated_by")?,
+        machine_id: r.get("machine_id")?,
     })
 }
+
+/// Append `b` to the brief history (a row with its id already there is
+/// left alone). Changes from older versions carry no id; they get the
+/// deterministic legacy id migration 6 gave existing rows. Returns the id.
+pub(super) fn insert_brief_history(tx: &Transaction<'_>, b: &Brief) -> Result<String> {
+    let id = if b.id.is_empty() {
+        format!("legacy-{}-{}", b.project_id, b.version)
+    } else {
+        b.id.clone()
+    };
+    tx.execute(
+        "INSERT OR IGNORE INTO brief_history(id, project_id, body_md, updated_at, updated_by, machine_id)
+         VALUES (?1,?2,?3,?4,?5,?6)",
+        params![id, b.project_id, b.body_md, b.updated_at, b.updated_by, b.machine_id],
+    )?;
+    Ok(id)
+}
+
+/// History rows of a project with their derived version (1 = oldest).
+const HISTORY: &str = "SELECT id, project_id, body_md, updated_at, updated_by, machine_id,
+       row_number() OVER (ORDER BY updated_at, id) AS version
+     FROM brief_history WHERE project_id = ?1";
 
 pub(super) fn wiki_row(r: &Row<'_>) -> rusqlite::Result<WikiPage> {
     Ok(WikiPage {
@@ -77,10 +101,25 @@ fn suggestion_row(r: &Row<'_>) -> rusqlite::Result<Suggestion> {
 pub(super) fn get_brief_in(c: &Connection, project_id: &str) -> Result<Option<Brief>> {
     one(
         c,
-        "SELECT * FROM briefs WHERE project_id = ?1",
+        "SELECT b.history_id AS id, b.project_id, b.body_md, b.updated_at, b.updated_by, b.machine_id,
+           (SELECT count(*) FROM brief_history h WHERE h.project_id = b.project_id
+              AND (h.updated_at, h.id) <= (b.updated_at, b.history_id)) AS version
+         FROM briefs b WHERE b.project_id = ?1",
         params![project_id],
         brief_row,
     )
+}
+
+/// This machine's id as the daemon recorded it ("" before the first start).
+fn local_machine_in(c: &Connection) -> Result<String> {
+    let v: Option<String> = one(
+        c,
+        "SELECT value_json FROM settings WHERE key = ?1",
+        params![super::MACHINE_ID_KEY],
+        |r| r.get(0),
+    )?;
+    Ok(v.and_then(|s| serde_json::from_str::<String>(&s).ok())
+        .unwrap_or_default())
 }
 
 pub(super) fn put_brief_in(
@@ -89,19 +128,26 @@ pub(super) fn put_brief_in(
     body_md: &str,
     by: &str,
 ) -> Result<Brief> {
-    let current: Option<i64> = one(
-        tx,
-        "SELECT MAX(version) FROM brief_history WHERE project_id = ?1",
+    let count: i64 = tx.query_row(
+        "SELECT count(*) FROM brief_history WHERE project_id = ?1",
         params![project_id],
         |r| r.get(0),
-    )?
-    .flatten();
+    )?;
+    // After the newest version known here (another machine's clock may be
+    // ahead), so it is the newest in the derived order too.
+    let newest: Option<i64> = tx.query_row(
+        "SELECT max(updated_at) FROM brief_history WHERE project_id = ?1",
+        params![project_id],
+        |r| r.get(0),
+    )?;
     let b = Brief {
+        id: crate::new_id(),
         project_id: project_id.to_string(),
         body_md: body_md.to_string(),
-        version: current.unwrap_or(0) + 1,
-        updated_at: crate::now_ms(),
+        version: count + 1,
+        updated_at: crate::now_ms().max(newest.map_or(0, |n| n + 1)),
         updated_by: by.to_string(),
+        machine_id: local_machine_in(tx)?,
     };
     apply_in(tx, &Change::Brief(b.clone()))?;
     Ok(b)
@@ -195,20 +241,34 @@ impl Store {
         self.read(|c| {
             all(
                 c,
-                "SELECT * FROM brief_history WHERE project_id = ?1 ORDER BY version DESC",
+                &format!("{HISTORY} ORDER BY updated_at DESC, id DESC"),
                 params![project_id],
                 brief_row,
             )
         })
     }
 
-    /// Write the body of `version` as a new version.
+    /// Write the body of history entry `version` as a new version.
     pub fn revert_brief(&self, project_id: &str, version: i64, by: &str) -> Result<Brief> {
         self.write(|tx| {
             let old: String = one(
                 tx,
-                "SELECT body_md FROM brief_history WHERE project_id = ?1 AND version = ?2",
+                &format!("SELECT body_md FROM ({HISTORY}) WHERE version = ?2"),
                 params![project_id, version],
+                |r| r.get(0),
+            )?
+            .ok_or(StoreError::NotFound("brief version"))?;
+            put_brief_in(tx, project_id, &old, by)
+        })
+    }
+
+    /// Write the body of history entry `id` as a new version.
+    pub fn revert_brief_to(&self, project_id: &str, id: &str, by: &str) -> Result<Brief> {
+        self.write(|tx| {
+            let old: String = one(
+                tx,
+                "SELECT body_md FROM brief_history WHERE project_id = ?1 AND id = ?2",
+                params![project_id, id],
                 |r| r.get(0),
             )?
             .ok_or(StoreError::NotFound("brief version"))?;
