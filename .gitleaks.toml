@@ -1,0 +1,7 @@
+# Redaction rule tests contain intentionally fake secrets.
+[extend]
+useDefault = true
+
+[allowlist]
+description = "blirp redaction test fixtures"
+paths = ['''crates/blirp-core/src/redact\.rs''']
