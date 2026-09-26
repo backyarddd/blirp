@@ -45,11 +45,38 @@ pub struct DistillPlan {
     pub resolve_record_ids: Vec<String>,
     pub brief_md: Option<String>,
     pub brief_apply: BriefApply,
+    /// Version of the brief the summarizer was shown (`None`: no brief).
+    /// If the brief changed since (e.g. a user edit during the run), a
+    /// written brief becomes a suggestion instead of overwriting it.
+    pub brief_base_version: Option<i64>,
+}
+
+/// Events for one distill run (§9), selected in SQL: the first events
+/// filling the head budget and the last filling the tail budget.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct DistillEvents {
+    pub head: Vec<Event>,
+    /// Events between `head` and `tail` that were left out.
+    pub omitted: i64,
+    /// Empty when nothing was left out (everything is in `head`).
+    pub tail: Vec<Event>,
+}
+
+/// Record titles compared case-, punctuation- and spacing-insensitively.
+pub fn norm_title(title: &str) -> String {
+    title
+        .split(|c: char| !c.is_alphanumeric())
+        .filter(|w| !w.is_empty())
+        .map(str::to_lowercase)
+        .collect::<Vec<_>>()
+        .join(" ")
 }
 
 #[derive(Debug, Clone, Default)]
 pub struct DistillOutcome {
     pub records_created: usize,
+    /// This session's earlier records refreshed by a re-distill.
+    pub records_updated: usize,
     pub records_resolved: usize,
     pub suggestions_created: usize,
     pub brief_updated: bool,
@@ -138,15 +165,61 @@ impl Store {
         })
     }
 
-    /// Every event of a session, ascending.
-    pub fn session_events(&self, session_id: &str) -> Result<Vec<Event>> {
+    /// Events after `after_seq` for a distill run, bounded in SQL so a huge
+    /// session is never loaded whole: the first events whose compacted
+    /// lines fill `head_chars` and the last ones filling `tail_chars` (each
+    /// part includes the event crossing its budget). The per-kind caps
+    /// mirror the distill compaction's line caps; +12 covers the line
+    /// prefix and newline.
+    pub fn distill_events(
+        &self,
+        session_id: &str,
+        after_seq: i64,
+        head_chars: i64,
+        tail_chars: i64,
+    ) -> Result<DistillEvents> {
         self.read(|c| {
-            all(
+            let rows = all(
                 c,
-                "SELECT * FROM events WHERE session_id = ?1 ORDER BY seq",
-                params![session_id],
-                event_row,
-            )
+                "WITH e AS (
+                   SELECT seq, 12 + CASE kind
+                       WHEN 'tool_call' THEN min(length(text), 300)
+                       WHEN 'file_edit' THEN min(length(text), 300)
+                       WHEN 'tool_result' THEN min(length(text), 400)
+                       WHEN 'system' THEN min(length(text), 200)
+                       WHEN 'summary' THEN min(length(text), 3000)
+                       ELSE length(text) END AS n
+                   FROM events WHERE session_id = ?1 AND seq > ?2
+                 ), w AS (
+                   SELECT seq, n, sum(n) OVER (ORDER BY seq) - n AS before,
+                          sum(n) OVER (ORDER BY seq DESC) - n AS after
+                   FROM e
+                 )
+                 SELECT ev.*, w.before < ?3 AS in_head FROM events ev
+                 JOIN w ON ev.session_id = ?1 AND ev.seq = w.seq
+                 WHERE w.before < ?3 OR w.after < ?4
+                 ORDER BY ev.seq",
+                params![session_id, after_seq, head_chars, tail_chars],
+                |r| Ok((event_row(r)?, r.get::<_, bool>("in_head")?)),
+            )?;
+            let total: i64 = c.query_row(
+                "SELECT count(*) FROM events WHERE session_id = ?1 AND seq > ?2",
+                params![session_id, after_seq],
+                |r| r.get(0),
+            )?;
+            let omitted = total - rows.len() as i64;
+            let mut out = DistillEvents {
+                omitted,
+                ..DistillEvents::default()
+            };
+            for (e, in_head) in rows {
+                if in_head || omitted == 0 {
+                    out.head.push(e);
+                } else {
+                    out.tail.push(e);
+                }
+            }
+            Ok(out)
         })
     }
 
@@ -262,14 +335,44 @@ impl Store {
                 params![pid],
                 record_row,
             )?;
+            // This session's own records (any status): a re-distill updates
+            // them instead of adding near-duplicates.
+            let own: Vec<Record> = all(
+                tx,
+                "SELECT * FROM records WHERE source_session_id = ?1",
+                params![s.id],
+                record_row,
+            )?;
             let now = crate::now_ms();
             let mut seen: Vec<(RecordKind, String)> = active
                 .iter()
-                .map(|r| (r.kind, r.title.trim().to_lowercase()))
+                .map(|r| (r.kind, norm_title(&r.title)))
                 .collect();
+            let mut handled: Vec<(RecordKind, String)> = Vec::new();
             for (kind, title, body) in &plan.new_records {
-                let key = (*kind, title.trim().to_lowercase());
-                if key.1.is_empty() || seen.contains(&key) {
+                let key = (*kind, norm_title(title));
+                if key.1.is_empty() || handled.contains(&key) {
+                    continue;
+                }
+                handled.push(key.clone());
+                if let Some(r) = own.iter().find(|r| (r.kind, norm_title(&r.title)) == key) {
+                    // Never touch a record the user edited.
+                    if r.updated_by != "user" && (r.body != *body || r.title != title.trim()) {
+                        apply_in(
+                            tx,
+                            &Change::Record(Record {
+                                title: title.trim().to_string(),
+                                body: body.clone(),
+                                updated_at: now,
+                                updated_by: BY_DISTILLER.into(),
+                                ..r.clone()
+                            }),
+                        )?;
+                        out.records_updated += 1;
+                    }
+                    continue;
+                }
+                if seen.contains(&key) {
                     continue;
                 }
                 seen.push(key);
@@ -329,8 +432,16 @@ impl Store {
                 .filter(|b| !b.is_empty())
             {
                 let current = get_brief_in(tx, &pid)?;
+                // Edited while the summarizer ran: the edit wins, the
+                // distiller's version is only proposed.
+                let moved = current.as_ref().map(|b| b.version) != plan.brief_base_version;
+                let apply = if moved {
+                    BriefApply::Suggest
+                } else {
+                    plan.brief_apply
+                };
                 if current.as_ref().is_none_or(|b| b.body_md.trim() != body) {
-                    match plan.brief_apply {
+                    match apply {
                         BriefApply::Write => {
                             put_brief_in(tx, &pid, body, BY_DISTILLER)?;
                             out.brief_updated = true;
@@ -356,5 +467,50 @@ impl Store {
             out.session = Some(s);
             Ok(out)
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::super::tests::temp_store;
+    use crate::model::{Event, EventKind};
+
+    // A long session is never loaded whole for a distill: SQL returns only
+    // the head and tail that fit the character budget.
+    #[test]
+    fn distill_events_are_bounded_in_sql() {
+        let (_d, store) = temp_store();
+        for seq in 1..=1000 {
+            store
+                .insert_event(Event {
+                    session_id: "s".into(),
+                    seq,
+                    ts: seq,
+                    kind: EventKind::User,
+                    text: "x".repeat(88),
+                    meta: None,
+                })
+                .unwrap();
+        }
+        // 100 estimated chars per event: 20 in the head, 80 in the tail.
+        let ev = store.distill_events("s", 0, 2_000, 8_000).unwrap();
+        assert_eq!((ev.head.len(), ev.tail.len(), ev.omitted), (20, 80, 900));
+        assert_eq!(ev.head.first().map(|e| e.seq), Some(1));
+        assert_eq!(ev.tail.first().map(|e| e.seq), Some(921));
+        assert_eq!(ev.tail.last().map(|e| e.seq), Some(1000));
+        // After the last summary only; everything fits: no tail, no gap.
+        let ev = store.distill_events("s", 990, 2_000, 8_000).unwrap();
+        assert_eq!((ev.head.len(), ev.tail.len(), ev.omitted), (10, 0, 0));
+        assert_eq!(ev.head[0].seq, 991);
+        assert_eq!(
+            store.distill_events("s", 1000, 2_000, 8_000).unwrap(),
+            super::DistillEvents::default()
+        );
+    }
+
+    #[test]
+    fn titles_normalize() {
+        assert_eq!(super::norm_title("  Use LRU-crate! "), "use lru crate");
+        assert_eq!(super::norm_title("use lru crate"), "use lru crate");
     }
 }

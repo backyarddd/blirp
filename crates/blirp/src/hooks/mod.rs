@@ -290,7 +290,7 @@ pub fn handle(
             .transcript_hint(agent, &updated.id, Path::new(t));
     }
     if event == HookEvent::SessionEnd && reason != Some("clear") {
-        state.distiller.enqueue(&updated.id, false);
+        state.distiller.enqueue_ended(&updated.id);
     }
     let additional_context = if event == HookEvent::SessionStart
         && !(req.global && launched && mode == InjectMode::Instructions)

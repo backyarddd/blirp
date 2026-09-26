@@ -743,7 +743,7 @@ fn record_exit(state: &SharedState, session_id: &str, info: ExitInfo) {
         Ok(s) => {
             state.emit(ServerEvent::SessionUpdated { session: s });
             // Ended sessions are distilled right away (§9 trigger).
-            state.distiller.enqueue(session_id, false);
+            state.distiller.enqueue_ended(session_id);
         }
         Err(e) => {
             tracing::error!(session = %session_id, error = %e, "recording session exit failed")

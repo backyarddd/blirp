@@ -33,13 +33,13 @@ Redaction is pattern based. A secret in an unusual format can survive; see [secu
 
 Distilling turns the new part of a session's transcript into memory.
 
-**When.** A session is distilled when it has been idle for `memory.distill_idle_secs` (default 300 s) with new events, or right after it ends (process exit or the agent's session-end hook). A scheduler checks every 30 s. Only sessions active in the last 7 days are distilled automatically, so importing old history does not use up the budget.
+**When.** A session is distilled when it has been idle for `memory.distill_idle_secs` (default 300 s) with new events, or shortly after it ends (process exit or the agent's session-end hook; the run waits 10 s so the last transcript lines are in, and both triggers make one run). A scheduler checks every 30 s. Only sessions active in the last 7 days are distilled automatically, so importing old history does not use up the budget.
 
 **Which sessions.** Only sessions that ran on this machine: a session replicated from another machine is distilled there and its results arrive by sync. Subagent sessions are skipped (their task and final report are already in the parent's transcript); **Distill now** still works on them.
 
 **Budget.** At most `memory.daily_distill_limit` runs (default 40) per UTC day, counting manual runs. One run at a time.
 
-**Input.** The redacted transcript since the last distill, compacted (prompts verbatim, assistant text, tool calls and results as short one-liners), capped at `memory.distill_max_chars` (default 60 000 characters: the first 20 % and last 80 % are kept around an omission marker), plus the current brief and the active records with their ids.
+**Input.** The redacted transcript since the last distill (with the session's previous summary as context, so a long session is summarized piece by piece and nothing is sent twice), compacted (prompts verbatim, assistant text, tool calls and results as short one-liners), capped at `memory.distill_max_chars` (default 60 000 characters: the first 20 % and last 80 % are kept around an omission marker), plus the current brief and the active records with their ids.
 
 **Output.** Strict JSON, validated (one retry with the validation error on bad output):
 
@@ -49,7 +49,7 @@ Distilling turns the new part of a session's transcript into memory.
 - `files` touched,
 - `brief_md`: a full replacement brief (up to 12 000 characters), or empty for no change.
 
-**Apply.** In one transaction: the session gets its summary (and a title if it has none); new records are added unless an active record of the same kind and title exists; resolved records are marked resolved; the brief gets a new version (`brief_mode = "auto"`, the default) or becomes a suggestion (`"review"`). Records you created or edited yourself are never changed by the distiller; if it wants to resolve one, it files a suggestion instead.
+**Apply.** In one transaction: the session gets its summary (and a title if it has none); new records are added unless an active record of the same kind and title exists (titles compare ignoring case, spacing and punctuation), and a record this session already produced is updated rather than added again; resolved records are marked resolved; the brief gets a new version (`brief_mode = "auto"`, the default) or becomes a suggestion (`"review"`, and always when you edited the brief while the run was in progress, so your edit is never overwritten). Records you created or edited yourself are never changed by the distiller; if it wants to resolve one, it files a suggestion instead.
 
 A failed run keeps the earlier summary, stores the error on the session (shown on the session page and by `blirp mem show`), and is retried only when new events arrive or you click **Distill now**. Backend failures (not installed, not logged in, timeout after 180 s) are not retried in a loop.
 

@@ -14,7 +14,10 @@ mod projects;
 mod sessions;
 mod sync;
 
-pub use engine::{BY_DISTILLER, BriefApply, DistillOutcome, DistillPlan, MACHINE_ID_KEY};
+pub use engine::{
+    BY_DISTILLER, BriefApply, DistillEvents, DistillOutcome, DistillPlan, MACHINE_ID_KEY,
+    norm_title,
+};
 pub use ingest::IngestTx;
 pub use memory::RecordFilter;
 pub use migrations::MigrationError;
