@@ -115,7 +115,7 @@ blirp agents set-token claude
 blirp agents clear-token claude
 ```
 
-`set-token` reads a token printed by `claude setup-token` from stdin (hidden when you type or paste it into a terminal; piped input works too, e.g. `blirp agents set-token claude < token.txt`), trims surrounding whitespace, and stores it in `~/.blirp/secrets/claude_oauth_token` (`0600`, folder `0700` on macOS and Linux). A token with spaces or line breaks inside is refused. The daemon passes it to claude sessions and the claude summarizer as `CLAUDE_CODE_OAUTH_TOKEN`, read each time it starts one, so no restart is needed. `clear-token` removes it. Does not need the daemon. Why and when: [agents.md](agents.md#headless-login-for-a-hub).
+`set-token` reads a token printed by `claude setup-token` from stdin (hidden when you type or paste it into a terminal; piped input works too, e.g. `blirp agents set-token claude < token.txt`), trims surrounding whitespace, and stores it in `~/.blirp/secrets/claude_oauth_token` (`0600`, folder `0700` on macOS and Linux). A token with spaces or line breaks inside is refused. Terminals that are not a console (Git Bash / mintty on Windows) cannot hide input; there, pipe the token in. Ctrl+C at the prompt turns echo back on. The daemon passes it to claude sessions and the claude summarizer as `CLAUDE_CODE_OAUTH_TOKEN`, read each time it starts one, so no restart is needed. `clear-token` removes it. Does not need the daemon. Why and when: [agents.md](agents.md#headless-login-for-a-hub).
 
 ## blirp pair
 
