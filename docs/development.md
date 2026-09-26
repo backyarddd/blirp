@@ -118,7 +118,7 @@ A new agent touches these places. Look at an existing agent with the same shape 
    - CLI archives `blirp-<ver>-<target>.tar.gz` (Linux x64/arm64, macOS arm64/x64) and `.zip` (Windows x64, with ConPTY), each with a `.sha256`;
    - the desktop app as portable assets for the install scripts and `blirp update`: `blirp_<ver>_<aarch64|x64>.app.tar.gz`, `blirp_<ver>_<amd64|aarch64>.AppImage`, `blirp_<ver>_x64-portable.zip` (`blirp-desktop.exe`, `blirp.exe`, `conpty.dll`, `x64/OpenConsole.exe`);
    - the classic installers (NSIS + MSI, DMG, deb + rpm) as extras;
-   - `SHA256SUMS.txt` over every asset and `SHA256SUMS.txt.sig`, its minisign signature (made with `tauri signer sign` and checked against `packaging/minisign.pub` in the job);
+   - `SHA256SUMS.txt` over the expected assets (an explicit list in the `checksums` job; a missing or unexpected asset fails the run, so add new asset names there) and `SHA256SUMS.txt.sig`, its minisign signature (made by the `sign` job, which alone sees the key: no checkout, no token, no package installs, a minisign release binary pinned by SHA-256; the `packaging` job checks it against `packaging/minisign.pub` before uploading);
    - rendered Homebrew/winget manifests.
 4. Check the draft, then publish it. The install scripts, `blirp update` and the daemon's update check use `releases/latest`, which only returns published, non-prerelease releases, so nothing reaches users before you publish. The API does not serve drafts even by tag; to try the draft's assets with the scripts first, download them and serve them locally (see "Testing the installers" below).
 5. Optional: copy `homebrew-formula-blirp.rb` / `homebrew-cask-blirp.rb` into a tap (`Formula/blirp.rb`, `Casks/blirp.rb`) and open a `microsoft/winget-pkgs` PR with the three `winget-*.yaml` files (`manifests/b/blirp/blirp/X.Y.Z/`, without the `winget-` prefix).
@@ -131,7 +131,7 @@ Repository **Settings > Secrets and variables > Actions**:
 
 | Secret | Required | Purpose |
 |---|---|---|
-| `TAURI_SIGNING_PRIVATE_KEY` | yes | release signing key (minisign format, made with `pnpm -C app tauri signer generate`; the name is historical, it used to sign Tauri updates). Signs `SHA256SUMS.txt`. Its public key is `packaging/minisign.pub`, built into every `blirp` for `blirp update`. |
+| `TAURI_SIGNING_PRIVATE_KEY` | yes | release signing key: base64 of a password-protected minisign secret key file (made with `pnpm -C app tauri signer generate`; the name is historical, it used to sign Tauri updates). The workflow signs with `minisign`, which reads that format. Signs `SHA256SUMS.txt`. Its public key is `packaging/minisign.pub`, built into every `blirp` for `blirp update`. |
 | `TAURI_SIGNING_PRIVATE_KEY_PASSWORD` | yes | its password |
 | `APPLE_CERTIFICATE`, `APPLE_CERTIFICATE_PASSWORD`, `APPLE_SIGNING_IDENTITY` | optional, signed macOS builds | base64 "Developer ID Application" `.p12`, its password, e.g. `Developer ID Application: Name (TEAMID)` |
 | `APPLE_ID`, `APPLE_PASSWORD`, `APPLE_TEAM_ID` | optional, notarization | Apple ID, app-specific password, team id |
@@ -143,5 +143,6 @@ Code-signing steps are skipped with a warning when their secrets are missing. Th
 ### Testing the installers
 
 - Lint: `shellcheck install.sh`, `Invoke-ScriptAnalyzer install.ps1` (or at least `[scriptblock]::Create((Get-Content install.ps1 -Raw))` in both PowerShell editions), `actionlint`.
+- Signature checks: the scripts carry the release key in `RELEASE_PUBKEY` / `$ReleasePubkey`; a test copy with a throwaway key swapped in must install from a correctly signed fake release, refuse a changed `SHA256SUMS.txt` or `.sig`, print the notice without a verifier (e.g. only LibreSSL, or `Path` without Git) and refuse then with `BLIRP_REQUIRE_SIGNATURE=1`. A throwaway minisign key and signature can be made with OpenSSL 3 alone (`genpkey -algorithm ed25519`, `pkeyutl -sign -rawin` over `dgst -blake2b512`).
 - Private repository: `GITHUB_TOKEN=<token with read access> sh install.sh` (PowerShell: `$env:GITHUB_TOKEN`); the scripts and `blirp update` then download through the API.
 - Local fake release: serve a directory with `releases/latest` and `releases/tags/v<ver>` (GitHub release JSON whose asset URLs point at the same server) plus the assets, `SHA256SUMS.txt` and a `SHA256SUMS.txt.sig` made with a throwaway key (`tauri signer generate`, then `tauri signer sign` and `base64 -d` the `.sig`), and set `BLIRP_RELEASE_BASE_URL=http://127.0.0.1:<port>/releases` for the scripts and `blirp`. Build the `blirp` under test with `BLIRP_UPDATE_PUBKEY=<throwaway public key line>` in the environment so `blirp update` trusts that key (compile time only; release builds never set it). Use `BLIRP_INSTALL_DIR`, `BLIRP_HOME` and (macOS/Linux) `HOME` pointing at scratch folders to keep the test away from your own install.

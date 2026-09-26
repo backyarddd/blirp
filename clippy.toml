@@ -1,3 +1,10 @@
 allow-unwrap-in-tests = true
 allow-expect-in-tests = true
 allow-print-in-tests = true
+# Every child process goes through blirp_core::process::command, which sets
+# CREATE_NO_WINDOW on Windows (a console-less daemon or app would otherwise
+# open a console window for each child it starts).
+disallowed-methods = [
+  { path = "std::process::Command::new", reason = "use blirp_core::process::command (no console window on Windows)" },
+  { path = "tokio::process::Command::new", reason = "use tokio::process::Command::from(blirp_core::process::command(..)) (no console window on Windows)" },
+]

@@ -115,7 +115,7 @@ Projects are matched across machines by git remote: the same repo cloned on two 
 
 ## Conflicts
 
-The hub keeps an ordered log of every change from every machine. Rows are last-writer-wins in the hub's order: a later edit of the same record, brief or session replaces an earlier one. A machine never lets an older remote change overwrite a newer local edit it has not pushed yet; its own edit is applied after it. Transcript events are append-only and keyed by session and position, so they never conflict. Briefs keep every version in their history, so a lost brief edit can be restored with **Revert**.
+The hub keeps an ordered log of every change from every machine. Shared memory and projects (records, briefs, wiki pages, resources, project names) keep the newest edit by time on every machine, whichever order the edits arrive in: a machine that was offline or left the hub and pairs again cannot overwrite newer edits with its older copies, and a deleted record, page, resource or project stays deleted. An edit is always stamped after the version it replaces, so a machine whose clock is behind does not lose its edits. Sessions and folders belong to their machine; for those, a later change in the hub's order replaces an earlier one. Transcript events are append-only and keyed by session and position, so they never conflict. Briefs keep every version in their history, so a replaced brief can be restored with **Revert**.
 
 ## Network, relay and privacy
 
@@ -141,7 +141,7 @@ With sync, the new-session dialog has a **Machine** picker. A session started fo
 
 - Every node keeps one connection to the hub, and the hub relays requests byte for byte to the target machine, so nodes behind NAT are reachable.
 - A node accepts control from elsewhere only when it opted in with `sync.allow_hub_control = true` (default off; the box in the join dialog, **Allow the hub to control this machine** in Settings > Machines & Sync, or `config.toml`; leaving the hub resets it; changing it closes relayed terminals and streams so they reopen with the new rights): until then the hub and other machines can view its sessions, but their launches, stops, resumes, deletes, terminal input and memory edits on it are refused (`control_not_allowed`). The hub itself accepts control from paired machines unless you turn **Terminal control** off for a machine under **Devices** on the hub.
-- Each machine owns its folders, sessions and transcripts: other machines can retitle a session or move it and its folder to another project (merge), but never create, change the folder or agent id of, or delete another machine's sessions, folders or transcript events. Deleting a session of another machine is forwarded to that machine.
+- Each machine owns its folders, sessions and transcripts: other machines can retitle a session, change its status, or move it and its folder to another project (merge), but never create, delete or change anything else of another machine's sessions (folder, agent id, transcript, summary, tokens), folders or transcript events. Deleting a project unregisters its folders on every machine, each machine dropping its own. Deleting a session of another machine is forwarded to that machine. A node also refuses anything its hub relays under the node's own name.
 - Only the request itself is forwarded, never local credentials; relayed requests have no admin rights (they cannot pair, revoke or change devices on the target).
 - If the target machine is offline, you get `machine_offline` / `machine_unreachable`.
 
@@ -149,7 +149,7 @@ With sync, the new-session dialog has a **Machine** picker. A session started fo
 
 - **Revoke a machine** (on the hub): **Settings > Machines & Sync > Machines > Revoke**, or `blirp devices revoke <device-id>` (ids from `blirp devices list`). Its live connections close at once and reconnects are refused. The machine row is marked revoked on every machine. Data it already synced stays.
 - **Revoke a browser device** (on the hub): **Devices > Revoke**, or `blirp devices revoke <id>`; it is signed out immediately.
-- **Leave the hub** (on a node): **Settings > Machines & Sync > Leave hub** (API: `DELETE /api/machines/<hub id>` on the node). The node returns to `standalone` and keeps its local copy of the data.
+- **Leave the hub** (on a node): **Settings > Machines & Sync > Leave hub** (API: `DELETE /api/machines/<hub id>` on the node). The node returns to `standalone` and keeps its local copy of the data. Pairing again sends everything it has, including what it had not sent yet and what it deleted; newer edits made elsewhere meanwhile stay newest.
 - **Stop being a hub:** **Disable hub** in the same place, or `blirp hub disable`. Sync and the portal stop and the role returns to `standalone`; paired machines stay known, so `blirp hub enable` later resumes without re-pairing. A node cannot become a hub while paired (`paired_node`); leave first.
 
 ## Backups and moving the hub

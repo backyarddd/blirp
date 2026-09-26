@@ -79,6 +79,7 @@ pub(super) fn resource_row(r: &Row<'_>) -> rusqlite::Result<Resource> {
         title: r.get("title")?,
         meta: json_col(r, "meta_json")?,
         created_at: r.get("created_at")?,
+        updated_at: r.get("updated_at")?,
         deleted: r.get("deleted")?,
     })
 }
@@ -447,6 +448,7 @@ impl Store {
             .ok_or(StoreError::NotFound("resource"))?;
             f(&mut r);
             nonempty("url", &r.url)?;
+            r.updated_at = crate::now_ms();
             apply_in(tx, &Change::Resource(r.clone()))?;
             Ok(r)
         })
@@ -786,6 +788,7 @@ mod tests {
                 title: "Ex".into(),
                 meta: Some(json!({"a": 1})),
                 created_at: now,
+                updated_at: now,
                 deleted: false,
             })
             .unwrap();

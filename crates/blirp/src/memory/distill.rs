@@ -344,29 +344,34 @@ async fn ollama_up(base: &str) -> bool {
         .is_ok_and(|r| r.status().is_success())
 }
 
-/// `auto`: claude, else ollama. Codex is never picked automatically: its
-/// built-in tools cannot all be switched off (only shell, exec and the
-/// optional tools are, see [`codex_args`]), so it runs only when chosen.
+/// `auto`: claude, else ollama. Codex is never picked automatically: it has
+/// no switch for "no tools", only one per tool (see [`codex_args`]), so a
+/// newer codex can bring a tool those do not cover; it runs only when chosen.
 fn pick_auto(claude: Option<Backend>, ollama: Option<Backend>) -> Result<Backend, String> {
     claude.or(ollama).ok_or_else(|| {
         "neither claude nor ollama is available (codex runs only when chosen explicitly)".into()
     })
 }
 
-/// `codex exec` for a summarizer run: no hooks, MCP servers, shell or exec
-/// tools, apps, plugins, browser, computer use, subagents or image tools
-/// (feature names verified against codex 0.153), read-only sandbox, no
-/// persisted session; the reply goes to `last`.
+/// `codex exec` for a summarizer run: the user's `config.toml` is not
+/// loaded (its MCP servers, plugins and hooks; `-c mcp_servers={}` does not
+/// remove configured servers), web search, hooks, shell and exec tools,
+/// apps, plugins, browser, computer use, subagents and image tools are off,
+/// read-only sandbox, no persisted session; the reply goes to `last`.
+/// Checked against codex 0.153.2 by capturing the request it sends: no tool
+/// at all (with the user's config, `mcp_servers={}` and no `web_search` it
+/// sent the user's MCP servers and `web_search`).
 fn codex_args(last: &Path) -> Vec<OsString> {
     let mut args: Vec<OsString> = [
         "exec",
         "--json",
         "--ephemeral",
         "--skip-git-repo-check",
+        "--ignore-user-config",
         "--sandbox",
         "read-only",
         "-c",
-        "mcp_servers={}",
+        "web_search=\"disabled\"",
     ]
     .iter()
     .map(OsString::from)
@@ -465,7 +470,7 @@ async fn run_process(
         .await
         .map_err(|e| format!("preparing {}: {e}", program.display()))?
         .map_err(|e| e.to_string())?;
-    let mut cmd = tokio::process::Command::new(&wrapped.program);
+    let mut cmd = tokio::process::Command::from(process::command(&wrapped.program));
     cmd.args(&wrapped.args)
         .envs(wrapped.env)
         .current_dir(dir)
@@ -480,11 +485,6 @@ async fn run_process(
         "BLIRP_MEMORY_FILE",
     ]) {
         cmd.env_remove(k);
-    }
-    #[cfg(windows)]
-    {
-        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
-        cmd.creation_flags(CREATE_NO_WINDOW);
     }
     #[cfg(unix)]
     cmd.process_group(0);
@@ -1435,6 +1435,13 @@ mod tests {
                 "{f}: {args:?}"
             );
         }
+        // No web search, and none of the user's MCP servers or plugins.
+        assert!(
+            args.windows(2)
+                .any(|w| w[0] == "-c" && w[1] == r#"web_search="disabled""#),
+            "{args:?}"
+        );
+        assert!(args.iter().any(|a| a == "--ignore-user-config"), "{args:?}");
         assert_eq!(args.last().map(String::as_str), Some("last.txt"));
     }
 

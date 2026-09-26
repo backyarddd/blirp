@@ -12,8 +12,10 @@ name: Release
 #
 # Secrets (see docs/development.md): TAURI_SIGNING_PRIVATE_KEY(+_PASSWORD)
 # are required (they sign SHA256SUMS.txt; the public key is
-# packaging/minisign.pub). Code signing is optional and runs only when its
-# secrets exist:
+# packaging/minisign.pub). Only the `sign` job sees them: it checks out no
+# code and installs no packages, it runs a pinned minisign release binary
+# over the checksums of an explicit list of asset names. Code signing is
+# optional and runs only when its secrets exist:
 #   macOS:   APPLE_CERTIFICATE, APPLE_CERTIFICATE_PASSWORD, APPLE_SIGNING_IDENTITY,
 #            notarization: APPLE_ID, APPLE_PASSWORD, APPLE_TEAM_ID
 #   Windows: Azure Artifact Signing: AZURE_TENANT_ID, AZURE_CLIENT_ID, AZURE_CLIENT_SECRET,
@@ -28,18 +30,25 @@ concurrency:
   group: release-${{ github.ref }}
   cancel-in-progress: false
 
+# Least privilege: each job asks for what it needs.
 permissions:
-  contents: write
+  contents: read
 
 env:
   CARGO_TERM_COLOR: always
   CARGO_INCREMENTAL: 0
   RUST_TOOLCHAIN: "1.94.0"
+  # The release signer: minisign's own release, checked against this hash
+  # (its minisign signature by the author was verified when it was pinned).
+  MINISIGN_URL: https://github.com/jedisct1/minisign/releases/download/0.12/minisign-0.12-linux.tar.gz
+  MINISIGN_SHA256: 9a599b48ba6eb7b1e80f12f36b94ceca7c00b7a5173c95c3efc88d9822957e73
 
 jobs:
   draft:
     name: Draft release
     runs-on: ubuntu-latest
+    permissions:
+      contents: write
     outputs:
       release_id: ${{ steps.release.outputs.id }}
       version: ${{ steps.version.outputs.version }}
@@ -82,6 +91,8 @@ jobs:
           - { os: windows-latest, target: x86_64-pc-windows-msvc }
     runs-on: ${{ matrix.os }}
     timeout-minutes: 60
+    permissions:
+      contents: write
     env:
       VERSION: ${{ needs.draft.outputs.version }}
       TARGET: ${{ matrix.target }}
@@ -104,7 +115,7 @@ jobs:
           cache-dependency-path: web/pnpm-lock.yaml
       - name: Build web UI
         run: |
-          pnpm -C web install --frozen-lockfile
+          pnpm -C web install --frozen-lockfile --ignore-scripts
           pnpm -C web build
 
       - name: Build blirp (unix)
@@ -227,6 +238,8 @@ jobs:
           - { os: windows-latest, target: x86_64-pc-windows-msvc }
     runs-on: ${{ matrix.os }}
     timeout-minutes: 90
+    permissions:
+      contents: write
     env:
       VERSION: ${{ needs.draft.outputs.version }}
       TARGET: ${{ matrix.target }}
@@ -260,9 +273,9 @@ jobs:
             app/pnpm-lock.yaml
       - name: Build web UI
         run: |
-          pnpm -C web install --frozen-lockfile
+          pnpm -C web install --frozen-lockfile --ignore-scripts
           pnpm -C web build
-      - run: pnpm -C app install --frozen-lockfile
+      - run: pnpm -C app install --frozen-lockfile --ignore-scripts
 
       - name: Build sidecar (unix)
         if: runner.os != 'Windows'
@@ -385,57 +398,126 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: gh release upload "$GITHUB_REF_NAME" dist/* --clobber
 
-  packaging:
-    name: Checksums, signature and package manifests
+  checksums:
+    name: Checksums of the expected assets
     needs: [draft, cli, desktop]
     runs-on: ubuntu-latest
+    permissions:
+      # Draft releases are visible only with write access.
+      contents: write
+    env:
+      VERSION: ${{ needs.draft.outputs.version }}
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - name: Download release assets
+        run: gh release download "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" --dir assets
+      # Only these names are summed (and so signed): an asset that should
+      # not be in the release fails the job instead of being vouched for.
+      - name: SHA256SUMS.txt for the expected assets
+        run: |
+          v=$VERSION
+          expected="blirp-$v-x86_64-unknown-linux-gnu.tar.gz blirp-$v-aarch64-unknown-linux-gnu.tar.gz
+            blirp-$v-aarch64-apple-darwin.tar.gz blirp-$v-x86_64-apple-darwin.tar.gz
+            blirp-$v-x86_64-pc-windows-msvc.zip
+            blirp_${v}_aarch64.app.tar.gz blirp_${v}_x64.app.tar.gz
+            blirp_${v}_amd64.AppImage blirp_${v}_aarch64.AppImage blirp_${v}_x64-portable.zip
+            blirp_${v}_aarch64.dmg blirp_${v}_x64.dmg
+            blirp_${v}_amd64.deb blirp_${v}_arm64.deb
+            blirp-$v-1.x86_64.rpm blirp-$v-1.aarch64.rpm
+            blirp_${v}_x64-setup.exe blirp_${v}_x64_en-US.msi"
+          # One name per line, for exact matching.
+          # shellcheck disable=SC2086 # split into names on purpose
+          printf '%s\n' $expected | sort > expected.txt
+          cd assets
+          bad=
+          while read -r n; do
+            [ -f "$n" ] || { echo "::error::missing release asset $n"; bad=1; }
+          done < ../expected.txt
+          for f in *; do
+            case $f in
+              # Per-archive checksums, and this workflow's own outputs on a re-run.
+              blirp-"$v"-*.sha256 | SHA256SUMS.txt | SHA256SUMS.txt.sig | homebrew-*.rb | winget-*.yaml) continue ;;
+            esac
+            grep -qxF "$f" ../expected.txt || {
+              echo "::error::unexpected release asset $f (delete it, or add it to the expected list)"
+              bad=1
+            }
+          done
+          [ -z "$bad" ] || exit 1
+          xargs sha256sum < ../expected.txt > ../SHA256SUMS.txt
+          cat ../SHA256SUMS.txt
+      - uses: actions/upload-artifact@v4
+        with:
+          name: sha256sums
+          path: SHA256SUMS.txt
+          if-no-files-found: error
+
+  sign:
+    name: Sign SHA256SUMS.txt
+    needs: checksums
+    runs-on: ubuntu-latest
+    # No token, no checkout, no package installs: the only programs that
+    # run next to the key are the shell, coreutils and the pinned minisign.
+    permissions: {}
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: sha256sums
+      - name: Fetch the pinned minisign
+        run: |
+          curl -fsSL --retry 3 -o "$RUNNER_TEMP/minisign.tar.gz" "$MINISIGN_URL"
+          echo "$MINISIGN_SHA256  $RUNNER_TEMP/minisign.tar.gz" | sha256sum -c -
+          tar -xzf "$RUNNER_TEMP/minisign.tar.gz" -C "$RUNNER_TEMP" --warning=no-unknown-keyword minisign-linux/x86_64/minisign
+      # `blirp update` and the install scripts verify this signature with
+      # packaging/minisign.pub before trusting any checksum. The secret is a
+      # base64 minisign secret key (the Tauri signer's format); its password
+      # goes in on stdin.
+      - name: Sign
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+        run: |
+          if [ -z "$TAURI_SIGNING_PRIVATE_KEY" ]; then
+            echo "::error::TAURI_SIGNING_PRIVATE_KEY is not set; SHA256SUMS.txt cannot be signed and blirp update would refuse the release"
+            exit 1
+          fi
+          umask 077
+          key="$RUNNER_TEMP/release.key"
+          trap 'rm -f "$key"' EXIT
+          printf '%s' "$TAURI_SIGNING_PRIVATE_KEY" | base64 -d > "$key"
+          printf '%s\n' "$TAURI_SIGNING_PRIVATE_KEY_PASSWORD" |
+            "$RUNNER_TEMP/minisign-linux/x86_64/minisign" -S -s "$key" -m SHA256SUMS.txt -x SHA256SUMS.txt.sig
+      - uses: actions/upload-artifact@v4
+        with:
+          name: sha256sums-sig
+          path: SHA256SUMS.txt.sig
+          if-no-files-found: error
+
+  packaging:
+    name: Publish checksums, signature and package manifests
+    needs: [draft, sign]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
     env:
       VERSION: ${{ needs.draft.outputs.version }}
       GH_TOKEN: ${{ github.token }}
     steps:
       - uses: actions/checkout@v4
-      - name: Require the release signing key
-        env:
-          KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: sha256sums*
+          merge-multiple: true
+          path: signed
+      - name: Verify the signature with packaging/minisign.pub
         run: |
-          if [ -z "$KEY" ]; then
-            echo "::error::TAURI_SIGNING_PRIVATE_KEY is not set; SHA256SUMS.txt cannot be signed and blirp update would refuse the release"
-            exit 1
-          fi
-      - uses: pnpm/action-setup@v4
-        with:
-          version: 12
-      - uses: actions/setup-node@v4
-        with:
-          node-version: 22
-          cache: pnpm
-          cache-dependency-path: app/pnpm-lock.yaml
-      - run: pnpm -C app install --frozen-lockfile
+          curl -fsSL --retry 3 -o "$RUNNER_TEMP/minisign.tar.gz" "$MINISIGN_URL"
+          echo "$MINISIGN_SHA256  $RUNNER_TEMP/minisign.tar.gz" | sha256sum -c -
+          tar -xzf "$RUNNER_TEMP/minisign.tar.gz" -C "$RUNNER_TEMP" --warning=no-unknown-keyword minisign-linux/x86_64/minisign
+          "$RUNNER_TEMP/minisign-linux/x86_64/minisign" -V -m signed/SHA256SUMS.txt -x signed/SHA256SUMS.txt.sig -p packaging/minisign.pub
       - name: Download release assets
         run: gh release download "$GITHUB_REF_NAME" --dir assets
-      - name: SHA256SUMS for every asset
-        run: |
-          cd assets
-          find . -maxdepth 1 -type f ! -name '*.sha256' ! -name '*.sig' ! -name 'SHA256SUMS.txt' \
-            ! -name 'homebrew-*.rb' ! -name 'winget-*.yaml' \
-            -printf '%f\n' | sort | xargs sha256sum > SHA256SUMS.txt
-          cat SHA256SUMS.txt
-      # `blirp update` verifies this signature with packaging/minisign.pub
-      # before trusting any checksum. `tauri signer sign` writes base64 of a
-      # standard minisign signature; publish the plain minisign file so
-      # `minisign -V` (and rsign2) check it directly.
-      - name: Sign SHA256SUMS.txt
-        env:
-          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
-          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
-        run: |
-          rm -f assets/SHA256SUMS.txt.sig
-          pnpm -C app tauri signer sign "$PWD/assets/SHA256SUMS.txt"
-          base64 -d assets/SHA256SUMS.txt.sig > assets/SHA256SUMS.txt.minisig
-          mv assets/SHA256SUMS.txt.minisig assets/SHA256SUMS.txt.sig
-          sudo apt-get install -y --no-install-recommends minisign
-          minisign -V -m assets/SHA256SUMS.txt -x assets/SHA256SUMS.txt.sig -p packaging/minisign.pub
       - name: Render Homebrew and winget manifests
         run: sh scripts/render-packaging.sh "$VERSION" assets packaging-out
       - name: Upload
-        run: gh release upload "$GITHUB_REF_NAME" assets/SHA256SUMS.txt assets/SHA256SUMS.txt.sig packaging-out/* --clobber
+        run: gh release upload "$GITHUB_REF_NAME" signed/SHA256SUMS.txt signed/SHA256SUMS.txt.sig packaging-out/* --clobber

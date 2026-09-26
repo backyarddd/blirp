@@ -4,7 +4,7 @@
 use rusqlite::Connection;
 
 /// Index `i` holds the migration that moves the schema from version `i` to `i + 1`.
-pub(crate) const MIGRATIONS: &[&str] = &[V1, V2, V3, V4, V5, V6, V7];
+pub(crate) const MIGRATIONS: &[&str] = &[V1, V2, V3, V4, V5, V6, V7, V8];
 
 /// Schema of §5. Note on the FTS tables: they are external-content tables keyed
 /// by the implicit rowid of `events`/`records`. blirp never runs `VACUUM`
@@ -284,6 +284,18 @@ UPDATE briefs SET history_id = 'legacy-' || project_id || '-' || version;
 /// later writes of that session or its events are ignored.
 const V7: &str = r#"
 CREATE TABLE deleted_sessions(
+    id         TEXT PRIMARY KEY,
+    deleted_at INTEGER NOT NULL
+);
+"#;
+
+/// Replicated memory converges on the newest version (§10): resources get the
+/// `updated_at` the other shared rows already have, and hard-deleted records
+/// a tombstone like sessions, so a stale copy never brings them back.
+const V8: &str = r#"
+ALTER TABLE resources ADD COLUMN updated_at INTEGER NOT NULL DEFAULT 0;
+UPDATE resources SET updated_at = created_at;
+CREATE TABLE deleted_records(
     id         TEXT PRIMARY KEY,
     deleted_at INTEGER NOT NULL
 );

@@ -354,6 +354,10 @@ pub struct Resource {
     pub title: String,
     pub meta: Option<JsonValue>,
     pub created_at: i64,
+    /// Last change; replicated copies converge on the newest (§10). Changes
+    /// queued by versions without it (before migration 8) read as 0.
+    #[serde(default)]
+    pub updated_at: i64,
     pub deleted: bool,
 }
 

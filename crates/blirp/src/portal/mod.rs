@@ -142,9 +142,8 @@ async fn start(state: &SharedState) -> anyhow::Result<()> {
     .context("TLS certificate")?;
     // HTTP/1.1 only: terminal WebSockets need the HTTP/1.1 upgrade.
     tls.alpn_protocols = vec![b"http/1.1".to_vec()];
-    let listener = std::net::TcpListener::bind((Ipv4Addr::UNSPECIFIED, port))
+    let listener = crate::bind_exclusive(SocketAddr::from((Ipv4Addr::UNSPECIFIED, port)))
         .with_context(|| format!("bind 0.0.0.0:{port} for the LAN portal"))?;
-    listener.set_nonblocking(true)?;
     let server = axum_server::from_tcp_rustls(
         listener,
         axum_server::tls_rustls::RustlsConfig::from_config(Arc::new(tls)),

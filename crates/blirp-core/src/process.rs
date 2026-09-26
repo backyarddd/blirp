@@ -7,16 +7,26 @@ use std::process::{Command, Stdio};
 use std::sync::{Arc, Mutex, PoisonError, mpsc};
 use std::time::{Duration, Instant};
 
+/// Windows process creation flag: a console program gets a console without
+/// a window. Callers that set other flags OR it in (`creation_flags`
+/// replaces the value).
+#[cfg(windows)]
+pub const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+
 /// `std::process::Command` that never flashes a console window on Windows.
-/// The daemon may run detached without a console; without `CREATE_NO_WINDOW`
-/// every git call would pop up a window.
+/// The daemon runs detached without a console, and the desktop app has none:
+/// a console program they start would open a new console window each time.
+/// Every child process blirp starts is built here (clippy's
+/// `disallowed-methods` refuses `Command::new` anywhere else); PTY children
+/// are the exception, they get their pseudo console from the PTY. For tokio,
+/// `tokio::process::Command::from(command(..))`.
+#[allow(clippy::disallowed_methods)] // the one place that may call it
 pub fn command(program: impl AsRef<std::ffi::OsStr>) -> Command {
     #[allow(unused_mut)]
     let mut cmd = Command::new(program);
     #[cfg(windows)]
     {
         use std::os::windows::process::CommandExt;
-        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
         cmd.creation_flags(CREATE_NO_WINDOW);
     }
     cmd
@@ -209,6 +219,41 @@ fn is_executable(p: &Path) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Child side of `children_get_no_console_window`: reports whether this
+    /// process has a console window (a no-op in a normal test run).
+    #[cfg(windows)]
+    #[test]
+    fn report_console_window() {
+        if std::env::var_os("BLIRP_TEST_REPORT_CONSOLE").is_none() {
+            return;
+        }
+        #[allow(unsafe_code)]
+        // SAFETY: GetConsoleWindow has no arguments and only reads process state.
+        let window = unsafe { windows_sys::Win32::System::Console::GetConsoleWindow() };
+        println!("console-window={}", !window.is_null());
+    }
+
+    // A console program started through `command` gets no console window:
+    // the detached daemon (no console of its own) would otherwise open one
+    // for every git call, probe or summarizer run.
+    #[cfg(windows)]
+    #[test]
+    fn children_get_no_console_window() {
+        let out = command(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "process::tests::report_console_window",
+                "--nocapture",
+                "--test-threads=1",
+            ])
+            .env("BLIRP_TEST_REPORT_CONSOLE", "1")
+            .stdin(Stdio::null())
+            .output()
+            .unwrap();
+        let text = String::from_utf8_lossy(&out.stdout);
+        assert!(text.contains("console-window=false"), "{text}");
+    }
 
     #[test]
     fn which_skips_extensionless_shims_on_windows() {

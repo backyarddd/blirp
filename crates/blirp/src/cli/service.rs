@@ -215,7 +215,7 @@ fn remove_if_exists(path: &Path) -> anyhow::Result<bool> {
 
 /// Run a helper tool; returns (success, combined output).
 fn tool(program: &str, args: &[&str]) -> anyhow::Result<(bool, String)> {
-    let out = std::process::Command::new(program)
+    let out = blirp_core::process::command(program)
         .args(args)
         .stdin(std::process::Stdio::null())
         .output()

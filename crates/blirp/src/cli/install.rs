@@ -110,18 +110,34 @@ pub async fn update(
     if was_running {
         super::lifecycle::stop(paths).await?;
     }
-    for f in install::CLI_FILES {
-        install::replace_path(&cli_root.join(f), &inst.dir.join(f))?;
-    }
+    let mut moves: Vec<(PathBuf, PathBuf)> = install::CLI_FILES
+        .iter()
+        .map(|f| (cli_root.join(f), inst.dir.join(f)))
+        .collect();
     if let Some((_dir, staged, dst)) = &app_stage {
-        install::replace_path(staged, dst)?;
+        moves.push((staged.clone(), dst.clone()));
     }
-    inst.receipt.version = target.to_string();
-    inst.save()?;
+    // All files and then the receipt, or (on any failure) none of them.
+    let installed = install::replace_all(&moves, || {
+        inst.receipt.version = target.to_string();
+        inst.save()
+    });
+    // The daemon comes back either way: the new version, or the old one.
+    let restarted = if was_running {
+        restart_daemon(paths, &inst.dir.join(install::CLI_FILES[0])).await
+    } else {
+        Ok(())
+    };
+    if let Err(e) = installed {
+        if let Err(r) = restarted {
+            eprintln!("blirp: the daemon did not start again: {r:#}");
+        }
+        return Err(e.context(format!(
+            "updating to {target} failed; blirp {current} is still installed"
+        )));
+    }
     println!("Updated blirp {current} -> {target}");
-    if was_running {
-        restart_daemon(paths, &inst.dir.join(install::CLI_FILES[0])).await?;
-    }
+    restarted?;
     Ok(ExitCode::SUCCESS)
 }
 
@@ -159,15 +175,22 @@ async fn restart_daemon(paths: &Paths, cli: &Path) -> anyhow::Result<()> {
         println!("Daemon restarted by the autostart service.");
         return Ok(());
     }
-    let status = tokio::process::Command::new(cli)
+    // Output captured and passed on: without a console of its own (no
+    // window) the child could not write to this terminal.
+    let out = tokio::process::Command::from(blirp_core::process::command(cli))
         .args(["daemon", "--detach"])
         .env(blirp_core::paths::HOME_ENV, paths.home())
         .stdin(std::process::Stdio::null())
-        .status()
+        .output()
         .await
         .with_context(|| format!("run {} daemon --detach", cli.display()))?;
-    if !status.success() {
-        bail!("the updated daemon did not start ({status}); see `blirp logs`");
+    print!("{}", String::from_utf8_lossy(&out.stdout));
+    eprint!("{}", String::from_utf8_lossy(&out.stderr));
+    if !out.status.success() {
+        bail!(
+            "the updated daemon did not start ({}); see `blirp logs`",
+            out.status
+        );
     }
     Ok(())
 }
@@ -346,14 +369,14 @@ mod windows {
 
     // Not DETACHED_PROCESS: Windows PowerShell exits at once without a
     // console. CREATE_NO_WINDOW gives it a hidden console of its own.
-    const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+    use blirp_core::process::CREATE_NO_WINDOW;
     const CREATE_BREAKAWAY_FROM_JOB: u32 = 0x0100_0000;
 
     /// Windows PowerShell running `script`. Paths reach scripts through
     /// environment variables, never quoted into the script text.
     fn powershell(script: &str) -> std::process::Command {
         let root = std::env::var_os("SystemRoot").unwrap_or_else(|| r"C:\Windows".into());
-        let mut c = std::process::Command::new(
+        let mut c = blirp_core::process::command(
             Path::new(&root).join(r"System32\WindowsPowerShell\v1.0\powershell.exe"),
         );
         c.args([
@@ -366,8 +389,7 @@ mod windows {
         // Any error fails the run; lookups that may find nothing say
         // `-ErrorAction SilentlyContinue` themselves.
         .arg(format!("$ErrorActionPreference = 'Stop'\n{script}\nexit 0"))
-        .stdin(std::process::Stdio::null())
-        .creation_flags(CREATE_NO_WINDOW);
+        .stdin(std::process::Stdio::null());
         c
     }
 
@@ -523,7 +545,7 @@ pub async fn launch(paths: &Paths) -> anyhow::Result<ExitCode> {
 
 fn open_app(app: &Path, paths: &Paths) -> anyhow::Result<()> {
     let mut cmd = if cfg!(target_os = "macos") {
-        let mut c = std::process::Command::new("open");
+        let mut c = blirp_core::process::command("open");
         c.arg("-a").arg(app);
         // Launch Services does not pass this shell's environment on; a
         // custom data dir must reach the app or it would start a second
@@ -537,7 +559,8 @@ fn open_app(app: &Path, paths: &Paths) -> anyhow::Result<()> {
         }
         c
     } else {
-        std::process::Command::new(app)
+        // The desktop app is a GUI program: detached below, no console.
+        blirp_core::process::command(app)
     };
     cmd.stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::null())

@@ -46,6 +46,7 @@ semver = "1"
 serde = { version = "1", features = ["derive"] }
 serde_json = { version = "1", features = ["preserve_order"] }
 sha2 = "0.11"
+socket2 = "0.6"
 spake2 = "0.4"
 subtle = "2"
 tempfile = "3"
@@ -64,7 +65,7 @@ ts-rs = { version = "12", features = ["serde-json-impl", "no-serde-warnings"] }
 uuid = { version = "1", features = ["v4", "v7", "serde"] }
 vt100 = "0.16"
 zstd = "0.13"
-windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_System_Console", "Win32_System_JobObjects", "Win32_System_Power", "Win32_System_Threading", "Win32_Security"] }
+windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Networking_WinSock", "Win32_System_Console", "Win32_System_JobObjects", "Win32_System_Power", "Win32_System_Threading", "Win32_Security"] }
 
 [workspace.lints.rust]
 unsafe_code = "deny"

@@ -84,7 +84,7 @@ CSRF protection: a mutating request or WebSocket upgrade that carries an `Origin
 | `GET /api/projects/:id/git?root=` | `{is_git, root, branch, head, upstream, ahead, behind, entries[{path, orig_path, index, worktree, conflicted}]}`; 404 `not_git` for plain folders |
 | `GET /api/projects/:id/git/diff?path=&root=` | `{path, diff, truncated}` (working tree diff, capped at 1 MiB) |
 
-Files and git are read-only and take paths relative to the project folder on this machine (`root` picks one when the project has several). Absolute paths, `..` and symlinks leading outside the folder are rejected.
+Files and git are read-only and take paths relative to the project folder on this machine (`root` picks one when the project has several). Absolute paths, `..` and symlinks leading outside the folder are rejected, and so is anything inside blirp's own data folder (`BLIRP_HOME`, e.g. when the project folder is your home folder; session worktrees under `worktrees/` excepted): 403 `path_in_data_dir`.
 
 ### Memory
 
@@ -99,7 +99,7 @@ Files and git are read-only and take paths relative to the project folder on thi
 | `GET /api/projects/:id/wiki` | `WikiPage[]`: `{id, project_id, slug, title, body_md, updated_at, updated_by, deleted}` |
 | `POST /api/projects/:id/wiki` | `{slug, title, body_md}`; 201 |
 | `GET/PUT/DELETE /api/projects/:id/wiki/:slug` | read; replace `{title, body_md}`; delete (204) |
-| `GET /api/projects/:id/resources` | `Resource[]`: `{id, project_id, kind, url, title, meta, created_at, deleted}`; kind `link`, `repo`, `pr`, `issue`, `doc`, `file` |
+| `GET /api/projects/:id/resources` | `Resource[]`: `{id, project_id, kind, url, title, meta, created_at, updated_at, deleted}`; kind `link`, `repo`, `pr`, `issue`, `doc`, `file` |
 | `POST /api/projects/:id/resources` | `{kind, url, title, meta?}`; 201 |
 | `GET/PATCH/DELETE /api/projects/:id/resources/:rid` | read; patch; delete (204) |
 | `GET /api/projects/:id/suggestions?status=` | `Suggestion[]`: `{id, project_id, target (brief\|record\|wiki), target_id, proposal, rationale, source_session_id, status, created_at, decided_at}` |

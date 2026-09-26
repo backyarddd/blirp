@@ -23,7 +23,7 @@ irm https://raw.githubusercontent.com/backyarddd/blirp/main/install.ps1 | iex
 
 Then run `blirp`: it starts the daemon and opens the app.
 
-The scripts download the latest published release, check every file against the release's `SHA256SUMS.txt`, and install without admin rights:
+The scripts download the latest published release, check every file against the release's `SHA256SUMS.txt` and that file against its minisign signature (when they can, see [below](#how-the-scripts-verify-downloads)), and install without admin rights:
 
 | | CLI | Desktop app | PATH |
 |---|---|---|---|
@@ -45,6 +45,7 @@ No code-signing prompts appear: files fetched with `curl` or `irm` carry no quar
 | `--modify-path` | (default) | `BLIRP_MODIFY_PATH=1` | add the CLI folder to `PATH` in your shell startup file (`~/.zshrc`, `~/.bashrc` or `~/.bash_profile`, fish `conf.d/blirp.fish`, else `~/.profile`); marked `# added by the blirp installer` |
 | | `-NoModifyPath` | `BLIRP_NO_MODIFY_PATH=1` | Windows: leave the user `Path` alone |
 | | | `BLIRP_INSTALL_DIR=dir` | install the CLI (Windows: everything) into `dir` |
+| | | `BLIRP_REQUIRE_SIGNATURE=1` | refuse to install when the release signature cannot be checked |
 
 Pass options to the piped scripts like this:
 
@@ -57,6 +58,15 @@ $env:BLIRP_NO_APP = '1'; irm https://raw.githubusercontent.com/backyarddd/blirp/
 ```
 
 `install.sh` needs `curl` (or `wget`), `tar` and `sha256sum` or `shasum`. The desktop app is installed even without a display (it is just a file); use `--no-app` on servers.
+
+### How the scripts verify downloads
+
+Every file is checked against the release's `SHA256SUMS.txt`. That file is signed with the blirp release key (`SHA256SUMS.txt.sig`, minisign), and the scripts check the signature with the key written into them whenever the machine can:
+
+- with `minisign`, if it is installed;
+- else with OpenSSL 1.1.1 or 3 (it needs BLAKE2b-512 and Ed25519): most Linux distributions, Homebrew's `openssl@3` on macOS (found even when it is not on `PATH`), and on Windows the OpenSSL that ships with Git for Windows. macOS's own `openssl` is LibreSSL and cannot; Windows PowerShell and .NET have no Ed25519.
+
+A bad signature stops the install. When nothing can check it, the script says so and continues: the checksums then came over HTTPS from GitHub, just like the script itself, so they protect against a corrupted download but not against a compromised release. Set `BLIRP_REQUIRE_SIGNATURE=1` to refuse to install in that case. Once installed, `blirp update` always verifies the signature itself.
 
 ### Private repository, mirrors and testing
 
@@ -138,7 +148,7 @@ blirp update              # install the latest release
 blirp update --version 0.3.1   # a specific release, also older ones
 ```
 
-`blirp update` downloads `SHA256SUMS.txt`, verifies its signature with the release key built into blirp, downloads the CLI archive (and the desktop app, if the install script installed it), and checks both against the sums. Only then does it stop the daemon (running sessions end as Detached and can be resumed), replace the files and start the daemon again (through the autostart service when one is installed). On Windows the running `blirp.exe` is renamed to `blirp.exe.old` and removed the next time blirp starts. It never downgrades unless you pass `--version`, and it only updates installs made by the install scripts; otherwise it tells you how that copy was installed.
+`blirp update` downloads `SHA256SUMS.txt`, verifies its signature with the release key built into blirp, downloads the CLI archive (and the desktop app, if the install script installed it), and checks both against the sums. Only then does it stop the daemon (running sessions end as Detached and can be resumed), replace the files and start the daemon again (through the autostart service when one is installed). If replacing any file fails, the files already replaced are put back and the old version starts again. On Windows the running `blirp.exe` is renamed to `blirp.exe.old` and removed the next time blirp starts. It never downgrades unless you pass `--version`, and it only updates installs made by the install scripts; otherwise it tells you how that copy was installed.
 
 **Settings > About** shows when a newer release exists, with the command to run; the daemon asks GitHub for it at most once a day. Turn that off with `[update] check = false` ([configuration.md](configuration.md#update)). The desktop app has no updater of its own.
 

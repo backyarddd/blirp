@@ -45,7 +45,7 @@
   async function stop(): Promise<void> {
     if (!confirm(`Stop "${sessionTitle(session)}"? This ends the agent process and everything it started.`)) return;
     busy = true;
-    await app.act(() => api.sessions.stop(session.id));
+    await onSession('stop the session', () => api.sessions.stop(session.id));
     busy = false;
   }
 
@@ -67,25 +67,40 @@
     return 'The machine that runs this session';
   }
 
+  /**
+   * Run `action` on this session. Stop, resume and delete of another machine's session are
+   * forwarded to it: its refusal (offline, no control from here) is explained, not taken as a
+   * change of this client's rights. Returns undefined when it failed (a toast says why).
+   */
+  async function onSession<T>(what: string, action: () => Promise<T>): Promise<T | undefined> {
+    const { machine_id } = session;
+    const isRemote = remote;
+    try {
+      return await action();
+    } catch (e) {
+      const why = isRemote && e instanceof ApiError ? remoteRefusal(e.code, await ownerName(machine_id)) : null;
+      if (why === null) app.noteForbidden(e);
+      app.toast(`Could not ${what}: ${why ?? errorMessage(e)}`);
+      return undefined;
+    }
+  }
+
   // Ended sessions only: the daemon refuses live ones (409 `session_live`). Another machine's
   // session is deleted by that machine: it must be online and accept changes from here.
   async function remove(): Promise<void> {
     const msg = `Delete "${sessionTitle(session)}"? Its transcript and subagent sessions are removed on every synced machine. Memory records it produced stay.`;
     if (!confirm(msg)) return;
     // The `session_deleted` event may unmount this toolbar before the reply arrives.
-    const { id, machine_id } = session;
-    const isRemote = remote;
+    const { id } = session;
     busy = true;
-    try {
+    const done = await onSession('delete the session', async () => {
       await api.sessions.delete(id);
+      return true;
+    });
+    busy = false;
+    if (done) {
       app.toast('Session deleted', 'info');
       app.removeSession(id);
-    } catch (e) {
-      const why = isRemote && e instanceof ApiError ? remoteRefusal(e.code, await ownerName(machine_id)) : null;
-      if (why === null) app.noteForbidden(e);
-      app.toast(`Could not delete the session: ${why ?? errorMessage(e)}`);
-    } finally {
-      busy = false;
     }
   }
 
@@ -116,7 +131,7 @@
 
   async function resume(): Promise<void> {
     busy = true;
-    const s = await app.act(() => api.sessions.resume(session.id));
+    const s = await onSession('resume the session', () => api.sessions.resume(session.id));
     busy = false;
     if (s) app.upsertSession(s);
   }

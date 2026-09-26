@@ -329,8 +329,10 @@ async fn api_auth_projects_memory_files() {
         );
     }
 
-    // Register a folder; files API stays inside it.
-    let proj = h._home.path().join("proj");
+    // Register a folder; files API stays inside it. Not inside the data
+    // dir (BLIRP_HOME), which the files API never serves.
+    let work = tempfile::tempdir().unwrap();
+    let proj = work.path().join("proj");
     std::fs::create_dir_all(proj.join("src")).unwrap();
     std::fs::write(proj.join("src/main.rs"), "fn main() {}\n").unwrap();
     let r = h
@@ -632,6 +634,24 @@ async fn subagent_children_are_filtered_and_counted() {
         .send(reqwest::Method::DELETE, "/api/sessions/live", json!({}))
         .await;
     assert_eq!(r.status(), 409);
+    // Another machine's session: stop, resume and delete are all forwarded
+    // to it and fail the same specific way when it cannot be reached.
+    store
+        .insert_session(&Session {
+            machine_id: "other-machine".into(),
+            ..mk("theirs", None, SessionOrigin::External, 5)
+        })
+        .unwrap();
+    for (method, path) in [
+        (reqwest::Method::POST, "/api/sessions/theirs/stop"),
+        (reqwest::Method::POST, "/api/sessions/theirs/resume"),
+        (reqwest::Method::DELETE, "/api/sessions/theirs"),
+    ] {
+        let r = h.send(method, path, json!({})).await;
+        assert_eq!(r.status(), 409, "{path}");
+        let body: serde_json::Value = r.json().await.unwrap();
+        assert_eq!(body["error"]["code"], "machine_unreachable", "{path}");
+    }
     h.daemon.shutdown().await.unwrap();
 }
 
@@ -907,7 +927,7 @@ async fn terminal_socket_protocol() {
 }
 
 fn git(dir: &std::path::Path, args: &[&str]) {
-    let st = std::process::Command::new("git")
+    let st = blirp_core::process::command("git")
         .arg("-C")
         .arg(dir)
         .args([
@@ -949,7 +969,7 @@ async fn failed_launch_removes_its_worktree() {
         )
         .await;
     assert_eq!(r.status(), 500);
-    let out = std::process::Command::new("git")
+    let out = blirp_core::process::command("git")
         .arg("-C")
         .arg(&repo)
         .args(["worktree", "list", "--porcelain"])
