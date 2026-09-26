@@ -30,7 +30,7 @@
             <a class="name ellipsis" href={href.sessions(s.id)}>{sessionTitle(s)}</a>
             <span class="faint small ellipsis hide-sm">{app.projectById.get(s.project_id)?.name ?? ''} · {agentLabel(s.agent)}</span>
             <span class="spacer"></span>
-            <StatusChip status={s.status} />
+            <StatusChip session={s} />
             <a class="icon-btn sm" href={href.sessions(s.id)} aria-label="Open {sessionTitle(s)}" title="Open session"><Maximize size={14} /></a>
           </header>
           <div class="term">

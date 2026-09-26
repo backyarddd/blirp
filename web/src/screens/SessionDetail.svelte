@@ -12,7 +12,7 @@
   import { parseSummary } from '../lib/memory';
   import { app } from '../lib/app.svelte';
   import { agentLabel, sessionTitle } from '../lib/status';
-  import { formatDateTime, formatElapsed, formatTime } from '../lib/time';
+  import { formatDateTime, formatElapsed, formatRelative, formatTime } from '../lib/time';
   import Markdown from '../lib/components/Markdown.svelte';
   import StatusChip from '../lib/components/StatusChip.svelte';
   import Loadable from '../lib/components/Loadable.svelte';
@@ -59,7 +59,7 @@
   let busy = $state(false);
   async function distill(): Promise<void> {
     busy = true;
-    await app.act(() => api.sessions.distill(session.id), 'Distill queued. Memory updates when it finishes.');
+    await app.distill(session);
     busy = false;
   }
 
@@ -88,7 +88,7 @@
     <div class="titles">
       <h1 class="ellipsis">{sessionTitle(session)}</h1>
       <div class="row wrap small muted">
-        <StatusChip status={session.status} />
+        <StatusChip {session} />
         <span>{agentLabel(session.agent)}</span>
         {#if session.origin === 'external'}<span class="badge">started outside blirp</span>{/if}
         <span>{formatDateTime(session.started_at)}</span>
@@ -100,13 +100,20 @@
         {#if session.exit_code !== null && session.exit_code !== 0}<span>· exit code {session.exit_code}</span>{/if}
       </div>
     </div>
-    <div class="row wrap actions">
-      <button type="button" class="btn sm" onclick={distill} disabled={busy}>Distill now</button>
-    </div>
+    {#if app.control}
+      <div class="row wrap actions">
+        <button type="button" class="btn sm" onclick={distill} disabled={busy}>Distill now</button>
+      </div>
+    {/if}
   </header>
 
   <div class="body">
-    {#if summary}
+    {#if summary?.error}
+      <p class="err small" role="status">
+        Last distill failed {formatRelative(summary.error.at)}: {summary.error.message}
+      </p>
+    {/if}
+    {#if summary?.summary}
       <section class="card summary">
         <h2 class="section-title">Summary</h2>
         <p>{summary.summary}</p>

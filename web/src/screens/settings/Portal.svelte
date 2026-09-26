@@ -1,19 +1,15 @@
 <script lang="ts">
   import { untrack } from 'svelte';
   import { api } from '../../lib/api/client';
-  import type { PortalConfig, SettingsView } from '../../lib/api/types.gen';
-  import type { BrowserInvite } from '../../lib/api/types.pending';
+  import type { BrowserInvite, PortalConfig, SettingsView } from '../../lib/api/types.gen';
   import { app } from '../../lib/app.svelte';
-  import { Resource } from '../../lib/resource.svelte';
-  import { formatDateTime } from '../../lib/time';
   import QrCode from '../../lib/components/QrCode.svelte';
+  import Expiry from '../../lib/components/Expiry.svelte';
 
   let { settings, onsaved }: { settings: SettingsView; onsaved: (s: SettingsView) => void } = $props();
 
-  const status = new Resource(() => api.sync.status());
-  $effect(() => {
-    void status.load();
-  });
+  const status = $derived(app.sync);
+  const running = $derived(status?.portal_url != null);
 
   let port = $state(untrack(() => settings.config.portal.lan_port));
   let saving = $state(false);
@@ -25,7 +21,7 @@
     saving = false;
     if (s) {
       onsaved(s);
-      void status.reload();
+      void app.refreshSync();
     }
   }
 
@@ -47,46 +43,51 @@
 <section class="card panel-pad">
   <h2 class="h">LAN portal</h2>
   <p class="hint">
-    Serve this UI over HTTPS on your local network so a phone or another computer can watch and steer sessions. Devices sign in
-    by scanning a one-time QR code from a screen that is already signed in. Prefer <code>tailscale serve</code> for access from
-    outside your network.
+    A hub can serve this UI over HTTPS on your local network so a phone or another computer can watch and steer sessions. Devices
+    sign in by scanning a one-time QR code from a screen that is already signed in. Prefer <code>tailscale serve</code> for access
+    from outside your network.
   </p>
-  <label class="check">
-    <input type="checkbox" checked={settings.config.portal.lan} disabled={saving} onchange={(e) => patchPortal({ lan: e.currentTarget.checked })} />
-    <span>Serve the portal on the local network</span>
-  </label>
-  <form class="row wrap port" onsubmit={savePort}>
-    <label class="field">
-      <span>HTTPS port</span>
-      <input class="input" type="number" min="1024" max="65535" bind:value={port} />
+  {#if !app.portal}
+    <label class="check">
+      <input type="checkbox" checked={settings.config.portal.lan} disabled={saving} onchange={(e) => patchPortal({ lan: e.currentTarget.checked })} />
+      <span>Serve the portal on the local network</span>
     </label>
-    <button type="submit" class="btn" disabled={saving || port === settings.config.portal.lan_port}>Save port</button>
-  </form>
-  {#if settings.config.portal.lan && status.data}
+    <form class="row wrap port" onsubmit={savePort}>
+      <label class="field">
+        <span>HTTPS port</span>
+        <input class="input" type="number" min="1024" max="65535" bind:value={port} />
+      </label>
+      <button type="submit" class="btn" disabled={saving || port === settings.config.portal.lan_port}>Save port</button>
+    </form>
+    <p class="hint">The portal runs while this machine is the hub. Changes apply the next time the hub is enabled or the daemon starts.</p>
+  {/if}
+  {#if running && status}
     <dl class="facts">
       <dt>Address</dt>
-      <dd class="mono small">{status.data.portal_url ?? 'Starting…'}</dd>
+      <dd class="mono small" data-testid="portal-url">{status.portal_url}</dd>
       <dt>Certificate fingerprint</dt>
-      <dd class="mono small fp">{status.data.portal_cert_fingerprint ?? 'Not generated yet'}</dd>
+      <dd class="mono small fp">{status.portal_cert_fingerprint ?? 'Not generated yet'}</dd>
     </dl>
     <p class="hint">The certificate is self-signed. Check the fingerprint when your browser asks you to trust it.</p>
+  {:else if settings.config.portal.lan}
+    <p class="small muted">The portal is not running.</p>
   {/if}
 </section>
 
-{#if settings.config.portal.lan}
+{#if running}
   <section class="card panel-pad">
     <div class="row">
       <h2 class="h">Sign in a phone or browser</h2>
       <span class="spacer"></span>
       <button type="button" class="btn primary" onclick={createLogin}>{login ? 'New code' : 'Show login QR'}</button>
     </div>
-    <p class="hint">The code works once and expires after 5 minutes. Manage signed-in devices under Machines &amp; Sync.</p>
+    <p class="hint">The code works once and expires after 5 minutes. New devices start view-only; allow terminal control under Devices.</p>
     {#if login}
       <div class="row wrap qr">
         <QrCode text={login.url} label="Portal login QR code" size={200} />
         <div class="small">
           <p class="mono url">{login.url}</p>
-          <p class="muted">Expires {formatDateTime(login.expires_at)}</p>
+          <Expiry at={login.expires_at} />
         </div>
       </div>
     {/if}

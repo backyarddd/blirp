@@ -1,8 +1,7 @@
 // Typed views of the free-form JSON the daemon stores for memory: `Session.summary`
 // (distill output, §9) and `Suggestion.proposal`. Both arrive as parsed JSON of unknown
 // shape, so read them defensively: a malformed field degrades to empty, never a crash.
-import type { JsonValue, Suggestion } from './api/types.gen';
-import type { SessionSummary, TitledNote } from './api/types.pending';
+import type { DistillFailure, JsonValue, SessionSummary, Suggestion, SummaryItem } from './api/types.gen';
 
 type JsonObject = { [key in string]: JsonValue };
 
@@ -15,30 +14,48 @@ const str = (o: JsonObject, k: string): string => {
   return typeof v === 'string' ? v : '';
 };
 
+const optStr = (o: JsonObject, k: string): string | null => {
+  const v = o[k];
+  return typeof v === 'string' && v !== '' ? v : null;
+};
+
+const optNum = (o: JsonObject, k: string): number | null => {
+  const v = o[k];
+  return typeof v === 'number' ? v : null;
+};
+
 const strings = (o: JsonObject, k: string): string[] => {
   const v = o[k];
   return Array.isArray(v) ? v.filter((x): x is string => typeof x === 'string') : [];
 };
 
-const notes = (o: JsonObject, k: string): TitledNote[] => {
+const notes = (o: JsonObject, k: string): SummaryItem[] => {
   const v = o[k];
   if (!Array.isArray(v)) return [];
   return v.filter(isObject).map((n) => ({ title: str(n, 'title'), body: str(n, 'body') }));
 };
+
+function failure(v: JsonValue | undefined): DistillFailure | null {
+  if (!isObject(v)) return null;
+  return { message: str(v, 'message') || 'Unknown error', at: optNum(v, 'at') ?? 0, through_seq: optNum(v, 'through_seq') ?? 0 };
+}
 
 /** The distill summary of a session, or null when it has none (or it is not an object). */
 export function parseSummary(v: JsonValue | null | undefined): SessionSummary | null {
   if (!isObject(v)) return null;
   const o = v;
   return {
-    title: str(o, 'title'),
-    summary: str(o, 'summary'),
+    title: optStr(o, 'title'),
+    summary: optStr(o, 'summary'),
     decisions: notes(o, 'decisions'),
     open_threads: notes(o, 'open_threads'),
-    resolved_record_ids: strings(o, 'resolved_record_ids'),
     gotchas: notes(o, 'gotchas'),
+    resolved_record_ids: strings(o, 'resolved_record_ids'),
     files: strings(o, 'files'),
-    brief_md: str(o, 'brief_md'),
+    backend: optStr(o, 'backend'),
+    distilled_at: optNum(o, 'distilled_at'),
+    through_seq: optNum(o, 'through_seq') ?? 0,
+    error: failure(o['error']),
   };
 }
 

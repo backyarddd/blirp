@@ -22,6 +22,40 @@ export function statusInfo(status: SessionStatus): StatusInfo {
   return INFO[status];
 }
 
+/**
+ * Session fields newer daemons add to the DTO; optional so the UI works with daemons that
+ * do not send them yet.
+ */
+export interface SessionExtras {
+  /** Ended by the user's Stop rather than on its own. */
+  stopped_by_user?: boolean;
+  /** Subagent sessions under this one (their rows are hidden from lists by default). */
+  children_count?: number;
+}
+
+export type SessionLike = Pick<Session, 'status'> & SessionExtras;
+
+const STOPPED: StatusInfo = { label: 'Stopped', tone: 'idle', pulse: false };
+
+/** Status chip for a session: an ended session the user stopped reads "Stopped". */
+export function sessionStatusInfo(s: SessionLike): StatusInfo {
+  return s.stopped_by_user === true && !isLive(s.status) ? STOPPED : INFO[s.status];
+}
+
+/**
+ * Subagent sessions ingested from an agent's transcript (§8). `continue_from` sessions also
+ * carry a parent but are launched by blirp and stay top-level.
+ */
+export function isSubagent(s: Pick<Session, 'origin' | 'parent_session_id'>): boolean {
+  return s.origin === 'external' && s.parent_session_id !== null;
+}
+
+/** Subagent count: the daemon's `children_count`, else counted from the loaded sessions. */
+export function childCount(s: Session & SessionExtras, loaded: readonly Session[]): number {
+  if (typeof s.children_count === 'number') return s.children_count;
+  return loaded.filter((c) => c.parent_session_id === s.id && isSubagent(c)).length;
+}
+
 const LIVE: ReadonlySet<SessionStatus> = new Set(['starting', 'working', 'idle', 'waiting']);
 
 /** The agent process is (as far as the daemon knows) still running. */

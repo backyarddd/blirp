@@ -38,7 +38,7 @@
   }
 
   function switchSession(delta: number): void {
-    const order = groupSessions(app.sessions, app.projectById).flatMap((g) => g.sessions);
+    const order = groupSessions(app.topSessions, app.projectById).flatMap((g) => g.sessions);
     if (order.length === 0) return;
     const current = route.name === 'sessions' ? route.sessionId : null;
     const i = order.findIndex((s) => s.id === current);
@@ -127,7 +127,7 @@
           Open blirp from the desktop app or run <code>blirp open</code> in a terminal. Both sign this browser in with a
           one-time link.
         </p>
-        <p class="muted small">On another device, scan the login QR code from Settings &gt; Portal on an already signed-in screen.</p>
+        <p class="muted small">On another device, scan the login QR code from Settings &gt; Machines &amp; Sync on an already signed-in screen.</p>
         <button class="btn" type="button" onclick={() => app.boot()}>Try again</button>
       {:else}
         <h1>Cannot reach the blirp daemon</h1>

@@ -7,7 +7,6 @@
   import Agents from './settings/Agents.svelte';
   import MemorySettings from './settings/MemorySettings.svelte';
   import Sync from './settings/Sync.svelte';
-  import Portal from './settings/Portal.svelte';
   import Appearance from './settings/Appearance.svelte';
   import About from './settings/About.svelte';
 
@@ -17,7 +16,6 @@
     { id: 'agents', label: 'Agents' },
     { id: 'memory', label: 'Memory' },
     { id: 'sync', label: 'Machines & Sync' },
-    { id: 'portal', label: 'Portal' },
     { id: 'appearance', label: 'Appearance' },
     { id: 'about', label: 'About' },
   ];
@@ -40,7 +38,7 @@
       <h1 class="page-title">Settings</h1>
       <ul>
         {#each SECTIONS as s (s.id)}
-          <li><a href={href.settings(s.id)} aria-current={s.id === section ? 'page' : undefined}>{s.label}</a></li>
+          <li><a href={href.settings(s.id)} aria-current={s.id === (section === 'portal' ? 'sync' : section) ? 'page' : undefined}>{s.label}</a></li>
         {/each}
       </ul>
     </nav>
@@ -52,10 +50,9 @@
               <Agents settings={settings.data} onsaved={saved} />
             {:else if section === 'memory'}
               <MemorySettings settings={settings.data} onsaved={saved} />
-            {:else if section === 'sync'}
+            {:else}
+              <!-- The LAN portal lives on the sync page; /settings/portal still lands there. -->
               <Sync settings={settings.data} onsaved={saved} />
-            {:else if section === 'portal'}
-              <Portal settings={settings.data} onsaved={saved} />
             {/if}
           {/if}
         </Loadable>

@@ -6,6 +6,7 @@
   import { agentLabel, basename, sessionTitle } from '../status';
   import { formatRelative } from '../time';
   import StatusChip from './StatusChip.svelte';
+  import Subagents from './Subagents.svelte';
 
   let { session }: { session: Session } = $props();
 </script>
@@ -22,8 +23,9 @@
       {#if session.origin === 'external'}<span class="badge">external</span>{/if}
     </span>
   </span>
-  <StatusChip status={session.status} />
+  <StatusChip {session} />
 </a>
+<Subagents parent={session} />
 
 <style>
   .srow {

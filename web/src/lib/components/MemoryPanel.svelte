@@ -1,11 +1,14 @@
 <script lang="ts">
   import X from '@lucide/svelte/icons/x';
   import Plus from '@lucide/svelte/icons/plus';
+  import Sparkles from '@lucide/svelte/icons/sparkles';
   import { api } from '../api/client';
   import type { ProjectMemory, Record as MemoryRecord, Session } from '../api/types.gen';
   import { app } from '../app.svelte';
+  import { parseSummary } from '../memory';
   import { Resource } from '../resource.svelte';
   import { href } from '../router';
+  import { formatRelative } from '../time';
   import BriefEditor from './BriefEditor.svelte';
   import Loadable from './Loadable.svelte';
   import Markdown from './Markdown.svelte';
@@ -32,6 +35,8 @@
       void memory.load();
     } else {
       void memory.reload();
+      // Sessions without a launch file (external ones) get a fresh render of the memory.
+      void injection.reload();
     }
   });
 
@@ -40,6 +45,18 @@
       .filter((r) => r.kind === 'open_thread' && r.status === 'active')
       .sort((a, b) => Number(b.pinned) - Number(a.pinned) || b.updated_at - a.updated_at),
   );
+  // Pinned open threads are already listed above.
+  const pinned = $derived(
+    (memory.data?.records ?? []).filter((r) => r.pinned && r.status === 'active' && r.kind !== 'open_thread'),
+  );
+
+  const summary = $derived(parseSummary(session.summary));
+  let distilling = $state(false);
+  async function distill(): Promise<void> {
+    distilling = true;
+    await app.distill(session);
+    distilling = false;
+  }
 
   let adding = $state(false);
   let newTitle = $state('');
@@ -93,9 +110,7 @@
         loading={injection.loading}
         error={injection.error}
         empty={!injection.data?.markdown}
-        emptyText={injection.unavailable
-          ? 'This version of blirp cannot show the injected memory yet.'
-          : 'Nothing was injected into this session.'}
+        emptyText="Nothing was injected into this session."
         onretry={() => injection.load()}
       >
         <details class="inj">
@@ -107,6 +122,31 @@
           {/if}
         </details>
       </Loadable>
+    </section>
+
+    <section aria-label="Distill">
+      <div class="row">
+        <h3 class="section-title">Session summary</h3>
+        <span class="spacer"></span>
+        {#if app.control}
+          <button type="button" class="btn sm" onclick={distill} disabled={distilling}>
+            <Sparkles size={13} aria-hidden="true" />{distilling ? 'Queuing…' : 'Distill now'}
+          </button>
+        {/if}
+      </div>
+      {#if summary?.summary}
+        <p class="small">{summary.summary}</p>
+        {#if summary.distilled_at}
+          <p class="faint small">Distilled {formatRelative(summary.distilled_at)}{summary.backend ? ` by ${summary.backend}` : ''}</p>
+        {/if}
+      {:else}
+        <p class="muted small">Not distilled yet. blirp distills sessions after they go idle or end.</p>
+      {/if}
+      {#if summary?.error}
+        <p class="distill-err small" role="status" data-testid="distill-error">
+          Last distill failed {formatRelative(summary.error.at)}: {summary.error.message}
+        </p>
+      {/if}
     </section>
 
     <Loadable loading={memory.loading} error={memory.error} empty={!memory.data} onretry={() => memory.load()}>
@@ -149,6 +189,17 @@
           </ul>
         {/if}
       </section>
+
+      {#if pinned.length > 0}
+        <section>
+          <h3 class="section-title">Pinned</h3>
+          <ul class="list">
+            {#each pinned as r (r.id)}
+              <li><RecordItem record={r} onchange={(x) => onRecord(r.id, x)} /></li>
+            {/each}
+          </ul>
+        </section>
+      {/if}
     </Loadable>
   </div>
 </div>
@@ -206,6 +257,11 @@
     padding: 8px;
     max-height: 360px;
     overflow: auto;
+  }
+  .distill-err {
+    color: var(--failed);
+    margin: 6px 0 0;
+    overflow-wrap: anywhere;
   }
   .add {
     display: grid;

@@ -1,6 +1,8 @@
 // The only module that talks HTTP to the daemon. Everything else imports `api`.
 import type {
+  AgentInfo,
   Brief,
+  BrowserInvite,
   CreateRecord,
   CreateResource,
   CreateWikiPage,
@@ -11,9 +13,12 @@ import type {
   GitDiff,
   GitStatus,
   Health,
+  Injection,
+  JoinHub,
   LaunchSession,
   Machine,
   OpenTarget,
+  PatchDevice,
   PatchRecord,
   PatchResource,
   ProjectMemory,
@@ -30,9 +35,10 @@ import type {
   SettingsView,
   Suggestion,
   SuggestionStatus,
+  SyncInvite,
+  SyncStatus,
   WikiPage,
 } from './types.gen';
-import type { AgentView, BrowserInvite, DevicePatch, Injection, Invite, JoinRequest, SyncStatus } from './types.pending';
 
 export class ApiError extends Error {
   constructor(
@@ -46,11 +52,6 @@ export class ApiError extends Error {
 
   get unauthorized(): boolean {
     return this.status === 401;
-  }
-
-  /** The endpoint belongs to a phase this daemon does not ship yet (§11). */
-  get notImplemented(): boolean {
-    return this.status === 501;
   }
 }
 
@@ -148,6 +149,8 @@ export interface SessionQuery {
   q?: string;
   cursor?: string;
   limit?: number;
+  /** Children (subagent sessions) of this session. */
+  parent?: string;
 }
 
 export interface SearchQuery {
@@ -224,9 +227,9 @@ export const api = {
   },
   search: (q: SearchQuery) => request<SearchResults>('GET', '/api/search', undefined, { ...q }),
   agents: {
-    list: () => request<AgentView[]>('GET', '/api/agents'),
-    installHooks: (id: string) => request<AgentView>('POST', `/api/agents/${enc(id)}/hooks/install`),
-    uninstallHooks: (id: string) => request<AgentView>('POST', `/api/agents/${enc(id)}/hooks/uninstall`),
+    list: () => request<AgentInfo[]>('GET', '/api/agents'),
+    installHooks: (id: string) => request<AgentInfo>('POST', `/api/agents/${enc(id)}/hooks/install`),
+    uninstallHooks: (id: string) => request<AgentInfo>('POST', `/api/agents/${enc(id)}/hooks/uninstall`),
   },
   inject: (session: string) => request<Injection>('GET', '/api/inject', undefined, { session }),
   settings: {
@@ -237,15 +240,19 @@ export const api = {
   sync: {
     status: () => request<SyncStatus>('GET', '/api/sync/status'),
     enableHub: () => request<SyncStatus>('POST', '/api/sync/hub/enable'),
-    invite: () => request<Invite>('POST', '/api/sync/invite'),
-    join: (body: JoinRequest) => request<SyncStatus>('POST', '/api/sync/join', body),
+    disableHub: () => request<SyncStatus>('POST', '/api/sync/hub/disable'),
+    invite: () => request<SyncInvite>('POST', '/api/sync/invite'),
+    /** `invite` may be a `blirp://join` URI, or empty to find the hub on the local network. */
+    join: (body: JoinHub) => request<SyncStatus>('POST', '/api/sync/join', body),
   },
   devices: {
     list: () => request<Device[]>('GET', '/api/devices'),
     revoke: (id: string) => request<void>('DELETE', `/api/devices/${enc(id)}`),
-    patch: (id: string, body: DevicePatch) => request<Device>('PATCH', `/api/devices/${enc(id)}`, body),
+    patch: (id: string, body: PatchDevice) => request<Device>('PATCH', `/api/devices/${enc(id)}`, body),
     browserInvite: () => request<BrowserInvite>('POST', '/api/devices/browser-invite'),
   },
+  /** 202; loopback listener only (404 on the portal). */
+  shutdown: () => request<void>('POST', '/api/daemon/shutdown'),
 };
 
 /** Absolute ws:// or wss:// URL for a same-origin path. */

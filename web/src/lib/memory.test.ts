@@ -11,18 +11,29 @@ describe('parseSummary', () => {
       resolved_record_ids: ['r1'],
       gotchas: [{ title: 'g' }],
       files: ['a.ts', 3],
-      brief_md: '# B',
+      backend: 'claude',
+      distilled_at: 5,
+      through_seq: 9,
+      error: null,
     });
     expect(s).toEqual({
       title: 'T',
       summary: 'S',
       decisions: [{ title: 'd', body: 'b' }],
       open_threads: [],
-      resolved_record_ids: ['r1'],
       gotchas: [{ title: 'g', body: '' }],
+      resolved_record_ids: ['r1'],
       files: ['a.ts'],
-      brief_md: '# B',
+      backend: 'claude',
+      distilled_at: 5,
+      through_seq: 9,
+      error: null,
     });
+  });
+  it('reads a failed attempt without a summary', () => {
+    const s = parseSummary({ summary: null, error: { message: 'no backend', at: 7, through_seq: 3 } });
+    expect(s?.summary).toBeNull();
+    expect(s?.error).toEqual({ message: 'no backend', at: 7, through_seq: 3 });
   });
   it('rejects non-objects and tolerates missing fields', () => {
     expect(parseSummary(null)).toBeNull();

@@ -1,8 +1,7 @@
 import { ApiError, api, errorMessage, eventsWsPath, onUnauthorized, wsUrl } from './api/client';
-import type { Health, LaunchSession, ProjectSummary, ServerEvent, Session } from './api/types.gen';
-import type { AgentView } from './api/types.pending';
+import type { AgentInfo, Health, LaunchSession, ProjectSummary, ServerEvent, Session, SyncStatus } from './api/types.gen';
 import { backoffDelay } from './terminal/protocol';
-import { hasTerminal, notifiableTransition, sessionTitle, statusInfo } from './status';
+import { hasTerminal, isSubagent, notifiableTransition, sessionStatusInfo, sessionTitle } from './status';
 import { readPref, writePref } from './prefs';
 import { navigate } from './router.svelte';
 import { href } from './router';
@@ -26,15 +25,17 @@ const EVENT_TYPES: ReadonlySet<string> = new Set([
   'session_updated',
   'project_updated',
   'memory_updated',
+  'sync_updated',
   'resync',
 ]);
 
 /** Shallow check of a daemon frame; payloads are generated DTOs from the same-origin daemon. */
 function isServerEvent(v: unknown): v is ServerEvent {
   if (typeof v !== 'object' || v === null) return false;
-  const o = v as { type?: unknown; session?: unknown; project_id?: unknown };
+  const o = v as { type?: unknown; session?: unknown; project_id?: unknown; status?: unknown };
   if (typeof o.type !== 'string' || !EVENT_TYPES.has(o.type)) return false;
   if (o.type === 'session_created' || o.type === 'session_updated') return typeof o.session === 'object' && o.session !== null;
+  if (o.type === 'sync_updated') return typeof o.status === 'object' && o.status !== null;
   if (o.type === 'resync') return true;
   return typeof o.project_id === 'string';
 }
@@ -50,9 +51,28 @@ class AppState {
   projects: ProjectSummary[] = $state.raw([]);
   projectsLoaded = $state(false);
   projectsError: string | null = $state(null);
-  agents: AgentView[] = $state.raw([]);
+  agents: AgentInfo[] = $state.raw([]);
   agentsError: string | null = $state(null);
   agentsLoaded = $state(false);
+
+  /** Pushed by `sync_updated`; null until loaded. */
+  sync: SyncStatus | null = $state.raw(null);
+  /** Bumped on every sync status change so views refetch machines and devices. */
+  syncTick = $state(0);
+  /**
+   * Served over the hub's LAN portal to a browser device (§13). Such devices never have
+   * `admin`, so admin-only actions are hidden. The daemon exposes no capability flag; the
+   * portal is recognized as HTTPS on the port of `portal_url` (the local listener is plain
+   * HTTP, and `tailscale serve` in front of it answers on its own port).
+   */
+  portal = $derived(
+    location.protocol === 'https:' && this.sync?.portal_url != null && portOf(this.sync.portal_url) === location.port,
+  );
+  #adminDenied = $state(false);
+  /** Hub, pairing, devices, global integration, open folder and daemon shutdown (§11). */
+  admin = $derived(!this.portal && !this.#adminDenied);
+  /** May type into terminals and launch, stop or distill sessions (§11). */
+  control = $state(true);
 
   conn: ConnState = $state('connecting');
   /** Bumped per project when the daemon reports a memory change; views re-fetch on change. */
@@ -69,6 +89,8 @@ class AppState {
   projectById: Map<string, ProjectSummary> = $derived(new Map(this.projects.map((p) => [p.id, p])));
   sessionById: Map<string, Session> = $derived(new Map(this.sessions.map((s) => [s.id, s])));
   liveSessions: Session[] = $derived(this.sessions.filter(hasTerminal));
+  /** What lists show: subagent children sit under their parent's card instead. */
+  topSessions: Session[] = $derived(this.sessions.filter((s) => !isSubagent(s)));
 
   #ws: WebSocket | null = null;
   #attempt = 0;
@@ -93,7 +115,42 @@ class AppState {
     }
     this.auth = 'ok';
     this.startStream();
-    await Promise.all([this.refreshProjects(), this.refreshSessions(), this.refreshAgents()]);
+    await Promise.all([this.refreshProjects(), this.refreshSessions(), this.refreshAgents(), this.refreshSync()]);
+    await this.#probeControl();
+  }
+
+  async refreshSync(): Promise<void> {
+    try {
+      this.setSync(await api.sync.status());
+    } catch (e) {
+      console.warn('blirp: sync status unavailable', e);
+    }
+  }
+
+  setSync(status: SyncStatus): void {
+    this.sync = status;
+    this.syncTick++;
+    // Health carries the role shown in the top bar and used by the machine picker.
+    if (this.health && this.health.role !== status.role) void this.refreshHealth();
+  }
+
+  /**
+   * Portal devices control terminals only when allowed in Settings > Devices, and the daemon
+   * does not tell a client which applies to it. Stopping a session id that cannot exist is
+   * refused with 403 `control_not_allowed` before anything else happens and otherwise fails
+   * harmlessly (409 `not_running`), so it answers the question without side effects.
+   */
+  async #probeControl(): Promise<void> {
+    if (!this.portal) {
+      this.control = true;
+      return;
+    }
+    try {
+      await api.sessions.stop('control-probe');
+      this.control = true;
+    } catch (e) {
+      this.control = !(e instanceof ApiError && e.code === 'control_not_allowed');
+    }
   }
 
   /** Role/name changes (hub enable, pairing) show up in the top bar. */
@@ -188,8 +245,33 @@ class AppState {
       if (success) this.toast(success, 'info');
       return out;
     } catch (e) {
+      this.noteForbidden(e);
       this.toast(errorMessage(e));
       return undefined;
+    }
+  }
+
+  /** A 403 teaches the UI what this client may not do, so those actions are hidden from then on. */
+  noteForbidden(e: unknown): void {
+    if (!(e instanceof ApiError) || e.status !== 403) return;
+    if (e.code === 'admin_only') this.#adminDenied = true;
+    if (e.code === 'control_not_allowed') this.control = false;
+  }
+
+  /** Manual distill (§9). The 409s are expected outcomes and read as information. */
+  async distill(session: Session): Promise<void> {
+    try {
+      await api.sessions.distill(session.id);
+      this.toast('Distill queued. The summary and memory update when it finishes.', 'info');
+    } catch (e) {
+      this.noteForbidden(e);
+      if (e instanceof ApiError && e.code === 'remote_session') {
+        this.toast('This session ran on another machine. It is distilled there and its summary arrives by sync.', 'info');
+      } else if (e instanceof ApiError && e.code === 'nothing_to_distill') {
+        this.toast('Nothing to distill yet: this session has no transcript events.', 'info');
+      } else {
+        this.toast(`Distill failed: ${errorMessage(e)}`);
+      }
     }
   }
 
@@ -234,7 +316,7 @@ class AppState {
     if (!('Notification' in window) || Notification.permission !== 'granted') return;
     const project = this.projectById.get(next.project_id)?.name ?? '';
     const n = new Notification(sessionTitle(next), {
-      body: `${statusInfo(next.status).label}${project ? ` · ${project}` : ''}`,
+      body: `${sessionStatusInfo(next).label}${project ? ` · ${project}` : ''}`,
       tag: next.id,
     });
     n.onclick = () => {
@@ -265,7 +347,10 @@ class AppState {
     ws.onopen = () => {
       this.conn = 'open';
       // Catch up on anything missed while disconnected; the stream only carries deltas.
-      if (reconnecting) void Promise.all([this.refreshSessions(), this.refreshProjects()]);
+      // Changing a device's rights closes its sockets (§10), so a reconnect re-checks control.
+      if (reconnecting) {
+        void Promise.all([this.refreshSessions(), this.refreshProjects(), this.refreshSync(), this.#probeControl()]);
+      }
       this.#attempt = 0;
     };
     ws.onmessage = (ev: MessageEvent<unknown>) => {
@@ -303,12 +388,23 @@ class AppState {
       case 'memory_updated':
         this.bumpMemory(msg.project_id);
         break;
+      case 'sync_updated':
+        this.setSync(msg.status);
+        break;
       case 'resync':
         // The daemon dropped events for this client; everything may be stale.
-        void Promise.all([this.refreshSessions(), this.refreshProjects()]);
+        void Promise.all([this.refreshSessions(), this.refreshProjects(), this.refreshSync()]);
         for (const p of this.projects) this.bumpMemory(p.id);
         break;
     }
+  }
+}
+
+function portOf(url: string): string | null {
+  try {
+    return new URL(url).port;
+  } catch {
+    return null;
   }
 }
 

@@ -1,9 +1,8 @@
 <script lang="ts">
-  import type { SessionStatus } from '../api/types.gen';
-  import { statusInfo } from '../status';
+  import { sessionStatusInfo, type SessionLike } from '../status';
 
-  let { status }: { status: SessionStatus } = $props();
-  const info = $derived(statusInfo(status));
+  let { session }: { session: SessionLike } = $props();
+  const info = $derived(sessionStatusInfo(session));
 </script>
 
 <span class="chip {info.tone}">

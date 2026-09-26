@@ -2,7 +2,7 @@
   import { app } from '../app.svelte';
   import { nav, navigate } from '../router.svelte';
   import { href } from '../router';
-  import { agentLabel, sessionTitle, statusInfo } from '../status';
+  import { agentLabel, sessionStatusInfo, sessionTitle } from '../status';
   import { toggleTheme } from '../theme.svelte';
   import { isMac } from '../prefs';
   import { shortcutLabel } from '../shortcuts';
@@ -52,11 +52,11 @@
       { id: 'a:settings', group: 'Actions', label: 'Settings', hint: '', run: go(href.settings()) },
       { id: 'a:theme', group: 'Actions', label: 'Toggle light / dark theme', hint: '', run: toggleTheme },
     ];
-    const sessions: Item[] = app.sessions.map((s) => ({
+    const sessions: Item[] = app.topSessions.map((s) => ({
       id: `s:${s.id}`,
       group: 'Sessions',
       label: sessionTitle(s),
-      hint: `${agentLabel(s.agent)} · ${app.projectById.get(s.project_id)?.name ?? ''} · ${statusInfo(s.status).label}`,
+      hint: `${agentLabel(s.agent)} · ${app.projectById.get(s.project_id)?.name ?? ''} · ${sessionStatusInfo(s).label}`,
       run: go(href.sessions(s.id)),
     }));
     const projects: Item[] = app.projects.map((p) => ({

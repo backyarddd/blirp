@@ -8,6 +8,7 @@
   import { formatRelative } from '../time';
   import StatusChip from './StatusChip.svelte';
   import Loadable from './Loadable.svelte';
+  import Subagents from './Subagents.svelte';
 
   let { selectedId }: { selectedId: string | null } = $props();
 
@@ -16,10 +17,10 @@
   const groups = $derived.by(() => {
     const q = filter.trim().toLowerCase();
     const list = q
-      ? app.sessions.filter((s) =>
+      ? app.topSessions.filter((s) =>
           `${sessionTitle(s)} ${s.branch ?? ''} ${s.cwd} ${s.agent}`.toLowerCase().includes(q),
         )
-      : app.sessions;
+      : app.topSessions;
     return groupSessions(list, app.projectById);
   });
 </script>
@@ -70,10 +71,11 @@
                         <Folder size={12} aria-label="Folder" />{basename(s.cwd)}
                       {/if}
                     </span>
-                    <StatusChip status={s.status} />
+                    <StatusChip session={s} />
                   </span>
                   <span class="sub faint">{agentLabel(s.agent)} · {formatRelative(s.last_activity_at)}{s.origin === 'external' ? ' · external' : ''}</span>
                 </a>
+                <Subagents parent={s} onnavigate={() => (app.sidebarOpen = false)} />
               </li>
             {/each}
           </ul>

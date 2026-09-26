@@ -32,7 +32,8 @@
       label: a.display_name || agentLabel(a.id),
       hint: a.installed ? (a.id === session.agent ? 'same agent' : '') : 'not installed',
       disabled: !a.installed,
-      onselect: () => void app.launch({ continue_from: session.id, agent: a.id, project_id: session.project_id }),
+      // No folder: the daemon starts it in the source session's folder when that exists here.
+      onselect: () => void app.launch({ continue_from: session.id, agent: a.id }),
     })),
   );
 
@@ -44,8 +45,10 @@
     busy = false;
   }
 
-  // Resume spawns the agent on this machine; other machines' sessions need the sync phase.
-  const resumable = $derived(canResume(session) && session.machine_id === app.health?.machine.id);
+  // Resume and stop of a session on another machine are forwarded to it through the hub.
+  const resumable = $derived(canResume(session));
+  // Opening a folder shows a window on this machine's desktop: local clients, local sessions.
+  const canOpen = $derived(app.admin && session.machine_id === app.health?.machine.id);
 
   async function resume(): Promise<void> {
     busy = true;
@@ -56,25 +59,33 @@
 </script>
 
 <div class="toolbar" role="toolbar" aria-label="Session actions">
-  <Menu items={continueItems} label="Agent: {agentLabel(session.agent)}. Continue in another agent" heading="Continue in…" triggerClass="btn sm agent">
-    <span class="agent-dot" aria-hidden="true"></span>{agentLabel(session.agent)}<ChevronDown size={14} aria-hidden="true" />
-  </Menu>
+  {#if app.control}
+    <Menu items={continueItems} label="Agent: {agentLabel(session.agent)}. Continue in another agent" heading="Continue in…" triggerClass="btn sm agent">
+      <span class="agent-dot" aria-hidden="true"></span>{agentLabel(session.agent)}<ChevronDown size={14} aria-hidden="true" />
+    </Menu>
+  {:else}
+    <span class="btn sm agent static"><span class="agent-dot" aria-hidden="true"></span>{agentLabel(session.agent)}</span>
+  {/if}
   <span class="elapsed" title={live ? 'Running for' : 'Duration'}><Clock size={14} aria-hidden="true" /><span class="sr-only">{live ? 'Running for' : 'Duration'}</span>{elapsed}</span>
-  <button type="button" class="icon-btn" aria-label="Open folder" title="Open folder" onclick={() => app.act(() => api.sessions.open(session.id, 'folder'))}>
-    <FolderOpen size={17} />
-  </button>
-  <button type="button" class="icon-btn" aria-label="Open in editor" title="Open in editor" onclick={() => app.act(() => api.sessions.open(session.id, 'editor'))}>
-    <Code size={17} />
-  </button>
-  <button
-    type="button"
-    class="icon-btn"
-    aria-label="Fork session"
-    title="Fork: new session with this session's handoff"
-    onclick={() => app.launch({ continue_from: session.id, agent: session.agent, project_id: session.project_id })}
-  >
-    <GitFork size={17} />
-  </button>
+  {#if canOpen}
+    <button type="button" class="icon-btn" aria-label="Open folder" title="Open folder" onclick={() => app.act(() => api.sessions.open(session.id, 'folder'))}>
+      <FolderOpen size={17} />
+    </button>
+    <button type="button" class="icon-btn" aria-label="Open in editor" title="Open in editor" onclick={() => app.act(() => api.sessions.open(session.id, 'editor'))}>
+      <Code size={17} />
+    </button>
+  {/if}
+  {#if app.control}
+    <button
+      type="button"
+      class="icon-btn"
+      aria-label="Fork session"
+      title="Fork: new session with this session's handoff"
+      onclick={() => app.launch({ continue_from: session.id, agent: session.agent })}
+    >
+      <GitFork size={17} />
+    </button>
+  {/if}
   <button
     type="button"
     class="icon-btn"
@@ -86,7 +97,9 @@
   >
     <Brain size={17} />
   </button>
-  {#if live && session.origin === 'blirp'}
+  {#if !app.control}
+    <!-- View-only device: stop and resume would be refused (403 control_not_allowed). -->
+  {:else if live && session.origin === 'blirp'}
     <button type="button" class="btn sm danger" onclick={stop} disabled={busy}><Square size={12} fill="currentColor" aria-hidden="true" />Stop</button>
   {:else if resumable}
     <button type="button" class="btn sm primary" onclick={resume} disabled={busy}><Play size={12} fill="currentColor" aria-hidden="true" />Resume</button>
@@ -104,6 +117,9 @@
   .toolbar :global(.agent) {
     border-radius: 999px;
     margin-right: 4px;
+  }
+  .static {
+    cursor: default;
   }
   .agent-dot {
     width: 8px;

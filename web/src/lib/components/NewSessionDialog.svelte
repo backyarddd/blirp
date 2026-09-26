@@ -20,7 +20,9 @@
   let formError: string | null = $state(null);
 
   const open = $derived(app.newSession.open);
-  const synced = $derived(app.health !== null && app.health.role !== 'standalone');
+  const synced = $derived((app.sync?.role ?? app.health?.role ?? 'standalone') !== 'standalone');
+  // Agents are detected on this machine; another machine may have others installed.
+  const remote = $derived(machine !== '');
   const project = $derived(app.projectById.get(projectId));
   const showWorktree = $derived(source === 'project' && project?.is_git === true);
   const installed = $derived(app.agents.filter((a) => a.installed));
@@ -55,7 +57,8 @@
     if (!worktree) worktree = settings?.config.sessions.worktree_default ?? false;
     if (synced) {
       try {
-        machines = (await api.machines.list()).filter((m) => !m.revoked);
+        const self = app.health?.machine.id;
+        machines = (await api.machines.list()).filter((m) => !m.revoked && m.id !== self);
       } catch (e) {
         formError = `Could not load machines: ${errorMessage(e)}`;
       }
@@ -98,6 +101,7 @@
       close();
       navigate(href.sessions(s.id));
     } catch (err) {
+      app.noteForbidden(err);
       formError = errorMessage(err);
     } finally {
       submitting = false;
@@ -152,8 +156,8 @@
           <option value="" disabled>{app.agentsError ? 'Could not load agents' : app.agentsLoaded ? 'No agents detected' : 'Detecting agents…'}</option>
         {/if}
         {#each app.agents as a (a.id)}
-          <option value={a.id} disabled={!a.installed}>
-            {a.display_name || agentLabel(a.id)}{a.version ? ` ${a.version}` : ''}{a.installed ? '' : ' (not installed)'}
+          <option value={a.id} disabled={!a.installed && !remote}>
+            {a.display_name || agentLabel(a.id)}{a.version && !remote ? ` ${a.version}` : ''}{a.installed || remote ? '' : ' (not installed)'}
           </option>
         {/each}
       </select>
@@ -180,6 +184,7 @@
             <option value={m.id}>{m.name} ({m.os})</option>
           {/each}
         </select>
+        {#if remote}<span class="hint">Runs on that machine through the hub; its terminal streams here.</span>{/if}
       </label>
     {/if}
 

@@ -1,6 +1,19 @@
 import { describe, expect, it } from 'vitest';
 import type { ProjectSummary, Session, SessionStatus } from './api/types.gen';
-import { agentLabel, basename, canResume, groupSessions, hasTerminal, isLive, notifiableTransition, sessionTitle, statusInfo } from './status';
+import {
+  agentLabel,
+  basename,
+  canResume,
+  childCount,
+  groupSessions,
+  hasTerminal,
+  isLive,
+  isSubagent,
+  notifiableTransition,
+  sessionStatusInfo,
+  sessionTitle,
+  statusInfo,
+} from './status';
 
 const ALL: SessionStatus[] = ['starting', 'working', 'idle', 'waiting', 'completed', 'failed', 'detached'];
 
@@ -81,6 +94,20 @@ describe('groupSessions', () => {
     live_session_count: 0,
     last_activity_at: null,
   };
+  it('shows Stopped only for ended sessions the user stopped', () => {
+    expect(sessionStatusInfo({ status: 'completed', stopped_by_user: true }).label).toBe('Stopped');
+    expect(sessionStatusInfo({ status: 'completed' }).label).toBe('Completed');
+    expect(sessionStatusInfo({ status: 'idle', stopped_by_user: true }).label).toBe('Idle');
+  });
+  it('treats only ingested children as subagents and counts them', () => {
+    const parent = mk('p', 'a');
+    const sub = { ...mk('c1', 'a'), origin: 'external' as const, parent_session_id: 'p' };
+    const fork = { ...mk('c2', 'a'), parent_session_id: 'p' };
+    expect(isSubagent(sub)).toBe(true);
+    expect(isSubagent(fork)).toBe(false);
+    expect(childCount(parent, [parent, sub, fork])).toBe(1);
+    expect(childCount({ ...parent, children_count: 4 }, [parent, sub])).toBe(4);
+  });
   it('groups by project in first-seen order', () => {
     const groups = groupSessions([mk('1', 'b'), mk('2', 'a'), mk('3', 'b')], new Map([['a', alpha]]));
     expect(groups.map((g) => [g.name, g.sessions.map((s) => s.id)])).toEqual([

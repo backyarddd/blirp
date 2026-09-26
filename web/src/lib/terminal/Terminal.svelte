@@ -11,7 +11,7 @@
   import { isMac } from '../prefs';
   import { matchShortcut } from '../shortcuts';
   import { app } from '../app.svelte';
-  import { hasTerminal, statusInfo } from '../status';
+  import { hasTerminal, sessionStatusInfo } from '../status';
   import type { SessionStatus } from '../api/types.gen';
   import { backoffDelay, decodeServerFrame, encodeBinaryInput, encodeInput, encodeResize } from './protocol';
 
@@ -86,6 +86,13 @@
     if (term) term.options.theme = theme.resolved === 'dark' ? DARK : LIGHT;
   });
 
+  // Devices without terminal control get a view-only stream: the daemon drops their input and
+  // resize frames without telling the client, so say so here instead of swallowing keys.
+  const viewOnly = $derived(!app.control);
+  $effect(() => {
+    if (term && exit === null) term.options.disableStdin = viewOnly;
+  });
+
   // Only the host element and session id recreate the terminal; options update in place.
   // `sessionId` is usually passed as `session.id`, which re-fires on every status push; the
   // derived only changes with the value, so a status update never drops the connection.
@@ -136,7 +143,7 @@
       if (ws?.readyState === WebSocket.OPEN) ws.send(data);
     };
     const sendResize = (): void => {
-      if (!remoteResize && t.cols > 0 && t.rows > 0) send(encodeResize(t.cols, t.rows));
+      if (!remoteResize && !viewOnly && t.cols > 0 && t.rows > 0) send(encodeResize(t.cols, t.rows));
     };
     const applyRemoteSize = (cols: number, rows: number): void => {
       if (cols === t.cols && rows === t.rows) return;
@@ -277,7 +284,7 @@
 
   const exitText = $derived(
     exit
-      ? `Process exited · ${statusInfo(exit.status).label}${exit.exit_code !== null ? ` (exit code ${exit.exit_code})` : ''}`
+      ? `Process exited · ${sessionStatusInfo({ ...app.sessionById.get(sid), status: exit.status }).label}${exit.exit_code !== null ? ` (exit code ${exit.exit_code})` : ''}`
       : '',
   );
 </script>
@@ -293,6 +300,10 @@
     <div class="banner" class:warn={conn !== 'connecting'} role="status" aria-live="polite">
       {MESSAGES[conn]}
       {#if conn === 'ended' && ondetails}<button type="button" class="btn sm" onclick={ondetails}>Show details</button>{/if}
+    </div>
+  {:else if viewOnly}
+    <div class="banner view-only" role="status" data-testid="terminal-view-only">
+      View only: this device may not type into terminals. Allow it under Settings &gt; Machines &amp; Sync on the hub.
     </div>
   {/if}
 </div>
@@ -338,6 +349,10 @@
     bottom: 12px;
     padding: 4px 6px 4px 14px;
     color: var(--text);
+  }
+  .banner.view-only {
+    top: auto;
+    bottom: 12px;
   }
   .banner.exit.failed {
     color: var(--failed);
