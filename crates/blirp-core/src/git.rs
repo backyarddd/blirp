@@ -386,6 +386,24 @@ pub fn worktree_add(repo: &Path, path: &Path, branch: &str) -> Result<(), GitErr
     .map(|_| ())
 }
 
+/// Remove linked worktree `path` of the repo whose main work tree is
+/// `main_root` (`git worktree remove`). Without `force` git itself refuses a
+/// worktree with changes or untracked files. The branch is kept.
+pub fn worktree_remove(main_root: &Path, path: &Path, force: bool) -> Result<(), GitError> {
+    let path_s = path.to_string_lossy();
+    let mut args = vec!["worktree", "remove"];
+    if force {
+        args.push("--force");
+    }
+    args.push(&path_s);
+    git(main_root, &args, MAX_OUTPUT).map(|_| ())
+}
+
+/// Forget worktrees whose folders are gone (`git worktree prune`).
+pub fn worktree_prune(repo: &Path) -> Result<(), GitError> {
+    git(repo, &["worktree", "prune"], MAX_OUTPUT).map(|_| ())
+}
+
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;

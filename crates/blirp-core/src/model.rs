@@ -240,6 +240,10 @@ pub struct Session {
     pub tokens_out: i64,
     pub cost_usd: f64,
     pub parent_session_id: Option<String>,
+    /// Ended by a user Stop: `status` is `completed` and `exit_code` null.
+    // Default: rows replicated from older versions do not carry it.
+    #[serde(default)]
+    pub stopped_by_user: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
@@ -378,6 +382,25 @@ pub struct Health {
     pub version: String,
     pub machine: Machine,
     pub role: MachineRole,
+    /// What the calling client may do here.
+    // Default: older daemons do not send it.
+    #[serde(default)]
+    pub capabilities: Capabilities,
+}
+
+/// Rights of the calling client (§11), so a UI can hide what the daemon
+/// would refuse.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, TS)]
+pub struct Capabilities {
+    /// Configuration, sync, devices, agent integration, invites, open,
+    /// shutdown: local clients (runtime token) only.
+    pub admin: bool,
+    /// Launch/resume/stop sessions, type into terminals, change memory:
+    /// local clients, browser devices allowed to control terminals, and
+    /// requests relayed from a machine allowed to.
+    pub control_terminals: bool,
+    /// The client authenticated with this machine's runtime token.
+    pub local: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, TS)]
@@ -589,6 +612,16 @@ pub struct FileContent {
     pub content: String,
 }
 
+/// `GET /api/sessions/:id`: the session plus how many subagent sessions
+/// ingest recorded under it (origin `external` with `parent_session_id`
+/// set to it, §8); list them with `GET /api/sessions?parent=<id>`.
+#[derive(Debug, Clone, Serialize, Deserialize, TS)]
+pub struct SessionDetail {
+    #[serde(flatten)]
+    pub session: Session,
+    pub children_count: i64,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, TS)]
 pub struct SessionsPage {
     pub items: Vec<Session>,
@@ -639,6 +672,16 @@ pub struct LaunchSession {
 pub struct PatchSession {
     /// New title; null clears it.
     pub title: Option<String>,
+}
+
+/// `POST /api/sessions/:id/worktree/remove`.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, TS)]
+#[serde(deny_unknown_fields)]
+pub struct RemoveWorktree {
+    /// Also discard uncommitted changes and untracked files.
+    #[serde(default)]
+    #[ts(optional)]
+    pub force: Option<bool>,
 }
 
 /// Where `POST /api/sessions/:id/open` shows the session folder.
@@ -763,6 +806,34 @@ pub struct SettingsView {
     pub config: Config,
     /// UI preferences and other free-form values stored in the database.
     pub values: BTreeMap<String, JsonValue>,
+    /// Automatic distilling (§9): paused summarizer, today's budget.
+    pub distill: DistillStatus,
+}
+
+/// Why automatic distilling is paused: the summarizer itself fails, not a
+/// session (§9). Retried with exponential backoff.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "snake_case")]
+pub enum DistillPause {
+    /// Not logged in, invalid or missing credentials.
+    Auth,
+    /// No summarizer installed or reachable.
+    Unavailable,
+    /// Rate or usage limit reached.
+    RateLimited,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, TS)]
+pub struct DistillStatus {
+    /// Set while automatic distilling is paused.
+    pub paused: Option<DistillPause>,
+    /// The summarizer's last error while paused.
+    pub reason: Option<String>,
+    /// When the summarizer is tried again (unix ms).
+    pub retry_at: Option<i64>,
+    /// Distill jobs run today (UTC) and the daily limit.
+    pub budget_used: u32,
+    pub budget_limit: u32,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize, TS)]
@@ -854,6 +925,10 @@ pub enum ServerEvent {
     SessionUpdated {
         session: Session,
     },
+    /// The session (and its subagent sessions) was deleted.
+    SessionDeleted {
+        session_id: String,
+    },
     ProjectUpdated {
         project_id: String,
     },
@@ -877,9 +952,13 @@ pub enum TerminalServerMessage {
     /// Reset the terminal and write `data`; reproduces scrollback, screen,
     /// modes, cursor and title. Sent first, and again after the client lagged.
     Snapshot { cols: u16, rows: u16, data: String },
-    /// Another client resized the terminal (last resize wins).
+    /// Sent right after the first snapshot when this client may not control
+    /// the terminal: its input and resize frames are ignored.
+    Readonly,
+    /// Another client resized the terminal (last resize wins); never sent
+    /// to the client that asked for the resize.
     Resize { cols: u16, rows: u16 },
-    /// The process exited; the socket closes after this frame.
+    /// The process exited; the socket closes (code 1000) after this frame.
     Exit {
         status: SessionStatus,
         exit_code: Option<i32>,
@@ -927,10 +1006,10 @@ mod tests {
             ErrorBody, ErrorDetail, Health, ProjectPathInfo, ProjectSummary, CreateProject,
             PatchProject, MergeProject, ProjectMemory, PutBrief, RevertBrief, CreateRecord,
             PatchRecord, CreateWikiPage, PutWikiPage, CreateResource, PatchResource,
-            GitStatusEntry, GitStatus, GitDiff, FileEntry, DirListing, FileContent, SessionsPage,
-            LaunchSession, PatchSession, OpenTarget, OpenSession, EventsPage, SearchHit, SearchResults, AgentInfo,
+            GitStatusEntry, GitStatus, GitDiff, FileEntry, DirListing, FileContent, SessionsPage, SessionDetail,
+            LaunchSession, PatchSession, RemoveWorktree, OpenTarget, OpenSession, EventsPage, SearchHit, SearchResults, AgentInfo,
             AgentIntegration, Injection, SummaryItem, DistillFailure, SessionSummary,
-            SettingsView, SettingsPatch, SyncStatus, SyncInvite, JoinHub, BrowserInvite, PatchDevice,
+            SettingsView, SettingsPatch, Capabilities, DistillStatus, DistillPause, SyncStatus, SyncInvite, JoinHub, BrowserInvite, PatchDevice,
             ServerEvent, TerminalServerMessage, TerminalClientMessage,
             Config, DaemonConfig, MachineConfig, AgentsConfig, CustomAgent, SessionsConfig,
             Summarizer, BriefMode, MemoryConfig, SyncConfig, PortalConfig,

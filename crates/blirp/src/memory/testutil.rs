@@ -53,6 +53,7 @@ pub fn session(id: &str, project: &str, started_at: i64) -> Session {
         tokens_out: 0,
         cost_usd: 0.0,
         parent_session_id: None,
+        stopped_by_user: false,
     }
 }
 

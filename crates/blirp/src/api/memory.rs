@@ -1,8 +1,8 @@
 //! Brief, records, wiki, resources and suggestions of a project.
 
-use super::{ApiError, ApiJson, ApiQuery, ApiResult, blocking};
+use super::{ApiError, ApiJson, ApiPath, ApiQuery, ApiResult, Control, blocking};
 use crate::state::SharedState;
-use axum::extract::{Path, State};
+use axum::extract::State;
 use axum::http::StatusCode;
 use axum::routing::{get, post};
 use axum::{Json, Router};
@@ -84,7 +84,8 @@ async fn project_op<T: Send + 'static>(
 
 async fn put_brief(
     State(s): State<SharedState>,
-    Path(id): Path<String>,
+    _: Control,
+    ApiPath(id): ApiPath<String>,
     ApiJson(b): ApiJson<PutBrief>,
 ) -> ApiResult<Json<Brief>> {
     check_len("body_md", &b.body_md)?;
@@ -97,7 +98,7 @@ async fn put_brief(
 
 async fn brief_history(
     State(s): State<SharedState>,
-    Path(id): Path<String>,
+    ApiPath(id): ApiPath<String>,
 ) -> ApiResult<Json<Vec<Brief>>> {
     project_op(&s, id, None, |st, pid| Ok(st.brief_history(pid)?))
         .await
@@ -106,7 +107,8 @@ async fn brief_history(
 
 async fn revert_brief(
     State(s): State<SharedState>,
-    Path(id): Path<String>,
+    _: Control,
+    ApiPath(id): ApiPath<String>,
     ApiJson(b): ApiJson<RevertBrief>,
 ) -> ApiResult<Json<Brief>> {
     project_op(&s, id, Some(MemoryPart::Brief), move |st, pid| {
@@ -127,7 +129,7 @@ struct RecordQuery {
 
 async fn list_records(
     State(s): State<SharedState>,
-    Path(id): Path<String>,
+    ApiPath(id): ApiPath<String>,
     ApiQuery(q): ApiQuery<RecordQuery>,
 ) -> ApiResult<Json<Vec<Record>>> {
     project_op(&s, id, None, move |st, pid| {
@@ -152,7 +154,8 @@ fn owned_record(st: &Store, pid: &str, rid: &str) -> ApiResult<Record> {
 
 async fn create_record(
     State(s): State<SharedState>,
-    Path(id): Path<String>,
+    _: Control,
+    ApiPath(id): ApiPath<String>,
     ApiJson(b): ApiJson<CreateRecord>,
 ) -> ApiResult<(StatusCode, Json<Record>)> {
     check_len("title", &b.title)?;
@@ -179,7 +182,7 @@ async fn create_record(
 
 async fn get_record(
     State(s): State<SharedState>,
-    Path((id, rid)): Path<(String, String)>,
+    ApiPath((id, rid)): ApiPath<(String, String)>,
 ) -> ApiResult<Json<Record>> {
     project_op(&s, id, None, move |st, pid| owned_record(st, pid, &rid))
         .await
@@ -188,7 +191,8 @@ async fn get_record(
 
 async fn patch_record(
     State(s): State<SharedState>,
-    Path((id, rid)): Path<(String, String)>,
+    _: Control,
+    ApiPath((id, rid)): ApiPath<(String, String)>,
     ApiJson(p): ApiJson<PatchRecord>,
 ) -> ApiResult<Json<Record>> {
     for (f, v) in [("title", &p.title), ("body", &p.body)] {
@@ -223,7 +227,8 @@ async fn patch_record(
 
 async fn delete_record(
     State(s): State<SharedState>,
-    Path((id, rid)): Path<(String, String)>,
+    _: Control,
+    ApiPath((id, rid)): ApiPath<(String, String)>,
 ) -> ApiResult<StatusCode> {
     project_op(&s, id, Some(MemoryPart::Records), move |st, pid| {
         owned_record(st, pid, &rid)?;
@@ -237,7 +242,7 @@ async fn delete_record(
 
 async fn list_wiki(
     State(s): State<SharedState>,
-    Path(id): Path<String>,
+    ApiPath(id): ApiPath<String>,
 ) -> ApiResult<Json<Vec<WikiPage>>> {
     project_op(&s, id, None, |st, pid| Ok(st.list_wiki(pid)?))
         .await
@@ -246,7 +251,8 @@ async fn list_wiki(
 
 async fn create_wiki(
     State(s): State<SharedState>,
-    Path(id): Path<String>,
+    _: Control,
+    ApiPath(id): ApiPath<String>,
     ApiJson(b): ApiJson<CreateWikiPage>,
 ) -> ApiResult<(StatusCode, Json<WikiPage>)> {
     check_len("body_md", &b.body_md)?;
@@ -259,7 +265,7 @@ async fn create_wiki(
 
 async fn get_wiki(
     State(s): State<SharedState>,
-    Path((id, slug)): Path<(String, String)>,
+    ApiPath((id, slug)): ApiPath<(String, String)>,
 ) -> ApiResult<Json<WikiPage>> {
     project_op(&s, id, None, move |st, pid| {
         st.get_wiki_page(pid, &slug)?
@@ -271,7 +277,8 @@ async fn get_wiki(
 
 async fn put_wiki(
     State(s): State<SharedState>,
-    Path((id, slug)): Path<(String, String)>,
+    _: Control,
+    ApiPath((id, slug)): ApiPath<(String, String)>,
     ApiJson(b): ApiJson<PutWikiPage>,
 ) -> ApiResult<Json<WikiPage>> {
     check_len("body_md", &b.body_md)?;
@@ -284,7 +291,8 @@ async fn put_wiki(
 
 async fn delete_wiki(
     State(s): State<SharedState>,
-    Path((id, slug)): Path<(String, String)>,
+    _: Control,
+    ApiPath((id, slug)): ApiPath<(String, String)>,
 ) -> ApiResult<StatusCode> {
     project_op(&s, id, Some(MemoryPart::Wiki), move |st, pid| {
         Ok(st.delete_wiki_page(pid, &slug, BY_USER)?)
@@ -313,7 +321,7 @@ fn owned_resource(st: &Store, pid: &str, rid: &str) -> ApiResult<Resource> {
 
 async fn list_resources(
     State(s): State<SharedState>,
-    Path(id): Path<String>,
+    ApiPath(id): ApiPath<String>,
 ) -> ApiResult<Json<Vec<Resource>>> {
     project_op(&s, id, None, |st, pid| Ok(st.list_resources(pid)?))
         .await
@@ -322,7 +330,8 @@ async fn list_resources(
 
 async fn create_resource(
     State(s): State<SharedState>,
-    Path(id): Path<String>,
+    _: Control,
+    ApiPath(id): ApiPath<String>,
     ApiJson(b): ApiJson<CreateResource>,
 ) -> ApiResult<(StatusCode, Json<Resource>)> {
     validate_url(&b.url)?;
@@ -344,7 +353,7 @@ async fn create_resource(
 
 async fn get_resource(
     State(s): State<SharedState>,
-    Path((id, rid)): Path<(String, String)>,
+    ApiPath((id, rid)): ApiPath<(String, String)>,
 ) -> ApiResult<Json<Resource>> {
     project_op(&s, id, None, move |st, pid| owned_resource(st, pid, &rid))
         .await
@@ -353,7 +362,8 @@ async fn get_resource(
 
 async fn patch_resource(
     State(s): State<SharedState>,
-    Path((id, rid)): Path<(String, String)>,
+    _: Control,
+    ApiPath((id, rid)): ApiPath<(String, String)>,
     ApiJson(p): ApiJson<PatchResource>,
 ) -> ApiResult<Json<Resource>> {
     if let Some(u) = &p.url {
@@ -382,7 +392,8 @@ async fn patch_resource(
 
 async fn delete_resource(
     State(s): State<SharedState>,
-    Path((id, rid)): Path<(String, String)>,
+    _: Control,
+    ApiPath((id, rid)): ApiPath<(String, String)>,
 ) -> ApiResult<StatusCode> {
     project_op(&s, id, Some(MemoryPart::Resources), move |st, pid| {
         owned_resource(st, pid, &rid)?;
@@ -403,7 +414,7 @@ struct SuggestionQuery {
 
 async fn list_suggestions(
     State(s): State<SharedState>,
-    Path(id): Path<String>,
+    ApiPath(id): ApiPath<String>,
     ApiQuery(q): ApiQuery<SuggestionQuery>,
 ) -> ApiResult<Json<Vec<Suggestion>>> {
     project_op(&s, id, None, move |st, pid| {
@@ -415,7 +426,8 @@ async fn list_suggestions(
 
 async fn decide_suggestion(
     State(s): State<SharedState>,
-    Path((id, action)): Path<(String, String)>,
+    _: Control,
+    ApiPath((id, action)): ApiPath<(String, String)>,
 ) -> ApiResult<Json<Suggestion>> {
     let decision = match action.as_str() {
         "accept" => SuggestionStatus::Accepted,

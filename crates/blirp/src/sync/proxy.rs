@@ -214,11 +214,15 @@ pub async fn relay_terminal(
     control: bool,
     mut shutdown: tokio::sync::watch::Receiver<bool>,
 ) {
+    use tungstenite::protocol::CloseFrame;
+    use tungstenite::protocol::frame::coding::CloseCode;
     let (mut rtx, mut rrx) = remote.split();
-    loop {
+    // Who ended the relay: the local client (None) or the remote side /
+    // this daemon (the close to pass on to the local client).
+    let ours: Option<(u16, String)> = loop {
         tokio::select! {
             msg = socket.recv() => match msg {
-                Some(Ok(Message::Close(_))) | None | Some(Err(_)) => break,
+                Some(Ok(Message::Close(_))) | None | Some(Err(_)) => break None,
                 Some(Ok(m)) => {
                     if !control {
                         continue;
@@ -226,24 +230,36 @@ pub async fn relay_terminal(
                     if let Some(m) = to_remote(m)
                         && rtx.send(m).await.is_err()
                     {
-                        break;
+                        break Some((1011, "remote terminal unreachable".into()));
                     }
                 }
             },
             msg = rrx.next() => match msg {
-                Some(Ok(tungstenite::Message::Close(_))) | None | Some(Err(_)) => break,
+                // The remote daemon's own close (exit, shutdown) goes on unchanged.
+                Some(Ok(tungstenite::Message::Close(Some(f)))) => {
+                    break Some((u16::from(f.code), f.reason.as_str().to_string()));
+                }
+                Some(Ok(tungstenite::Message::Close(None))) => break Some((1000, String::new())),
+                None | Some(Err(_)) => break Some((1011, "remote terminal unreachable".into())),
                 Some(Ok(m)) => {
                     if let Some(m) = to_local(m)
                         && socket.send(m).await.is_err()
                     {
-                        break;
+                        break None;
                     }
                 }
             },
-            _ = shutdown.changed() => break,
+            _ = shutdown.changed() => {
+                let (code, reason) = crate::api::WS_GOING_AWAY;
+                break Some((code, reason.to_string()));
+            }
         }
-    }
-    // Best effort: either side may already be gone.
-    let _ = rtx.send(tungstenite::Message::Close(None)).await;
-    let _ = socket.send(Message::Close(None)).await;
+    };
+    // Best effort: the remote side may already be gone.
+    let frame = CloseFrame {
+        code: CloseCode::Normal,
+        reason: "".into(),
+    };
+    let _ = rtx.send(tungstenite::Message::Close(Some(frame))).await;
+    crate::api::close_ws(&mut socket, ours.as_ref().map(|(c, r)| (*c, r.as_str()))).await;
 }

@@ -6,11 +6,11 @@ mod proxy;
 
 pub use proxy::{connect_terminal, forward, launch_remote, relay_terminal};
 
-use crate::api::{ApiError, ApiJson, ApiResult, Principal, blocking};
+use crate::api::{Admin, ApiError, ApiJson, ApiPath, ApiResult, Principal, blocking};
 use crate::state::SharedState;
 use axum::Json;
 use axum::Router;
-use axum::extract::{Path, State};
+use axum::extract::State;
 use axum::http::StatusCode;
 use axum::routing::{delete, get, post};
 use blirp_core::config::Config;
@@ -104,6 +104,25 @@ pub fn routes() -> Router<SharedState> {
         .route("/api/machines/{id}", delete(revoke_machine))
         .route("/api/sync/{*rest}", axum::routing::any(unknown))
         .route("/api/devices/{id}/{*rest}", axum::routing::any(unknown))
+}
+
+/// Start, stop or move the LAN portal to match a changed config.
+pub(crate) async fn apply_portal_config(s: &SharedState) -> ApiResult<()> {
+    let _guard = s.sync.transition.lock().await;
+    crate::portal::sync_with_config(s)
+        .await
+        .map_err(|e| portal_failed(&e))
+}
+
+/// The LAN portal could not start (port taken, certificate); the config
+/// that asked for it is kept.
+fn portal_failed(e: &anyhow::Error) -> ApiError {
+    tracing::warn!(error = %format!("{e:#}"), "LAN portal failed to start");
+    ApiError::new(
+        StatusCode::CONFLICT,
+        "portal_failed",
+        format!("the LAN portal could not start: {e:#}"),
+    )
 }
 
 async fn unknown() -> ApiError {
@@ -303,11 +322,7 @@ async fn get_status(State(s): State<SharedState>) -> ApiResult<Json<SyncStatus>>
     status(&s).await.map(Json)
 }
 
-async fn hub_enable(
-    State(s): State<SharedState>,
-    principal: Principal,
-) -> ApiResult<Json<SyncStatus>> {
-    principal.require_admin()?;
+async fn hub_enable(State(s): State<SharedState>, _: Admin) -> ApiResult<Json<SyncStatus>> {
     let _guard = s.sync.transition.lock().await;
     match s.config().sync.role {
         MachineRole::Node => {
@@ -323,19 +338,16 @@ async fn hub_enable(
                 set_role(&s, MachineRole::Standalone, None).await?;
                 return Err(e);
             }
-            crate::portal::sync_with_config(&s)
-                .await
-                .map_err(|e| ApiError::internal("starting the LAN portal", format!("{e:#}")))?;
         }
     }
+    // Also when already a hub: the portal settings may have changed.
+    crate::portal::sync_with_config(&s)
+        .await
+        .map_err(|e| portal_failed(&e))?;
     status(&s).await.map(Json)
 }
 
-async fn hub_disable(
-    State(s): State<SharedState>,
-    principal: Principal,
-) -> ApiResult<Json<SyncStatus>> {
-    principal.require_admin()?;
+async fn hub_disable(State(s): State<SharedState>, _: Admin) -> ApiResult<Json<SyncStatus>> {
     let _guard = s.sync.transition.lock().await;
     if s.config().sync.role != MachineRole::Hub {
         return Err(ApiError::conflict("not_hub", "this machine is not a hub"));
@@ -347,8 +359,7 @@ async fn hub_disable(
     status(&s).await.map(Json)
 }
 
-async fn invite(State(s): State<SharedState>, principal: Principal) -> ApiResult<Json<SyncInvite>> {
-    principal.require_admin()?;
+async fn invite(State(s): State<SharedState>, _: Admin) -> ApiResult<Json<SyncInvite>> {
     let svc = s
         .sync
         .service()
@@ -368,10 +379,9 @@ async fn invite(State(s): State<SharedState>, principal: Principal) -> ApiResult
 
 async fn join(
     State(s): State<SharedState>,
-    principal: Principal,
+    _: Admin,
     ApiJson(body): ApiJson<JoinHub>,
 ) -> ApiResult<Json<SyncStatus>> {
-    principal.require_admin()?;
     let _guard = s.sync.transition.lock().await;
     let config = s.config();
     if config.sync.role != MachineRole::Standalone {
@@ -420,10 +430,7 @@ async fn list_devices(State(s): State<SharedState>) -> ApiResult<Json<Vec<Device
     Ok(Json(blocking(move || Ok(store.list_devices()?)).await?))
 }
 
-async fn browser_invite(
-    State(s): State<SharedState>,
-    _principal: Principal,
-) -> ApiResult<Json<BrowserInvite>> {
+async fn browser_invite(State(s): State<SharedState>, _: Admin) -> ApiResult<Json<BrowserInvite>> {
     crate::portal::create_invite(&s).map(Json)
 }
 
@@ -458,10 +465,9 @@ async fn revoke_node(s: &SharedState, node_id: &str) -> ApiResult<()> {
 
 async fn revoke_device(
     State(s): State<SharedState>,
-    Path(id): Path<String>,
-    principal: Principal,
+    ApiPath(id): ApiPath<String>,
+    _: Admin,
 ) -> ApiResult<StatusCode> {
-    principal.require_admin()?;
     let store = s.store.clone();
     let did = id.clone();
     let device = blocking(move || {
@@ -489,11 +495,10 @@ async fn revoke_device(
 
 async fn patch_device(
     State(s): State<SharedState>,
-    Path(id): Path<String>,
-    principal: Principal,
+    ApiPath(id): ApiPath<String>,
+    _: Admin,
     ApiJson(body): ApiJson<PatchDevice>,
 ) -> ApiResult<Json<Device>> {
-    principal.require_admin()?;
     let store = s.store.clone();
     let did = id.clone();
     let device = blocking(move || {
@@ -522,10 +527,9 @@ async fn patch_device(
 /// the hub's id means "leave the hub".
 async fn revoke_machine(
     State(s): State<SharedState>,
-    Path(id): Path<String>,
-    principal: Principal,
+    ApiPath(id): ApiPath<String>,
+    _: Admin,
 ) -> ApiResult<StatusCode> {
-    principal.require_admin()?;
     let _guard = s.sync.transition.lock().await;
     let config = s.config();
     if id == s.machine.id {

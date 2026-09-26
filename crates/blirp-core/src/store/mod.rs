@@ -72,6 +72,13 @@ pub enum Change {
         path: String,
     },
     Session(Session),
+    /// Deletes a session with its events (and their full-text rows) and its
+    /// ingested subagent sessions; records and suggestions it produced stay
+    /// with `source_session_id` cleared, and continue/fork sessions lose
+    /// their parent link.
+    DeleteSession {
+        id: String,
+    },
     /// Append-only; a duplicate `(session_id, seq)` is ignored.
     Event(Event),
     Record(Record),
@@ -100,6 +107,7 @@ impl Change {
                 ("project_paths", "delete", format!("{machine_id}\n{path}"))
             }
             Change::Session(s) => ("sessions", "upsert", s.id.clone()),
+            Change::DeleteSession { id } => ("sessions", "delete", id.clone()),
             Change::Event(e) => ("events", "insert", format!("{}\n{}", e.session_id, e.seq)),
             Change::Record(r) => ("records", "upsert", r.id.clone()),
             Change::DeleteRecord { id } => ("records", "delete", id.clone()),
@@ -276,6 +284,13 @@ pub(crate) fn apply_in(tx: &Transaction<'_>, change: &Change) -> Result<bool> {
         return Ok(false);
     }
     let (entity, op, key) = change.describe();
+    if matches!(change, Change::Session(_)) {
+        // The full row is queued now; a deferred status write is covered.
+        tx.execute(
+            "DELETE FROM outbox_deferred WHERE entity = ?1 AND key = ?2",
+            params![entity, key],
+        )?;
+    }
     tx.execute(
         "INSERT INTO outbox(entity, op, key, payload_json, ts) VALUES (?1,?2,?3,?4,?5)",
         params![
@@ -322,8 +337,9 @@ fn write_row(tx: &Transaction<'_>, change: &Change) -> Result<usize> {
         Change::Session(s) => tx.execute(
             "INSERT INTO sessions(id, project_id, machine_id, agent, agent_session_id, origin, cwd, title,
                status, branch, worktree, transcript_path, started_at, ended_at, last_activity_at, exit_code,
-               summary_json, distilled_through_seq, tokens_in, tokens_out, cost_usd, parent_session_id)
-             VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,?19,?20,?21,?22)
+               summary_json, distilled_through_seq, tokens_in, tokens_out, cost_usd, parent_session_id,
+               stopped_by_user)
+             VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,?19,?20,?21,?22,?23)
              ON CONFLICT(id) DO UPDATE SET project_id=excluded.project_id, machine_id=excluded.machine_id,
                agent=excluded.agent, agent_session_id=excluded.agent_session_id, origin=excluded.origin,
                cwd=excluded.cwd, title=excluded.title, status=excluded.status, branch=excluded.branch,
@@ -332,14 +348,47 @@ fn write_row(tx: &Transaction<'_>, change: &Change) -> Result<usize> {
                last_activity_at=excluded.last_activity_at, exit_code=excluded.exit_code,
                summary_json=excluded.summary_json, distilled_through_seq=excluded.distilled_through_seq,
                tokens_in=excluded.tokens_in, tokens_out=excluded.tokens_out, cost_usd=excluded.cost_usd,
-               parent_session_id=excluded.parent_session_id",
+               parent_session_id=excluded.parent_session_id, stopped_by_user=excluded.stopped_by_user",
             params![
                 s.id, s.project_id, s.machine_id, s.agent, s.agent_session_id, s.origin, s.cwd, s.title,
                 s.status, s.branch, s.worktree, s.transcript_path, s.started_at, s.ended_at,
                 s.last_activity_at, s.exit_code, json_text(&s.summary), s.distilled_through_seq,
-                s.tokens_in, s.tokens_out, s.cost_usd, s.parent_session_id
+                s.tokens_in, s.tokens_out, s.cost_usd, s.parent_session_id, s.stopped_by_user
             ],
         )?,
+        Change::DeleteSession { id } => {
+            // The session and its ingested subagents (§8).
+            const DOOMED: &str = "SELECT id FROM sessions WHERE id = ?1
+                 OR (parent_session_id = ?1 AND origin = 'external')";
+            // The FTS triggers drop the events' full-text rows.
+            tx.execute(
+                &format!("DELETE FROM events WHERE session_id IN ({DOOMED})"),
+                params![id],
+            )?;
+            for table in ["records", "suggestions"] {
+                tx.execute(
+                    &format!(
+                        "UPDATE {table} SET source_session_id = NULL WHERE source_session_id IN ({DOOMED})"
+                    ),
+                    params![id],
+                )?;
+            }
+            tx.execute(
+                "UPDATE sessions SET parent_session_id = NULL
+                 WHERE parent_session_id = ?1 AND origin <> 'external'",
+                params![id],
+            )?;
+            tx.execute(
+                &format!(
+                    "DELETE FROM outbox_deferred WHERE entity = 'sessions' AND key IN ({DOOMED})"
+                ),
+                params![id],
+            )?;
+            tx.execute(
+                "DELETE FROM sessions WHERE id = ?1 OR (parent_session_id = ?1 AND origin = 'external')",
+                params![id],
+            )?
+        }
         Change::Event(e) => tx.execute(
             "INSERT INTO events(session_id, seq, ts, kind, text, meta_json) VALUES (?1,?2,?3,?4,?5,?6)
              ON CONFLICT(session_id, seq) DO NOTHING",

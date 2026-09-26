@@ -121,6 +121,19 @@ pub struct MemoryConfig {
     pub brief_mode: BriefMode,
     pub inject_max_chars: u32,
     pub distill_max_chars: u32,
+    /// Inject project memory when agents start (§9). Off: sessions start
+    /// without memory; MCP tools and the CLI still reach it on demand.
+    pub inject: bool,
+    /// Agents (`claude`, `custom:<name>`, ...) that never get memory
+    /// injected, even when `inject` is on.
+    pub inject_disabled_agents: Vec<String>,
+}
+
+impl MemoryConfig {
+    /// Whether sessions of `agent` get memory injected at start.
+    pub fn inject_enabled(&self, agent: &str) -> bool {
+        self.inject && !self.inject_disabled_agents.iter().any(|a| a == agent)
+    }
 }
 
 impl Default for MemoryConfig {
@@ -133,6 +146,8 @@ impl Default for MemoryConfig {
             brief_mode: BriefMode::Auto,
             inject_max_chars: 8000,
             distill_max_chars: 60_000,
+            inject: true,
+            inject_disabled_agents: Vec::new(),
         }
     }
 }
@@ -259,6 +274,15 @@ impl Config {
         if m.distill_idle_secs == 0 {
             return bad("memory.distill_idle_secs must be > 0".into());
         }
+        for a in &m.inject_disabled_agents {
+            let known = BUILTIN_AGENTS.contains(&a.as_str())
+                || a.strip_prefix("custom:").is_some_and(|n| seen.contains(n));
+            if !known {
+                return bad(format!(
+                    "memory.inject_disabled_agents entry {a:?} is not a built-in agent or a defined custom:<name>"
+                ));
+            }
+        }
         if m.inject_max_chars < 500 {
             return bad("memory.inject_max_chars must be >= 500".into());
         }
@@ -331,6 +355,8 @@ daily_distill_limit = 5
 brief_mode = "review"
 inject_max_chars = 4000
 distill_max_chars = 20000
+inject = true
+inject_disabled_agents = ["codex", "custom:mine"]
 [sync]
 role = "node"
 hub = "abc"
@@ -345,6 +371,11 @@ lan_port = 9000
         assert_eq!(c.agents.custom[0].args, ["--fast"]);
         assert_eq!(c.memory.summarizer, Summarizer::Ollama);
         assert_eq!(c.memory.brief_mode, BriefMode::Review);
+        assert!(c.memory.inject_enabled("claude"));
+        assert!(!c.memory.inject_enabled("codex"));
+        assert!(!c.memory.inject_enabled("custom:mine"));
+        let off = parse("[memory]\ninject = false").unwrap();
+        assert!(!off.memory.inject_enabled("claude"));
         assert_eq!(c.sync.role, MachineRole::Node);
         assert!(c.portal.lan);
     }
@@ -374,6 +405,10 @@ lan_port = 9000
             ("[sync]\nrelay = \"ftp://x\"", "sync.relay"),
             ("[memory]\ndistill_idle_secs = 0", "distill_idle_secs"),
             ("[memory]\nsummarizer = \"gpt\"", "summarizer"),
+            (
+                "[memory]\ninject_disabled_agents = [\"vim\"]",
+                "inject_disabled_agents",
+            ),
             ("[daemon]\nport = 70000", "port"),
         ] {
             let err = parse(toml).unwrap_err().to_string();

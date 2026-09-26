@@ -2,10 +2,11 @@
 //! file manager or the user's editor. The program is spawned detached; the
 //! request returns as soon as it started.
 
-use super::{ApiError, ApiJson, ApiResult, Principal, blocking};
+use super::{Admin, ApiError, ApiJson, ApiPath, ApiResult, blocking};
+use crate::agents::PlatformCommand;
 use crate::state::SharedState;
 use axum::Router;
-use axum::extract::{Path, State};
+use axum::extract::State;
 use axum::http::StatusCode;
 use axum::routing::post;
 use blirp_core::model::{OpenSession, OpenTarget};
@@ -20,12 +21,11 @@ pub fn routes() -> Router<SharedState> {
 
 async fn open(
     State(s): State<SharedState>,
-    principal: Principal,
-    Path(id): Path<String>,
+    _: Admin,
+    ApiPath(id): ApiPath<String>,
     ApiJson(body): ApiJson<OpenSession>,
 ) -> ApiResult<StatusCode> {
     // Opens a window on this machine's desktop: its own app or CLI only.
-    principal.require_admin()?;
     let (store, machine) = (s.store.clone(), s.machine.id.clone());
     blocking(move || {
         let session = store
@@ -49,7 +49,18 @@ async fn open(
             OpenTarget::Editor => editor().unwrap_or_else(file_manager),
         };
         args.push(dir.into_os_string());
-        spawn_detached(program, args)
+        // Shims (`code.cmd`) are wrapped like agent launches, with the
+        // folder among the escaped arguments.
+        let cmd = crate::agents::wrap_for_platform(std::path::Path::new(&program), args).map_err(
+            |e| {
+                ApiError::new(
+                    StatusCode::UNPROCESSABLE_ENTITY,
+                    "open_failed",
+                    e.to_string(),
+                )
+            },
+        )?;
+        spawn_detached(cmd)
     })
     .await?;
     Ok(StatusCode::NO_CONTENT)
@@ -68,7 +79,6 @@ fn file_manager() -> (OsString, Vec<OsString>) {
 }
 
 /// `$VISUAL`, then `$EDITOR`, then `code`, whichever resolves to a program.
-/// Shims (`code.cmd`) are wrapped the same way agent launches are.
 fn editor() -> Option<(OsString, Vec<OsString>)> {
     let from_env = ["VISUAL", "EDITOR"]
         .iter()
@@ -79,7 +89,7 @@ fn editor() -> Option<(OsString, Vec<OsString>)> {
         });
     let (path, args) = from_env.or_else(|| Some((process::which("code")?, Vec::new())))?;
     let args = args.into_iter().map(OsString::from).collect();
-    Some(crate::agents::wrap_for_platform(&path, args))
+    Some((path.into_os_string(), args))
 }
 
 /// Split an editor variable (`code -w`, `"C:\Program Files\x\x.exe" -n`) into
@@ -108,12 +118,11 @@ fn split_command(v: &str) -> Option<(String, Vec<String>)> {
     Some((program, args))
 }
 
-/// Start `program` without waiting for it; a thread reaps it when it exits.
-fn spawn_detached(program: OsString, args: Vec<OsString>) -> ApiResult<()> {
-    let name = program.to_string_lossy().into_owned();
-    let mut cmd = process::command(&program);
-    cmd.args(args)
-        .stdin(Stdio::null())
+/// Start `command` without waiting for it; a thread reaps it when it exits.
+fn spawn_detached(command: PlatformCommand) -> ApiResult<()> {
+    let name = command.program.to_string_lossy().into_owned();
+    let mut cmd = command.std_command();
+    cmd.stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null());
     let mut child = cmd.spawn().map_err(|e| {

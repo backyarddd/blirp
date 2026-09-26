@@ -4,14 +4,15 @@ use crate::agents::{Agent, AgentError, LaunchContext};
 use crate::api::{ApiError, ApiResult};
 use crate::memory::launch::{HANDOFF_FILE, LaunchInput, LaunchIntegration, continue_prompt};
 use crate::memory::render::render_injection;
-use crate::pty::{ExitInfo, SpawnRequest, Terminal};
+use crate::pty::{ExitInfo, Reservation, SpawnRequest, Terminal};
 use crate::state::SharedState;
 use axum::http::StatusCode;
 use blirp_core::model::{LaunchSession, ServerEvent, Session, SessionOrigin, SessionStatus};
 use blirp_core::{git, now_ms};
+use regex::Regex;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::sync::{Arc, LazyLock};
 use std::time::{Duration, Instant};
 
 const DEFAULT_COLS: u16 = 120;
@@ -24,18 +25,27 @@ const MAX_PROMPT: usize = 64 * 1024;
 /// How long the initial prompt waits for the user to answer a startup dialog.
 const PROMPT_GATE_MAX_WAIT: Duration = Duration::from_secs(600);
 
-/// Startup dialogs (folder trust) that must be answered by the user before
-/// the initial prompt can be typed: claude, codex, gemini/cursor wording.
-fn is_gate(screen: &str) -> bool {
-    let s = screen.to_lowercase();
-    [
-        "trust this folder",
-        "trust the files in this folder",
-        "trust the contents of this directory",
-        "do you trust",
-    ]
-    .iter()
-    .any(|g| s.contains(g))
+/// Interactive dialogs the user must answer themselves: selection menus
+/// with a highlighted numbered choice (claude `❯ 1.`, codex `› 1.`, also
+/// inside a box), confirm/cancel hints, yes/no questions, and the trust,
+/// permission and MCP-server wording of claude, codex, gemini and cursor.
+/// Typing the initial prompt into one would answer it (a `1` picks the
+/// first choice, Enter confirms the default), e.g. approve an MCP server.
+static DIALOG: LazyLock<Regex> = LazyLock::new(|| {
+    // Infallible: a literal pattern, exercised by the screen fixture tests.
+    #[allow(clippy::expect_used)]
+    Regex::new(concat!(
+        r"(?mi)^[\s│┃|]*[❯›»▶►>]\s*\d+[.)]\s",
+        r"|enter to (confirm|select|continue)|press enter|esc to (cancel|reject|exit|go back)",
+        r"|\((y/n|yes/no)\)|\[(y/n|yes/no)\]",
+        r"|trust this folder|trust the files in this folder|trust the contents of this directory",
+        r"|do you trust|do you want to|new mcp server|allow .{0,40}\?",
+    ))
+    .expect("valid regex")
+});
+
+fn is_dialog(screen: &str) -> bool {
+    DIALOG.is_match(screen)
 }
 
 /// Env vars of a parent agent session that must not leak into sessions
@@ -66,6 +76,7 @@ fn agent_error(e: AgentError) -> ApiError {
             "agent_not_installed",
             e.to_string(),
         ),
+        AgentError::InvalidArgument(_) => ApiError::bad_request(e.to_string()),
     }
 }
 
@@ -196,7 +207,12 @@ fn prepare(state: &SharedState, req: &LaunchSession) -> ApiResult<Prepared> {
     })?;
     // Keep the same subfolder inside the new worktree.
     let sub = cwd.strip_prefix(&repo.toplevel).unwrap_or(Path::new(""));
-    let session_cwd = wt.join(sub);
+    // `join("")` would add a trailing separator.
+    let session_cwd = if sub.as_os_str().is_empty() {
+        wt.clone()
+    } else {
+        wt.join(sub)
+    };
     Ok(Prepared {
         project_id,
         cwd: if session_cwd.is_dir() {
@@ -223,14 +239,16 @@ pub async fn launch(state: &SharedState, req: LaunchSession) -> ApiResult<Sessio
     let source = match req.continue_from.clone() {
         Some(src) => {
             let store = state.store.clone();
-            let source = crate::api::blocking(move || {
-                store
+            let (source, folder_here) = crate::api::blocking(move || {
+                let s = store
                     .get_session(&src)?
-                    .ok_or_else(|| ApiError::not_found("continue_from session"))
+                    .ok_or_else(|| ApiError::not_found("continue_from session"))?;
+                let here = Path::new(&s.cwd).is_dir();
+                Ok((s, here))
             })
             .await?;
             if req.project_id.is_none() && req.cwd.is_none() {
-                if source.machine_id == state.machine.id && Path::new(&source.cwd).is_dir() {
+                if source.machine_id == state.machine.id && folder_here {
                     req.cwd = Some(source.cwd.clone());
                 } else {
                     req.project_id = Some(source.project_id.clone());
@@ -240,10 +258,18 @@ pub async fn launch(state: &SharedState, req: LaunchSession) -> ApiResult<Sessio
         }
         None => None,
     };
+    // A relative folder would resolve against the daemon's own directory.
+    if req
+        .cwd
+        .as_ref()
+        .is_some_and(|c| !Path::new(c).is_absolute())
+    {
+        return Err(ApiError::bad_request("cwd must be an absolute path"));
+    }
     if req.prompt.as_ref().is_some_and(|p| p.len() > MAX_PROMPT) {
         return Err(ApiError::bad_request("prompt exceeds 64 KiB"));
     }
-    let agent = Agent::resolve(&req.agent, &state.config()).map_err(agent_error)?;
+    let agent = resolve_agent(state, &req.agent).await?;
     if agent.path.is_none() {
         return Err(agent_error(AgentError::NotInstalled(agent.display_name)));
     }
@@ -277,6 +303,7 @@ pub async fn launch(state: &SharedState, req: LaunchSession) -> ApiResult<Sessio
         tokens_out: 0,
         cost_usd: 0.0,
         parent_session_id: source.as_ref().map(|s| s.id.clone()),
+        stopped_by_user: false,
     };
     let store = state.store.clone();
     let row = session.clone();
@@ -292,9 +319,15 @@ pub async fn launch(state: &SharedState, req: LaunchSession) -> ApiResult<Sessio
     state.emit(ServerEvent::SessionCreated {
         session: session.clone(),
     });
+    // A fresh id is always free.
+    let reservation = state
+        .terminals
+        .reserve(&session.id)
+        .ok_or_else(|| ApiError::conflict("already_running", "session is already starting"))?;
     start(
         state,
         session,
+        reservation,
         &agent,
         StartOptions {
             resume: false,
@@ -305,6 +338,12 @@ pub async fn launch(state: &SharedState, req: LaunchSession) -> ApiResult<Sessio
         },
     )
     .await
+}
+
+/// [`Agent::resolve`] scans PATH, so it runs on the blocking pool.
+async fn resolve_agent(state: &SharedState, id: &str) -> ApiResult<Agent> {
+    let (id, config) = (id.to_string(), state.config());
+    crate::api::blocking(move || Agent::resolve(&id, &config).map_err(agent_error)).await
 }
 
 /// POST /api/sessions/:id/resume
@@ -324,22 +363,24 @@ pub async fn resume(state: &SharedState, id: &str) -> ApiResult<Session> {
             "this session runs on another machine that is not reachable",
         ));
     }
-    if state.terminals.get(id).is_some() {
-        return Err(ApiError::conflict(
-            "already_running",
-            "session is still running",
-        ));
-    }
-    if !Path::new(&session.cwd).is_dir() {
+    // Reserved before anything else, so concurrent resumes of the same
+    // session cannot both spawn an agent; released again on any error.
+    let reservation = state
+        .terminals
+        .reserve(id)
+        .ok_or_else(|| ApiError::conflict("already_running", "session is still running"))?;
+    let cwd = session.cwd.clone();
+    if !crate::api::blocking(move || Ok(Path::new(&cwd).is_dir())).await? {
         return Err(ApiError::bad_request(format!(
             "session folder {} no longer exists",
             session.cwd
         )));
     }
-    let agent = Agent::resolve(&session.agent, &state.config()).map_err(agent_error)?;
+    let agent = resolve_agent(state, &session.agent).await?;
     start(
         state,
         session,
+        reservation,
         &agent,
         StartOptions {
             resume: true,
@@ -370,12 +411,19 @@ fn integrate(
     handoff: Option<&str>,
 ) -> LaunchIntegration {
     let launch_dir = state.paths.launch_dir(&session.id);
-    let max = state.config().memory.inject_max_chars as usize;
-    let memory = match render_injection(&state.store, &session.project_id, Some(&session.id), max) {
-        Ok(m) => m,
-        Err(e) => {
-            tracing::warn!(session = %session.id, error = %e, "rendering memory failed; launching without it");
-            String::new()
+    let config = state.config().memory;
+    let max = config.inject_max_chars as usize;
+    // Turned off by the user (§12): no memory, but a handoff pack the user
+    // asked for with continue/fork is still passed on.
+    let memory = if !config.inject_enabled(&agent.id) {
+        String::new()
+    } else {
+        match render_injection(&state.store, &session.project_id, Some(&session.id), max) {
+            Ok(m) => m,
+            Err(e) => {
+                tracing::warn!(session = %session.id, error = %e, "rendering memory failed; launching without it");
+                String::new()
+            }
         }
     };
     let memory = match handoff {
@@ -411,6 +459,7 @@ fn integrate(
 async fn start(
     state: &SharedState,
     session: Session,
+    reservation: Reservation,
     agent: &Agent,
     opts: StartOptions,
 ) -> ApiResult<Session> {
@@ -431,6 +480,7 @@ async fn start(
                 s.status = SessionStatus::Starting;
                 s.ended_at = None;
                 s.exit_code = None;
+                s.stopped_by_user = false;
                 s.last_activity_at = now_ms();
             })?)
         })
@@ -442,15 +492,25 @@ async fn start(
     };
     let st = state.clone();
     let (s2, a2, h2) = (session.clone(), agent.clone(), handoff.clone());
-    let integ = crate::api::blocking(move || Ok(integrate(&st, &s2, &a2, h2.as_deref()))).await?;
-    let (program, args) = agent
-        .command(&LaunchContext {
-            agent_session_id: session.agent_session_id.as_deref(),
+    // Both touch the filesystem (launch files, shim parsing).
+    let (integ, command) = crate::api::blocking(move || {
+        let integ = integrate(&st, &s2, &a2, h2.as_deref());
+        let command = a2.command(&LaunchContext {
+            agent_session_id: s2.agent_session_id.as_deref(),
             resume,
             args_before: &integ.args_before,
             args_after: &integ.args_after,
-        })
-        .map_err(agent_error)?;
+        });
+        Ok((integ, command))
+    })
+    .await?;
+    let command = match command {
+        Ok(c) => c,
+        Err(e) => {
+            mark_failed(state, &session.id).await?;
+            return Err(agent_error(e));
+        }
+    };
     let prompt = match (prompt, &handoff) {
         (Some(p), _) => Some(p),
         (None, Some(_)) if agent.id != "shell" => Some(continue_prompt(
@@ -472,9 +532,10 @@ async fn start(
         ("COLORTERM".to_string(), "truecolor".to_string()),
     ];
     env.extend(integ.env);
+    env.extend(command.env);
     let spawn = SpawnRequest {
-        program,
-        args,
+        program: command.program,
+        args: command.args,
         cwd: PathBuf::from(&session.cwd),
         env,
         env_remove: ENV_REMOVE.iter().map(|s| s.to_string()).collect(),
@@ -487,8 +548,8 @@ async fn start(
     let spawned = tokio::task::spawn_blocking(move || {
         let on_exit_state = st.clone();
         let on_exit_id = sid.clone();
-        Terminal::spawn(&sid, spawn, move |info| {
-            on_exit(&on_exit_state, &on_exit_id, info)
+        Terminal::spawn(&sid, spawn, move |term, info| {
+            on_exit(&on_exit_state, &on_exit_id, term, info)
         })
     })
     .await
@@ -498,16 +559,7 @@ async fn start(
         Ok(t) => t,
         Err(e) => {
             tracing::warn!(session = %session.id, error = %format!("{e:#}"), "session failed to start");
-            let store = state.store.clone();
-            let id = session.id.clone();
-            let failed = crate::api::blocking(move || {
-                Ok(store.modify_session(&id, |s| {
-                    s.status = SessionStatus::Failed;
-                    s.ended_at = Some(now_ms());
-                })?)
-            })
-            .await?;
-            state.emit(ServerEvent::SessionUpdated { session: failed });
+            mark_failed(state, &session.id).await?;
             return Err(ApiError::new(
                 StatusCode::UNPROCESSABLE_ENTITY,
                 "spawn_failed",
@@ -515,10 +567,11 @@ async fn start(
             ));
         }
     };
-    state.terminals.insert(term.clone());
-    // A process that exited before registration already ran on_exit.
+    reservation.fill(term.clone());
+    // A process that exited before registration already ran on_exit, whose
+    // removal found nothing to remove.
     if term.has_exited() {
-        state.terminals.remove(&session.id);
+        state.terminals.remove(&term);
     }
 
     if let Some(prompt) = prompt.filter(|p| !p.trim().is_empty()) {
@@ -527,7 +580,104 @@ async fn start(
     Ok(session)
 }
 
-/// Type `prompt` once the agent's output has settled, then press Enter.
+/// A launch or resume that could not start its process: the row (already
+/// `starting`) ends as `failed`.
+async fn mark_failed(state: &SharedState, id: &str) -> ApiResult<()> {
+    let store = state.store.clone();
+    let id = id.to_string();
+    let failed = crate::api::blocking(move || {
+        Ok(store.modify_session(&id, |s| {
+            s.status = SessionStatus::Failed;
+            s.ended_at = Some(now_ms());
+        })?)
+    })
+    .await?;
+    state.emit(ServerEvent::SessionUpdated { session: failed });
+    Ok(())
+}
+
+/// `POST /api/sessions/:id/worktree/remove` (blocking): remove the session's
+/// git worktree once the session has ended. Uncommitted changes or untracked
+/// files make it refuse (409 `worktree_dirty`) unless `force`; the branch is
+/// kept either way. Only folders under `BLIRP_HOME/worktrees` are touched,
+/// whatever a (replicated) row says.
+pub fn remove_worktree(state: &SharedState, id: &str, force: bool) -> ApiResult<Session> {
+    let session = state
+        .store
+        .get_session(id)?
+        .ok_or_else(|| ApiError::not_found("session"))?;
+    if session.machine_id != state.machine.id {
+        return Err(ApiError::bad_request(
+            "the worktree is on another machine; remove it there",
+        ));
+    }
+    let wt = session
+        .worktree
+        .clone()
+        .ok_or_else(|| ApiError::conflict("no_worktree", "the session has no worktree"))?;
+    if session.status.is_live() || state.terminals.get(id).is_some() {
+        return Err(ApiError::conflict(
+            "session_live",
+            "the session is running; stop it first",
+        ));
+    }
+    let wt = PathBuf::from(wt);
+    let root = dunce::canonicalize(state.paths.worktrees_dir())
+        .map_err(|e| ApiError::internal("locating the worktrees folder", e))?;
+    if wt.is_dir() {
+        let wt =
+            dunce::canonicalize(&wt).map_err(|e| ApiError::internal("locating the worktree", e))?;
+        if !wt.starts_with(&root) || wt == root {
+            return Err(ApiError::bad_request(format!(
+                "{} is not a blirp worktree",
+                wt.display()
+            )));
+        }
+        let info = git::repo_info(&wt)
+            .map_err(|e| ApiError::internal("inspecting the worktree", e))?
+            .ok_or_else(|| ApiError::conflict("not_git", "the worktree is not a git work tree"))?;
+        if !force {
+            let changes = git::status(&wt)
+                .map_err(|e| ApiError::internal("reading worktree status", e))?
+                .entries
+                .len();
+            if changes > 0 {
+                return Err(ApiError::conflict(
+                    "worktree_dirty",
+                    format!(
+                        "the worktree has {changes} uncommitted change(s); commit them or remove with force"
+                    ),
+                ));
+            }
+        }
+        git::worktree_remove(&info.main_root, &wt, force).map_err(|e| {
+            ApiError::new(
+                StatusCode::CONFLICT,
+                "worktree_remove_failed",
+                format!("git worktree remove failed: {e}"),
+            )
+        })?;
+    } else {
+        // Already gone: let git forget it.
+        for repo in state
+            .store
+            .local_roots(&session.project_id, &state.machine.id)?
+        {
+            if let Err(e) = git::worktree_prune(&repo) {
+                tracing::debug!(repo = %repo.display(), error = %e, "git worktree prune failed");
+            }
+        }
+    }
+    let updated = state.store.modify_session(id, |s| s.worktree = None)?;
+    state.emit(ServerEvent::SessionUpdated {
+        session: updated.clone(),
+    });
+    Ok(updated)
+}
+
+/// Type `prompt` once the agent's output has settled with no dialog on
+/// screen, then press Enter. While any dialog is visible nothing is typed
+/// (the user answers it); one that stays open 10 min drops the prompt.
 async fn type_prompt(term: Arc<Terminal>, prompt: String) {
     let begin = Instant::now();
     loop {
@@ -537,8 +687,7 @@ async fn type_prompt(term: Arc<Terminal>, prompt: String) {
         let settled = term
             .last_output()
             .is_some_and(|t| t.elapsed() >= PROMPT_SETTLE);
-        if settled && is_gate(&term.screen_text()) {
-            // A trust dialog is waiting for the user; typing now would answer it.
+        if is_dialog(&term.screen_text()) {
             if begin.elapsed() >= PROMPT_GATE_MAX_WAIT {
                 tracing::info!(session = %term.session_id, "initial prompt dropped: a dialog stayed open");
                 return;
@@ -560,16 +709,28 @@ async fn type_prompt(term: Arc<Terminal>, prompt: String) {
     term.write(bytes);
     // Some TUIs drop an Enter that arrives in the same read as a paste.
     tokio::time::sleep(Duration::from_millis(150)).await;
+    // A dialog that popped up meanwhile gets no Enter from us.
+    if is_dialog(&term.screen_text()) {
+        tracing::info!(session = %term.session_id, "initial prompt not submitted: a dialog opened");
+        return;
+    }
     term.write(b"\r".to_vec());
 }
 
-/// Runs on the PTY waiter thread when the session process exits.
-fn on_exit(state: &SharedState, session_id: &str, info: ExitInfo) {
-    state.terminals.remove(session_id);
+/// Runs on the PTY waiter thread when the session process exits. The exit is
+/// recorded before the terminal leaves the registry, so a resume (which can
+/// only start once it is gone) never has its fresh status overwritten.
+fn on_exit(state: &SharedState, session_id: &str, term: &Arc<Terminal>, info: ExitInfo) {
+    record_exit(state, session_id, info);
+    state.terminals.remove(term);
+}
+
+fn record_exit(state: &SharedState, session_id: &str, info: ExitInfo) {
     let now = now_ms();
     match state.store.modify_session(session_id, |s| {
         s.status = info.status;
-        s.exit_code = Some(info.code);
+        s.exit_code = info.code;
+        s.stopped_by_user = info.stopped_by_user;
         s.ended_at = Some(now);
         s.last_activity_at = now;
     }) {
@@ -650,12 +811,25 @@ pub fn mark_detached(state: &SharedState) -> anyhow::Result<()> {
 
 #[cfg(test)]
 mod tests {
+    /// Captured screens (tests/fixtures/screens): dialogs must hold the
+    /// initial prompt back, normal input screens must not.
     #[test]
-    fn startup_gates() {
-        assert!(super::is_gate(
-            "Quick safety check: Is this a project you created or one you trust?\n❯ 1. Yes, I trust this folder"
-        ));
-        assert!(!super::is_gate("> type your prompt\n? for shortcuts"));
+    fn dialogs_hold_the_prompt_back() {
+        let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/screens");
+        let screen = |name: &str| std::fs::read_to_string(dir.join(name)).unwrap();
+        for dialog in [
+            "claude-mcp-server.txt",
+            "claude-trust.txt",
+            "claude-permission.txt",
+            "claude-theme.txt",
+            "codex-trust.txt",
+            "generic-yes-no.txt",
+        ] {
+            assert!(super::is_dialog(&screen(dialog)), "{dialog}");
+        }
+        for input in ["claude-input.txt", "codex-input.txt", "shell-input.txt"] {
+            assert!(!super::is_dialog(&screen(input)), "{input}");
+        }
     }
 
     #[test]

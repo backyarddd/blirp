@@ -12,6 +12,18 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, PoisonError};
 
+/// Comparison key for watched roots and sources. Windows paths are case
+/// insensitive and may carry a verbatim `\\?\` prefix or `/` separators
+/// (hooks report them as the agent spelled them); elsewhere paths compare
+/// as they are.
+pub(crate) fn path_key(p: &Path) -> PathBuf {
+    if cfg!(windows) {
+        PathBuf::from(dunce::simplified(p).to_string_lossy().to_lowercase())
+    } else {
+        p.to_path_buf()
+    }
+}
+
 /// What a pass should look at.
 #[derive(Debug, Clone, Default)]
 pub struct Work {
@@ -117,13 +129,15 @@ impl Engine {
         }
     }
 
-    /// Adapter index owning `path` (longest matching root).
+    /// Adapter index owning `path` (longest matching root). Paths reported
+    /// by hooks may differ from the roots in case or form on Windows.
     pub fn adapter_for(&self, path: &Path) -> Option<usize> {
+        let key = path_key(path);
         self.adapters
             .iter()
             .enumerate()
             .flat_map(|(i, a)| a.roots().into_iter().map(move |r| (i, r)))
-            .filter(|(_, r)| path.starts_with(r))
+            .filter(|(_, r)| key.starts_with(path_key(r)))
             .max_by_key(|(_, r)| r.as_os_str().len())
             .map(|(i, _)| i)
     }
@@ -167,10 +181,19 @@ impl Engine {
             && let Some(known) = lock(&self.known).get(&ix)
         {
             // File sources are keyed by path (item None); database sources
-            // always rescan because one file holds many of them.
-            let known_file = |c: &PathBuf| known.iter().any(|s| &s.path == c && s.item.is_none());
-            if changed.iter().all(known_file) {
-                return Ok(changed.iter().filter_map(|p| Source::file(p)).collect());
+            // always rescan because one file holds many of them. A changed
+            // path maps to the known source's own spelling, so a hook's
+            // differently cased path never becomes a second source.
+            let known_file = |c: &PathBuf| {
+                let key = path_key(c);
+                known
+                    .iter()
+                    .find(|s| s.item.is_none() && path_key(&s.path) == key)
+                    .map(|s| s.path.clone())
+            };
+            let paths: Option<Vec<PathBuf>> = changed.iter().map(known_file).collect();
+            if let Some(paths) = paths {
+                return Ok(paths.iter().filter_map(|p| Source::file(p)).collect());
             }
         }
         let mut sources = adapter.scan(&self.store)?;

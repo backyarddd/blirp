@@ -1,8 +1,8 @@
 //! Projects: list, register, rename, delete, merge, memory view.
 
-use super::{ApiJson, ApiResult, blocking};
+use super::{ApiError, ApiJson, ApiPath, ApiResult, Control, blocking};
 use crate::state::SharedState;
-use axum::extract::{Path, State};
+use axum::extract::State;
 use axum::http::StatusCode;
 use axum::routing::{get, post};
 use axum::{Json, Router};
@@ -32,7 +32,7 @@ async fn list(State(s): State<SharedState>) -> ApiResult<Json<Vec<ProjectSummary
 
 async fn get_one(
     State(s): State<SharedState>,
-    Path(id): Path<String>,
+    ApiPath(id): ApiPath<String>,
 ) -> ApiResult<Json<ProjectSummary>> {
     let (store, machine) = (s.store.clone(), s.machine.id.clone());
     Ok(Json(
@@ -42,8 +42,13 @@ async fn get_one(
 
 async fn create(
     State(s): State<SharedState>,
+    _: Control,
     ApiJson(body): ApiJson<CreateProject>,
 ) -> ApiResult<(StatusCode, Json<ProjectSummary>)> {
+    // A relative folder would resolve against the daemon's own directory.
+    if !std::path::Path::new(&body.path).is_absolute() {
+        return Err(ApiError::bad_request("path must be an absolute path"));
+    }
     let (store, machine) = (s.store.clone(), s.machine.id.clone());
     let summary = blocking(move || {
         let p = store.register_project(
@@ -62,7 +67,8 @@ async fn create(
 
 async fn rename(
     State(s): State<SharedState>,
-    Path(id): Path<String>,
+    _: Control,
+    ApiPath(id): ApiPath<String>,
     ApiJson(body): ApiJson<PatchProject>,
 ) -> ApiResult<Json<ProjectSummary>> {
     let (store, machine) = (s.store.clone(), s.machine.id.clone());
@@ -77,7 +83,11 @@ async fn rename(
     Ok(Json(summary))
 }
 
-async fn remove(State(s): State<SharedState>, Path(id): Path<String>) -> ApiResult<StatusCode> {
+async fn remove(
+    State(s): State<SharedState>,
+    _: Control,
+    ApiPath(id): ApiPath<String>,
+) -> ApiResult<StatusCode> {
     let store = s.store.clone();
     let pid = id.clone();
     blocking(move || Ok(store.delete_project(&pid)?)).await?;
@@ -87,7 +97,8 @@ async fn remove(State(s): State<SharedState>, Path(id): Path<String>) -> ApiResu
 
 async fn merge(
     State(s): State<SharedState>,
-    Path(id): Path<String>,
+    _: Control,
+    ApiPath(id): ApiPath<String>,
     ApiJson(body): ApiJson<MergeProject>,
 ) -> ApiResult<Json<ProjectSummary>> {
     let (store, machine) = (s.store.clone(), s.machine.id.clone());
@@ -106,7 +117,7 @@ async fn merge(
 
 async fn memory(
     State(s): State<SharedState>,
-    Path(id): Path<String>,
+    ApiPath(id): ApiPath<String>,
 ) -> ApiResult<Json<ProjectMemory>> {
     let store = s.store.clone();
     Ok(Json(

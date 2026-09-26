@@ -1,6 +1,6 @@
 //! Health, machines, search, settings, agents and the server event stream.
 
-use super::{ApiError, ApiJson, ApiQuery, ApiResult, Principal, blocking};
+use super::{Admin, ApiError, ApiJson, ApiQuery, ApiResult, Principal, blocking};
 use crate::state::SharedState;
 use axum::Json;
 use axum::Router;
@@ -10,8 +10,8 @@ use axum::http::StatusCode;
 use axum::response::Response;
 use axum::routing::{get, post};
 use blirp_core::model::{
-    AgentInfo, Health, Machine, SearchHitKind, SearchResults, ServerEvent, SettingsPatch,
-    SettingsView,
+    AgentInfo, DistillStatus, Health, Machine, SearchHitKind, SearchResults, ServerEvent,
+    SettingsPatch, SettingsView,
 };
 use serde::Deserialize;
 use std::time::{Duration, Instant};
@@ -35,14 +35,13 @@ pub fn local_routes() -> Router<SharedState> {
 
 /// Graceful stop for clients without a signal path to the daemon (the
 /// detached Windows daemon has no console): same as SIGTERM / Ctrl+C.
-async fn shutdown(State(s): State<SharedState>, principal: Principal) -> ApiResult<StatusCode> {
-    principal.require_admin()?;
+async fn shutdown(State(s): State<SharedState>, _: Admin) -> ApiResult<StatusCode> {
     tracing::info!("shutdown requested over the API");
     s.stop_requested.notify_one();
     Ok(StatusCode::ACCEPTED)
 }
 
-async fn health(State(s): State<SharedState>) -> Json<Health> {
+async fn health(State(s): State<SharedState>, principal: Principal) -> Json<Health> {
     // The role changes at runtime (hub enable, pairing); the config is current.
     let role = s.config().sync.role;
     Json(Health {
@@ -52,6 +51,7 @@ async fn health(State(s): State<SharedState>) -> Json<Health> {
             role,
             ..s.machine.clone()
         },
+        capabilities: principal.capabilities(),
     })
 }
 
@@ -83,15 +83,29 @@ async fn search(
 
 async fn get_settings(State(s): State<SharedState>) -> ApiResult<Json<SettingsView>> {
     let store = s.store.clone();
-    let values = blocking(move || Ok(store.all_settings()?)).await?;
+    let (values, used) = blocking(move || {
+        Ok((
+            store.all_settings()?,
+            crate::memory::distill::budget_used(&store)?,
+        ))
+    })
+    .await?;
+    let config = s.config();
+    let distill = DistillStatus {
+        budget_used: u32::try_from(used).unwrap_or(u32::MAX),
+        budget_limit: config.memory.daily_distill_limit,
+        ..s.distiller.status(blirp_core::now_ms())
+    };
     Ok(Json(SettingsView {
-        config: s.config(),
+        config,
         values,
+        distill,
     }))
 }
 
 async fn patch_settings(
     State(s): State<SharedState>,
+    _: Admin,
     ApiJson(patch): ApiJson<SettingsPatch>,
 ) -> ApiResult<Json<SettingsView>> {
     let state = s.clone();
@@ -114,6 +128,8 @@ async fn patch_settings(
         Ok(())
     })
     .await?;
+    // Apply portal changes (portal.lan, lan_port) now, not at the next start.
+    crate::sync::apply_portal_config(&s).await?;
     get_settings(State(s)).await
 }
 
@@ -154,14 +170,15 @@ async fn push_events(
     mut shutdown: tokio::sync::watch::Receiver<bool>,
 ) {
     let mut rx = s.events.subscribe();
-    loop {
+    // None: the client closed (or vanished); Some: we close with that code.
+    let ours = loop {
         tokio::select! {
             ev = rx.recv() => {
                 let ev = match ev {
                     Ok(ev) => ev,
                     // Missed events: tell the client to refetch.
                     Err(RecvError::Lagged(_)) => ServerEvent::Resync,
-                    Err(RecvError::Closed) => break,
+                    Err(RecvError::Closed) => break Some(super::WS_GOING_AWAY),
                 };
                 let text = match serde_json::to_string(&ev) {
                     Ok(t) => t,
@@ -171,17 +188,16 @@ async fn push_events(
                     }
                 };
                 if socket.send(Message::Text(text.into())).await.is_err() {
-                    break;
+                    break None;
                 }
             }
             msg = socket.recv() => match msg {
-                Some(Ok(Message::Close(_))) | None | Some(Err(_)) => break,
+                Some(Ok(Message::Close(_))) | None | Some(Err(_)) => break None,
                 // Clients have nothing to say on this stream; pings are answered by axum.
                 Some(Ok(_)) => {}
             },
-            _ = shutdown.changed() => break,
+            _ = shutdown.changed() => break Some(super::WS_GOING_AWAY),
         }
-    }
-    // Best effort: the peer may already be gone.
-    let _ = socket.send(Message::Close(None)).await;
+    };
+    super::close_ws(&mut socket, ours).await;
 }

@@ -42,7 +42,7 @@ Data dir `BLIRP_HOME`, default `~/.blirp` on every OS (Windows: `%USERPROFILE%\.
   identity.key       iroh secret key, 64 hex chars (0600); created on first start
   tls/cert.pem, tls/key.pem   self-signed LAN portal certificate (hub, key 0600)
   daemon.lock        single-instance lock (OS file lock held by the daemon)
-  logs/blirpd.<date>.log   rolling logs (tracing-appender, daily, keep 7)
+  logs/blirpd.<date>.log   rolling logs (tracing-appender, daily, keep 7); stderr gets a copy only when it is a terminal
   logs/desktop.<date>.log  desktop shell log (same rotation); launchd.log: LaunchAgent stdout/stderr (macOS)
   worktrees/<project-id>/<name>/   optional per-session git worktrees
   launch/<session-id>/             per-launch generated files (claude settings.json, mcp.json, memory.md)
@@ -53,13 +53,13 @@ Data dir `BLIRP_HOME`, default `~/.blirp` on every OS (Windows: `%USERPROFILE%\.
 
 ## 4. Processes
 
-- `blirp daemon` - long-running per-user process. Owns PTYs, ingest watchers, memory jobs, SQLite writer, local HTTP/WS API, and (optionally) the iroh sync endpoint and LAN portal (hub). Single instance enforced by a lock file.
+- `blirp daemon` - long-running per-user process. Owns PTYs, ingest watchers, memory jobs, SQLite writer, local HTTP/WS API, and (optionally) the iroh sync endpoint and LAN portal (hub). Single instance enforced by a lock file. `--detach` starts it in the background with `BLIRP_HOME` as its working directory (never the caller's folder, which it would otherwise keep in use).
 - `blirp hook <agent> <event>` - short-lived; reads hook JSON from stdin, POSTs to daemon, prints injection output where the agent supports it. Always exits 0.
 - `blirp mcp` - stdio MCP server spawned by agents. Reads the local SQLite directly in read-only mode for queries; writes (e.g. `mem_record`) go through the daemon API.
-- `blirp <cli>` - `status`, `open` (opens UI/portal in browser with a login link), `mem search|brief|show`, `sessions`, `pair`, `hub enable|disable|invite|status`, `devices list|revoke`, `service install|uninstall|status`, `hooks install|uninstall|status`, `doctor`.
+- `blirp <cli>` - `status`, `worktrees list|prune` (see `POST /api/sessions/:id/worktree/remove`), `stop` (graceful `POST /api/daemon/shutdown`; if the daemon still holds `daemon.lock` after 15 s, or does not answer, the pid from runtime.json is killed; the lock, not the pid, decides whether a daemon runs), `logs [-n N] [-f]` (end of the newest `logs/blirpd.<date>.log`; `-f` follows it across the daily rotation), `open` (opens UI/portal in browser with a login link), `mem search|brief|show`, `sessions`, `pair`, `hub enable|disable|invite|status`, `devices list|revoke`, `service install|uninstall|status`, `hooks install|uninstall|status`, `doctor`.
 - Desktop app - on launch ensures the daemon is running (spawns sidecar `blirp daemon --detach` if not), reads runtime.json, opens a window at `http://127.0.0.1:<port>/auth?token=...` which sets an HttpOnly cookie and redirects to `/`. Closing the window does not stop the daemon or sessions.
 
-Autostart: `blirp service install` registers per-user autostart: macOS LaunchAgent `~/Library/LaunchAgents/dev.blirp.daemon.plist` (`blirp daemon`, `KeepAlive.SuccessfulExit=false`), Linux `systemd --user` unit `blirp.service` (`Restart=on-failure`, `enable --now`; headless hubs also need `loginctl enable-linger`), Windows `HKCU\Software\Microsoft\Windows\CurrentVersion\Run` value `blirp` = `conhost.exe --headless "<blirp.exe>" daemon --detach` (no console window). The unit records the absolute binary path and, on macOS/Linux, the installing shell's `PATH` and an explicit `BLIRP_HOME`. Install is idempotent (an existing daemon is left running and the service takes over at next login); uninstall removes exactly that entry and leaves a running daemon alone. Never a system service (it would not see the user's agent logins).
+Autostart: `blirp service install` registers per-user autostart: macOS LaunchAgent `~/Library/LaunchAgents/dev.blirp.daemon.plist` (`blirp daemon`, `KeepAlive.SuccessfulExit=false`), Linux `systemd --user` unit `blirp.service` (`Restart=on-failure`, `enable --now`; headless hubs also need `loginctl enable-linger`), Windows `HKCU\Software\Microsoft\Windows\CurrentVersion\Run` value `blirp` = `conhost.exe --headless "<blirp.exe>" daemon --detach` (no console window). The unit records the absolute binary path and, on macOS/Linux, the installing shell's `PATH` and an explicit `BLIRP_HOME`. Install is idempotent (an existing daemon is left running and the service takes over at next login); uninstall removes exactly that entry; on Windows and Linux a running daemon keeps running, on macOS unloading the LaunchAgent (`launchctl bootout`) stops the daemon it started, and the command says which happened. Never a system service (it would not see the user's agent logins).
 
 ## 5. Data model (SQLite, `blirp-core::store`)
 
@@ -89,6 +89,7 @@ sessions(id TEXT PK, project_id TEXT, machine_id TEXT,
          distilled_through_seq INT DEFAULT 0,
          tokens_in INT DEFAULT 0, tokens_out INT DEFAULT 0, cost_usd REAL DEFAULT 0,
          parent_session_id TEXT NULL, -- fork / continue-in lineage; parent of an ingested subagent
+         stopped_by_user INT DEFAULT 0, -- ended by a user Stop (migration 3)
          UNIQUE(agent, agent_session_id))
 
 events(session_id TEXT, seq INT, ts INT,
@@ -131,7 +132,7 @@ hub_log(hub_seq INTEGER PRIMARY KEY AUTOINCREMENT, origin_machine TEXT, origin_s
         UNIQUE(origin_machine, origin_seq))            -- only populated on the hub
 ```
 
-All writes to replicated entities (`projects`, `project_paths`, `sessions`, `events`, `records`, `briefs`, `wiki_pages`, `resources`, `machines`) go through `Store::apply(Change)` which writes the row and appends to `outbox` in one transaction. Nothing else may write those tables, except replication applying changes received from other machines (`Store::apply_remote` and the hub/node batch paths in `store::sync`), which write the row without queueing it again (no echo).
+All writes to replicated entities (`projects`, `project_paths`, `sessions`, `events`, `records`, `briefs`, `wiki_pages`, `resources`, `machines`) go through `Store::apply(Change)` which writes the row and appends to `outbox` in one transaction. One exception keeps the outbox from growing with every status flip: a session change that only moves between live statuses (starting/working/idle/waiting, plus `last_activity_at`) within 5 s of that session's last outbox entry writes the row and records `outbox_deferred(entity, key, due)` (migration 5) instead; the daemon's 500 ms status tick queues the then-current row once `due` passes (`Store::flush_deferred`), and any other change to the session (a final status, a title, tokens) is queued at once and clears the deferral. So at most one status-only entry per session per 5 s is replicated and the final state always is. Nothing else may write those tables, except replication applying changes received from other machines (`Store::apply_remote` and the hub/node batch paths in `store::sync`), which write the row without queueing it again (no echo).
 
 The machine id is the iroh endpoint id from `identity.key`. Installs that predate the identity used a local uuid; on first start the daemon rebinds that uuid to the endpoint id once (`Store::rebind_machine`: this machine's folders and sessions move, the old machine row is dropped with `Change::DeleteMachine`, all through the outbox). Migration 2 adds the indexes replication needs (`outbox(entity, key, origin_seq)`, `hub_log(origin_machine, hub_seq)`).
 
@@ -145,7 +146,7 @@ The machine id is the iroh endpoint id from `identity.key`. Installs that predat
 
 Worktree sessions resolve to the parent repo's project (git common dir).
 
-Implementation notes: a subfolder of an unregistered repo registers the repo top level (step 2). The Home project is named `Home (<machine name>)`, has no `project_paths` rows (so it never captures subfolders by prefix) and its id is kept in the local `settings` key `home_project_id`. git runs as the `git` CLI with a timeout; when git is missing every folder is treated as non-git.
+Implementation notes: a subfolder of an unregistered repo registers the repo top level (step 2). The Home project is named `Home (<machine name>)`, has no `project_paths` rows (so it never captures subfolders by prefix) and its id is kept in the local `settings` key `home_project_id`. git runs as the `git` CLI with a timeout; when git is missing every folder is treated as non-git. Short-lived helpers (git, `--version` probes) run in their own process group / job: a timeout kills the whole tree, and after a normal exit output pipes that a background grandchild still holds are read for at most 1 s (the helper itself is left running). Blocking work (PATH scans, filesystem checks, shim parsing) never runs on the async runtime.
 
 ## 6. PTY supervisor (`blirp::pty`)
 
@@ -153,19 +154,21 @@ Implementation notes: a subfolder of an unregistered repo registers the repo top
 - Each live terminal: child process, master reader task, writer, `vt100::Parser` holding screen state (scrollback 10 000 lines), subscriber broadcast channel.
 - Attach protocol (WS `/api/terminals/:id/ws`): server first sends a `snapshot` frame (formatted screen contents reproducing the current screen, including alt-screen state, cursor position and title), then streams raw output bytes. Client sends `input` (bytes), `resize {cols, rows}`. Multiple clients may attach; last resize wins.
 - Framing (types `TerminalServerMessage` / `TerminalClientMessage` in `types.gen.ts`):
-  - server -> client **text** frames are JSON: `{"type":"snapshot","cols","rows","data"}` (reset the terminal, then write `data`; it starts with `ESC c`, replays scrollback lines on the normal screen, redraws the screen and restores input modes, cursor and title; sent first and again whenever the client fell behind), `{"type":"resize","cols","rows"}` (another client resized), `{"type":"exit","status","exit_code"}` (process ended; the socket closes).
+  - server -> client **text** frames are JSON: `{"type":"snapshot","cols","rows","data"}` (reset the terminal, then write `data`; it starts with `ESC c`, replays scrollback lines on the normal screen, redraws the screen and restores input modes, cursor and title; sent first and again whenever the client fell behind), `{"type":"readonly"}` (right after the first snapshot when the client may not control the terminal: its input and resize frames are ignored), `{"type":"resize","cols","rows"}` (another client resized; never echoed to the client that asked), `{"type":"exit","status","exit_code"}` (process ended; the socket closes).
   - server -> client **binary** frames are raw PTY output bytes (may split UTF-8 sequences; feed them to the terminal as bytes).
   - client -> server **binary** frames are raw input bytes; **text** frames are JSON `{"type":"input","data":"..."}` or `{"type":"resize","cols":N,"rows":N}` (1-1000 each). Frames are capped at 1 MiB.
   - A live terminal that has exited is gone: attaching returns 404 `terminal_not_found`; use the session's status and events instead.
+  - Closing (this and `/api/events/ws`) always completes the WebSocket close handshake: a client's close is answered; the server closes with 1000 `exited` after the exit frame, 1001 `going away` when the daemon shuts down or the client's access changed (reconnect), and a relayed terminal passes the remote daemon's close code on (1011 when the remote side is unreachable).
 - The daemon answers terminal queries itself when no client is attached (DSR cursor position `ESC[6n`, DSR status `ESC[5n`, primary DA `ESC[c`) so ConPTY and TUIs never block at startup. Attached clients (xterm.js) answer them instead.
-- Kill = terminate the whole process tree (Windows job object + ClosePseudoConsole; Unix process group SIGHUP then SIGKILL after 3 s). The Windows job has `KILL_ON_JOB_CLOSE`, so sessions also end if the daemon dies; after a normal exit the rest of the tree is reaped the same way (like a terminal hangup).
+- Kill = terminate the whole process tree (Windows job object + ClosePseudoConsole; Unix: the tree is the child's process group plus every process of its session (the PTY child is a session leader; shells put background jobs such as `nohup x &` into groups of their own, and reparenting to init keeps the session) plus descendants still linked by parent pid, listed with `ps` and remembered at Stop time; it gets SIGHUP and SIGTERM, then SIGKILL after 3 s if anything is still alive, whether or not the leader already exited). The Windows job has `KILL_ON_JOB_CLOSE`, so sessions also end if the daemon dies; after a normal exit the rest of the tree is reaped the same way (like a terminal hangup). On Unix the output reader polls, so a process outside the group that keeps the PTY open cannot pin the reader thread: it gives up 1 s after the group is gone. The ConPTY is closed outside the PTY locks (the close waits for the reader, which needs the screen lock).
+- Live terminals are registered per session id; a launch or resume reserves the id before spawning, so concurrent resumes of one session start one agent (the others get 409 `already_running`), and an exiting terminal records its exit and then removes only its own registry entry.
 - Activity tracking: `last_output_at`; status heuristics in §7.
 
 ## 7. Sessions and agents (`blirp::agents`)
 
 An `AgentSpec` describes each agent: binary name(s), how to detect it on PATH, launch args, resume args, env injection, hook/MCP integration, transcript adapter. Custom agents are any command line from config (no memory ingest, but still tracked with status and injection via `BLIRP_MEMORY_FILE` env and AGENTS.md if the user enables it).
 
-Launch (`POST /api/sessions`): body `{project_id | cwd, agent, prompt?, worktree?: bool, continue_from?: session_id, machine?: id}`:
+Launch (`POST /api/sessions`): body `{project_id | cwd, agent, prompt?, worktree?: bool, continue_from?: session_id, machine?: id}` (`cwd` must be absolute, else 400):
 1. Resolve project + cwd. If `worktree` and project is git: `git worktree add ~/.blirp/worktrees/<project>/<name> -b blirp/<name>`; name is `adjective-animal-xxxx`.
 2. Create session row (`starting`, origin `blirp`).
 3. Render memory injection (§9) to `~/.blirp/launch/<id>/memory.md`.
@@ -173,18 +176,19 @@ Launch (`POST /api/sessions`): body `{project_id | cwd, agent, prompt?, worktree
    - claude: `claude --session-id <new uuid> --settings <launch/settings.json> --mcp-config <launch/mcp.json>` (settings contains blirp hooks for SessionStart, UserPromptSubmit, Stop, Notification, SessionEnd, PreCompact). Store the uuid as `agent_session_id` immediately.
    - codex: `codex -c developer_instructions=<user's own developer_instructions + memory> -c mcp_servers.blirp.command=... -c mcp_servers.blirp.args=["mcp"] -c mcp_servers.blirp.env={...}` placed before any `resume` subcommand. Codex 0.153 has SessionStart hooks, but non-managed hooks only run after the user trusts their exact definition, so launch-time context uses `developer_instructions` (verified with `codex debug prompt-input`).
    - opencode, pi, gemini, cursor, amp, aider, dsh: per §9 table.
-   - Windows npm `.cmd` shims (`codex.cmd`, `gemini.cmd`, ...) are unwrapped to `node <script>` so arguments never pass through `cmd.exe` quoting; other `.cmd/.bat` still run via `cmd /d /c`.
+   - Windows npm `.cmd` shims (`codex.cmd`, `gemini.cmd`, ...) that run node (`SET "_prog=node"`, or the older `"%~dp0
+ode.exe"` form) are unwrapped to `node <script>` so arguments never pass through `cmd.exe`. Other `.cmd/.bat` files run as `cmd /d /v:off /c %BLIRP_CMD_LINE%`, with the escaped command line in the `BLIRP_CMD_LINE` env var (the PTY spawner cannot pass a raw command line): the script path is quoted, every argument with anything but word characters is quoted with embedded quotes doubled (so `& | < > ^ ( )` stay literal), and cmd expands the variable once, so `%` in arguments is never expanded. Arguments with line breaks are rejected (400).
    - Launch integration failures (render, file writes) are logged and the agent starts without memory.
    - Env always: `BLIRP_SESSION_ID`, `BLIRP_PROJECT_ID`, `BLIRP_HOME`, `BLIRP_MEMORY_FILE`, plus `TERM=xterm-256color`, `COLORTERM=truecolor`. Parent-agent markers (`CLAUDECODE`, `CLAUDE_CODE_*` session/child/messaging vars, `CLAUDE_PID`, `CLAUDE_EFFORT`, `CODEX_SANDBOX`) are removed so a daemon started from inside an agent does not leak them.
    - shell: `$SHELL` (unix, else `/bin/sh`); Windows `pwsh`, else `powershell`, else `%ComSpec%`.
-   - Binaries resolve on PATH; on Windows only `.exe/.com/.cmd/.bat/.ps1` count (npm's extensionless shims are skipped), `.cmd/.bat` run via `cmd /d /c`, `.ps1` via PowerShell `-File`.
+   - Binaries resolve on PATH; on Windows only `.exe/.com/.cmd/.bat/.ps1` count (npm's extensionless shims are skipped), `.cmd/.bat` run through `cmd` as above, `.ps1` via PowerShell `-File`. The same wrapping applies to `--version` probes, summarizer runs and `open` in an editor shim.
    - Resume (`POST /api/sessions/:id/resume`, same session row) with `agent_session_id`: claude `--resume <id>`, codex `resume <id>`, opencode `--session <id>`, gemini `--resume <id>`, cursor `--resume <id>`, amp `threads continue <id>`; pi, aider, dsh, shell and custom agents (or no known id) relaunch fresh in the session folder.
-5. Spawn PTY; if `prompt` given, type it after the agent is ready (first output idle for 1.5 s, at most 60 s) followed by Enter. The prompt is sent as a bracketed paste when the application enabled bracketed paste mode. While a folder-trust dialog is on screen (claude "trust this folder", codex "trust the contents of this directory", ...) the prompt waits for the user to answer it (up to 10 min), because typing into the dialog would answer it.
+5. Spawn PTY; if `prompt` given, type it after the agent is ready (first output idle for 1.5 s, at most 60 s) followed by Enter. The prompt is sent as a bracketed paste when the application enabled bracketed paste mode. While any interactive dialog is on screen the prompt waits for the user to answer it (up to 10 min, then it is dropped): a selection menu with a highlighted numbered choice (claude `❯ 1.`, codex `› 1.`, also inside a box), "Enter to confirm" / "Esc to cancel" hints, `(y/n)` questions, and trust, permission ("Do you want to ...") and "New MCP server" wording. Typing into a dialog would answer it (a digit picks a choice, Enter confirms the default, e.g. approving an MCP server from the user's `.mcp.json`); blirp never answers dialogs. The screen is checked again before Enter is sent. Fixtures of captured screens live in `crates/blirp/tests/fixtures/screens/`.
 
 Status:
 - From hooks when available (claude: UserPromptSubmit -> working, Stop -> idle, Notification(permission/idle prompt) -> waiting, SessionEnd -> completed).
 - Else heuristics: output within the last 2 s -> working; otherwise idle.
-- Process exit: code 0 -> completed, else failed. A user Stop -> completed regardless of exit code. Daemon shutdown ends running sessions as `detached`.
+- Process exit: code 0 -> completed, else failed. A user Stop is recorded as intent: `completed` with `exit_code` null and `stopped_by_user = true` (the kill's own code, e.g. 1 from TerminateJobObject, is dropped), so the UI shows "Stopped"; the terminal `exit` frame has `exit_code: null` too. Resume clears the flag. Daemon shutdown ends running sessions as `detached`.
 - Heuristics never overwrite `waiting` (hook-owned) or a final status.
 - On daemon restart, blirp-launched sessions whose process is gone become `detached` (ingested external sessions keep their status); UI offers Resume (agent resume flag with `agent_session_id`).
 
@@ -203,7 +207,7 @@ trait Adapter {
 }
 ```
 
-- Watch roots with `notify` (debounced 500 ms) plus a full rescan every 5 min and at startup. Hooks that report a `transcript_path` hand it over through `IngestTrigger` (§9 Hooks); hints are collected for 250 ms from the first one and then join the next pass like a watcher event (a path outside every adapter root is ignored), so hooked sessions are ingested within about a second even when their root is not watched. Only roots that exist are watched; the rescan adds roots created later (agent installed after blirp). A watcher event re-reads just the changed known file; anything else (new file, database) rescans that adapter.
+- Watch roots with `notify` (debounced 500 ms) plus a full rescan every 5 min and at startup. Hooks that report a `transcript_path` hand it over through `IngestTrigger` (§9 Hooks); hints are collected for 250 ms from the first one and then join the next pass like a watcher event (a path outside every adapter root is ignored; on Windows roots and known sources are matched case-insensitively after removing a `\\?\` prefix, and a hinted file continues the known source under its scanned spelling), so hooked sessions are ingested within about a second even when their root is not watched. Only roots that exist are watched; the rescan adds roots created later (agent installed after blirp). A watcher event re-reads just the changed known file; anything else (new file, database) rescans that adapter.
 - Passes run on the blocking pool, one at a time (adapters of a pass in parallel, sources of one adapter sequentially, most recently modified first), never on the async runtime or the PTY path. Events are written in `Store::ingest_tx` transactions of at most 1000 events with `apply` semantics (row + outbox); a source's cursor is stored in the transaction of its last batch. Shutdown stops a pass between events.
 - Incremental: a `Source` carries a fingerprint (size + mtime for files, `time_updated` for database rows); an equal fingerprint in the stored cursor skips the source. JSONL cursors store byte offset + line count guarded by file identity (creation time / inode) and a hash of the first 256 bytes; only complete lines are consumed (a final line without newline counts once the file has been quiet for 60 s). SQLite stores keep the last consumed `(time_created, id)`; JSON files the message count. Truncation, rotation or a changed head -> re-read from 0, dedupe on `(session_id, seq)` (so a file rewritten with *different* content at the same positions is not re-imported; agents append, so this only affects hand-edited files).
 - Seqs are deterministic for the same source content and increase with arrival (the distiller consumes events past `distilled_through_seq`): line-oriented sources use `line_index * 1024 + n`; sources without stable lines (gemini, cursor `store.db`, opencode) keep a counter in the cursor and dedupe by message / tool-call / blob id.
@@ -247,6 +251,8 @@ Summarizer backends (config `memory.summarizer`, default `auto`), all with a 180
 - `ollama`: `POST $OLLAMA_HOST|http://127.0.0.1:11434/api/chat` with `format: "json"`, `stream: false`, model `memory.ollama_model`.
 - `none`: never distill.
 
+Summarizer failures are classified. A failure of the summarizer itself (auth: "not logged in", invalid key; unavailable: not installed, not reachable; rate or usage limits) pauses automatic distilling with a circuit breaker: the unit of budget is given back, the session records no failure (it stays eligible), and automatic jobs are skipped quietly until the pause ends (5 min, doubling on each failed retry up to 6 h; the first job after it is the probe). Success resumes distilling. Pause changes are logged once per attempt; "budget used up" once per day. `GET /api/settings` reports `distill {paused, reason, retry_at, budget_used, budget_limit}`. Manual distills always try. Other failures (timeouts, invalid output) fail only that session as below.
+
 `auto` picks the first available: claude on PATH, codex on PATH, ollama answering `/api/tags`. Every summarizer runs in a fresh empty dir `BLIRP_HOME/distill/run-*` (removed afterwards; inside BLIRP_HOME and outside `worktrees/`, which is exactly what ingest skips, so even a summarizer that persists its session is never ingested and distilled in turn) with `BLIRP_DISTILLING=1` (blirp hooks exit immediately when set) and without `BLIRP_SESSION_ID`/`CLAUDECODE`-style env.
 
 Input: redacted, compacted transcript (user prompts verbatim; assistant text; tool calls as one-line `TOOL: ...` (<= 300 chars); tool results `RESULT: ...` (<= 400 chars); file edits and system lines one-line), capped at `memory.distill_max_chars` (default 60 000, keep head 20% + tail 80% around a `[... N characters omitted ...]` marker), plus the current brief and active records (with ids) of the project.
@@ -271,13 +277,17 @@ Apply (`Store::apply_distill`, one transaction): session title (if unset) + `sum
 ```
 # blirp memory: <project name>
 <brief, at most half the budget; "_No project brief yet._" when empty>
-## Open threads      (active open_thread records, pinned first, then most recently updated, max 10)
+## Pinned            (active pinned records of any kind, notes and plans included, labelled `[kind]`, max 8)
+## Open threads      (active open_thread records not shown under Pinned, max 10)
+## Active plans      (active plan records not shown under Pinned, max 5)
 ## Recent decisions  (max 8)
 ## Gotchas           (max 5)
 ## Recent sessions   (last 3 titled or summarized, excluding the session being started: date, agent, machine, title: summary)
 Tools: search older history with the blirp MCP tools (mem_search, mem_session, mem_recent, mem_record) or `blirp mem search "<query>"`.
 ```
-Records sort by pinned, then `updated_at` desc, then id; list items are one line (<= 400 chars); empty sections are omitted; sections are filled in the order above until the budget is used, and the Tools line is always kept. Dates are UTC `YYYY-MM-DD`. Nothing depends on the current time, so the text changes only when memory changes and agent prompt caches keep hitting. At launch the rendered text (plus a handoff pack, if any) is written to `~/.blirp/launch/<session>/memory.md`; `GET /api/inject?session=` returns exactly that file, `?cwd=` renders for the folder's project.
+Records sort by pinned, then `updated_at` desc, then id; a record appears once (under Pinned when it is pinned and within the cap, else in its kind's section; unpinned notes are not injected); list items are one line (<= 400 chars); empty sections are omitted; sections are filled in the order above until the budget is used, and the Tools line is always kept. Dates are UTC `YYYY-MM-DD`. Nothing depends on the current time, so the text changes only when memory changes and agent prompt caches keep hitting. At launch the rendered text (plus a handoff pack, if any) is written to `~/.blirp/launch/<session>/memory.md`; `GET /api/inject?session=` returns exactly that file, `?cwd=` renders for the folder's project.
+
+Injection can be turned off (§12 `memory.inject = false`, or per agent with `memory.inject_disabled_agents`): launches then write an empty `memory.md` (a continue/fork handoff pack is still passed on, since the user asked for it), and SessionStart hooks (daemon and offline fallback) return no context. The MCP tools and `blirp mem` keep working on demand.
 
 Per-agent integration (launch-time never edits user files; "verified" = checked against the installed CLI on the reference machine, "docs" = from official docs only):
 
@@ -340,7 +350,7 @@ Pairing (`blirp/pair/1`):
 Replication (`blirp/sync/1`): the node dials the hub and opens one bidirectional stream for strict request/response (`hello {versions, machine}` -> `welcome {version, hub_machine_id, head}`, `push {entries}` -> `push_ack {acked}`, `pull {after}` -> `page`); the hub opens one unidirectional stream for `notify {head}` frames whenever `hub_log` grows.
 - Push: node sends outbox entries after `last_pushed_origin_seq` in batches (<= 500 entries or 4 MiB). Hub, in one transaction: first logs its own pending local writes into `hub_log`, then inserts each entry (idempotent on `(origin_machine, origin_seq)`), applies it to its tables and advances the node's cursor; acks the highest origin_seq. Entries whose payload does not match their declared entity/op/key, or `machines` rows for another machine than the sender, are rejected (logged, never retried). An entry that fails to apply on the hub (constraint) is still logged.
 - Pull: node requests `hub_log` after `last_pulled_hub_seq`. The page carries other machines' entries in full and the requester's own entries only as position markers, plus `own_seen` (the requester's highest origin_seq logged before the page). The node applies the page and moves its cursor in one transaction.
-- Conflict rule: rows are last-writer-wins by `hub_seq` order. The hub's tables always equal `hub_log` replayed in order. A node skips a pulled remote upsert/delete for a row it wrote itself later (a local outbox entry for the same entity/key with origin_seq > own_seen: unpushed, or pushed after the remote entry), because that write will be (or was) logged after it. `events` are append-only and keyed by (session_id, seq). Local deletion of an agent transcript never deletes anything (ingest-only).
+- Conflict rule: rows are last-writer-wins by `hub_seq` order. The hub's tables always equal `hub_log` replayed in order. A node skips a pulled remote upsert/delete for a row it wrote itself later (a local outbox entry for the same entity/key with origin_seq > own_seen: unpushed, or pushed after the remote entry, or a deferred status write for it), because that write will be (or was) logged after it. `events` are append-only and keyed by (session_id, seq). Local deletion of an agent transcript never deletes anything (ingest-only).
 - Crash safety: every apply commits together with its cursor; re-sent batches are ignored. Offline nodes queue in the outbox; the node reconnects with exponential backoff (1 s .. 60 s, jitter). Local writes are picked up by polling the outbox head every 500 ms.
 - Hub itself is also a normal machine with its own sessions; its own writes enter `hub_log` within 500 ms (or before any push/pull is served).
 
@@ -352,14 +362,18 @@ Revocation (`DELETE /api/machines/:id` or `DELETE /api/devices/:id` on the hub):
 
 ## 11. HTTP API (daemon, axum)
 
-Auth: local clients send `Authorization: Bearer <runtime token>` or the `blirp_session` cookie set by `/auth?token=`. LAN/portal browser devices use device cookies (§13). All JSON; validation errors return 400 `{error:{code,message}}`.
+Auth: local clients send `Authorization: Bearer <runtime token>` or the `blirp_session` cookie set by `/auth?token=`. LAN/portal browser devices use device cookies (§13). All JSON; validation errors (malformed or mistyped JSON bodies, query strings and path parameters) return 400 `{error:{code,message}}` with code `invalid_request`; only a missing JSON content type (415) and an oversized body (413) keep their own status.
 
 ```
-GET  /api/health                         {version, machine, role}
+GET  /api/health                         {version, machine, role, capabilities: {admin, control_terminals, local}}
+                                         (the calling client's rights)
 GET  /api/machines                       list; DELETE /api/machines/:id (revoke)
 GET  /api/projects                       list with path(s), git flag, session counts, last activity; GET /api/projects/:id one
-POST /api/projects                       {path, name?} register folder
-PATCH/DELETE /api/projects/:id           rename / soft delete; POST /api/projects/:id/merge {into}
+POST /api/projects                       {path, name?} register folder (absolute path, else 400)
+PATCH/DELETE /api/projects/:id           rename / soft delete: the project is hidden (`deleted = 1`) and its folders are
+                                         unregistered on every machine; its sessions, events and memory stay in the
+                                         database (a later session in such a folder registers a new project);
+                                         POST /api/projects/:id/merge {into}
 GET  /api/projects/:id/memory            brief, records, recent sessions
 PUT  /api/projects/:id/brief             {body_md}; GET .../brief/history; POST .../brief/revert {version}
 CRUD /api/projects/:id/records[/:rid]
@@ -370,11 +384,28 @@ GET  /api/projects/:id/git               {is_git, branch, status[], ahead/behind
 GET  /api/projects/:id/files?path=       directory listing (read-only) ; GET .../files/content?path= (text, <= 1 MiB)
                                          files and git take optional `root=` (one of the project's folders here);
                                          paths are relative, `..`/absolute paths and symlinks escaping the root are rejected
-GET  /api/sessions?project=&status=&agent=&machine=&q=&cursor=
+GET  /api/sessions?project=&status=&agent=&machine=&q=&parent=&include_children=&cursor=
+                                         ingested subagent sessions (origin external with a parent, §8) are
+                                         left out unless include_children=true; parent=<id> lists only that
+                                         session's subagents (continue/fork sessions are not children)
 POST /api/sessions                       launch (§7)
-GET  /api/sessions/:id                   detail incl. summary; GET .../events?after=&limit=
+GET  /api/sessions/:id                   SessionDetail: the session incl. summary + children_count (its
+                                         subagent sessions); GET .../events?after=&limit=
 POST /api/sessions/:id/stop | /resume | /distill   (distill: 202 queued, 409 nothing_to_distill | remote_session)
+POST /api/sessions/:id/worktree/remove   {force?}: remove the ended session's git worktree (`git worktree remove` from the
+                                         main work tree; the `blirp/<name>` branch is kept) and clear `worktree`. 409
+                                         `session_live`, `no_worktree`, `worktree_dirty` (uncommitted changes or untracked
+                                         files, unless force). Only folders under BLIRP_HOME/worktrees are touched. Never
+                                         done automatically; `blirp worktrees list|prune` lists them and removes those
+                                         of ended sessions without changes
 PATCH /api/sessions/:id                  {title}
+DELETE /api/sessions/:id                 204; only when not running (409 `session_live`). Deletes the session, its events
+                                         (and their full-text rows), its ingested subagent sessions and its launch files;
+                                         records/suggestions it produced stay with `source_session_id` cleared, and
+                                         continue/fork sessions lose their parent link. Replicated as a `sessions` delete
+                                         (`Change::DeleteSession`); emits `session_deleted`. Retention is otherwise
+                                         permanent (§8): an ingested session whose transcript grows later comes back
+                                         with only the new events.
 POST /api/sessions/:id/open              {target: "folder"|"editor"}: session folder in the OS file manager, or in
                                          $VISUAL / $EDITOR / `code` (first on PATH), else the OS default; 204
 GET  /api/terminals/:id/ws               terminal attach (§6)
@@ -383,7 +414,7 @@ GET  /api/agents                         detected agents + versions + integratio
 POST /api/agents/:id/hooks/install|uninstall   global integration (§9); returns the AgentInfo
 POST /api/hooks/:agent/:event            hook ingress (from `blirp hook`)
 GET  /api/inject?session=&cwd=&agent=    {markdown}: the session's launch memory.md, else a render for the session's / folder's project
-GET  /api/settings ; PATCH /api/settings  {config: Config, values: {key: json}}; PATCH {config?: full Config
+GET  /api/settings ; PATCH /api/settings  {config: Config, values: {key: json}, distill: DistillStatus}; PATCH {config?: full Config
                                          (validated, written to config.toml), values?: {key: json|null}}
 GET  /api/sync/status                    SyncStatus {role, machine_id, hub, connected, last_sync_at, pending_outbox,
                                          portal_url, portal_cert_fingerprint}
@@ -401,9 +432,13 @@ GET  /mcp                                MCP Streamable HTTP
 GET  /*                                  embedded SPA
 ```
 
-Request/response DTOs are defined in `blirp-core::model` and exported to `web/src/lib/api/types.gen.ts` (`cargo test -p blirp-core export_bindings`). `/api/events/ws` pushes JSON `ServerEvent` frames: `session_created`, `session_updated`, `project_updated`, `memory_updated {project_id, part}`, `sync_updated {status}` (role, connection or portal changed), and `resync` when the client fell behind and must refetch.
+Request/response DTOs are defined in `blirp-core::model` and exported to `web/src/lib/api/types.gen.ts` (`cargo test -p blirp-core export_bindings`). `/api/events/ws` pushes JSON `ServerEvent` frames: `session_created`, `session_updated`, `session_deleted {session_id}`, `project_updated`, `memory_updated {project_id, part}`, `sync_updated {status}` (role, connection or portal changed), and `resync` when the client fell behind and must refetch.
 
-Every authenticated request carries a principal: local clients (runtime token or `blirp_session` cookie) have `control` and `admin`; portal browser devices have `control = can_control_terminals` and no `admin`; requests relayed by the sync proxy have the proxied `control` and no `admin`. `control` is required to launch, resume or stop sessions, to distill a session (403 `control_not_allowed`) and to send terminal input; `admin` is required for hub/pairing/device management, hook ingress, global integration install/uninstall, `POST /api/sessions/:id/open` and `POST /api/daemon/shutdown` (403 `admin_only`).
+Every authenticated request carries a principal: local clients (runtime token or `blirp_session` cookie) have `control` and `admin`; portal browser devices have `control = can_control_terminals` and no `admin`; requests relayed by the sync proxy have the proxied `control` and no `admin`. Rights are checked before the request body is read (extractors `Control` / `Admin`), so a caller without them always gets 403:
+- `admin` (403 `admin_only`): `PATCH /api/settings` (config.toml, settings values), hub enable/disable, invite, join, browser invites, device and machine revoke/patch, hook ingress, global integration install/uninstall, `POST /api/sessions/:id/open`, `POST /api/daemon/shutdown`.
+- `control` (403 `control_not_allowed`): every other mutation: launch, resume, stop, distill, rename or delete sessions, worktree removal, project register/rename/delete/merge, brief, records, wiki, resources and suggestions; plus terminal input and resize.
+- Reads (every `GET`, the event stream, viewing a terminal) need authentication only.
+A portal browser device without terminal control is therefore read-only. `tests/daemon.rs` keeps a table of every mutating route and checks it against a viewer and a controlling portal device.
 
 `/mcp` is local-only: it is mounted on the loopback listener alone (runtime token, loopback `Host`), not on the LAN portal and not for requests relayed by the sync proxy, where it falls through to the SPA. Remote MCP would need device-authenticated access and is not offered yet. `POST /api/daemon/shutdown` is mounted the same way (loopback listener only, 404 elsewhere): only this machine's own clients may stop its daemon.
 
@@ -422,6 +457,8 @@ Every authenticated request carries a principal: local clients (runtime token or
            brief_mode = "auto" | "review"
            inject_max_chars = 8000
            distill_max_chars = 60000
+           inject = true                     # false: no launch-time memory for any agent
+           inject_disabled_agents = []       # e.g. ["codex", "custom:mine"]: no memory for these
 [sync]     role = "standalone" | "hub" | "node"
            hub = "<node id>"
            relay = "default" | "disabled" | "<url>"
@@ -432,7 +469,7 @@ Every authenticated request carries a principal: local clients (runtime token or
 ## 13. Portal and remote browser access
 
 - Local desktop and `blirp open`: localhost + token cookie.
-- Hub with `portal.lan = true`: axum-server with rustls (ring, TLS 1.2/1.3, ALPN `http/1.1` so WebSockets upgrade) on `0.0.0.0:lan_port`, serving the same router; self-signed cert generated with `rcgen` (SANs localhost, 127.0.0.1, LAN IP) and persisted in `~/.blirp/tls/`; SHA-256 fingerprint (`AA:BB:...`) in `GET /api/sync/status`. The portal runs while the role is hub and `portal.lan` is set (checked at daemon start and on hub enable/disable). Browser devices log in by opening a one-time link/QR `https://<lan ip>:<port>/device-login?invite=<128-bit token>` (5 min, single use, stored hashed, redemption rate-limited to 10 attempts per minute per client IP) created with `POST /api/devices/browser-invite` on an already-authenticated screen; it creates a `devices` row (kind `browser`, no terminal control) and sets `blirp_device=<random 256-bit token>; HttpOnly; Secure; SameSite=Strict; Path=/; Max-Age=400 days` (stored as SHA-256), then redirects to `/`. The portal accepts only device cookies (not the runtime token). Devices are listed and revocable in Settings > Machines & Sync > Devices; revoking or changing a device closes its open WebSockets. Terminal control from a browser device requires `can_control_terminals`.
+- Hub with `portal.lan = true`: axum-server with rustls (ring, TLS 1.2/1.3, ALPN `http/1.1` so WebSockets upgrade) on `0.0.0.0:lan_port`, serving the same router; self-signed cert generated with `rcgen` (SANs localhost, 127.0.0.1, LAN IP) and persisted in `~/.blirp/tls/`; SHA-256 fingerprint (`AA:BB:...`) in `GET /api/sync/status`. The portal runs while the role is hub and `portal.lan` is set, on `portal.lan_port`; this is applied at daemon start, on hub enable (also when already a hub) and disable, and live on `PATCH /api/settings` (a changed port restarts the listener). A portal that cannot start (port taken) answers 409 `portal_failed`; the saved config is kept. Browser devices log in by opening a one-time link/QR `https://<lan ip>:<port>/device-login?invite=<128-bit token>` (5 min, single use, stored hashed, redemption rate-limited to 10 attempts per minute per client IP) created with `POST /api/devices/browser-invite` on an already-authenticated screen; it creates a `devices` row (kind `browser`, no terminal control) and sets `blirp_device=<random 256-bit token>; HttpOnly; Secure; SameSite=Strict; Path=/; Max-Age=400 days` (stored as SHA-256), then redirects to `/`. The portal accepts only device cookies (not the runtime token). Devices are listed and revocable in Settings > Machines & Sync > Devices; revoking or changing a device closes its open WebSockets. Terminal control from a browser device requires `can_control_terminals`.
 - Users with Tailscale can instead run `tailscale serve` in front of the portal port (docs/portal.md); the loopback listener only accepts the runtime token, so it is not a target for browser devices.
 - Security headers: CSP (scripts self only, no inline scripts; `style-src 'self' 'unsafe-inline'` for xterm.js; `img-src 'self' data:`; `connect-src 'self' ws://<host> wss://<host>`), `X-Frame-Options: DENY`, `SameSite=Strict` cookies, CSRF protection via same-site cookie + `Origin` check on mutations and WS upgrades.
 
@@ -462,7 +499,7 @@ Layout mirrors the reference (Xirp-style):
 
 ## 16. Quality bar
 
-- Rust: edition 2024, `cargo fmt --check`, `cargo clippy --workspace --all-targets -- -D warnings`, `cargo test --workspace`. No `unwrap()`/`expect()` outside tests and provably-infallible cases (comment why). Errors: `thiserror` in libraries, `anyhow` at binary edges, never silently swallowed (log with context). No `unsafe` except where a platform API demands it, with a `SAFETY:` comment.
+- Rust: edition 2024, toolchain pinned in `rust-toolchain.toml` (same version as CI's `RUST_TOOLCHAIN`; bump both together), `cargo fmt --check`, `cargo clippy --workspace --all-targets -- -D warnings`, `cargo test --workspace`. No `unwrap()`/`expect()` outside tests and provably-infallible cases (comment why). Errors: `thiserror` in libraries, `anyhow` at binary edges, never silently swallowed (log with context). No `unsafe` except where a platform API demands it, with a `SAFETY:` comment.
 - Web: `pnpm -C web check` (svelte-check, strict TS, no `any`), `pnpm -C web test` (vitest), `pnpm -C web build`. `pnpm -C web e2e` (not part of `test`) builds the SPA, starts the real daemon on a temp `BLIRP_HOME` and drives the UI with Playwright in the installed Edge (`BLIRP_E2E_CHANNEL` picks another browser, `BLIRP_E2E_KEEP=1` keeps the temp dir and `daemon.log`).
 - Every adapter, redaction rule, migration, the distill JSON contract, project resolution, pairing, and replication have tests. An integration test starts a daemon on a temp `BLIRP_HOME`, launches a PTY session running a shell echo, attaches over WS, and asserts snapshot + stream.
 - CI matrix: windows-latest, macos-latest, ubuntu-latest.

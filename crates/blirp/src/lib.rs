@@ -10,7 +10,6 @@ pub mod ingest;
 pub mod mcp;
 pub mod memory;
 pub mod portal;
-pub mod proc_tree;
 pub mod pty;
 pub mod sessions;
 pub mod state;

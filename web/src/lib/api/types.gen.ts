@@ -55,7 +55,11 @@ agent_session_id: string | null, origin: SessionOrigin, cwd: string, title: stri
 /**
  * Distill output (§9), null until the session is distilled.
  */
-summary: JsonValue | null, distilled_through_seq: number, tokens_in: number, tokens_out: number, cost_usd: number, parent_session_id: string | null, };
+summary: JsonValue | null, distilled_through_seq: number, tokens_in: number, tokens_out: number, cost_usd: number, parent_session_id: string | null, 
+/**
+ * Ended by a user Stop: `status` is `completed` and `exit_code` null.
+ */
+stopped_by_user: boolean, };
 
 export type Event = { session_id: string, seq: number, ts: number, kind: EventKind, 
 /**
@@ -104,7 +108,11 @@ export type ErrorDetail = {
  */
 code: string, message: string, };
 
-export type Health = { version: string, machine: Machine, role: MachineRole, };
+export type Health = { version: string, machine: Machine, role: MachineRole, 
+/**
+ * What the calling client may do here.
+ */
+capabilities: Capabilities, };
 
 export type ProjectPathInfo = { machine_id: string, path: string, git_remote: string | null, 
 /**
@@ -224,6 +232,29 @@ export type SessionsPage = { items: Array<Session>,
  */
 next_cursor: string | null, };
 
+/**
+ * `GET /api/sessions/:id`: the session plus how many subagent sessions
+ * ingest recorded under it (origin `external` with `parent_session_id`
+ * set to it, §8); list them with `GET /api/sessions?parent=<id>`.
+ */
+export type SessionDetail = { children_count: number, id: string, project_id: string, machine_id: string, 
+/**
+ * `claude|codex|opencode|pi|gemini|cursor|amp|aider|dsh|shell|custom:<name>`
+ */
+agent: string, 
+/**
+ * The agent's own session id (claude uuid, codex rollout uuid, ...).
+ */
+agent_session_id: string | null, origin: SessionOrigin, cwd: string, title: string | null, status: SessionStatus, branch: string | null, worktree: string | null, transcript_path: string | null, started_at: number, ended_at: number | null, last_activity_at: number, exit_code: number | null, 
+/**
+ * Distill output (§9), null until the session is distilled.
+ */
+summary: JsonValue | null, distilled_through_seq: number, tokens_in: number, tokens_out: number, cost_usd: number, parent_session_id: string | null, 
+/**
+ * Ended by a user Stop: `status` is `completed` and `exit_code` null.
+ */
+stopped_by_user: boolean, };
+
 export type LaunchSession = { 
 /**
  * Launch in this project's folder on this machine. One of `project_id`/`cwd` is required.
@@ -260,6 +291,15 @@ export type PatchSession = {
  * New title; null clears it.
  */
 title: string | null, };
+
+/**
+ * `POST /api/sessions/:id/worktree/remove`.
+ */
+export type RemoveWorktree = { 
+/**
+ * Also discard uncommitted changes and untracked files.
+ */
+force?: boolean, };
 
 /**
  * Where `POST /api/sessions/:id/open` shows the session folder.
@@ -371,7 +411,11 @@ export type SettingsView = { config: Config,
 /**
  * UI preferences and other free-form values stored in the database.
  */
-values: { [key in string]: JsonValue }, };
+values: { [key in string]: JsonValue }, 
+/**
+ * Automatic distilling (§9): paused summarizer, today's budget.
+ */
+distill: DistillStatus, };
 
 export type SettingsPatch = { 
 /**
@@ -383,6 +427,51 @@ config?: Config,
  * Keys to set; a null value deletes the key.
  */
 values?: { [key in string]: JsonValue | null }, };
+
+/**
+ * Rights of the calling client (§11), so a UI can hide what the daemon
+ * would refuse.
+ */
+export type Capabilities = { 
+/**
+ * Configuration, sync, devices, agent integration, invites, open,
+ * shutdown: local clients (runtime token) only.
+ */
+admin: boolean, 
+/**
+ * Launch/resume/stop sessions, type into terminals, change memory:
+ * local clients, browser devices allowed to control terminals, and
+ * requests relayed from a machine allowed to.
+ */
+control_terminals: boolean, 
+/**
+ * The client authenticated with this machine's runtime token.
+ */
+local: boolean, };
+
+export type DistillStatus = { 
+/**
+ * Set while automatic distilling is paused.
+ */
+paused: DistillPause | null, 
+/**
+ * The summarizer's last error while paused.
+ */
+reason: string | null, 
+/**
+ * When the summarizer is tried again (unix ms).
+ */
+retry_at: number | null, 
+/**
+ * Distill jobs run today (UTC) and the daily limit.
+ */
+budget_used: number, budget_limit: number, };
+
+/**
+ * Why automatic distilling is paused: the summarizer itself fails, not a
+ * session (§9). Retried with exponential backoff.
+ */
+export type DistillPause = "auth" | "unavailable" | "rate_limited";
 
 /**
  * `GET /api/sync/status` (§10).
@@ -458,13 +547,13 @@ export type PatchDevice = { can_control_terminals: boolean, };
 /**
  * Frames pushed on `/api/events/ws`.
  */
-export type ServerEvent = { "type": "session_created", session: Session, } | { "type": "session_updated", session: Session, } | { "type": "project_updated", project_id: string, } | { "type": "memory_updated", project_id: string, part: MemoryPart, } | { "type": "sync_updated", status: SyncStatus, } | { "type": "resync" };
+export type ServerEvent = { "type": "session_created", session: Session, } | { "type": "session_updated", session: Session, } | { "type": "session_deleted", session_id: string, } | { "type": "project_updated", project_id: string, } | { "type": "memory_updated", project_id: string, part: MemoryPart, } | { "type": "sync_updated", status: SyncStatus, } | { "type": "resync" };
 
 /**
  * Text frames sent by the server on `/api/terminals/:id/ws` (§6). Raw
  * terminal output is sent as binary frames.
  */
-export type TerminalServerMessage = { "type": "snapshot", cols: number, rows: number, data: string, } | { "type": "resize", cols: number, rows: number, } | { "type": "exit", status: SessionStatus, exit_code: number | null, };
+export type TerminalServerMessage = { "type": "snapshot", cols: number, rows: number, data: string, } | { "type": "readonly" } | { "type": "resize", cols: number, rows: number, } | { "type": "exit", status: SessionStatus, exit_code: number | null, };
 
 /**
  * Text frames accepted from clients on `/api/terminals/:id/ws`. Binary frames
@@ -499,7 +588,17 @@ export type Summarizer = "auto" | "claude" | "codex" | "ollama" | "none";
 
 export type BriefMode = "auto" | "review";
 
-export type MemoryConfig = { summarizer: Summarizer, ollama_model: string, distill_idle_secs: number, daily_distill_limit: number, brief_mode: BriefMode, inject_max_chars: number, distill_max_chars: number, };
+export type MemoryConfig = { summarizer: Summarizer, ollama_model: string, distill_idle_secs: number, daily_distill_limit: number, brief_mode: BriefMode, inject_max_chars: number, distill_max_chars: number, 
+/**
+ * Inject project memory when agents start (§9). Off: sessions start
+ * without memory; MCP tools and the CLI still reach it on demand.
+ */
+inject: boolean, 
+/**
+ * Agents (`claude`, `custom:<name>`, ...) that never get memory
+ * injected, even when `inject` is on.
+ */
+inject_disabled_agents: Array<string>, };
 
 export type SyncConfig = { role: MachineRole, 
 /**

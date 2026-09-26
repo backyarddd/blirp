@@ -16,7 +16,7 @@ use axum::middleware::{self, Next};
 use axum::response::{IntoResponse, Redirect, Response};
 use axum::routing::{any, get};
 use axum::{Json, Router};
-use blirp_core::model::{ErrorBody, ErrorDetail};
+use blirp_core::model::{Capabilities, ErrorBody, ErrorDetail};
 use blirp_core::store::StoreError;
 use serde::Deserialize;
 
@@ -46,6 +46,16 @@ impl Principal {
             admin: true,
             device: None,
             label: "local".into(),
+        }
+    }
+
+    /// Only local clients (runtime token) are admins; neither portal devices
+    /// nor relayed requests are.
+    pub fn capabilities(&self) -> Capabilities {
+        Capabilities {
+            admin: self.admin,
+            control_terminals: self.control,
+            local: self.admin && self.device.is_none(),
         }
     }
 
@@ -87,6 +97,40 @@ impl<S: Send + Sync> FromRequestParts<S> for Principal {
                 "not authenticated",
             )
         })
+    }
+}
+
+/// Extractor for routes that change sessions or memory (§11): the caller
+/// needs `control`. It rejects before the body is read, so a caller without
+/// the right always gets 403, whatever it sent.
+pub struct Control(pub Principal);
+
+impl<S: Send + Sync> FromRequestParts<S> for Control {
+    type Rejection = ApiError;
+    async fn from_request_parts(
+        parts: &mut axum::http::request::Parts,
+        state: &S,
+    ) -> Result<Self, Self::Rejection> {
+        let p = Principal::from_request_parts(parts, state).await?;
+        p.require_control()?;
+        Ok(Self(p))
+    }
+}
+
+/// Extractor for routes that change this machine's configuration, sync,
+/// devices or agent integration, mint invites, or act on its desktop (§11):
+/// the caller needs `admin` (local clients only).
+pub struct Admin(pub Principal);
+
+impl<S: Send + Sync> FromRequestParts<S> for Admin {
+    type Rejection = ApiError;
+    async fn from_request_parts(
+        parts: &mut axum::http::request::Parts,
+        state: &S,
+    ) -> Result<Self, Self::Rejection> {
+        let p = Principal::from_request_parts(parts, state).await?;
+        p.require_admin()?;
+        Ok(Self(p))
     }
 }
 
@@ -161,6 +205,33 @@ impl From<StoreError> for ApiError {
     }
 }
 
+/// WebSocket close code and reason when a stream is done (§6): the
+/// terminal's process exited.
+pub(crate) const WS_DONE: (u16, &str) = (1000, "exited");
+/// The daemon is shutting down, or the client's access changed (device
+/// revoked or its rights edited): reconnect.
+pub(crate) const WS_GOING_AWAY: (u16, &str) = (1001, "going away");
+
+/// End a WebSocket with a proper close handshake. `ours: None` means the
+/// client closed first: its close is answered automatically, and reading on
+/// flushes that answer. Otherwise we send our close and wait (bounded) for
+/// the client's. Without this the peer sees an abnormal close (1006).
+pub(crate) async fn close_ws(socket: &mut axum::extract::ws::WebSocket, ours: Option<(u16, &str)>) {
+    use axum::extract::ws::{CloseFrame, Message};
+    if let Some((code, reason)) = ours {
+        let frame = CloseFrame {
+            code,
+            reason: reason.into(),
+        };
+        if socket.send(Message::Close(Some(frame))).await.is_err() {
+            return;
+        }
+    }
+    let drain = async { while let Some(Ok(_)) = socket.recv().await {} };
+    // A client that never answers must not pin the task.
+    let _ = tokio::time::timeout(std::time::Duration::from_secs(2), drain).await;
+}
+
 /// Run blocking work (SQLite, git, filesystem) off the async runtime.
 pub async fn blocking<T: Send + 'static>(
     f: impl FnOnce() -> ApiResult<T> + Send + 'static,
@@ -170,7 +241,10 @@ pub async fn blocking<T: Send + 'static>(
         .map_err(|e| ApiError::internal("background task", e))?
 }
 
-/// `Json` extractor whose rejections use the API error shape.
+/// `Json` extractor whose rejections use the API error shape. Syntax and
+/// validation errors (axum answers 422 for the latter) are 400 (§11); a
+/// missing JSON content type (415) and an oversized body (413) keep their
+/// status.
 pub struct ApiJson<T>(pub T);
 
 impl<S: Send + Sync, T: serde::de::DeserializeOwned> FromRequest<S> for ApiJson<T> {
@@ -178,7 +252,37 @@ impl<S: Send + Sync, T: serde::de::DeserializeOwned> FromRequest<S> for ApiJson<
     async fn from_request(req: Request, state: &S) -> Result<Self, Self::Rejection> {
         match Json::<T>::from_request(req, state).await {
             Ok(Json(v)) => Ok(Self(v)),
-            Err(r) => Err(ApiError::new(r.status(), "invalid_request", r.body_text())),
+            Err(r) => {
+                let status = match r.status() {
+                    s @ (StatusCode::UNSUPPORTED_MEDIA_TYPE | StatusCode::PAYLOAD_TOO_LARGE) => s,
+                    _ => StatusCode::BAD_REQUEST,
+                };
+                Err(ApiError::new(status, "invalid_request", r.body_text()))
+            }
+        }
+    }
+}
+
+/// `Path` extractor whose rejections (bad percent-encoding, a parameter
+/// that does not parse) are 400 with the API error shape.
+pub struct ApiPath<T>(pub T);
+
+impl<S: Send + Sync, T: serde::de::DeserializeOwned + Send> FromRequestParts<S> for ApiPath<T> {
+    type Rejection = ApiError;
+    async fn from_request_parts(
+        parts: &mut axum::http::request::Parts,
+        state: &S,
+    ) -> Result<Self, Self::Rejection> {
+        match axum::extract::Path::<T>::from_request_parts(parts, state).await {
+            Ok(axum::extract::Path(v)) => Ok(Self(v)),
+            Err(r) => {
+                let status = if r.status().is_server_error() {
+                    r.status()
+                } else {
+                    StatusCode::BAD_REQUEST
+                };
+                Err(ApiError::new(status, "invalid_request", r.body_text()))
+            }
         }
     }
 }

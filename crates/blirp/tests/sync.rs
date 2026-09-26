@@ -645,3 +645,73 @@ async fn pair_replicate_proxy_revoke_and_portal() {
     b.daemon.shutdown().await.unwrap();
     a.daemon.shutdown().await.unwrap();
 }
+
+/// Whether something accepts TCP connections on `port` (loopback).
+async fn listening(port: u16) -> bool {
+    tokio::net::TcpStream::connect(("127.0.0.1", port))
+        .await
+        .is_ok()
+}
+
+// Settings changes to the LAN portal apply live: no daemon restart.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn portal_follows_settings_live() {
+    let tmp = tempfile::tempdir().unwrap();
+    let a = Node::start(&tmp.path().join("a"), "hub-a", None).await;
+    let st: SyncStatus = a.ok(Method::POST, "/api/sync/hub/enable", None).await;
+    assert!(st.portal_url.is_none());
+
+    let set_portal = |lan: bool, port: u16| {
+        let a = &a;
+        async move {
+            let mut view: Value = a.get("/api/settings").await;
+            view["config"]["portal"] = json!({"lan": lan, "lan_port": port});
+            let _: Value = a
+                .ok(
+                    Method::PATCH,
+                    "/api/settings",
+                    Some(json!({"config": view["config"]})),
+                )
+                .await;
+            sync_status(a).await.portal_url
+        }
+    };
+    let port_of = |url: Option<String>| -> Option<u16> {
+        url.map(|u| u.rsplit(':').next().unwrap().parse().unwrap())
+    };
+
+    let p1 = free_port();
+    assert_eq!(port_of(set_portal(true, p1).await), Some(p1));
+    assert!(listening(p1).await);
+
+    // A new port moves the listener.
+    let p2 = free_port();
+    assert_eq!(port_of(set_portal(true, p2).await), Some(p2));
+    assert!(listening(p2).await);
+    assert!(!listening(p1).await, "old portal port still open");
+
+    // Hub enable on an existing hub re-applies the portal config too.
+    let st: SyncStatus = a.ok(Method::POST, "/api/sync/hub/enable", None).await;
+    assert_eq!(port_of(st.portal_url), Some(p2));
+
+    // Turning it off closes it.
+    assert_eq!(set_portal(false, p2).await, None);
+    assert!(!listening(p2).await);
+
+    // A port that is taken is reported, and the setting is kept.
+    let taken = std::net::TcpListener::bind("0.0.0.0:0").unwrap();
+    let busy = taken.local_addr().unwrap().port();
+    let mut view: Value = a.get("/api/settings").await;
+    view["config"]["portal"] = json!({"lan": true, "lan_port": busy});
+    let r = a
+        .req(
+            Method::PATCH,
+            "/api/settings",
+            Some(json!({"config": view["config"]})),
+        )
+        .await;
+    assert_eq!(r.status(), 409);
+    let view: Value = a.get("/api/settings").await;
+    assert_eq!(view["config"]["portal"]["lan_port"], busy);
+    a.daemon.shutdown().await.unwrap();
+}

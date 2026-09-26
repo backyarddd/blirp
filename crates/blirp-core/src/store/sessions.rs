@@ -1,6 +1,6 @@
 //! Sessions, events and full-text search.
 
-use super::{Change, Result, Store, StoreError, all, apply_in, json_col, one};
+use super::{Change, Result, Store, StoreError, all, apply_in, json_col, one, write_row};
 use crate::model::{Event, SearchHit, SearchHitKind, Session, SessionStatus, SessionsPage};
 use rusqlite::{Row, params, params_from_iter, types::Value};
 
@@ -28,6 +28,7 @@ pub(super) fn session_row(r: &Row<'_>) -> rusqlite::Result<Session> {
         tokens_out: r.get("tokens_out")?,
         cost_usd: r.get("cost_usd")?,
         parent_session_id: r.get("parent_session_id")?,
+        stopped_by_user: r.get("stopped_by_user")?,
     })
 }
 
@@ -42,6 +43,20 @@ pub(super) fn event_row(r: &Row<'_>) -> rusqlite::Result<Event> {
     })
 }
 
+/// At most one status-only outbox entry per session per window (ms).
+pub const STATUS_COALESCE_MS: i64 = 5_000;
+
+/// Only a live status (and the activity time with it) changed.
+fn status_only(before: &Session, after: &Session) -> bool {
+    if !before.status.is_live() || !after.status.is_live() {
+        return false;
+    }
+    let mut probe = after.clone();
+    probe.status = before.status;
+    probe.last_activity_at = before.last_activity_at;
+    probe == *before
+}
+
 #[derive(Debug, Clone, Default)]
 pub struct SessionFilter {
     pub project_id: Option<String>,
@@ -50,10 +65,19 @@ pub struct SessionFilter {
     pub machine_id: Option<String>,
     /// Substring match on title, cwd and agent.
     pub q: Option<String>,
+    /// Only subagent children of this session (origin `external` with
+    /// `parent_session_id` set to it).
+    pub parent: Option<String>,
+    /// Leave out every subagent child session.
+    pub hide_children: bool,
     /// Opaque cursor from a previous page.
     pub cursor: Option<String>,
     pub limit: i64,
 }
+
+/// SQL condition for "is an ingested subagent session" (§8): continue/fork
+/// sessions also carry a parent but are the user's own (origin `blirp`).
+const IS_CHILD: &str = "(origin = 'external' AND parent_session_id IS NOT NULL)";
 
 fn like_escape(s: &str) -> String {
     let mut out = String::with_capacity(s.len() + 2);
@@ -98,6 +122,14 @@ impl Store {
     }
 
     /// Read-modify-write a session in one transaction.
+    ///
+    /// Live status flips (working/idle/waiting and the activity time that
+    /// goes with them) are coalesced for replication: when the session's
+    /// last outbox entry is younger than [`STATUS_COALESCE_MS`], the row is
+    /// written but its outbox entry is deferred until that window has passed
+    /// ([`Store::flush_deferred`] then queues the current row). Any other
+    /// change, including every move to a final status, is queued at once and
+    /// covers a deferred one, so the final state is never lost.
     pub fn modify_session(&self, id: &str, f: impl FnOnce(&mut Session)) -> Result<Session> {
         self.write(|tx| {
             let mut s = one(
@@ -109,10 +141,96 @@ impl Store {
             .ok_or(StoreError::NotFound("session"))?;
             let before = s.clone();
             f(&mut s);
-            if s != before {
-                apply_in(tx, &Change::Session(s.clone()))?;
+            if s == before {
+                return Ok(s);
             }
+            let change = Change::Session(s.clone());
+            if status_only(&before, &s) {
+                let last: Option<i64> = tx.query_row(
+                    "SELECT max(ts) FROM outbox WHERE entity = 'sessions' AND key = ?1",
+                    params![id],
+                    |r| r.get(0),
+                )?;
+                if let Some(last) = last.filter(|t| crate::now_ms() - t < STATUS_COALESCE_MS) {
+                    write_row(tx, &change)?;
+                    tx.execute(
+                        "INSERT INTO outbox_deferred(entity, key, due) VALUES ('sessions', ?1, ?2)
+                         ON CONFLICT(entity, key) DO NOTHING",
+                        params![id, last + STATUS_COALESCE_MS],
+                    )?;
+                    return Ok(s);
+                }
+            }
+            apply_in(tx, &change)?;
             Ok(s)
+        })
+    }
+
+    /// This machine's sessions that have a worktree.
+    pub fn sessions_with_worktree(&self, machine_id: &str) -> Result<Vec<Session>> {
+        self.read(|c| {
+            all(
+                c,
+                "SELECT * FROM sessions WHERE machine_id = ?1 AND worktree IS NOT NULL
+                 ORDER BY started_at DESC, id DESC",
+                params![machine_id],
+                session_row,
+            )
+        })
+    }
+
+    /// Delete a session that is not running (see [`Change::DeleteSession`]).
+    /// Returns the deleted session.
+    pub fn delete_session(&self, id: &str) -> Result<Session> {
+        self.write(|tx| {
+            let s = one(
+                tx,
+                "SELECT * FROM sessions WHERE id = ?1",
+                params![id],
+                session_row,
+            )?
+            .ok_or(StoreError::NotFound("session"))?;
+            if s.status.is_live() {
+                return Err(StoreError::Conflict(
+                    "the session is running; stop it first".into(),
+                ));
+            }
+            apply_in(tx, &Change::DeleteSession { id: id.to_string() })?;
+            Ok(s)
+        })
+    }
+
+    /// Queue the current row of every coalesced session write due by `now`
+    /// (the daemon's status tick calls this). Returns how many were queued.
+    pub fn flush_deferred(&self, now: i64) -> Result<usize> {
+        self.write(|tx| {
+            let due: Vec<String> = all(
+                tx,
+                "SELECT key FROM outbox_deferred WHERE entity = 'sessions' AND due <= ?1",
+                params![now],
+                |r| r.get(0),
+            )?;
+            let mut queued = 0;
+            for id in &due {
+                match one(
+                    tx,
+                    "SELECT * FROM sessions WHERE id = ?1",
+                    params![id],
+                    session_row,
+                )? {
+                    Some(s) => {
+                        apply_in(tx, &Change::Session(s))?;
+                        queued += 1;
+                    }
+                    None => {
+                        tx.execute(
+                            "DELETE FROM outbox_deferred WHERE entity = 'sessions' AND key = ?1",
+                            params![id],
+                        )?;
+                    }
+                }
+            }
+            Ok(queued)
         })
     }
 
@@ -160,6 +278,15 @@ impl Store {
         if let Some(m) = &f.machine_id {
             push(" AND machine_id = ?", m.clone().into(), &mut sql);
         }
+        if let Some(p) = &f.parent {
+            push(
+                &format!(" AND {IS_CHILD} AND parent_session_id = ?"),
+                p.clone().into(),
+                &mut sql,
+            );
+        } else if f.hide_children {
+            sql.push_str(&format!(" AND NOT {IS_CHILD}"));
+        }
         if let Some(q) = f.q.as_deref().map(str::trim).filter(|q| !q.is_empty()) {
             let pat = like_escape(q);
             push(
@@ -192,6 +319,19 @@ impl Store {
             None
         };
         Ok(SessionsPage { items, next_cursor })
+    }
+
+    /// Subagent sessions recorded under `id` (see [`SessionFilter::parent`]).
+    pub fn children_count(&self, id: &str) -> Result<i64> {
+        self.read(|c| {
+            Ok(c.query_row(
+                &format!(
+                    "SELECT count(*) FROM sessions WHERE {IS_CHILD} AND parent_session_id = ?1"
+                ),
+                params![id],
+                |r| r.get(0),
+            )?)
+        })
     }
 
     pub fn insert_event(&self, e: Event) -> Result<bool> {
@@ -330,6 +470,7 @@ mod tests {
             tokens_out: 0,
             cost_usd: 0.0,
             parent_session_id: None,
+            stopped_by_user: false,
         }
     }
 
@@ -394,6 +535,188 @@ mod tests {
             .unwrap();
         assert_eq!(m.status, SessionStatus::Completed);
         assert_eq!(store.live_sessions_on("m").unwrap().len(), 5);
+    }
+
+    #[test]
+    fn subagent_children_are_filtered_and_counted() {
+        let (_d, store) = temp_store();
+        store.insert_session(&session("top", "p", 100)).unwrap();
+        let mut fork = session("fork", "p", 101);
+        fork.parent_session_id = Some("top".into());
+        store.insert_session(&fork).unwrap();
+        for (i, id) in ["sub1", "sub2"].iter().enumerate() {
+            let mut sub = session(id, "p", 102 + i as i64);
+            sub.origin = SessionOrigin::External;
+            sub.parent_session_id = Some("top".into());
+            store.insert_session(&sub).unwrap();
+        }
+        let ids = |f: SessionFilter| -> Vec<String> {
+            store
+                .list_sessions(&SessionFilter { limit: 50, ..f })
+                .unwrap()
+                .items
+                .into_iter()
+                .map(|s| s.id)
+                .collect()
+        };
+        assert_eq!(
+            ids(SessionFilter::default()),
+            ["sub2", "sub1", "fork", "top"]
+        );
+        // Forks keep showing: only ingested subagents are children.
+        assert_eq!(
+            ids(SessionFilter {
+                hide_children: true,
+                ..Default::default()
+            }),
+            ["fork", "top"]
+        );
+        assert_eq!(
+            ids(SessionFilter {
+                parent: Some("top".into()),
+                hide_children: true,
+                ..Default::default()
+            }),
+            ["sub2", "sub1"]
+        );
+        assert_eq!(store.children_count("top").unwrap(), 2);
+        assert_eq!(store.children_count("sub1").unwrap(), 0);
+    }
+
+    #[test]
+    fn status_flips_are_coalesced_without_losing_the_final_state() {
+        let (_d, store) = temp_store();
+        let queued = |store: &Store| -> Vec<Session> {
+            store
+                .outbox_after(0, 1000)
+                .unwrap()
+                .into_iter()
+                .filter(|e| e.entity == "sessions")
+                .map(|e| serde_json::from_value(e.payload["row"].clone()).unwrap())
+                .collect()
+        };
+        store.insert_session(&session("s", "p", 100)).unwrap();
+        assert_eq!(queued(&store).len(), 1);
+
+        // Flips right after the insert: the row changes, the outbox does not.
+        for st in [
+            SessionStatus::Idle,
+            SessionStatus::Working,
+            SessionStatus::Idle,
+        ] {
+            let s = store
+                .modify_session("s", |s| {
+                    s.status = st;
+                    s.last_activity_at += 1;
+                })
+                .unwrap();
+            assert_eq!(s.status, st);
+        }
+        assert_eq!(queued(&store).len(), 1);
+        assert_eq!(
+            store.get_session("s").unwrap().unwrap().status,
+            SessionStatus::Idle
+        );
+        // Not due yet; once due, the current row is queued exactly once.
+        assert_eq!(store.flush_deferred(crate::now_ms()).unwrap(), 0);
+        let later = crate::now_ms() + STATUS_COALESCE_MS;
+        assert_eq!(store.flush_deferred(later).unwrap(), 1);
+        assert_eq!(store.flush_deferred(later).unwrap(), 0);
+        let q = queued(&store);
+        assert_eq!(q.len(), 2);
+        assert_eq!(q[1].status, SessionStatus::Idle);
+
+        // A final status is queued at once and covers a deferred flip.
+        store
+            .modify_session("s", |s| s.status = SessionStatus::Working)
+            .unwrap();
+        assert_eq!(queued(&store).len(), 2);
+        store
+            .modify_session("s", |s| s.status = SessionStatus::Completed)
+            .unwrap();
+        let q = queued(&store);
+        assert_eq!(q.len(), 3);
+        assert_eq!(q[2].status, SessionStatus::Completed);
+        assert_eq!(store.flush_deferred(i64::MAX).unwrap(), 0);
+
+        // Changes other than the status are never deferred.
+        store
+            .modify_session("s", |s| s.title = Some("renamed".into()))
+            .unwrap();
+        assert_eq!(queued(&store).len(), 4);
+    }
+
+    #[test]
+    fn deleting_a_session_takes_its_events_and_subagents() {
+        let (_d, store) = temp_store();
+        let mut top = session("top", "p", 100);
+        top.status = SessionStatus::Completed;
+        store.insert_session(&top).unwrap();
+        let mut sub = session("sub", "p", 101);
+        sub.origin = SessionOrigin::External;
+        sub.parent_session_id = Some("top".into());
+        store.insert_session(&sub).unwrap();
+        let mut fork = session("fork", "p", 102);
+        fork.parent_session_id = Some("top".into());
+        store.insert_session(&fork).unwrap();
+        for (sid, seq) in [("top", 1), ("sub", 1), ("fork", 1)] {
+            store
+                .insert_event(Event {
+                    session_id: sid.into(),
+                    seq,
+                    ts: 1,
+                    kind: EventKind::User,
+                    text: format!("zebra crossing {sid}"),
+                    meta: None,
+                })
+                .unwrap();
+        }
+        let rec = Record {
+            id: "r1".into(),
+            project_id: "p".into(),
+            kind: RecordKind::Decision,
+            title: "keep".into(),
+            body: "".into(),
+            status: RecordStatus::Active,
+            pinned: false,
+            source_session_id: Some("top".into()),
+            created_at: 1,
+            updated_at: 1,
+            updated_by: "distiller".into(),
+        };
+        store.apply(Change::Record(rec)).unwrap();
+
+        // A running session cannot be deleted.
+        assert!(matches!(
+            store.delete_session("fork"),
+            Err(StoreError::Conflict(_))
+        ));
+        store.delete_session("top").unwrap();
+        assert!(store.get_session("top").unwrap().is_none());
+        assert!(store.get_session("sub").unwrap().is_none());
+        let fork = store.get_session("fork").unwrap().unwrap();
+        assert_eq!(fork.parent_session_id, None);
+        let hits = store.search("zebra", None, None, 10).unwrap();
+        let sessions: Vec<_> = hits
+            .iter()
+            .filter_map(|h| h.session_id.as_deref())
+            .collect();
+        assert_eq!(
+            sessions,
+            ["fork"],
+            "full-text rows of deleted events remain"
+        );
+        let r = store.get_record("r1").unwrap().unwrap();
+        assert_eq!(r.source_session_id, None);
+        let last = store.outbox_after(0, 100).unwrap().pop().unwrap();
+        assert_eq!(
+            (last.entity.as_str(), last.op.as_str(), last.key.as_str()),
+            ("sessions", "delete", "top")
+        );
+        assert!(matches!(
+            store.delete_session("top"),
+            Err(StoreError::NotFound(_))
+        ));
     }
 
     #[test]

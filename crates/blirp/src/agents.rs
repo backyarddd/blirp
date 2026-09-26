@@ -88,6 +88,8 @@ pub enum AgentError {
     Unknown(String),
     #[error("{0} is not installed (not found on PATH)")]
     NotInstalled(String),
+    #[error("cannot pass this to a Windows batch file: {0}")]
+    InvalidArgument(String),
 }
 
 /// A resolved, launchable agent.
@@ -197,11 +199,8 @@ impl Agent {
         self.id == "claude"
     }
 
-    /// Program and argv for a launch or resume.
-    pub fn command(
-        &self,
-        ctx: &LaunchContext<'_>,
-    ) -> Result<(OsString, Vec<OsString>), AgentError> {
+    /// Program, argv and extra env for a launch or resume.
+    pub fn command(&self, ctx: &LaunchContext<'_>) -> Result<PlatformCommand, AgentError> {
         let path = self
             .path
             .as_ref()
@@ -225,7 +224,7 @@ impl Agent {
             _ => {}
         }
         args.extend(ctx.args_after.iter().cloned());
-        Ok(wrap_for_platform(path, args))
+        wrap_for_platform(path, args)
     }
 }
 
@@ -235,20 +234,32 @@ fn is_powershell(p: &Path) -> bool {
         .is_some_and(|s| s.eq_ignore_ascii_case("pwsh") || s.eq_ignore_ascii_case("powershell"))
 }
 
-/// The node program and script behind an npm-generated `.cmd` shim
-/// (`"%_prog%" "%dp0%\node_modules\...\bin\x.js" %*`), when both exist.
+/// The node program and script behind an npm `cmd-shim` (`codex.cmd`,
+/// `gemini.cmd`, ...), when the shim runs node and both files exist. Current
+/// shims end in `"%_prog%" "%dp0%\node_modules\...\x.js" %*` with
+/// `SET "_prog=node"`; older ones run `"%~dp0\node.exe" "%~dp0\...\x.js" %*`
+/// or `node "%~dp0\...\x.js" %*`. Shims of other targets (a native `.exe`,
+/// a `sh` script) are not unwrapped.
 fn npm_shim_target(path: &Path) -> Option<(PathBuf, PathBuf)> {
-    const MARK: &str = "\"%dp0%\\";
     let text = std::fs::read_to_string(path).ok()?;
     if text.len() > 16 * 1024 {
         return None;
     }
-    let start = text.find(MARK)? + MARK.len();
-    let len = text[start..].find('"')?;
-    let rel = &text[start..start + len];
-    if !text[start + len + 1..].trim_start().starts_with("%*") {
+    let lower = text.to_ascii_lowercase();
+    if !lower.contains(r#"set "_prog=node""#) && !lower.contains(r#""%~dp0\node.exe""#) {
         return None;
     }
+    // The quoted script that is directly followed by `%*`.
+    let rel = [r#""%dp0%\"#, r#""%~dp0\"#].iter().find_map(|mark| {
+        text.match_indices(mark).find_map(|(i, m)| {
+            let start = i + m.len();
+            let len = text[start..].find('"')?;
+            text[start + len + 1..]
+                .trim_start()
+                .starts_with("%*")
+                .then(|| &text[start..start + len])
+        })
+    })?;
     let dir = path.parent()?;
     let script = dir.join(rel);
     let node = Some(dir.join("node.exe"))
@@ -257,11 +268,107 @@ fn npm_shim_target(path: &Path) -> Option<(PathBuf, PathBuf)> {
     script.is_file().then_some((node, script))
 }
 
-/// On Windows, npm `.cmd` shims run their node script directly (so arguments
-/// never pass through `cmd.exe` quoting), other `.cmd`/`.bat` files through
-/// `cmd /d /c` and `.ps1` shims through PowerShell; everything else is
+/// A program with its arguments, plus env it needs, ready to spawn.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PlatformCommand {
+    pub program: OsString,
+    pub args: Vec<OsString>,
+    pub env: Vec<(String, String)>,
+}
+
+impl PlatformCommand {
+    fn plain(program: OsString, args: Vec<OsString>) -> Self {
+        Self {
+            program,
+            args,
+            env: Vec::new(),
+        }
+    }
+
+    /// A `std::process::Command` for it (no console window on Windows).
+    pub fn std_command(&self) -> std::process::Command {
+        let mut cmd = process::command(&self.program);
+        cmd.args(&self.args).envs(self.env.iter().cloned());
+        cmd
+    }
+}
+
+/// Env var carrying a batch file's escaped command line (see
+/// [`wrap_for_platform`]).
+pub const CMD_LINE_ENV: &str = "BLIRP_CMD_LINE";
+
+/// Append `arg` to a `cmd.exe` command line so cmd passes it on as one
+/// literal argument: anything but plain word characters is quoted (inside
+/// quotes `& | < > ( ) ^` are literal to cmd), embedded quotes are doubled
+/// with the backslashes before them doubled (how MSVC-style parsers of the
+/// forwarded `%*` read it), and a trailing backslash is doubled so it cannot
+/// escape the closing quote. Line breaks and NUL cannot be passed at all.
+fn cmd_quote(arg: &str, out: &mut String) -> Result<(), AgentError> {
+    if arg.contains(['\r', '\n', '\0']) {
+        return Err(AgentError::InvalidArgument(
+            "arguments must not contain line breaks".into(),
+        ));
+    }
+    const PLAIN: &str = r"#$*+-./:?@\_";
+    let quote = arg.is_empty()
+        || arg.ends_with('\\')
+        || arg.chars().any(|c| {
+            c.is_control() || (c.is_ascii() && !c.is_ascii_alphanumeric() && !PLAIN.contains(c))
+        });
+    if !quote {
+        out.push_str(arg);
+        return Ok(());
+    }
+    out.push('"');
+    let mut backslashes = 0;
+    for c in arg.chars() {
+        if c == '\\' {
+            backslashes += 1;
+        } else {
+            if c == '"' {
+                out.extend(std::iter::repeat_n('\\', backslashes));
+                out.push('"');
+            }
+            backslashes = 0;
+        }
+        out.push(c);
+    }
+    out.extend(std::iter::repeat_n('\\', backslashes));
+    out.push('"');
+    Ok(())
+}
+
+/// The line `cmd.exe` runs for batch file `script`: the quoted path, then
+/// the quoted arguments.
+fn cmd_line(script: &Path, args: &[OsString]) -> Result<String, AgentError> {
+    let path = script
+        .to_str()
+        .filter(|p| !p.contains('"'))
+        .ok_or_else(|| AgentError::InvalidArgument(script.display().to_string()))?;
+    let mut line = format!("\"{path}\"");
+    for a in args {
+        let a = a
+            .to_str()
+            .ok_or_else(|| AgentError::InvalidArgument("argument is not valid Unicode".into()))?;
+        line.push(' ');
+        cmd_quote(a, &mut line)?;
+    }
+    Ok(line)
+}
+
+/// On Windows, npm `.cmd` shims run their node script directly (so
+/// arguments never pass through `cmd.exe`), other `.cmd`/`.bat` files run
+/// through `cmd.exe` and `.ps1` shims through PowerShell; everything else is
 /// executed directly.
-pub fn wrap_for_platform(path: &Path, args: Vec<OsString>) -> (OsString, Vec<OsString>) {
+///
+/// Batch files: the escaped command line (see [`cmd_quote`]) travels in the
+/// [`CMD_LINE_ENV`] env var and cmd runs `/d /v:off /c %BLIRP_CMD_LINE%`.
+/// cmd expands the variable once and then parses the result like a typed
+/// line: quotes protect the metacharacters, and a `%` in the value is not
+/// expanded again. The environment is needed because the PTY spawner quotes
+/// every argument MSVC-style (there is no raw command line), and `\"` means
+/// nothing to cmd; `%BLIRP_CMD_LINE%` itself contains nothing to quote.
+pub fn wrap_for_platform(path: &Path, args: Vec<OsString>) -> Result<PlatformCommand, AgentError> {
     let ext = path
         .extension()
         .and_then(|e| e.to_str())
@@ -272,14 +379,20 @@ pub fn wrap_for_platform(path: &Path, args: Vec<OsString>) -> (OsString, Vec<OsS
     {
         let mut a: Vec<OsString> = vec![script.into_os_string()];
         a.extend(args);
-        return (node.into_os_string(), a);
+        return Ok(PlatformCommand::plain(node.into_os_string(), a));
     }
-    match ext.as_deref() {
+    Ok(match ext.as_deref() {
         Some("cmd" | "bat") if cfg!(windows) => {
             let cmd = std::env::var_os("ComSpec").unwrap_or_else(|| "cmd.exe".into());
-            let mut a: Vec<OsString> = vec!["/d".into(), "/c".into(), path.into()];
-            a.extend(args);
-            (cmd, a)
+            let line = cmd_line(path, &args)?;
+            PlatformCommand {
+                program: cmd,
+                args: ["/d", "/v:off", "/c", &format!("%{CMD_LINE_ENV}%")]
+                    .iter()
+                    .map(OsString::from)
+                    .collect(),
+                env: vec![(CMD_LINE_ENV.to_string(), line)],
+            }
         }
         Some("ps1") if cfg!(windows) => {
             let ps = ["pwsh", "powershell"]
@@ -298,18 +411,16 @@ pub fn wrap_for_platform(path: &Path, args: Vec<OsString>) -> (OsString, Vec<OsS
             .collect();
             a.push(path.into());
             a.extend(args);
-            (ps, a)
+            PlatformCommand::plain(ps, a)
         }
-        _ => (path.as_os_str().to_owned(), args),
-    }
+        _ => PlatformCommand::plain(path.as_os_str().to_owned(), args),
+    })
 }
 
 /// First line of `<agent> --version`, `None` on failure or timeout.
 pub fn probe_version(path: &Path) -> Option<String> {
-    let (program, args) = wrap_for_platform(path, vec!["--version".into()]);
-    let mut cmd = process::command(program);
-    cmd.args(args);
-    let out = process::run(cmd, Duration::from_secs(5), 64 * 1024).ok()?;
+    let cmd = wrap_for_platform(path, vec!["--version".into()]).ok()?;
+    let out = process::run(cmd.std_command(), Duration::from_secs(5), 64 * 1024).ok()?;
     if !out.success() {
         return None;
     }
@@ -404,7 +515,7 @@ mod tests {
     }
 
     fn argv(a: &Agent, resume: bool, sid: Option<&str>) -> Vec<String> {
-        let (_, args) = a
+        let PlatformCommand { args, .. } = a
             .command(&LaunchContext {
                 agent_session_id: sid,
                 resume,
@@ -439,7 +550,7 @@ mod tests {
     #[test]
     fn integration_args_surround_launch_args() {
         let codex = agent("codex", "/bin/codex");
-        let (_, args) = codex
+        let PlatformCommand { args, .. } = codex
             .command(&LaunchContext {
                 agent_session_id: Some("r1"),
                 resume: true,
@@ -463,17 +574,99 @@ mod tests {
         std::fs::write(script.join("codex.js"), "").unwrap();
         std::fs::write(dir.path().join("node.exe"), "").unwrap();
         let shim = dir.path().join("codex.cmd");
+        // Verbatim cmd-shim output.
         std::fs::write(
             &shim,
             r#"@ECHO off
+GOTO start
+:find_dp0
+SET dp0=%~dp0
+EXIT /b
+:start
+SETLOCAL
+CALL :find_dp0
+
+IF EXIST "%dp0%\node.exe" (
+  SET "_prog=%dp0%\node.exe"
+) ELSE (
+  SET "_prog=node"
+  SET PATHEXT=%PATHEXT:;.JS;=;%
+)
+
 endLocal & goto #_undefined_# 2>NUL || title %COMSPEC% & "%_prog%"  "%dp0%\node_modules\@openai\codex\bin\codex.js" %*
 "#,
         )
         .unwrap();
-        let (prog, args) = wrap_for_platform(&shim, vec!["a b\"c".into()]);
-        assert_eq!(prog, dir.path().join("node.exe").into_os_string());
-        assert_eq!(args[0], script.join("codex.js").into_os_string());
-        assert_eq!(args[1], "a b\"c");
+        let c = wrap_for_platform(&shim, vec!["a b\"c".into()]).unwrap();
+        assert_eq!(c.program, dir.path().join("node.exe").into_os_string());
+        assert_eq!(c.args[0], script.join("codex.js").into_os_string());
+        assert_eq!(c.args[1], "a b\"c");
+        assert!(c.env.is_empty());
+
+        // A shim of a native binary is not a node script.
+        let exe_shim = dir.path().join("tool.cmd");
+        std::fs::write(
+            &exe_shim,
+            "@ECHO off\r\n\"%~dp0\\node_modules\\tool\\bin\\tool.exe\"   %*\r\n",
+        )
+        .unwrap();
+        assert_eq!(npm_shim_target(&exe_shim), None);
+    }
+
+    #[test]
+    fn cmd_quoting() {
+        let q = |a: &str| {
+            let mut s = String::new();
+            cmd_quote(a, &mut s).map(|()| s)
+        };
+        assert_eq!(q("plain-arg_1.txt").unwrap(), "plain-arg_1.txt");
+        assert_eq!(q("").unwrap(), r#""""#);
+        assert_eq!(q("a b").unwrap(), r#""a b""#);
+        assert_eq!(q("x&y").unwrap(), r#""x&y""#);
+        assert_eq!(q("50%").unwrap(), r#""50%""#);
+        assert_eq!(q("^|<>()").unwrap(), r#""^|<>()""#);
+        assert_eq!(q(r#"say "hi""#).unwrap(), r#""say ""hi""""#);
+        assert_eq!(q(r#"a\"b"#).unwrap(), r#""a\\""b""#);
+        assert_eq!(q(r"C:\dir\").unwrap(), r#""C:\dir\\""#);
+        assert!(q("two\nlines").is_err());
+    }
+
+    // Batch files get their arguments literally: a path with spaces and
+    // parentheses works, and `&`, `%`, `^`, `|`, `<`, `>`, quotes and `!`
+    // are never interpreted by cmd.
+    #[cfg(windows)]
+    #[test]
+    fn batch_files_receive_arguments_literally() {
+        let dir = tempfile::tempdir().unwrap();
+        let bin = dir.path().join("my tools (x86)");
+        std::fs::create_dir_all(&bin).unwrap();
+        let shim = bin.join("echo args.cmd");
+        // `%*` is the raw argument text; `echo(` prints it, and cmd does not
+        // interpret metacharacters that are inside quotes.
+        std::fs::write(&shim, "@echo off\r\necho(%*\r\n").unwrap();
+        let args: Vec<OsString> = [
+            "plain",
+            "a&b",
+            "& echo INJECTED",
+            "50%",
+            "%PATH%",
+            "x|y<z>w^v",
+            r#"say "hi""#,
+            "bang!",
+            "",
+        ]
+        .iter()
+        .map(OsString::from)
+        .collect();
+        let c = wrap_for_platform(&shim, args).unwrap();
+        let out = process::run(c.std_command(), Duration::from_secs(20), 64 * 1024).unwrap();
+        assert!(out.success(), "{out:?}");
+        let text = String::from_utf8_lossy(&out.stdout);
+        assert_eq!(
+            text.trim_end(),
+            r#"plain "a&b" "& echo INJECTED" "50%" "%PATH%" "x|y<z>w^v" "say ""hi""" "bang!" """#
+        );
+        assert!(!text.lines().any(|l| l.trim() == "INJECTED"));
     }
 
     #[test]
@@ -505,12 +698,25 @@ endLocal & goto #_undefined_# 2>NUL || title %COMSPEC% & "%_prog%"  "%dp0%\node_
     #[cfg(windows)]
     #[test]
     fn windows_shims_are_wrapped() {
-        let (prog, args) = wrap_for_platform(Path::new(r"C:\npm\codex.cmd"), vec!["resume".into()]);
-        assert!(prog.to_string_lossy().to_lowercase().ends_with("cmd.exe"));
-        assert_eq!(args, ["/d", "/c", r"C:\npm\codex.cmd", "resume"]);
-        let (_, args) = wrap_for_platform(Path::new(r"C:\npm\x.ps1"), vec![]);
-        assert!(args.iter().any(|a| a == "-File"));
-        let (prog, _) = wrap_for_platform(Path::new(r"C:\bin\claude.exe"), vec![]);
-        assert_eq!(prog, r"C:\bin\claude.exe");
+        let c = wrap_for_platform(Path::new(r"C:\npm\codex.cmd"), vec!["resume".into()]).unwrap();
+        assert!(
+            c.program
+                .to_string_lossy()
+                .to_lowercase()
+                .ends_with("cmd.exe")
+        );
+        assert_eq!(c.args, ["/d", "/v:off", "/c", "%BLIRP_CMD_LINE%"]);
+        assert_eq!(
+            c.env,
+            [(
+                CMD_LINE_ENV.to_string(),
+                r#""C:\npm\codex.cmd" resume"#.to_string()
+            )]
+        );
+        let c = wrap_for_platform(Path::new(r"C:\npm\x.ps1"), vec![]).unwrap();
+        assert!(c.args.iter().any(|a| a == "-File"));
+        let c = wrap_for_platform(Path::new(r"C:\bin\claude.exe"), vec![]).unwrap();
+        assert_eq!(c.program, r"C:\bin\claude.exe");
+        assert!(wrap_for_platform(Path::new(r"C:\npm\x.cmd"), vec!["a\nb".into()]).is_err());
     }
 }

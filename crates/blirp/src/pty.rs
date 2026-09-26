@@ -7,9 +7,9 @@
 //! terminal queries itself while no client is attached so ConPTY and TUIs
 //! never block waiting for a terminal.
 
-use crate::proc_tree::ProcessTree;
 use anyhow::Context as _;
 use blirp_core::model::SessionStatus;
+use blirp_core::proc_tree::ProcessTree;
 use bytes::Bytes;
 use portable_pty::{ChildKiller, CommandBuilder, MasterPty, PtySize, native_pty_system};
 use std::collections::HashMap;
@@ -25,6 +25,10 @@ pub const SCROLLBACK: usize = 10_000;
 /// Output within this window means the agent is working (§7).
 pub const ACTIVE_WINDOW: Duration = Duration::from_secs(2);
 const KILL_GRACE: Duration = Duration::from_secs(3);
+/// Output still arriving this long after the group was killed is dropped
+/// and the reader thread ends (unix).
+#[cfg_attr(not(unix), allow(dead_code))]
+const READER_LINGER: Duration = Duration::from_secs(1);
 
 fn lock<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
     // Poisoning only means a panic elsewhere mid-update of plain data
@@ -45,14 +49,23 @@ pub struct SpawnRequest {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ExitInfo {
-    pub code: i32,
+    /// The process's exit code; `None` when the user stopped the session
+    /// (the code then only says how it was killed).
+    pub code: Option<i32>,
     pub status: SessionStatus,
+    /// Ended by a user Stop (§7), reported as `completed`.
+    pub stopped_by_user: bool,
 }
 
 #[derive(Debug, Clone)]
 pub enum TermEvent {
     Data(Bytes),
-    Resize { cols: u16, rows: u16 },
+    /// `by`: the client that asked for it (see [`Terminal::resize`]).
+    Resize {
+        cols: u16,
+        rows: u16,
+        by: u64,
+    },
     Exit(ExitInfo),
 }
 
@@ -114,15 +127,20 @@ pub struct Terminal {
     tree: ProcessTree,
     stop_requested: AtomicBool,
     detach_on_exit: AtomicBool,
+    /// Set once the process tree is gone for good: a reader still blocked on
+    /// output (a process outside the tree holds the PTY open) gives up.
+    #[cfg_attr(not(unix), allow(dead_code))]
+    abandon_reader: AtomicBool,
 }
 
 impl Terminal {
     /// Spawn `req` in a new PTY. `on_exit` runs on the waiter thread once the
-    /// child has exited and its final output has been broadcast.
+    /// child has exited and its final output has been broadcast; it gets the
+    /// terminal so a registry can tell it apart from a later one.
     pub fn spawn(
         session_id: &str,
         req: SpawnRequest,
-        on_exit: impl FnOnce(ExitInfo) + Send + 'static,
+        on_exit: impl FnOnce(&Arc<Terminal>, ExitInfo) + Send + 'static,
     ) -> anyhow::Result<Arc<Terminal>> {
         let size = PtySize {
             rows: req.rows,
@@ -146,9 +164,9 @@ impl Terminal {
             .with_context(|| format!("spawn {}", req.program.to_string_lossy()))?;
         // Only the child may hold the slave side, or EOF never arrives on unix.
         drop(pair.slave);
-        let tree = ProcessTree::attach(child.as_ref());
+        let tree = process_tree(child.as_ref());
         let killer = child.clone_killer();
-        let mut reader = pair.master.try_clone_reader().context("pty reader")?;
+        let mut reader = PtyReader::new(pair.master.as_ref())?;
         let mut writer = pair.master.take_writer().context("pty writer")?;
 
         let (tx, _) = broadcast::channel(1024);
@@ -172,6 +190,7 @@ impl Terminal {
             tree,
             stop_requested: AtomicBool::new(false),
             detach_on_exit: AtomicBool::new(false),
+            abandon_reader: AtomicBool::new(false),
         });
 
         let sid = session_id.to_string();
@@ -195,7 +214,7 @@ impl Terminal {
             .spawn(move || {
                 let mut buf = vec![0u8; 16 * 1024];
                 loop {
-                    match reader.read(&mut buf) {
+                    match reader.read(&mut buf, &t.abandon_reader) {
                         Ok(0) => break,
                         Ok(n) => t.on_output(&buf[..n]),
                         Err(e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
@@ -223,28 +242,51 @@ impl Terminal {
                         -1
                     }
                 };
-                // Closing the master ends the reader (ClosePseudoConsole on Windows).
-                drop(lock(&t.master).take());
+                // Closing the master ends the reader (ClosePseudoConsole on
+                // Windows). Take it under the lock but close it outside: the
+                // close waits for the reader to drain output, and the reader
+                // needs the screen lock.
+                let master = lock(&t.master).take();
+                drop(master);
                 if done_rx.recv_timeout(Duration::from_secs(2)).is_err() {
                     tracing::debug!(session = %t.session_id, "pty output still open after exit (orphaned children)");
                 }
-                // Reap anything the agent left running in its tree, like a terminal hangup.
+                // Reap anything the agent left running in its tree, like a
+                // terminal hangup; unix escalates to SIGKILL after the grace.
                 t.tree.terminate();
-                let status = if t.detach_on_exit.load(Ordering::SeqCst) {
-                    SessionStatus::Detached
-                } else if code == 0 || t.stop_requested.load(Ordering::SeqCst) {
-                    SessionStatus::Completed
+                t.reap_in_background();
+                let info = if t.detach_on_exit.load(Ordering::SeqCst) {
+                    ExitInfo {
+                        code: Some(code),
+                        status: SessionStatus::Detached,
+                        stopped_by_user: false,
+                    }
+                } else if t.stop_requested.load(Ordering::SeqCst) {
+                    // The code only says how the tree was killed (on Windows
+                    // TerminateJobObject's 1); the user's intent is the result.
+                    ExitInfo {
+                        code: None,
+                        status: SessionStatus::Completed,
+                        stopped_by_user: true,
+                    }
                 } else {
-                    SessionStatus::Failed
+                    ExitInfo {
+                        code: Some(code),
+                        status: if code == 0 {
+                            SessionStatus::Completed
+                        } else {
+                            SessionStatus::Failed
+                        },
+                        stopped_by_user: false,
+                    }
                 };
-                let info = ExitInfo { code, status };
                 {
                     let mut s = lock(&t.screen);
                     s.exited = Some(info);
                     // No subscribers is fine.
                     let _ = t.tx.send(TermEvent::Exit(info));
                 }
-                on_exit(info);
+                on_exit(&t, info);
             })
             .context("spawn pty waiter thread")?;
 
@@ -277,15 +319,21 @@ impl Terminal {
         }
     }
 
-    pub fn resize(&self, cols: u16, rows: u16) -> anyhow::Result<()> {
+    /// Resize the PTY and screen; `by` identifies the requesting client so
+    /// the broadcast is not echoed back to it.
+    pub fn resize(&self, cols: u16, rows: u16, by: u64) -> anyhow::Result<()> {
         if !(1..=1000).contains(&cols) || !(1..=1000).contains(&rows) {
             anyhow::bail!("terminal size must be 1-1000 columns and rows");
         }
-        let mut s = lock(&self.screen);
-        if s.parser.screen().size() == (rows, cols) {
+        // Lock order is `master` then `screen`, and `screen` is never held
+        // while the PTY resizes: ResizePseudoConsole can wait for the reader,
+        // which needs `screen`. Holding `master` throughout keeps concurrent
+        // resizes from interleaving PTY and parser sizes.
+        let master = lock(&self.master);
+        if lock(&self.screen).parser.screen().size() == (rows, cols) {
             return Ok(());
         }
-        if let Some(m) = lock(&self.master).as_ref() {
+        if let Some(m) = master.as_ref() {
             m.resize(PtySize {
                 rows,
                 cols,
@@ -294,8 +342,8 @@ impl Terminal {
             })
             .context("resize pty")?;
         }
-        s.parser.screen_mut().set_size(rows, cols);
-        let _ = self.tx.send(TermEvent::Resize { cols, rows });
+        lock(&self.screen).parser.screen_mut().set_size(rows, cols);
+        let _ = self.tx.send(TermEvent::Resize { cols, rows, by });
         Ok(())
     }
 
@@ -318,17 +366,45 @@ impl Terminal {
             tracing::warn!(session = %self.session_id, error = %e, "kill failed");
         }
         if cfg!(unix) {
-            // SIGHUP first; escalate if the tree ignores it.
+            // SIGHUP first; SIGKILL the whole group if anything in it ignores
+            // it, whether or not the leader has exited by then.
             let t = self.clone();
-            std::thread::spawn(move || {
-                std::thread::sleep(KILL_GRACE);
-                if !t.has_exited() {
-                    t.tree.force_kill();
-                    if let Err(e) = lock(&t.killer).kill() {
+            let spawned = std::thread::Builder::new()
+                .name(format!("pty-kill-{}", self.session_id))
+                .spawn(move || {
+                    t.tree.escalate(KILL_GRACE);
+                    if !t.has_exited()
+                        && let Err(e) = lock(&t.killer).kill()
+                    {
                         tracing::debug!(session = %t.session_id, error = %e, "kill after grace failed");
                     }
-                }
+                });
+            if let Err(e) = spawned {
+                tracing::warn!(session = %self.session_id, error = %e, "cannot start kill escalation; killing now");
+                self.tree.force_kill();
+            }
+        }
+    }
+
+    /// After the process exited: SIGKILL group members that outlived the
+    /// hangup once the grace is over, then release a reader that processes
+    /// outside the group still hold open (unix; the Windows job is gone).
+    fn reap_in_background(self: &Arc<Self>) {
+        if !cfg!(unix) {
+            return;
+        }
+        let t = self.clone();
+        let spawned = std::thread::Builder::new()
+            .name(format!("pty-reap-{}", self.session_id))
+            .spawn(move || {
+                t.tree.escalate(KILL_GRACE);
+                std::thread::sleep(READER_LINGER);
+                t.abandon_reader.store(true, Ordering::SeqCst);
             });
+        if let Err(e) = spawned {
+            tracing::warn!(session = %self.session_id, error = %e, "cannot start reaper; killing the group now");
+            self.tree.force_kill();
+            self.abandon_reader.store(true, Ordering::SeqCst);
         }
     }
 
@@ -404,31 +480,194 @@ fn snapshot(parser: &mut vt100::Parser<Callbacks>) -> Snapshot {
     }
 }
 
-/// Live terminals by session id.
+/// The session's whole process tree (§6); without one, Stop kills only the
+/// main process.
+fn process_tree(child: &(dyn portable_pty::Child + Send + Sync)) -> ProcessTree {
+    #[cfg(windows)]
+    let tree = child
+        .as_raw_handle()
+        .map_or_else(ProcessTree::none, ProcessTree::for_process_handle);
+    #[cfg(unix)]
+    let tree = child
+        .process_id()
+        .map_or_else(ProcessTree::none, ProcessTree::for_process_group);
+    tree
+}
+
+enum Slot {
+    /// A launch or resume reserved the id and is spawning its process.
+    Pending,
+    Live(Arc<Terminal>),
+}
+
+type Slots = Arc<Mutex<HashMap<String, Slot>>>;
+
+/// Live terminals by session id. An id is reserved before its process is
+/// spawned, so concurrent resumes can never start two agents for one
+/// session, and an exiting terminal only ever removes its own entry.
 #[derive(Default)]
 pub struct Registry {
-    terms: Mutex<HashMap<String, Arc<Terminal>>>,
+    terms: Slots,
+}
+
+/// A reserved id, held until [`Reservation::fill`]; dropping it unfilled
+/// (the spawn failed) frees the id again.
+pub struct Reservation {
+    terms: Slots,
+    id: String,
+    filled: bool,
+}
+
+impl Reservation {
+    pub fn fill(mut self, t: Arc<Terminal>) {
+        lock(&self.terms).insert(self.id.clone(), Slot::Live(t));
+        self.filled = true;
+    }
+}
+
+impl Drop for Reservation {
+    fn drop(&mut self) {
+        if !self.filled {
+            let mut terms = lock(&self.terms);
+            if matches!(terms.get(&self.id), Some(Slot::Pending)) {
+                terms.remove(&self.id);
+            }
+        }
+    }
 }
 
 impl Registry {
-    pub fn insert(&self, t: Arc<Terminal>) {
-        lock(&self.terms).insert(t.session_id.clone(), t);
+    /// Reserve `session_id`; `None` while it is live or being started.
+    pub fn reserve(&self, session_id: &str) -> Option<Reservation> {
+        let mut terms = lock(&self.terms);
+        if terms.contains_key(session_id) {
+            return None;
+        }
+        terms.insert(session_id.to_string(), Slot::Pending);
+        Some(Reservation {
+            terms: self.terms.clone(),
+            id: session_id.to_string(),
+            filled: false,
+        })
     }
 
     pub fn get(&self, session_id: &str) -> Option<Arc<Terminal>> {
-        lock(&self.terms).get(session_id).cloned()
+        match lock(&self.terms).get(session_id) {
+            Some(Slot::Live(t)) => Some(t.clone()),
+            _ => None,
+        }
     }
 
-    pub fn remove(&self, session_id: &str) -> Option<Arc<Terminal>> {
-        lock(&self.terms).remove(session_id)
+    /// Remove `t`, but only while the entry is still `t` and not a newer
+    /// terminal of the same session.
+    pub fn remove(&self, t: &Arc<Terminal>) -> bool {
+        let mut terms = lock(&self.terms);
+        let ours = matches!(terms.get(&t.session_id), Some(Slot::Live(x)) if Arc::ptr_eq(x, t));
+        if ours {
+            terms.remove(&t.session_id);
+        }
+        ours
     }
 
     pub fn all(&self) -> Vec<Arc<Terminal>> {
-        lock(&self.terms).values().cloned().collect()
+        lock(&self.terms)
+            .values()
+            .filter_map(|s| match s {
+                Slot::Live(t) => Some(t.clone()),
+                Slot::Pending => None,
+            })
+            .collect()
     }
 
+    /// No live terminal and no launch in progress.
     pub fn is_empty(&self) -> bool {
         lock(&self.terms).is_empty()
+    }
+}
+
+/// PTY output reader. On unix it owns a duplicate of the master fd and
+/// polls it, so it can give up (`abandon`) when a process outside the
+/// session's group keeps the PTY open forever; a plain blocking read would
+/// leak the thread. Windows reads end when ClosePseudoConsole runs.
+struct PtyReader {
+    #[cfg(unix)]
+    file: std::fs::File,
+    #[cfg(not(unix))]
+    inner: Box<dyn Read + Send>,
+}
+
+impl PtyReader {
+    #[cfg(not(unix))]
+    fn new(master: &(dyn MasterPty + Send)) -> anyhow::Result<Self> {
+        Ok(Self {
+            inner: master.try_clone_reader().context("pty reader")?,
+        })
+    }
+
+    #[cfg(not(unix))]
+    fn read(&mut self, buf: &mut [u8], _abandon: &AtomicBool) -> std::io::Result<usize> {
+        self.inner.read(buf)
+    }
+
+    #[cfg(unix)]
+    fn new(master: &(dyn MasterPty + Send)) -> anyhow::Result<Self> {
+        let fd = master.as_raw_fd().context("pty master has no fd")?;
+        Ok(Self {
+            file: unix_fd::dup(fd).context("pty reader")?,
+        })
+    }
+
+    #[cfg(unix)]
+    fn read(&mut self, buf: &mut [u8], abandon: &AtomicBool) -> std::io::Result<usize> {
+        loop {
+            if unix_fd::readable(&self.file, 200)? {
+                return self.file.read(buf);
+            }
+            if abandon.load(Ordering::SeqCst) {
+                return Ok(0);
+            }
+        }
+    }
+}
+
+#[cfg(unix)]
+#[allow(unsafe_code)]
+mod unix_fd {
+    use std::os::fd::{AsRawFd, FromRawFd, OwnedFd, RawFd};
+
+    /// A new close-on-exec descriptor for the same open file.
+    pub fn dup(fd: RawFd) -> std::io::Result<std::fs::File> {
+        // SAFETY: fcntl(F_DUPFD_CLOEXEC) only reads `fd`, which the caller's
+        // live MasterPty owns; an invalid fd yields EBADF.
+        let new = unsafe { libc::fcntl(fd, libc::F_DUPFD_CLOEXEC, 0) };
+        if new < 0 {
+            return Err(std::io::Error::last_os_error());
+        }
+        // SAFETY: `new` is a fresh descriptor nothing else owns.
+        Ok(std::fs::File::from(unsafe { OwnedFd::from_raw_fd(new) }))
+    }
+
+    /// Whether `f` has input (or a hangup or error to report) within `timeout_ms`.
+    pub fn readable(f: &std::fs::File, timeout_ms: i32) -> std::io::Result<bool> {
+        let mut p = libc::pollfd {
+            fd: f.as_raw_fd(),
+            events: libc::POLLIN,
+            revents: 0,
+        };
+        // SAFETY: `p` is one valid pollfd for a descriptor `f` keeps open.
+        let n = unsafe { libc::poll(&raw mut p, 1, timeout_ms) };
+        if n > 0 {
+            return Ok(true);
+        }
+        if n == 0 {
+            return Ok(false);
+        }
+        let e = std::io::Error::last_os_error();
+        if e.kind() == std::io::ErrorKind::Interrupted {
+            Ok(false)
+        } else {
+            Err(e)
+        }
     }
 }
 

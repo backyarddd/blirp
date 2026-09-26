@@ -4,7 +4,7 @@
 use rusqlite::Connection;
 
 /// Index `i` holds the migration that moves the schema from version `i` to `i + 1`.
-pub(crate) const MIGRATIONS: &[&str] = &[V1, V2];
+pub(crate) const MIGRATIONS: &[&str] = &[V1, V2, V3, V4, V5];
 
 /// Schema of §5. Note on the FTS tables: they are external-content tables keyed
 /// by the implicit rowid of `events`/`records`. blirp never runs `VACUUM`
@@ -230,6 +230,28 @@ CREATE TABLE hub_log(
 const V2: &str = r#"
 CREATE INDEX outbox_entity_key ON outbox(entity, key, origin_seq);
 CREATE INDEX hub_log_origin ON hub_log(origin_machine, hub_seq);
+"#;
+
+/// A user Stop is recorded as intent (§7): `completed`, no exit code.
+const V3: &str = r#"
+ALTER TABLE sessions ADD COLUMN stopped_by_user INTEGER NOT NULL DEFAULT 0;
+"#;
+
+/// Subagent children are listed and counted by parent (§11).
+const V4: &str = r#"
+CREATE INDEX sessions_parent ON sessions(parent_session_id, started_at DESC)
+    WHERE parent_session_id IS NOT NULL;
+"#;
+
+/// Coalesced status-only session writes (§5): rows whose outbox entry is
+/// deferred until `due`.
+const V5: &str = r#"
+CREATE TABLE outbox_deferred(
+    entity TEXT NOT NULL,
+    key    TEXT NOT NULL,
+    due    INTEGER NOT NULL,
+    PRIMARY KEY(entity, key)
+);
 "#;
 
 #[derive(Debug, thiserror::Error)]

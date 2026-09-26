@@ -1,9 +1,9 @@
 //! Read-only project files and git views. Every path stays inside a
 //! registered root of the project on this machine.
 
-use super::{ApiError, ApiQuery, ApiResult, blocking};
+use super::{ApiError, ApiPath, ApiQuery, ApiResult, blocking};
 use crate::state::SharedState;
-use axum::extract::{Path, State};
+use axum::extract::State;
 use axum::http::StatusCode;
 use axum::routing::get;
 use axum::{Json, Router};
@@ -123,7 +123,7 @@ fn mtime_ms(m: &std::fs::Metadata) -> Option<i64> {
 
 async fn list_dir(
     State(s): State<SharedState>,
-    Path(id): Path<String>,
+    ApiPath(id): ApiPath<String>,
     ApiQuery(q): ApiQuery<PathQuery>,
 ) -> ApiResult<Json<DirListing>> {
     let st = s.clone();
@@ -181,7 +181,7 @@ async fn list_dir(
 
 async fn read_file(
     State(s): State<SharedState>,
-    Path(id): Path<String>,
+    ApiPath(id): ApiPath<String>,
     ApiQuery(q): ApiQuery<PathQuery>,
 ) -> ApiResult<Json<FileContent>> {
     let st = s.clone();
@@ -270,7 +270,7 @@ fn git_root(st: &SharedState, id: &str, root: Option<&str>) -> ApiResult<PathBuf
 
 async fn git_status(
     State(s): State<SharedState>,
-    Path(id): Path<String>,
+    ApiPath(id): ApiPath<String>,
     ApiQuery(q): ApiQuery<PathQuery>,
 ) -> ApiResult<Json<GitStatus>> {
     let st = s.clone();
@@ -284,7 +284,7 @@ async fn git_status(
 
 async fn git_diff(
     State(s): State<SharedState>,
-    Path(id): Path<String>,
+    ApiPath(id): ApiPath<String>,
     ApiQuery(q): ApiQuery<PathQuery>,
 ) -> ApiResult<Json<GitDiff>> {
     let st = s.clone();

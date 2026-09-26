@@ -213,9 +213,12 @@ async fn shell_session_over_websocket() {
             _ => continue,
         }
     };
-    assert_eq!(exit.0, SessionStatus::Completed);
+    // A Stop is recorded as intent, not as the kill's exit code.
+    assert_eq!(exit, (SessionStatus::Completed, None));
     let done = wait_status(&h, &session.id, SessionStatus::Completed).await;
-    assert!(done.ended_at.is_some() && done.exit_code.is_some());
+    assert!(done.ended_at.is_some());
+    assert_eq!(done.exit_code, None);
+    assert!(done.stopped_by_user);
 
     // Stopping again is a conflict; resuming relaunches in the same row.
     let r = h
@@ -237,6 +240,7 @@ async fn shell_session_over_websocket() {
     let resumed: Session = r.json().await.unwrap();
     assert_eq!(resumed.status, SessionStatus::Starting);
     assert!(resumed.ended_at.is_none());
+    assert!(!resumed.stopped_by_user);
 
     // An initial prompt is typed once output settles, then submitted.
     let r = h
@@ -306,6 +310,20 @@ async fn api_auth_projects_memory_files() {
     assert_eq!(r.status(), 200);
     let r = h.http.get(h.url("/auth?token=wrong")).send().await.unwrap();
     assert_eq!(r.status(), 401);
+
+    // Folders must be absolute: relative ones would resolve against the
+    // daemon's working directory (`src` exists relative to this test's).
+    for (path, body) in [
+        ("/api/projects", json!({"path": "src"})),
+        ("/api/sessions", json!({"cwd": "src", "agent": "shell"})),
+    ] {
+        let r = h.send(reqwest::Method::POST, path, body).await;
+        assert_eq!(r.status(), 400, "{path}");
+        assert_eq!(
+            r.json::<ErrorBody>().await.unwrap().error.code,
+            "invalid_request"
+        );
+    }
 
     // Register a folder; files API stays inside it.
     let proj = h._home.path().join("proj");
@@ -385,11 +403,42 @@ async fn api_auth_projects_memory_files() {
             json!({"kind": "nope", "title": "x", "body": ""}),
         )
         .await;
-    assert_eq!(r.status(), 422);
+    assert_eq!(r.status(), 400);
     assert_eq!(
         r.json::<ErrorBody>().await.unwrap().error.code,
         "invalid_request"
     );
+    // Every extractor answers 400 with the error shape: JSON syntax, query
+    // and path parameters.
+    let r = h
+        .http
+        .post(h.url(&format!("/api/projects/{id}/records")))
+        .bearer_auth(&h.token)
+        .header("content-type", "application/json")
+        .body("{not json")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(r.status(), 400);
+    assert_eq!(
+        r.json::<ErrorBody>().await.unwrap().error.code,
+        "invalid_request"
+    );
+    for path in ["/api/sessions?limit=many", "/api/sessions/%FF"] {
+        let r = h
+            .http
+            .get(h.url(path))
+            .bearer_auth(&h.token)
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(r.status(), 400, "{path}");
+        assert_eq!(
+            r.json::<ErrorBody>().await.unwrap().error.code,
+            "invalid_request",
+            "{path}"
+        );
+    }
 
     // Unknown endpoints answer 404 with the standard error shape.
     let r = h
@@ -432,5 +481,480 @@ async fn shutdown_endpoint_requests_stop() {
     )
     .await
     .expect("stop was not requested");
+    h.daemon.shutdown().await.unwrap();
+}
+
+async fn wait_no_terminal(h: &Harness, id: &str) {
+    let deadline = Instant::now() + Duration::from_secs(20);
+    while h.daemon.state.terminals.get(id).is_some() {
+        assert!(Instant::now() < deadline, "terminal {id} never went away");
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+}
+
+// Concurrent resumes of one session must start exactly one agent; the
+// others are refused while the first is starting or running.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn concurrent_resumes_start_one_agent() {
+    let h = Harness::start().await;
+    let proj = h._home.path().join("race");
+    std::fs::create_dir(&proj).unwrap();
+    let r = h
+        .send(
+            reqwest::Method::POST,
+            "/api/sessions",
+            json!({"cwd": proj, "agent": "shell"}),
+        )
+        .await;
+    assert_eq!(r.status(), 201);
+    let session: Session = r.json().await.unwrap();
+    let stop = format!("/api/sessions/{}/stop", session.id);
+    assert_eq!(
+        h.send(reqwest::Method::POST, &stop, json!({}))
+            .await
+            .status(),
+        202
+    );
+    wait_status(&h, &session.id, SessionStatus::Completed).await;
+    wait_no_terminal(&h, &session.id).await;
+
+    for _ in 0..3 {
+        let path = format!("/api/sessions/{}/resume", session.id);
+        let codes: Vec<u16> = futures_util::future::join_all(
+            (0..8).map(|_| h.send(reqwest::Method::POST, &path, json!({}))),
+        )
+        .await
+        .into_iter()
+        .map(|r| r.status().as_u16())
+        .collect();
+        assert_eq!(codes.iter().filter(|c| **c == 200).count(), 1, "{codes:?}");
+        assert!(codes.iter().all(|c| *c == 200 || *c == 409), "{codes:?}");
+        let live = h.daemon.state.terminals.all();
+        assert_eq!(live.len(), 1);
+        assert_eq!(live[0].session_id, session.id);
+
+        // Stopping ends the one agent and frees the session for the next round.
+        assert_eq!(
+            h.send(reqwest::Method::POST, &stop, json!({}))
+                .await
+                .status(),
+            202
+        );
+        wait_status(&h, &session.id, SessionStatus::Completed).await;
+        wait_no_terminal(&h, &session.id).await;
+        assert!(h.daemon.state.terminals.is_empty());
+    }
+    let Harness { daemon, _home, .. } = h;
+    daemon.shutdown().await.unwrap();
+}
+
+// Ingested subagent sessions stay out of the default list; `parent=` lists
+// them and the detail counts them.
+#[tokio::test]
+async fn subagent_children_are_filtered_and_counted() {
+    use blirp_core::model::{SessionDetail, SessionOrigin, SessionsPage};
+    let h = Harness::start().await;
+    let store = &h.daemon.state.store;
+    let proj = h._home.path().join("kids");
+    std::fs::create_dir(&proj).unwrap();
+    let project = store
+        .register_project(&h.daemon.state.machine.id, &proj, None)
+        .unwrap();
+    let mk = |id: &str, parent: Option<&str>, origin: SessionOrigin, at: i64| Session {
+        id: id.into(),
+        project_id: project.id.clone(),
+        machine_id: h.daemon.state.machine.id.clone(),
+        agent: "claude".into(),
+        agent_session_id: Some(format!("asid-{id}")),
+        origin,
+        cwd: proj.display().to_string(),
+        title: None,
+        status: SessionStatus::Completed,
+        branch: None,
+        worktree: None,
+        transcript_path: None,
+        started_at: at,
+        ended_at: Some(at),
+        last_activity_at: at,
+        exit_code: None,
+        summary: None,
+        distilled_through_seq: 0,
+        tokens_in: 0,
+        tokens_out: 0,
+        cost_usd: 0.0,
+        parent_session_id: parent.map(str::to_string),
+        stopped_by_user: false,
+    };
+    store
+        .insert_session(&mk("top", None, SessionOrigin::External, 1))
+        .unwrap();
+    store
+        .insert_session(&mk("fork", Some("top"), SessionOrigin::Blirp, 2))
+        .unwrap();
+    store
+        .insert_session(&mk("sub", Some("top"), SessionOrigin::External, 3))
+        .unwrap();
+    let ids = |p: SessionsPage| p.items.into_iter().map(|s| s.id).collect::<Vec<_>>();
+    assert_eq!(ids(h.get("/api/sessions").await), ["fork", "top"]);
+    assert_eq!(
+        ids(h.get("/api/sessions?include_children=true").await),
+        ["sub", "fork", "top"]
+    );
+    assert_eq!(ids(h.get("/api/sessions?parent=top").await), ["sub"]);
+    let d: SessionDetail = h.get("/api/sessions/top").await;
+    assert_eq!((d.session.id.as_str(), d.children_count), ("top", 1));
+
+    // Deleting takes the subagents along; the fork stays, unlinked.
+    let r = h
+        .send(reqwest::Method::DELETE, "/api/sessions/top", json!({}))
+        .await;
+    assert_eq!(r.status(), 204);
+    let r = h
+        .send(reqwest::Method::DELETE, "/api/sessions/top", json!({}))
+        .await;
+    assert_eq!(r.status(), 404);
+    assert_eq!(
+        ids(h.get("/api/sessions?include_children=true").await),
+        ["fork"]
+    );
+    // A running session is refused.
+    store
+        .insert_session(&Session {
+            status: SessionStatus::Working,
+            ..mk("live", None, SessionOrigin::External, 4)
+        })
+        .unwrap();
+    let r = h
+        .send(reqwest::Method::DELETE, "/api/sessions/live", json!({}))
+        .await;
+    assert_eq!(r.status(), 409);
+    h.daemon.shutdown().await.unwrap();
+}
+
+/// Every mutating route with the right it needs (§11). A route missing
+/// here is a route nobody checked.
+const MUTATING_ROUTES: &[(&str, &str, Need)] = &[
+    ("PATCH", "/api/settings", Need::Admin),
+    ("POST", "/api/sync/hub/enable", Need::Admin),
+    ("POST", "/api/sync/hub/disable", Need::Admin),
+    ("POST", "/api/sync/invite", Need::Admin),
+    ("POST", "/api/sync/join", Need::Admin),
+    ("POST", "/api/devices/browser-invite", Need::Admin),
+    ("PATCH", "/api/devices/d1", Need::Admin),
+    ("DELETE", "/api/devices/d1", Need::Admin),
+    ("DELETE", "/api/machines/m1", Need::Admin),
+    ("POST", "/api/agents/claude/hooks/install", Need::Admin),
+    ("POST", "/api/agents/claude/hooks/uninstall", Need::Admin),
+    ("POST", "/api/hooks/claude/Stop", Need::Admin),
+    ("POST", "/api/sessions/s1/open", Need::Admin),
+    ("POST", "/api/sessions", Need::Control),
+    ("DELETE", "/api/sessions/s1", Need::Control),
+    ("POST", "/api/sessions/s1/worktree/remove", Need::Control),
+    ("PATCH", "/api/sessions/s1", Need::Control),
+    ("POST", "/api/sessions/s1/stop", Need::Control),
+    ("POST", "/api/sessions/s1/resume", Need::Control),
+    ("POST", "/api/sessions/s1/distill", Need::Control),
+    ("POST", "/api/projects", Need::Control),
+    ("PATCH", "/api/projects/p1", Need::Control),
+    ("DELETE", "/api/projects/p1", Need::Control),
+    ("POST", "/api/projects/p1/merge", Need::Control),
+    ("PUT", "/api/projects/p1/brief", Need::Control),
+    ("POST", "/api/projects/p1/brief/revert", Need::Control),
+    ("POST", "/api/projects/p1/records", Need::Control),
+    ("PATCH", "/api/projects/p1/records/r1", Need::Control),
+    ("DELETE", "/api/projects/p1/records/r1", Need::Control),
+    ("POST", "/api/projects/p1/wiki", Need::Control),
+    ("PUT", "/api/projects/p1/wiki/w1", Need::Control),
+    ("DELETE", "/api/projects/p1/wiki/w1", Need::Control),
+    ("POST", "/api/projects/p1/resources", Need::Control),
+    ("PATCH", "/api/projects/p1/resources/r1", Need::Control),
+    ("DELETE", "/api/projects/p1/resources/r1", Need::Control),
+    ("POST", "/api/suggestions/x1/accept", Need::Control),
+];
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+enum Need {
+    Admin,
+    Control,
+}
+
+/// A LAN portal browser device (never admin) and its cookie.
+fn portal_device(h: &Harness, control: bool) -> String {
+    use sha2::Digest as _;
+    let token = format!("{:064x}", u128::from(control) + 7);
+    let now = blirp_core::now_ms();
+    h.daemon
+        .state
+        .store
+        .upsert_device(&blirp_core::model::Device {
+            id: format!("dev-{control}"),
+            name: "phone".into(),
+            kind: blirp_core::model::DeviceKind::Browser,
+            token_hash: Some(hex::encode(sha2::Sha256::digest(token.as_bytes()))),
+            node_id: None,
+            created_at: now,
+            last_seen: now,
+            revoked: false,
+            can_control_terminals: control,
+        })
+        .unwrap();
+    format!("blirp_device={token}")
+}
+
+async fn portal_call(
+    app: &axum::Router,
+    method: &str,
+    path: &str,
+    cookie: &str,
+) -> (u16, serde_json::Value) {
+    use tower::ServiceExt as _;
+    let req = axum::http::Request::builder()
+        .method(method)
+        .uri(path)
+        .header("cookie", cookie)
+        .header("content-type", "application/json")
+        .body(axum::body::Body::from("{}"))
+        .unwrap();
+    let resp = app.clone().oneshot(req).await.unwrap();
+    let status = resp.status().as_u16();
+    let bytes = axum::body::to_bytes(resp.into_body(), 1 << 20)
+        .await
+        .unwrap();
+    (
+        status,
+        serde_json::from_slice(&bytes).unwrap_or(serde_json::Value::Null),
+    )
+}
+
+// Portal devices are never admins; without terminal control they are
+// read-only. Every mutating route refuses them before looking at the body.
+#[tokio::test]
+async fn portal_devices_get_only_their_rights() {
+    let h = Harness::start().await;
+    let app = blirp::api::portal_router(h.daemon.state.clone());
+    let viewer = portal_device(&h, false);
+    let controller = portal_device(&h, true);
+
+    for (method, path, need) in MUTATING_ROUTES {
+        let (status, body) = portal_call(&app, method, path, &viewer).await;
+        assert_eq!(status, 403, "viewer {method} {path}: {body}");
+        let want = if *need == Need::Admin {
+            "admin_only"
+        } else {
+            "control_not_allowed"
+        };
+        assert_eq!(body["error"]["code"], want, "viewer {method} {path}");
+
+        let (status, body) = portal_call(&app, method, path, &controller).await;
+        if *need == Need::Admin {
+            assert_eq!(status, 403, "controller {method} {path}: {body}");
+            assert_eq!(body["error"]["code"], "admin_only", "{method} {path}");
+        } else {
+            assert!(
+                status != 403 && status != 401,
+                "controller {method} {path}: {status} {body}"
+            );
+        }
+    }
+    // Loopback-only routes do not exist on the portal.
+    let (status, _) = portal_call(&app, "POST", "/api/daemon/shutdown", &controller).await;
+    assert_eq!(status, 404);
+
+    // Health tells each client what it may do.
+    for (cookie, control) in [(&viewer, false), (&controller, true)] {
+        let (status, body) = portal_call(&app, "GET", "/api/health", cookie).await;
+        assert_eq!(status, 200);
+        assert_eq!(
+            body["capabilities"],
+            json!({"admin": false, "control_terminals": control, "local": false})
+        );
+    }
+    let local: Health = h.get("/api/health").await;
+    assert_eq!(
+        local.capabilities,
+        blirp_core::model::Capabilities {
+            admin: true,
+            control_terminals: true,
+            local: true
+        }
+    );
+    // The local client passes the admin checks.
+    let r = h
+        .send(reqwest::Method::PATCH, "/api/settings", json!({}))
+        .await;
+    assert_eq!(r.status(), 200);
+    h.daemon.shutdown().await.unwrap();
+}
+
+async fn ws_with(url: String, header: (&'static str, String)) -> Ws {
+    let mut req = url.into_client_request().unwrap();
+    req.headers_mut()
+        .insert(header.0, header.1.parse().unwrap());
+    tokio_tungstenite::connect_async(req).await.unwrap().0
+}
+
+// Terminal socket protocol details: read-only clients are told so, a
+// resize is not echoed to its sender, and both close directions complete
+// the close handshake with the documented codes.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn terminal_socket_protocol() {
+    let h = Harness::start().await;
+    let proj = h._home.path().join("proto");
+    std::fs::create_dir(&proj).unwrap();
+    let r = h
+        .send(
+            reqwest::Method::POST,
+            "/api/sessions",
+            json!({"cwd": proj, "agent": "shell"}),
+        )
+        .await;
+    assert_eq!(r.status(), 201);
+    let session: Session = r.json().await.unwrap();
+
+    // A portal device without terminal control gets `readonly` after the snapshot.
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let portal = listener.local_addr().unwrap();
+    let app = blirp::api::portal_router(h.daemon.state.clone());
+    tokio::spawn(async move { axum::serve(listener, app).await });
+    let viewer = portal_device(&h, false);
+    let mut v = ws_with(
+        format!("ws://{portal}/api/terminals/{}/ws", session.id),
+        ("Cookie", viewer),
+    )
+    .await;
+    assert!(matches!(
+        next_text(&mut v).await,
+        TerminalServerMessage::Snapshot { .. }
+    ));
+    assert!(matches!(
+        next_text(&mut v).await,
+        TerminalServerMessage::Readonly
+    ));
+    drop(v);
+
+    let mut a = h.ws(&session.id).await;
+    let mut b = h.ws(&session.id).await;
+    next_text(&mut a).await;
+    next_text(&mut b).await;
+    let resize = json!({"type": "resize", "cols": 90, "rows": 20}).to_string();
+    a.send(Message::Text(resize.into())).await.unwrap();
+    let TerminalServerMessage::Resize { cols, rows } = next_text(&mut b).await else {
+        panic!("the other client must hear about the resize");
+    };
+    assert_eq!((cols, rows), (90, 20));
+    let input = json!({"type": "input", "data": "echo AFT$()ER-RESIZE\r"}).to_string();
+    a.send(Message::Text(input.into())).await.unwrap();
+    let mut screen = vt100::Parser::new(20, 90, 100);
+    let control = read_until(&mut a, &mut screen, "AFTER-RESIZE").await;
+    assert!(
+        !control
+            .iter()
+            .any(|m| matches!(m, TerminalServerMessage::Resize { .. })),
+        "resize echoed to its sender: {control:?}"
+    );
+
+    // Client-initiated close: the server answers it.
+    a.close(None).await.unwrap();
+    let reply = tokio::time::timeout(Duration::from_secs(5), a.next())
+        .await
+        .unwrap();
+    assert!(matches!(reply, Some(Ok(Message::Close(_)))), "{reply:?}");
+
+    // Server-initiated close after the exit frame: 1000 "exited".
+    let stop = format!("/api/sessions/{}/stop", session.id);
+    assert_eq!(
+        h.send(reqwest::Method::POST, &stop, json!({}))
+            .await
+            .status(),
+        202
+    );
+    let close = loop {
+        match tokio::time::timeout(Duration::from_secs(20), b.next()).await {
+            Ok(Some(Ok(Message::Close(f)))) => break f,
+            Ok(Some(Ok(_))) => continue,
+            other => panic!("expected a close frame, got {other:?}"),
+        }
+    };
+    let close = close.expect("close frame without code");
+    assert_eq!(u16::from(close.code), 1000);
+    assert_eq!(close.reason.as_str(), "exited");
+    h.daemon.shutdown().await.unwrap();
+}
+
+fn git(dir: &std::path::Path, args: &[&str]) {
+    let st = std::process::Command::new("git")
+        .arg("-C")
+        .arg(dir)
+        .args([
+            "-c",
+            "user.name=t",
+            "-c",
+            "user.email=t@t",
+            "-c",
+            "init.defaultBranch=main",
+        ])
+        .args(args)
+        .output()
+        .unwrap();
+    assert!(st.status.success(), "git {args:?}: {st:?}");
+}
+
+// A session's worktree is removed on request once the session ended, never
+// with uncommitted work unless forced.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn worktrees_are_removed_only_when_clean_or_forced() {
+    let h = Harness::start().await;
+    let repo = h._home.path().join("repo");
+    std::fs::create_dir(&repo).unwrap();
+    git(&repo, &["init"]);
+    std::fs::write(repo.join("a.txt"), "a\n").unwrap();
+    git(&repo, &["add", "."]);
+    git(&repo, &["commit", "-m", "init"]);
+    let r = h
+        .send(
+            reqwest::Method::POST,
+            "/api/sessions",
+            json!({"cwd": repo, "agent": "shell", "worktree": true}),
+        )
+        .await;
+    assert_eq!(r.status(), 201, "{:?}", r.text().await);
+    let s: Session = r.json().await.unwrap();
+    let wt = std::path::PathBuf::from(s.worktree.clone().expect("worktree"));
+    assert!(wt.join("a.txt").is_file());
+    let remove = format!("/api/sessions/{}/worktree/remove", s.id);
+    let code = |r: reqwest::Response| async move {
+        let status = r.status().as_u16();
+        (
+            status,
+            r.json::<ErrorBody>().await.map(|e| e.error.code).ok(),
+        )
+    };
+
+    let r = h.send(reqwest::Method::POST, &remove, json!({})).await;
+    assert_eq!(code(r).await, (409, Some("session_live".into())));
+    let stop = format!("/api/sessions/{}/stop", s.id);
+    assert_eq!(
+        h.send(reqwest::Method::POST, &stop, json!({}))
+            .await
+            .status(),
+        202
+    );
+    wait_status(&h, &s.id, SessionStatus::Completed).await;
+    wait_no_terminal(&h, &s.id).await;
+
+    std::fs::write(wt.join("scratch.txt"), "work\n").unwrap();
+    let r = h.send(reqwest::Method::POST, &remove, json!({})).await;
+    assert_eq!(code(r).await, (409, Some("worktree_dirty".into())));
+    assert!(wt.is_dir());
+
+    let r = h
+        .send(reqwest::Method::POST, &remove, json!({"force": true}))
+        .await;
+    assert_eq!(r.status(), 200, "{:?}", r.text().await);
+    let s: Session = h.get(&format!("/api/sessions/{}", s.id)).await;
+    assert_eq!(s.worktree, None);
+    assert!(!wt.exists());
+    let r = h.send(reqwest::Method::POST, &remove, json!({})).await;
+    assert_eq!(code(r).await, (409, Some("no_worktree".into())));
     h.daemon.shutdown().await.unwrap();
 }

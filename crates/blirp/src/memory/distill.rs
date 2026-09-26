@@ -6,8 +6,8 @@ use crate::memory::render::clip;
 use crate::state::SharedState;
 use blirp_core::config::{BriefMode, MemoryConfig, Summarizer};
 use blirp_core::model::{
-    Event, EventKind, MemoryPart, Record, RecordKind, RecordStatus, ServerEvent, Session,
-    SessionOrigin, SessionSummary, SummaryItem,
+    DistillPause, DistillStatus, Event, EventKind, MemoryPart, Record, RecordKind, RecordStatus,
+    ServerEvent, Session, SessionOrigin, SessionSummary, SummaryItem,
 };
 use blirp_core::process;
 use blirp_core::store::{BriefApply, DistillOutcome, DistillPlan, RecordFilter, Store, StoreError};
@@ -275,14 +275,19 @@ async fn ollama_up(base: &str) -> bool {
 /// ollama in that order). `Ok(None)` for `none`. CLI summarizers run in a
 /// fresh dir under `scratch`.
 pub async fn select_backend(cfg: &MemoryConfig, scratch: &Path) -> Result<Option<Backend>, String> {
+    // PATH scans touch the filesystem: off the async runtime.
+    let (claude_exe, codex_exe) =
+        tokio::task::spawn_blocking(|| (process::which("claude"), process::which("codex")))
+            .await
+            .map_err(|e| format!("looking up summarizers: {e}"))?;
     let claude = || {
-        process::which("claude").map(|exe| Backend::Claude {
+        claude_exe.clone().map(|exe| Backend::Claude {
             exe,
             scratch: scratch.to_path_buf(),
         })
     };
     let codex = || {
-        process::which("codex").map(|exe| Backend::Codex {
+        codex_exe.clone().map(|exe| Backend::Codex {
             exe,
             scratch: scratch.to_path_buf(),
         })
@@ -335,9 +340,15 @@ async fn run_process(
     dir: &Path,
     timeout: Duration,
 ) -> Result<ProcOut, String> {
-    let (prog, args) = wrap_for_platform(program, args);
-    let mut cmd = tokio::process::Command::new(&prog);
-    cmd.args(&args)
+    // Shim parsing reads the file: off the async runtime.
+    let program_path = program.to_path_buf();
+    let wrapped = tokio::task::spawn_blocking(move || wrap_for_platform(&program_path, args))
+        .await
+        .map_err(|e| format!("preparing {}: {e}", program.display()))?
+        .map_err(|e| e.to_string())?;
+    let mut cmd = tokio::process::Command::new(&wrapped.program);
+    cmd.args(&wrapped.args)
+        .envs(wrapped.env)
         .current_dir(dir)
         .env(DISTILLING_ENV, "1")
         .stdin(std::process::Stdio::piped())
@@ -364,11 +375,11 @@ async fn run_process(
     #[cfg(windows)]
     let tree = child
         .raw_handle()
-        .map(crate::proc_tree::ProcessTree::for_process_handle);
+        .map(blirp_core::proc_tree::ProcessTree::for_process_handle);
     #[cfg(unix)]
     let tree = child
         .id()
-        .map(crate::proc_tree::ProcessTree::for_process_group);
+        .map(blirp_core::proc_tree::ProcessTree::for_process_group);
 
     let mut sin = child.stdin.take();
     let mut sout = child.stdout.take();
@@ -723,6 +734,92 @@ pub fn record_failure(
     })
 }
 
+// ---------------------------------------------------------------- breaker
+
+/// First pause after the summarizer itself failed, doubled on every failed
+/// retry up to [`PAUSE_MAX_MS`].
+const PAUSE_MIN_MS: i64 = 5 * 60 * 1000;
+const PAUSE_MAX_MS: i64 = 6 * 3600 * 1000;
+
+/// A failure of the summarizer itself (credentials, installation, limits),
+/// which would fail every session alike, as opposed to one session's
+/// content. `None`: a per-session failure.
+pub fn classify(e: &DistillError) -> Option<DistillPause> {
+    let msg = match e {
+        DistillError::NoBackend(_) => return Some(DistillPause::Unavailable),
+        DistillError::Backend(m) => m.to_lowercase(),
+        _ => return None,
+    };
+    let any = |words: &[&str]| words.iter().any(|w| msg.contains(w));
+    if any(&[
+        "not logged in",
+        "please log in",
+        "/login",
+        "log in",
+        "unauthorized",
+        "authentication",
+        "invalid api key",
+        "api key",
+        "credit balance",
+        "status 401",
+        "status 403",
+    ]) {
+        Some(DistillPause::Auth)
+    } else if any(&[
+        "rate limit",
+        "rate_limit",
+        "usage limit",
+        "too many requests",
+        "status 429",
+        "quota",
+        "overloaded",
+    ]) {
+        Some(DistillPause::RateLimited)
+    } else if any(&[
+        "cannot start",
+        "not on path",
+        "not reachable",
+        "connection refused",
+    ]) {
+        Some(DistillPause::Unavailable)
+    } else {
+        None
+    }
+}
+
+/// Circuit breaker for the summarizer: while open, automatic jobs are left
+/// alone (no budget, no per-session failure); the first job after
+/// `open_until` is the probe.
+#[derive(Debug, Default)]
+struct Breaker {
+    failures: u32,
+    open_until: i64,
+    pause: Option<(DistillPause, String)>,
+}
+
+impl Breaker {
+    fn is_open(&self, now: i64) -> bool {
+        self.pause.is_some() && now < self.open_until
+    }
+
+    /// Record a summarizer failure; returns when it will be retried.
+    fn trip(&mut self, kind: DistillPause, message: &str, now: i64) -> i64 {
+        self.failures = self.failures.saturating_add(1);
+        let shift = self.failures.saturating_sub(1).min(16);
+        let pause = PAUSE_MIN_MS.saturating_mul(1 << shift).min(PAUSE_MAX_MS);
+        self.open_until = now + pause;
+        self.pause = Some((kind, clip(message, 300)));
+        self.open_until
+    }
+
+    /// The summarizer worked; true when it had been paused.
+    fn reset(&mut self) -> bool {
+        let was = self.pause.is_some();
+        *self = Breaker::default();
+        was
+    }
+}
+
 // ---------------------------------------------------------------- queue
 
 struct Job {
@@ -735,6 +832,9 @@ pub struct Distiller {
     tx: mpsc::UnboundedSender<Job>,
     rx: Mutex<Option<mpsc::UnboundedReceiver<Job>>>,
     queued: Mutex<HashSet<String>>,
+    breaker: Mutex<Breaker>,
+    /// Day on which "budget used up" was last logged (once per day).
+    budget_logged: Mutex<Option<String>>,
 }
 
 impl Default for Distiller {
@@ -744,22 +844,48 @@ impl Default for Distiller {
             tx,
             rx: Mutex::new(Some(rx)),
             queued: Mutex::new(HashSet::new()),
+            breaker: Mutex::new(Breaker::default()),
+            budget_logged: Mutex::new(None),
         }
     }
+}
+
+fn lock<T>(m: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
+    // Plain state; a panic elsewhere cannot leave it inconsistent.
+    m.lock().unwrap_or_else(PoisonError::into_inner)
 }
 
 fn today() -> String {
     crate::memory::render::date(blirp_core::now_ms())
 }
 
-/// Consume one unit of today's budget; false when it is exhausted.
-fn take_budget(store: &Store, limit: u32) -> Result<bool, StoreError> {
+/// Jobs run today (UTC).
+pub fn budget_used(store: &Store) -> Result<u64, StoreError> {
     let day = today();
-    let used = store
+    Ok(store
         .get_setting(BUDGET_KEY)?
         .filter(|v| v.get("day").and_then(|d| d.as_str()) == Some(day.as_str()))
         .and_then(|v| v.get("count").and_then(|c| c.as_u64()))
-        .unwrap_or(0);
+        .unwrap_or(0))
+}
+
+/// Give back a unit taken for a job the summarizer never really ran
+/// (it failed as a whole, see [`classify`]).
+fn refund_budget(store: &Store) -> Result<(), StoreError> {
+    let used = budget_used(store)?;
+    if used > 0 {
+        store.set_setting(
+            BUDGET_KEY,
+            &serde_json::json!({"day": today(), "count": used - 1}),
+        )?;
+    }
+    Ok(())
+}
+
+/// Consume one unit of today's budget; false when it is exhausted.
+fn take_budget(store: &Store, limit: u32) -> Result<bool, StoreError> {
+    let day = today();
+    let used = budget_used(store)?;
     if used >= u64::from(limit) {
         return Ok(false);
     }
@@ -771,6 +897,20 @@ fn take_budget(store: &Store, limit: u32) -> Result<bool, StoreError> {
 }
 
 impl Distiller {
+    /// Pause state for the settings view (budget filled in by the caller).
+    pub fn status(&self, now: i64) -> DistillStatus {
+        let b = lock(&self.breaker);
+        match &b.pause {
+            Some((kind, reason)) => DistillStatus {
+                paused: Some(*kind),
+                reason: Some(reason.clone()),
+                retry_at: Some(b.open_until.max(now)),
+                ..DistillStatus::default()
+            },
+            None => DistillStatus::default(),
+        }
+    }
+
     /// Queue a session; false when it is already queued or running.
     pub fn enqueue(&self, session_id: &str, manual: bool) -> bool {
         let mut q = self.queued.lock().unwrap_or_else(PoisonError::into_inner);
@@ -890,12 +1030,28 @@ async fn process(state: &SharedState, job: &Job) {
             return;
         }
     }
+    // A failing summarizer pauses automatic jobs; they stay eligible and run
+    // once it works again. A manual distill always tries (and can close it).
+    if !job.manual && lock(&state.distiller.breaker).is_open(blirp_core::now_ms()) {
+        tracing::debug!(session = %job.session_id, "summarizer paused; not distilling");
+        return;
+    }
     let store = state.store.clone();
     let limit = cfg.daily_distill_limit;
     match tokio::task::spawn_blocking(move || take_budget(&store, limit)).await {
         Ok(Ok(true)) => {}
         Ok(Ok(false)) => {
-            tracing::info!(session = %job.session_id, limit, "daily distill budget used up; skipping");
+            let day = today();
+            let mut logged = lock(&state.distiller.budget_logged);
+            if logged.as_deref() != Some(day.as_str()) {
+                tracing::info!(
+                    limit,
+                    "daily distill budget used up; distilling resumes tomorrow (UTC)"
+                );
+                *logged = Some(day);
+            } else {
+                tracing::debug!(session = %job.session_id, "daily distill budget used up; skipping");
+            }
             return;
         }
         Ok(Err(e)) => {
@@ -914,6 +1070,32 @@ async fn process(state: &SharedState, job: &Job) {
         )),
         Err(e) => Err(DistillError::NoBackend(e)),
     };
+    let now = blirp_core::now_ms();
+    match &result {
+        Err(e) => {
+            if let Some(kind) = classify(e) {
+                let retry_at = lock(&state.distiller.breaker).trip(kind, &e.to_string(), now);
+                let store = state.store.clone();
+                if let Ok(Err(e)) = tokio::task::spawn_blocking(move || refund_budget(&store)).await
+                {
+                    tracing::warn!(error = %e, "returning distill budget failed");
+                }
+                // Logged once per failed attempt (at most every 5 min .. 6 h).
+                tracing::warn!(
+                    reason = ?kind,
+                    error = %e,
+                    retry_in_secs = (retry_at - now) / 1000,
+                    "summarizer unavailable; automatic distilling paused"
+                );
+                return;
+            }
+        }
+        Ok(_) => {
+            if lock(&state.distiller.breaker).reset() {
+                tracing::info!("summarizer works again; automatic distilling resumed");
+            }
+        }
+    }
     match result {
         Ok(outcome) => {
             tracing::info!(
@@ -1314,6 +1496,64 @@ mod tests {
             .unwrap_err();
         assert!(matches!(err, DistillError::Backend(_)));
         assert_eq!(fake.calls(), 1);
+    }
+
+    #[test]
+    fn summarizer_failures_are_classified() {
+        let backend = |m: &str| DistillError::Backend(m.into());
+        assert_eq!(
+            classify(&backend(
+                "(exit Some(1); stderr: Not logged in · Please run /login)"
+            )),
+            Some(DistillPause::Auth)
+        );
+        assert_eq!(
+            classify(&backend("HTTP status 429: rate limit exceeded")),
+            Some(DistillPause::RateLimited)
+        );
+        assert_eq!(
+            classify(&backend("cannot start claude: program not found")),
+            Some(DistillPause::Unavailable)
+        );
+        assert_eq!(
+            classify(&DistillError::NoBackend("none available".into())),
+            Some(DistillPause::Unavailable)
+        );
+        // Per-session problems do not pause anything.
+        assert_eq!(classify(&backend("timed out after 180s")), None);
+        assert_eq!(classify(&DistillError::Invalid("bad json".into())), None);
+    }
+
+    #[test]
+    fn breaker_backs_off_exponentially_and_resets() {
+        let mut b = Breaker::default();
+        assert!(!b.is_open(0));
+        assert_eq!(b.trip(DistillPause::Auth, "not logged in", 0), PAUSE_MIN_MS);
+        assert!(b.is_open(PAUSE_MIN_MS - 1));
+        assert!(
+            !b.is_open(PAUSE_MIN_MS),
+            "the probe runs once the pause is over"
+        );
+        assert_eq!(b.trip(DistillPause::Auth, "x", 0), 2 * PAUSE_MIN_MS);
+        assert_eq!(b.trip(DistillPause::Auth, "x", 0), 4 * PAUSE_MIN_MS);
+        for _ in 0..30 {
+            b.trip(DistillPause::Auth, "x", 0);
+        }
+        assert_eq!(b.open_until, PAUSE_MAX_MS);
+        assert!(b.reset());
+        assert!(!b.is_open(1));
+        assert!(!b.reset());
+    }
+
+    #[test]
+    fn refunded_budget_is_given_back() {
+        let (_d, store, _) = project_store("R");
+        assert!(take_budget(&store, 1).unwrap());
+        assert!(!take_budget(&store, 1).unwrap());
+        refund_budget(&store).unwrap();
+        assert_eq!(budget_used(&store).unwrap(), 0);
+        refund_budget(&store).unwrap();
+        assert_eq!(budget_used(&store).unwrap(), 0);
     }
 
     #[test]

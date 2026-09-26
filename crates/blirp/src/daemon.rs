@@ -159,6 +159,10 @@ impl Daemon {
                         match tokio::task::spawn_blocking(move || {
                             let mut owned = owned;
                             crate::sessions::refresh_statuses(&st, &mut owned);
+                            // Coalesced status writes whose window passed (§5).
+                            if let Err(e) = st.store.flush_deferred(blirp_core::now_ms()) {
+                                tracing::warn!(error = %e, "queueing coalesced session updates failed");
+                            }
                             owned
                         })
                         .await
@@ -323,8 +327,13 @@ pub async fn detach(paths: &Paths, port: Option<u16>) -> anyhow::Result<RuntimeI
         return Ok(info);
     }
     let exe = std::env::current_exe().context("locate blirp executable")?;
+    // It becomes the daemon's working directory, so it must exist first.
+    paths.ensure_dirs()?;
     let mut cmd = std::process::Command::new(exe);
+    // Never inherit the caller's folder: the daemon would keep it in use
+    // (on Windows it could not be deleted or renamed) for its lifetime.
     cmd.arg("daemon")
+        .current_dir(paths.home())
         .env(blirp_core::paths::HOME_ENV, paths.home())
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::null())
@@ -429,10 +438,17 @@ pub fn init_logging(paths: &Paths) -> anyhow::Result<tracing_appender::non_block
         .context("create log file")?;
     let (file, guard) = tracing_appender::non_blocking(appender);
     let filter = EnvFilter::try_from_env("BLIRP_LOG").unwrap_or_else(|_| EnvFilter::new("info"));
+    // The log file always; stderr only for a terminal. Under a service
+    // manager stderr is captured to a file of its own (launchd.log, the
+    // journal), which would duplicate every line, with color codes.
+    use std::io::IsTerminal as _;
+    let console = std::io::stderr()
+        .is_terminal()
+        .then(|| fmt::layer().with_writer(std::io::stderr));
     tracing_subscriber::registry()
         .with(filter)
         .with(fmt::layer().with_writer(file).with_ansi(false))
-        .with(fmt::layer().with_writer(std::io::stderr))
+        .with(console)
         .try_init()
         .context("install log subscriber")?;
     Ok(guard)
