@@ -1,13 +1,16 @@
 <script lang="ts">
   import { untrack } from 'svelte';
-  import { api } from '../../lib/api/client';
-  import type { BriefMode, MemoryConfig, SettingsView, Summarizer } from '../../lib/api/types.gen';
+  import type { BriefMode, DistillPause, MemoryConfig, SettingsView, Summarizer } from '../../lib/api/types.gen';
   import { app } from '../../lib/app.svelte';
+  import { agentLabel } from '../../lib/status';
+  import { formatElapsed, formatTime } from '../../lib/time';
 
   let { settings, onsaved }: { settings: SettingsView; onsaved: (s: SettingsView) => void } = $props();
 
   // Local draft, initialised once; saving replaces the parent's settings.
-  let form: MemoryConfig = $state(untrack(() => ({ ...settings.config.memory })));
+  let form: MemoryConfig = $state(
+    untrack(() => ({ ...settings.config.memory, inject_disabled_agents: [...settings.config.memory.inject_disabled_agents] })),
+  );
   let saving = $state(false);
   let formError: string | null = $state(null);
 
@@ -30,6 +33,30 @@
     { key: 'distill_max_chars', label: 'Transcript size sent to the summarizer (characters)', hint: 'Longer transcripts keep the head and tail.', min: 2000 },
   ];
 
+  // Detected agents plus any configured id that is not detected here (kept, never dropped).
+  const injectAgents = $derived([
+    ...app.agents.map((a) => ({ id: a.id, label: a.display_name || agentLabel(a.id) })),
+    ...form.inject_disabled_agents.filter((id) => !app.agents.some((a) => a.id === id)).map((id) => ({ id, label: agentLabel(id) })),
+  ]);
+
+  function setInjectFor(id: string, on: boolean): void {
+    const rest = form.inject_disabled_agents.filter((x) => x !== id);
+    form.inject_disabled_agents = on ? rest : [...rest, id];
+  }
+
+  const PAUSES: Record<DistillPause, string> = {
+    auth: 'the summarizer is not signed in or its key is invalid',
+    unavailable: 'the summarizer is not installed or not reachable',
+    rate_limited: 'the summarizer hit a rate or usage limit',
+  };
+  const distill = $derived(settings.distill);
+  let now = $state(Date.now());
+  $effect(() => {
+    if (!distill.paused) return;
+    const t = setInterval(() => (now = Date.now()), 1000);
+    return () => clearInterval(t);
+  });
+
   async function save(e: SubmitEvent): Promise<void> {
     e.preventDefault();
     formError = null;
@@ -45,7 +72,10 @@
       return;
     }
     saving = true;
-    const s = await app.act(() => api.settings.patch({ config: { ...settings.config, memory: { ...form, ollama_model: form.ollama_model.trim() } } }), 'Memory settings saved');
+    const s = await app.saveSettings(
+      { config: { ...settings.config, memory: { ...form, ollama_model: form.ollama_model.trim() } } },
+      'Memory settings saved',
+    );
     saving = false;
     if (s) onsaved(s);
   }
@@ -54,6 +84,29 @@
 <form class="card panel-pad" onsubmit={save}>
   <h2 class="h">Memory</h2>
   <p class="hint">blirp summarizes finished or idle sessions into decisions, open threads and a project brief, then injects that into new sessions.</p>
+  {#if !app.admin}
+    <p class="small muted">Settings can only be changed from this machine's own desktop app or CLI.</p>
+  {/if}
+
+  <div class="status" role="status" data-testid="distill-status">
+    {#if distill.paused}
+      <p class="warn">
+        <strong>Automatic distilling is paused</strong>: {PAUSES[distill.paused]}.
+        {#if distill.retry_at}
+          blirp tries again at {formatTime(distill.retry_at)}{distill.retry_at > now ? ` (in ${formatElapsed(distill.retry_at - now)})` : ''}.
+        {/if}
+      </p>
+      {#if distill.reason}<p class="mono small reason">{distill.reason}</p>{/if}
+      <p class="small muted">
+        It resumes by itself: each retry waits longer (up to 6 hours) and the first success resumes distilling. Fix the cause (sign
+        in, install, or wait for the limit) to speed that up; "Distill now" on a session always tries right away.
+      </p>
+    {:else}
+      <p class="small muted">Automatic distilling is running.</p>
+    {/if}
+    <p class="small muted">Distill jobs today: {distill.budget_used} of {distill.budget_limit}.</p>
+  </div>
+<fieldset class="bare" disabled={!app.admin}>
 
   <label class="field">
     <span>Summarizer</span>
@@ -75,6 +128,26 @@
     {/each}
   </fieldset>
 
+  <fieldset class="field">
+    <legend class="label">Memory injection</legend>
+    <label class="check"><input type="checkbox" bind:checked={form.inject} />Give new sessions this project's memory when they start</label>
+    <span class="hint">Off: sessions start without memory. The MCP tools and <code>blirp mem</code> still reach it on demand.</span>
+    {#if form.inject && injectAgents.length > 0}
+      <div class="agents" role="group" aria-label="Inject memory for these agents">
+        {#each injectAgents as a (a.id)}
+          <label class="check small">
+            <input
+              type="checkbox"
+              checked={!form.inject_disabled_agents.includes(a.id)}
+              onchange={(e) => setInjectFor(a.id, e.currentTarget.checked)}
+            />{a.label}
+          </label>
+        {/each}
+      </div>
+      <span class="hint">Unchecked agents never get memory injected.</span>
+    {/if}
+  </fieldset>
+
   <div class="grid">
     {#each INTS as f (f.key)}
       <label class="field">
@@ -86,10 +159,13 @@
   </div>
 
   {#if formError}<p class="err" role="alert">{formError}</p>{/if}
-  <div class="row">
-    <span class="spacer"></span>
-    <button type="submit" class="btn primary" disabled={saving}>{saving ? 'Saving…' : 'Save'}</button>
-  </div>
+  {#if app.admin}
+    <div class="row">
+      <span class="spacer"></span>
+      <button type="submit" class="btn primary" disabled={saving}>{saving ? 'Saving…' : 'Save'}</button>
+    </div>
+  {/if}
+</fieldset>
 </form>
 
 <style>
@@ -106,6 +182,33 @@
     margin: 0 0 12px;
     display: grid;
     gap: 6px;
+  }
+  .bare {
+    display: block;
+    margin: 0;
+  }
+  .status {
+    margin: 0 0 16px;
+    padding: 10px 12px;
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    background: var(--panel-2);
+  }
+  .status p {
+    margin: 0 0 4px;
+  }
+  .warn {
+    color: var(--waiting);
+  }
+  .reason {
+    overflow-wrap: anywhere;
+    color: var(--text-2);
+  }
+  .agents {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 4px 16px;
+    margin-left: 24px;
   }
   .grid {
     display: grid;
