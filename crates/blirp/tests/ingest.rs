@@ -1148,3 +1148,81 @@ async fn daemon_runs_ingest_and_serves_sessions() {
     }
     daemon.shutdown().await.unwrap();
 }
+
+/// A hook that reports `transcript_path` gets that transcript ingested at
+/// once (memory's `IngestTrigger`), without waiting for a watcher or rescan.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn hook_transcript_path_is_ingested_promptly() {
+    let h = H::new();
+    let claude_dir = h.root.join("claude-config");
+    let blirp_home = h.root.join("daemon-home");
+    let mut env = IngestEnv::at_home(&h.home, &blirp_home);
+    env.vars
+        .insert("CLAUDE_CONFIG_DIR".into(), claude_dir.clone().into());
+    let daemon = blirp::daemon::Daemon::start(blirp::daemon::DaemonOptions {
+        paths: blirp_core::paths::Paths::at(&blirp_home),
+        port: Some(0),
+        ingest: Some(env),
+    })
+    .await
+    .unwrap();
+    let store = daemon.state.store.clone();
+    wait_for("startup scan", Duration::from_secs(10), || {
+        store
+            .get_setting("ingest.claude.last_at")
+            .unwrap()
+            .is_some()
+    })
+    .await;
+
+    // `projects/` did not exist at startup, so nothing watches it and the
+    // next rescan is minutes away: only the hook hint can pick this up.
+    let transcript = claude_dir
+        .join("projects")
+        .join("C--work-proj")
+        .join(format!("{CLAUDE_SID}.jsonl"));
+    std::fs::create_dir_all(transcript.parent().unwrap()).unwrap();
+    std::fs::write(&transcript, h.fill(&fixture("claude/session.jsonl"))).unwrap();
+
+    let reply: serde_json::Value = reqwest::Client::new()
+        .post(format!(
+            "http://127.0.0.1:{}/api/hooks/claude/Stop",
+            daemon.port
+        ))
+        .bearer_auth(daemon.token())
+        .json(&json!({
+            "cwd": h.cwd,
+            "payload": {
+                "session_id": CLAUDE_SID,
+                "transcript_path": transcript,
+                "cwd": h.cwd,
+                "hook_event_name": "Stop",
+            },
+        }))
+        .send()
+        .await
+        .unwrap()
+        .error_for_status()
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let hook_session = reply["session_id"].as_str().unwrap().to_string();
+
+    let start = Instant::now();
+    wait_for("hinted transcript", Duration::from_secs(5), || {
+        store.events_page(&hook_session, -1, 1000).unwrap().0.len() == 9
+    })
+    .await;
+    assert!(start.elapsed() < Duration::from_secs(5));
+    // Ingest filled the session the hook created, through the outbox.
+    let s = store
+        .session_by_agent_id("claude", CLAUDE_SID)
+        .unwrap()
+        .unwrap();
+    assert_eq!(s.id, hook_session);
+    assert_eq!(s.title.as_deref(), Some("Greeting helper"));
+    let outbox = store.outbox_after(0, 1_000_000).unwrap();
+    assert_eq!(outbox.iter().filter(|e| e.entity == "events").count(), 9);
+    daemon.shutdown().await.unwrap();
+}

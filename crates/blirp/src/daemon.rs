@@ -181,7 +181,10 @@ impl Daemon {
                 env,
                 Arc::new(move |e| emit_state.emit(e)),
             );
-            crate::ingest::IngestService::start(Arc::new(engine))
+            let service = crate::ingest::IngestService::start(Arc::new(engine));
+            // Hooks reporting a transcript path get it ingested right away.
+            state.set_ingest_trigger(service.trigger());
+            service
         });
 
         RuntimeInfo {

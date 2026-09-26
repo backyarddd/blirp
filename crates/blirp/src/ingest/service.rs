@@ -2,12 +2,15 @@
 //! 5-minute rescan (which also picks up roots created after start), stale
 //! status sweep and notification flushing. Passes run on the blocking pool,
 //! one at a time; changes arriving meanwhile are merged into the next pass.
+//! Hooks hand over transcript paths through [`IngestService::trigger`]; the
+//! hinted files join the next pass after [`HINT_DELAY`].
 
 use super::engine::{Engine, Work};
+use crate::memory::IngestTrigger;
 use notify_debouncer_full::notify::{RecommendedWatcher, RecursiveMode};
 use notify_debouncer_full::{DebounceEventResult, Debouncer, RecommendedCache, new_debouncer};
 use std::collections::HashSet;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::{mpsc, watch};
@@ -19,13 +22,28 @@ const TICK: Duration = Duration::from_secs(1);
 /// Stale-status sweep period, in ticks.
 const SWEEP_TICKS: u32 = 30;
 const STOP_GRACE: Duration = Duration::from_secs(5);
+/// Hook hints arriving within this window share one pass (a turn fires
+/// several hooks, and the agent may still be appending to the transcript).
+pub const HINT_DELAY: Duration = Duration::from_millis(250);
 
 type Watcher = Debouncer<RecommendedWatcher, RecommendedCache>;
 
 pub struct IngestService {
     engine: Arc<Engine>,
     stop_tx: watch::Sender<bool>,
+    hint_tx: mpsc::UnboundedSender<PathBuf>,
     task: JoinHandle<()>,
+}
+
+/// [`IngestTrigger`] feeding hook-reported transcript paths to the service.
+struct HintTrigger(mpsc::UnboundedSender<PathBuf>);
+
+impl IngestTrigger for HintTrigger {
+    fn transcript_hint(&self, _agent: &str, _session_id: &str, transcript_path: &Path) {
+        // Never blocks (hooks answer within 1.5 s); the receiver is gone only
+        // after shutdown, when there is nothing left to ingest into.
+        let _ = self.0.send(transcript_path.to_path_buf());
+    }
 }
 
 impl IngestService {
@@ -33,12 +51,19 @@ impl IngestService {
     /// tokio runtime.
     pub fn start(engine: Arc<Engine>) -> IngestService {
         let (stop_tx, stop_rx) = watch::channel(false);
-        let task = tokio::spawn(run(engine.clone(), stop_rx));
+        let (hint_tx, hint_rx) = mpsc::unbounded_channel();
+        let task = tokio::spawn(run(engine.clone(), stop_rx, hint_rx));
         IngestService {
             engine,
             stop_tx,
+            hint_tx,
             task,
         }
+    }
+
+    /// Trigger to install with `AppState::set_ingest_trigger`.
+    pub fn trigger(&self) -> Arc<dyn IngestTrigger> {
+        Arc::new(HintTrigger(self.hint_tx.clone()))
     }
 
     pub fn engine(&self) -> &Arc<Engine> {
@@ -108,7 +133,22 @@ fn refresh_watches(engine: &Engine, watcher: &mut Option<Watcher>, watched: &mut
     });
 }
 
-async fn run(engine: Arc<Engine>, mut stop_rx: watch::Receiver<bool>) {
+/// Changed paths grouped by owning adapter; paths outside every root are dropped.
+fn work_for(engine: &Engine, paths: impl IntoIterator<Item = PathBuf>) -> Work {
+    let mut w = Work::default();
+    for p in paths {
+        if let Some(ix) = engine.adapter_for(&p) {
+            w.paths.entry(ix).or_default().insert(p);
+        }
+    }
+    w
+}
+
+async fn run(
+    engine: Arc<Engine>,
+    mut stop_rx: watch::Receiver<bool>,
+    mut hint_rx: mpsc::UnboundedReceiver<PathBuf>,
+) {
     let (tx, mut rx) = mpsc::unbounded_channel::<Vec<PathBuf>>();
     let e = engine.clone();
     let mut w = start_watcher(tx);
@@ -133,6 +173,10 @@ async fn run(engine: Arc<Engine>, mut stop_rx: watch::Receiver<bool>) {
     let mut rescan = tokio::time::interval_at(tokio::time::Instant::now() + RESCAN, RESCAN);
     let mut tick = tokio::time::interval(TICK);
     let mut ticks = 0u32;
+    let mut hinted: Vec<PathBuf> = Vec::new();
+    // Set by the first hint of a burst; later ones join it, so a steady
+    // stream of hooks cannot postpone ingest.
+    let mut hint_due: Option<tokio::time::Instant> = None;
 
     loop {
         if !running && !pending.is_empty() {
@@ -156,14 +200,16 @@ async fn run(engine: Arc<Engine>, mut stop_rx: watch::Receiver<bool>) {
         }
         tokio::select! {
             _ = stop_rx.changed() => break,
-            Some(paths) = rx.recv() => {
-                let mut w = Work::default();
-                for p in paths {
-                    if let Some(ix) = engine.adapter_for(&p) {
-                        w.paths.entry(ix).or_default().insert(p);
-                    }
-                }
-                pending.merge(w);
+            Some(paths) = rx.recv() => pending.merge(work_for(&engine, paths)),
+            Some(path) = hint_rx.recv() => {
+                hinted.push(path);
+                hint_due.get_or_insert_with(|| tokio::time::Instant::now() + HINT_DELAY);
+            }
+            () = tokio::time::sleep_until(hint_due.unwrap_or_else(tokio::time::Instant::now)),
+                if hint_due.is_some() =>
+            {
+                hint_due = None;
+                pending.merge(work_for(&engine, std::mem::take(&mut hinted)));
             }
             Some(()) = done_rx.recv() => running = false,
             _ = rescan.tick() => {
