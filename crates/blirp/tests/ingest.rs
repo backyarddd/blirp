@@ -775,6 +775,24 @@ fn opencode_sqlite_sessions() {
         (9, 8, "Add docs")
     );
 
+    // A message whose parts are not written yet waits for them.
+    let now = blirp_core::now_ms();
+    db.execute_batch(&format!(
+        "INSERT INTO message VALUES ('msg_005','ses_parent',{now},{now},'{{\"role\":\"user\"}}');
+         UPDATE session SET time_updated = time_updated + 1 WHERE id = 'ses_parent';"
+    ))
+    .unwrap();
+    h.pass();
+    assert_eq!(h.events(&s).len(), 9);
+    db.execute_batch(&format!(
+        "INSERT INTO part VALUES ('prt_011','msg_005','ses_parent',{now},{now},'{{\"type\":\"text\",\"text\":\"Parts came later\"}}');
+         UPDATE session SET time_updated = time_updated + 1 WHERE id = 'ses_parent';"
+    ))
+    .unwrap();
+    h.pass();
+    let ev = h.events(&s);
+    assert_eq!((ev.len(), ev[9].text.as_str()), (10, "Parts came later"));
+
     // Deleting a session in opencode never deletes blirp's copy.
     db.execute_batch("DELETE FROM part WHERE session_id = 'ses_child'; DELETE FROM message WHERE session_id = 'ses_child'; DELETE FROM session WHERE id = 'ses_child';").unwrap();
     h.pass();
