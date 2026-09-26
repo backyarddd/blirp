@@ -1,0 +1,8 @@
+# winget version manifest. Template: the VERSION placeholder is filled by scripts/render-packaging.sh.
+# Submit the three rendered files to microsoft/winget-pkgs under manifests/b/blirp/blirp/<version>/.
+# yaml-language-server: $schema=https://aka.ms/winget-manifest.version.1.6.0.schema.json
+PackageIdentifier: blirp.blirp
+PackageVersion: {{VERSION}}
+DefaultLocale: en-US
+ManifestType: version
+ManifestVersion: 1.6.0
