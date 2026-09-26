@@ -10,10 +10,16 @@
   import MemoryPanel from '../lib/components/MemoryPanel.svelte';
   import Terminal from '../lib/terminal/Terminal.svelte';
   import SessionDetail from './SessionDetail.svelte';
+  import { rememberOpenSession } from '../lib/machines';
 
   let { sessionId }: { sessionId: string | null } = $props();
 
   const session = $derived(sessionId ? app.sessionById.get(sessionId) : undefined);
+  // Reopening the app (next day, after a restart) shows this session again (per browser).
+  const openId = $derived(session?.id);
+  $effect(() => {
+    if (openId) rememberOpenSession(openId);
+  });
   const project = $derived(session ? app.projectById.get(session.project_id) : undefined);
 
   // A terminal that was on screen stays (with its exit banner) after the process ends, until

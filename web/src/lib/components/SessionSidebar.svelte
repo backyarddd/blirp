@@ -9,6 +9,7 @@
   import StatusChip from './StatusChip.svelte';
   import Loadable from './Loadable.svelte';
   import Subagents from './Subagents.svelte';
+  import MachineBadge from './MachineBadge.svelte';
 
   /** `selectedChildren`: subagent count of the selected session (lists leave subagents out). */
   let { selectedId, selectedChildren }: { selectedId: string | null; selectedChildren: number } = $props();
@@ -76,7 +77,10 @@
                     </span>
                     <StatusChip session={s} />
                   </span>
-                  <span class="sub faint">{agentLabel(s.agent)} · {formatRelative(s.last_activity_at)}{s.origin === 'external' ? ' · external' : ''}</span>
+                  <span class="sub">
+                    <span class="faint ellipsis">{agentLabel(s.agent)} · {formatRelative(s.last_activity_at)}{s.origin === 'external' ? ' · external' : ''}</span>
+                    <MachineBadge machineId={s.machine_id} />
+                  </span>
                 </a>
                 {#if s.id === selectedId}
                   <Subagents parentId={s.id} count={selectedChildren} onnavigate={() => (app.sidebarOpen = false)} />
@@ -168,6 +172,11 @@
     flex: none;
   }
   .sub {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 6px;
+    min-width: 0;
     font-size: 11.5px;
   }
 </style>

@@ -7,6 +7,7 @@
   import { matchShortcut } from './lib/shortcuts';
   import { isMac } from './lib/prefs';
   import { groupSessions } from './lib/status';
+  import { forgetOpenSession } from './lib/machines';
   import TopBar from './lib/components/TopBar.svelte';
   import CommandPalette from './lib/components/CommandPalette.svelte';
   import NewSessionDialog from './lib/components/NewSessionDialog.svelte';
@@ -73,7 +74,10 @@
         switchSession(1);
         break;
       case 'close':
-        if (route.name === 'sessions' && route.sessionId) navigate(href.sessions());
+        if (route.name === 'sessions' && route.sessionId) {
+          forgetOpenSession(route.sessionId);
+          navigate(href.sessions());
+        }
         break;
     }
   }

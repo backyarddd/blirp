@@ -3,6 +3,8 @@ import type {
   AgentInfo,
   Brief,
   BrowserInvite,
+  CloneJob,
+  CloneRepo,
   CreateRecord,
   CreateResource,
   CreateWikiPage,
@@ -18,6 +20,7 @@ import type {
   JoinPreview,
   LaunchSession,
   Machine,
+  MachineDirs,
   OpenTarget,
   PatchDevice,
   PatchRecord,
@@ -182,6 +185,14 @@ export const api = {
   machines: {
     list: () => request<Machine[]>('GET', '/api/machines'),
     revoke: (id: string) => request<void>('DELETE', `/api/machines/${enc(id)}`),
+    /** Another machine's answers are relayed through the hub. */
+    health: (id: string) => request<Health>('GET', `/api/machines/${enc(id)}/health`),
+    agents: (id: string) => request<AgentInfo[]>('GET', `/api/machines/${enc(id)}/agents`),
+    /** Folders (never files) inside that machine's home; `path` is absolute, empty for home. */
+    dirs: (id: string, path: string, hidden: boolean) =>
+      request<MachineDirs>('GET', `/api/machines/${enc(id)}/dirs`, undefined, { path, hidden }),
+    clone: (id: string, req: CloneRepo) => request<CloneJob>('POST', `/api/machines/${enc(id)}/clone`, req),
+    cloneJob: (id: string, job: string) => request<CloneJob>('GET', `/api/machines/${enc(id)}/clone/${enc(job)}`),
   },
   projects: {
     list: () => request<ProjectSummary[]>('GET', '/api/projects'),
