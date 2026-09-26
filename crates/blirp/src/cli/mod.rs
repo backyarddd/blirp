@@ -326,15 +326,15 @@ async fn status(paths: &Paths) -> anyhow::Result<ExitCode> {
 
 fn open_browser(url: &str) -> std::io::Result<()> {
     let mut cmd = if cfg!(windows) {
-        let mut c = std::process::Command::new("rundll32");
+        let mut c = blirp_core::process::command("rundll32");
         c.args(["url.dll,FileProtocolHandler", url]);
         c
     } else if cfg!(target_os = "macos") {
-        let mut c = std::process::Command::new("open");
+        let mut c = blirp_core::process::command("open");
         c.arg(url);
         c
     } else {
-        let mut c = std::process::Command::new("xdg-open");
+        let mut c = blirp_core::process::command("xdg-open");
         c.arg(url);
         c
     };

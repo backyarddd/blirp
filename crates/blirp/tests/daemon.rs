@@ -906,7 +906,7 @@ async fn terminal_socket_protocol() {
 }
 
 fn git(dir: &std::path::Path, args: &[&str]) {
-    let st = std::process::Command::new("git")
+    let st = blirp_core::process::command("git")
         .arg("-C")
         .arg(dir)
         .args([
@@ -948,7 +948,7 @@ async fn failed_launch_removes_its_worktree() {
         )
         .await;
     assert_eq!(r.status(), 500);
-    let out = std::process::Command::new("git")
+    let out = blirp_core::process::command("git")
         .arg("-C")
         .arg(&repo)
         .args(["worktree", "list", "--porcelain"])

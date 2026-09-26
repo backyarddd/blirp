@@ -73,19 +73,14 @@ pub async fn ensure(paths: &Paths) -> anyhow::Result<RuntimeInfo> {
     let err_path = paths.logs_dir().join("desktop-daemon-start.log");
     let err_file = std::fs::File::create(&err_path)
         .with_context(|| format!("create {}", err_path.display()))?;
-    let mut cmd = tokio::process::Command::new(&bin);
+    // No console window flash for the short-lived --detach process.
+    let mut cmd = tokio::process::Command::from(blirp_core::process::command(&bin));
     cmd.args(["daemon", "--detach"])
         .env(blirp_core::paths::HOME_ENV, paths.home())
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::null())
         .stderr(err_file)
         .kill_on_drop(true);
-    #[cfg(windows)]
-    {
-        // No console window flash for the short-lived --detach process.
-        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
-        cmd.creation_flags(CREATE_NO_WINDOW);
-    }
     #[cfg(unix)]
     if let Some(path) = login_shell_path().await {
         cmd.env("PATH", path);
@@ -166,7 +161,7 @@ async fn login_shell_path() -> Option<String> {
                 "/bin/sh".into()
             }
         });
-    let mut cmd = tokio::process::Command::new(&shell);
+    let mut cmd = tokio::process::Command::from(blirp_core::process::command(&shell));
     cmd.args(["-ilc", &format!("printf '\\n{MARK}%s\\n' \"$PATH\"")])
         .stdin(std::process::Stdio::null())
         .stderr(std::process::Stdio::null())

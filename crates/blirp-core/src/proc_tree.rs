@@ -379,7 +379,7 @@ mod tests {
     use std::time::{Duration, Instant};
 
     fn group(script: &str) -> (std::process::Child, ProcessTree) {
-        let child = std::process::Command::new("sh")
+        let child = crate::process::command("sh")
             .args(["-c", script])
             .process_group(0)
             .spawn()
@@ -415,7 +415,7 @@ mod tests {
 
     /// A PTY-like child: its own session, like portable-pty's `setsid`.
     fn session(script: &str) -> (std::process::Child, ProcessTree) {
-        let mut cmd = std::process::Command::new("sh");
+        let mut cmd = crate::process::command("sh");
         cmd.args(["-c", script]);
         #[allow(unsafe_code)]
         // SAFETY: setsid is async-signal-safe and touches no Rust state.

@@ -250,13 +250,13 @@ mod tests {
     #[test]
     fn kill_pid_ends_a_process() {
         let mut child = if cfg!(windows) {
-            std::process::Command::new("ping")
+            blirp_core::process::command("ping")
                 .args(["-n", "30", "127.0.0.1"])
                 .stdout(std::process::Stdio::null())
                 .spawn()
                 .unwrap()
         } else {
-            std::process::Command::new("sleep")
+            blirp_core::process::command("sleep")
                 .arg("30")
                 .spawn()
                 .unwrap()

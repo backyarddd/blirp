@@ -299,7 +299,7 @@ pub fn extract(archive: &Path, into: &Path) -> anyhow::Result<()> {
     } else {
         PathBuf::from("tar")
     };
-    let out = std::process::Command::new(&tar)
+    let out = blirp_core::process::command(&tar)
         .arg("-xf")
         .arg(archive)
         .arg("-C")
@@ -645,7 +645,7 @@ mod tests {
         let exe = root.path().join("blirp.exe");
         let system = std::env::var_os("SystemRoot").unwrap();
         std::fs::copy(Path::new(&system).join(r"System32\PING.EXE"), &exe).unwrap();
-        let mut child = std::process::Command::new(&exe)
+        let mut child = blirp_core::process::command(&exe)
             .args(["-n", "30", "127.0.0.1"])
             .stdout(std::process::Stdio::null())
             .spawn()
@@ -680,7 +680,7 @@ mod tests {
         std::fs::create_dir_all(&src).unwrap();
         std::fs::write(src.join("blirp"), "bin").unwrap();
         let archive = root.path().join("a.tar.gz");
-        let status = std::process::Command::new(if cfg!(windows) {
+        let status = blirp_core::process::command(if cfg!(windows) {
             r"C:\Windows\System32\tar.exe"
         } else {
             "tar"

@@ -470,7 +470,7 @@ async fn run_process(
         .await
         .map_err(|e| format!("preparing {}: {e}", program.display()))?
         .map_err(|e| e.to_string())?;
-    let mut cmd = tokio::process::Command::new(&wrapped.program);
+    let mut cmd = tokio::process::Command::from(process::command(&wrapped.program));
     cmd.args(&wrapped.args)
         .envs(wrapped.env)
         .current_dir(dir)
@@ -485,11 +485,6 @@ async fn run_process(
         "BLIRP_MEMORY_FILE",
     ]) {
         cmd.env_remove(k);
-    }
-    #[cfg(windows)]
-    {
-        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
-        cmd.creation_flags(CREATE_NO_WINDOW);
     }
     #[cfg(unix)]
     cmd.process_group(0);

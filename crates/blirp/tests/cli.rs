@@ -6,7 +6,7 @@
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
 use std::path::Path;
-use std::process::{Command, Output};
+use std::process::Output;
 
 const INGEST_VARS: &[&str] = &[
     "CLAUDE_CONFIG_DIR",
@@ -20,7 +20,7 @@ const INGEST_VARS: &[&str] = &[
 ];
 
 fn blirp(home: &Path, user: &Path, args: &[&str]) -> Output {
-    let mut cmd = Command::new(env!("CARGO_BIN_EXE_blirp"));
+    let mut cmd = blirp_core::process::command(env!("CARGO_BIN_EXE_blirp"));
     cmd.args(args)
         .env("BLIRP_HOME", home)
         .env("HOME", user)
@@ -128,7 +128,7 @@ fn detached_daemon_holds_none_of_the_callers_handles() {
 }
 
 fn git(dir: &Path, args: &[&str]) {
-    let o = Command::new("git")
+    let o = blirp_core::process::command("git")
         .arg("-C")
         .arg(dir)
         .args([

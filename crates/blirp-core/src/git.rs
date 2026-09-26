@@ -410,7 +410,7 @@ pub(crate) mod tests {
 
     /// `git` with deterministic identity for test repos.
     pub(crate) fn run_git(dir: &Path, args: &[&str]) {
-        let st = std::process::Command::new("git")
+        let st = crate::process::command("git")
             .arg("-C")
             .arg(dir)
             .args([
@@ -591,7 +591,7 @@ u UU N... 100644 100644 100644 100644 a b c conflict.rs\0\
             &["diff", "HEAD"],
             &["diff", "HEAD", "--no-ext-diff"],
         ] {
-            std::process::Command::new("git")
+            crate::process::command("git")
                 .arg("-C")
                 .arg(&repo)
                 .args(args)

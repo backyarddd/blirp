@@ -506,7 +506,7 @@ fn spawn_background(
     dir: &std::path::Path,
 ) -> std::io::Result<Background> {
     use std::os::unix::process::CommandExt;
-    let mut cmd = std::process::Command::new(exe);
+    let mut cmd = blirp_core::process::command(exe);
     cmd.args(args)
         .current_dir(dir)
         .env(blirp_core::paths::HOME_ENV, dir)
