@@ -130,7 +130,7 @@ jobs:
           mkdir "$RUNNER_TEMP/cargo-about"
           tar -xzf "$RUNNER_TEMP/cargo-about.tar.gz" -C "$RUNNER_TEMP/cargo-about" --strip-components 1
           echo "$RUNNER_TEMP/cargo-about" >> "$GITHUB_PATH"
-      - uses: pnpm/action-setup@fc06bc1257f339d1d5d8b3a19a8cae5388b55320 # v4.4.0
+      - uses: pnpm/action-setup@ea17c68df8912ef543352723c149a84f56e3d413 # v6.1.0
         with:
           version: ${{ env.PNPM_VERSION }}
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
@@ -179,7 +179,7 @@ jobs:
         run: |
           channel=$(sed -n 's/^channel = "\([^"]*\)".*/\1/p' rust-toolchain.toml)
           rustup toolchain install "$channel" --profile minimal --target "$TARGET"
-      - uses: pnpm/action-setup@fc06bc1257f339d1d5d8b3a19a8cae5388b55320 # v4.4.0
+      - uses: pnpm/action-setup@ea17c68df8912ef543352723c149a84f56e3d413 # v6.1.0
         with:
           version: ${{ env.PNPM_VERSION }}
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
@@ -347,7 +347,7 @@ jobs:
         run: |
           channel=$(sed -n 's/^channel = "\([^"]*\)".*/\1/p' rust-toolchain.toml)
           rustup toolchain install "$channel" --profile minimal --target "$TARGET"
-      - uses: pnpm/action-setup@fc06bc1257f339d1d5d8b3a19a8cae5388b55320 # v4.4.0
+      - uses: pnpm/action-setup@ea17c68df8912ef543352723c149a84f56e3d413 # v6.1.0
         with:
           version: ${{ env.PNPM_VERSION }}
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
