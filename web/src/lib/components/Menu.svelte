@@ -80,7 +80,8 @@
 >
 <div bind:this={menu} {id} popover="auto" class="menu" role="menu" tabindex="-1" onkeydown={onKey}>
   {#if heading}<div class="heading">{heading}</div>{/if}
-  {#each items as item (item.label)}
+  <!-- Unkeyed: labels are not unique (a custom agent may be named like a built-in one). -->
+  {#each items as item}
     <button type="button" role="menuitem" disabled={item.disabled} onclick={() => select(item)}>
       <span>{item.label}</span>
       {#if item.hint}<span class="hint">{item.hint}</span>{/if}
