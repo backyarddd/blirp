@@ -140,7 +140,7 @@ blirp update --version 0.3.1   # a specific release, also older ones
 
 `blirp update` downloads `SHA256SUMS.txt`, verifies its signature with the release key built into blirp, downloads the CLI archive (and the desktop app, if the install script installed it), and checks both against the sums. Only then does it stop the daemon (running sessions end as Detached and can be resumed), replace the files and start the daemon again (through the autostart service when one is installed). On Windows the running `blirp.exe` is renamed to `blirp.exe.old` and removed the next time blirp starts. It never downgrades unless you pass `--version`, and it only updates installs made by the install scripts; otherwise it tells you how that copy was installed.
 
-The daemon also checks once a day whether a newer release exists and shows it in **Settings > About** with the command to run. Turn that off with `[update] check = false` ([configuration.md](configuration.md#update)). The desktop app has no updater of its own.
+**Settings > About** shows when a newer release exists, with the command to run; the daemon asks GitHub for it at most once a day. Turn that off with `[update] check = false` ([configuration.md](configuration.md#update)). The desktop app has no updater of its own.
 
 The database migrates forward automatically on the first start of a newer version.
 

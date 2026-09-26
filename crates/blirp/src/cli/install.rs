@@ -394,7 +394,7 @@ mod windows {
 $d = $env:BLIRP_DIR.TrimEnd('\') + '\'
 Get-Process -Name blirp-desktop -ErrorAction SilentlyContinue |
   Where-Object { $_.Path -and $_.Path.StartsWith($d, [StringComparison]::OrdinalIgnoreCase) } |
-  Stop-Process -Force
+  Stop-Process -Force -ErrorAction SilentlyContinue
 "#;
         run(script, &[("BLIRP_DIR", dir)])
             .inspect_err(|e| eprintln!("error: closing the desktop app: {e:#}"))
