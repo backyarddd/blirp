@@ -1,6 +1,7 @@
 //! Command line (§4).
 
 mod later;
+pub mod service;
 
 use anyhow::{Context as _, bail};
 use blirp_core::model::{Health, SessionsPage};
@@ -45,6 +46,11 @@ enum Command {
     },
     /// Check the installation.
     Doctor,
+    /// Install or remove autostart of the daemon at login.
+    Service {
+        #[command(subcommand)]
+        cmd: service::ServiceCommand,
+    },
     #[command(flatten)]
     Later(later::LaterCommand),
 }
@@ -108,6 +114,7 @@ async fn run(cmd: Command, paths: Paths) -> anyhow::Result<ExitCode> {
         Command::Open => open(&paths).await,
         Command::Sessions { project, limit } => sessions(&paths, project, limit).await,
         Command::Doctor => doctor(&paths).await,
+        Command::Service { cmd } => service::run(&cmd, &paths).await,
         Command::Later(_) => Ok(ExitCode::from(2)),
     }
 }

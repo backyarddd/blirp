@@ -1,5 +1,5 @@
-//! Subcommands implemented by later releases (memory CLI, hooks, MCP, sync,
-//! autostart). Kept together so each can be replaced in one place.
+//! Subcommands implemented by later releases (memory CLI, hooks, MCP,
+//! sync). Kept together so each can be replaced in one place.
 
 use clap::Subcommand;
 use std::process::ExitCode;
@@ -16,8 +16,6 @@ pub enum LaterCommand {
     Pair(Args),
     /// Hub management.
     Hub(Args),
-    /// Install or remove autostart.
-    Service(Args),
     /// Install or remove global agent hooks.
     Hooks(Args),
 }
@@ -35,7 +33,6 @@ pub fn run(cmd: &LaterCommand) -> ExitCode {
         LaterCommand::Mcp(_) => "mcp",
         LaterCommand::Pair(_) => "pair",
         LaterCommand::Hub(_) => "hub",
-        LaterCommand::Service(_) => "service",
         LaterCommand::Hooks(_) => "hooks",
     };
     eprintln!("blirp {name} is available in a later release");
