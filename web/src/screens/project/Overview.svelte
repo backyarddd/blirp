@@ -1,7 +1,7 @@
 <script lang="ts">
   import Send from '@lucide/svelte/icons/send';
   import { api } from '../../lib/api/client';
-  import type { MemoryRecord, Project, ProjectMemory } from '../../lib/api/types';
+  import type { ProjectMemory, ProjectSummary, Record as MemoryRecord } from '../../lib/api/types.gen';
   import { app } from '../../lib/app.svelte';
   import { Resource } from '../../lib/resource.svelte';
   import { href } from '../../lib/router';
@@ -11,7 +11,7 @@
   import RecordItem from '../../lib/components/RecordItem.svelte';
   import SessionRow from '../../lib/components/SessionRow.svelte';
 
-  let { project }: { project: Project } = $props();
+  let { project }: { project: ProjectSummary } = $props();
   const pid = $derived(project.id);
 
   const memory = new Resource(() => api.projects.memory(pid));
@@ -80,9 +80,9 @@
       ></textarea>
       <div class="row wrap">
         <select class="select agent" bind:value={agent} aria-label="Agent">
-          {#if app.agents.length === 0}<option value="">No agents detected</option>{/if}
+          {#if app.agents.length === 0}<option value="">{app.agentsLoaded ? 'No agents detected' : 'Detecting agents…'}</option>{/if}
           {#each app.agents as a (a.id)}
-            <option value={a.id} disabled={!a.installed}>{a.name || agentLabel(a.id)}{a.installed ? '' : ' (not installed)'}</option>
+            <option value={a.id} disabled={!a.installed}>{a.display_name || agentLabel(a.id)}{a.installed ? '' : ' (not installed)'}</option>
           {/each}
         </select>
         {#if project.is_git}

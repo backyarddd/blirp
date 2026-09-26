@@ -1,11 +1,12 @@
 <script lang="ts">
   import RefreshCw from '@lucide/svelte/icons/refresh-cw';
   import { api } from '../../lib/api/client';
-  import type { AgentInfo, Settings } from '../../lib/api/types';
+  import type { Config, SettingsView } from '../../lib/api/types.gen';
+  import type { AgentView } from '../../lib/api/types.pending';
   import { app } from '../../lib/app.svelte';
   import { agentLabel } from '../../lib/status';
 
-  let { settings, onsaved }: { settings: Settings; onsaved: (s: Settings) => void } = $props();
+  let { settings, onsaved }: { settings: SettingsView; onsaved: (s: SettingsView) => void } = $props();
 
   let refreshing = $state(false);
   let busyAgent: string | null = $state(null);
@@ -20,19 +21,20 @@
     refreshing = false;
   }
 
-  async function hooks(a: AgentInfo, install: boolean): Promise<void> {
-    if (!install && !confirm(`Remove blirp's hooks from ${a.name}'s global config? Other hooks are left alone.`)) return;
+  async function hooks(a: AgentView, install: boolean): Promise<void> {
+    if (!install && !confirm(`Remove blirp's hooks from ${a.display_name}'s global config? Other hooks are left alone.`)) return;
     busyAgent = a.id;
     const updated = await app.act(
       () => (install ? api.agents.installHooks(a.id) : api.agents.uninstallHooks(a.id)),
-      install ? `Hooks installed for ${a.name}` : `Hooks removed from ${a.name}`,
+      install ? `Hooks installed for ${a.display_name}` : `Hooks removed from ${a.display_name}`,
     );
     busyAgent = null;
     if (updated) app.agents = app.agents.map((x) => (x.id === updated.id ? updated : x));
   }
 
-  async function patch(p: Parameters<typeof api.settings.patch>[0]): Promise<void> {
-    const s = await app.act(() => api.settings.patch(p), 'Saved');
+  // PATCH replaces the whole config, so every change starts from the loaded one.
+  async function saveConfig(change: (c: Config) => Config): Promise<void> {
+    const s = await app.act(() => api.settings.patch({ config: change(settings.config) }), 'Saved');
     if (s) onsaved(s);
   }
 </script>
@@ -57,28 +59,29 @@
         <li class="agent">
           <div class="info">
             <div class="row wrap">
-              <strong>{a.name || agentLabel(a.id)}</strong>
+              <strong>{a.display_name || agentLabel(a.id)}</strong>
               {#if a.installed}
                 <span class="badge ok">installed{a.version ? ` · ${a.version}` : ''}</span>
               {:else}
                 <span class="badge">not found</span>
               {/if}
-              {#if a.custom}<span class="badge">custom</span>{/if}
+              {#if !a.builtin}<span class="badge">custom</span>{/if}
             </div>
             {#if a.path}<span class="mono small faint ellipsis" title={a.path}>{a.path}</span>{/if}
             <span class="small muted">
-              {#if !a.integration.supported}
-                Global hooks not supported; memory is injected when launched from blirp.
-              {:else if a.integration.installed}
-                Global hooks installed.
+              {#if !a.builtin}
+                Custom command: memory is injected when launched from blirp.
+              {:else if !a.integration}
+                Global integration status is not available in this version of blirp.
               {:else}
-                Global hooks not installed.
+                Global hooks {a.integration.global_hooks ? 'installed' : 'not installed'} · MCP {a.integration.mcp
+                  ? 'registered'
+                  : 'not registered'} · memory injection {a.integration.inject ? 'on' : 'off'}
               {/if}
-              {#if a.integration.detail}<span class="faint"> {a.integration.detail}</span>{/if}
             </span>
           </div>
-          {#if a.integration.supported && a.installed}
-            {#if a.integration.installed}
+          {#if a.builtin && a.installed && a.integration}
+            {#if a.integration.global_hooks}
               <button type="button" class="btn sm" disabled={busyAgent === a.id} onclick={() => hooks(a, false)}>Uninstall hooks</button>
             {:else}
               <button type="button" class="btn sm primary" disabled={busyAgent === a.id} onclick={() => hooks(a, true)}>Install hooks</button>
@@ -94,17 +97,27 @@
   <h2 class="h">Defaults</h2>
   <label class="field top">
     <span>Default agent for new sessions</span>
-    <select class="select narrow" value={settings.agents.default} onchange={(e) => patch({ agents: { default: e.currentTarget.value } })}>
-      {#each app.agents.filter((a) => a.installed || a.id === settings.agents.default) as a (a.id)}
-        <option value={a.id}>{a.name || agentLabel(a.id)}</option>
+    <select
+      class="select narrow"
+      value={settings.config.agents.default}
+      onchange={(e) => {
+        const value = e.currentTarget.value;
+        void saveConfig((c) => ({ ...c, agents: { ...c.agents, default: value } }));
+      }}
+    >
+      {#each app.agents.filter((a) => a.installed || a.id === settings.config.agents.default) as a (a.id)}
+        <option value={a.id}>{a.display_name || agentLabel(a.id)}</option>
       {/each}
     </select>
   </label>
   <label class="check">
     <input
       type="checkbox"
-      checked={settings.sessions.worktree_default}
-      onchange={(e) => patch({ sessions: { worktree_default: e.currentTarget.checked } })}
+      checked={settings.config.sessions.worktree_default}
+      onchange={(e) => {
+        const on = e.currentTarget.checked;
+        void saveConfig((c) => ({ ...c, sessions: { ...c.sessions, worktree_default: on } }));
+      }}
     />
     <span>Start sessions in git projects in a new worktree by default</span>
   </label>

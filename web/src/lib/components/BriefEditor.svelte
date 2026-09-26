@@ -1,7 +1,7 @@
 <script lang="ts">
   import Pencil from '@lucide/svelte/icons/pencil';
   import { api } from '../api/client';
-  import type { Brief } from '../api/types';
+  import type { Brief } from '../api/types.gen';
   import { app } from '../app.svelte';
   import { formatRelative } from '../time';
   import Markdown from './Markdown.svelte';

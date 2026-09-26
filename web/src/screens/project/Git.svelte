@@ -1,21 +1,28 @@
 <script lang="ts">
+  import { untrack } from 'svelte';
   import GitBranch from '@lucide/svelte/icons/git-branch';
   import RefreshCw from '@lucide/svelte/icons/refresh-cw';
   import { api } from '../../lib/api/client';
-  import type { Project } from '../../lib/api/types';
+  import type { GitStatusEntry, ProjectSummary } from '../../lib/api/types.gen';
   import { Resource } from '../../lib/resource.svelte';
   import Loadable from '../../lib/components/Loadable.svelte';
 
-  let { project }: { project: Project } = $props();
+  let { project }: { project: ProjectSummary } = $props();
   const pid = $derived(project.id);
 
-  const status = new Resource(() => api.projects.git(pid));
+  // A project may hold several repos on this machine; `root=` picks one.
+  const roots = $derived(project.paths.filter((p) => p.local && p.is_git).map((p) => p.path));
+  let root: string | undefined = $state(untrack(() => roots[0]));
+
+  let selected: string | null = $state(null);
+  const status = new Resource(() => api.projects.git(pid, { root }));
   $effect(() => {
+    void root;
+    untrack(() => (selected = null));
     void status.load();
   });
 
-  let selected: string | null = $state(null);
-  const diff = new Resource(() => (selected ? api.projects.gitDiff(pid, selected) : Promise.resolve(null)));
+  const diff = new Resource(() => (selected ? api.projects.gitDiff(pid, selected, { root }) : Promise.resolve(null)));
   $effect(() => {
     void diff.load();
   });
@@ -28,17 +35,32 @@
     return '';
   }
 
-  function statusLabel(code: string): string {
-    const c = code.trim();
+  /** Porcelain v2 letters: `.` unchanged, `?` untracked; show the familiar short form. */
+  function statusCode(e: GitStatusEntry): string {
+    if (e.index === '?') return '??';
+    return `${e.index}${e.worktree}`.replaceAll('.', '');
+  }
+
+  function statusLabel(e: GitStatusEntry): string {
+    const c = statusCode(e);
+    if (e.conflicted) return 'conflict';
     if (c === '??') return 'untracked';
-    if (c.includes('U')) return 'conflict';
     if (c.includes('A')) return 'added';
     if (c.includes('D')) return 'deleted';
     if (c.includes('R')) return 'renamed';
     if (c.includes('M')) return 'modified';
-    return c || 'changed';
+    return 'changed';
   }
 </script>
+
+{#if roots.length > 1}
+  <label class="field roots">
+    <span>Repository</span>
+    <select class="select mono" bind:value={root}>
+      {#each roots as r (r)}<option value={r}>{r}</option>{/each}
+    </select>
+  </label>
+{/if}
 
 <Loadable loading={status.loading} error={status.error} empty={!status.data} onretry={() => status.load()}>
   {#if status.data && !status.data.is_git}
@@ -49,17 +71,17 @@
       <span class="badge"><GitBranch size={12} aria-hidden="true" />{s.branch ?? 'detached HEAD'}</span>
       {#if s.ahead}<span class="small muted">{s.ahead} ahead</span>{/if}
       {#if s.behind}<span class="small muted">{s.behind} behind</span>{/if}
-      <span class="small muted">{s.status.length} changed {s.status.length === 1 ? 'file' : 'files'}</span>
+      <span class="small muted">{s.entries.length} changed {s.entries.length === 1 ? 'file' : 'files'}</span>
       <span class="spacer"></span>
       <button type="button" class="btn sm" onclick={() => status.reload()} disabled={status.loading}><RefreshCw size={14} aria-hidden="true" />Refresh</button>
     </div>
     <div class="git">
       <nav class="card side" aria-label="Changed files">
-        {#if s.status.length === 0}
+        {#if s.entries.length === 0}
           <p class="muted pad">Working tree clean.</p>
         {:else}
           <ul class="changes">
-            {#each s.status as f (f.path)}
+            {#each s.entries as f (f.path)}
               <li>
                 <button
                   type="button"
@@ -68,9 +90,9 @@
                   aria-current={selected === f.path ? 'true' : undefined}
                   onclick={() => (selected = f.path)}
                 >
-                  <span class="code mono {statusLabel(f.status)}" title={statusLabel(f.status)}>{f.status.trim() || '·'}</span>
+                  <span class="code mono {statusLabel(f)}" title={statusLabel(f)}>{statusCode(f) || '·'}</span>
                   <span class="mono ellipsis">{f.path}</span>
-                  <span class="sr-only">{statusLabel(f.status)}</span>
+                  <span class="sr-only">{statusLabel(f)}</span>
                 </button>
               </li>
             {/each}
@@ -98,6 +120,9 @@
 <style>
   .head {
     margin-bottom: 12px;
+  }
+  .roots {
+    max-width: 520px;
   }
   .git {
     display: grid;

@@ -16,6 +16,27 @@
   const session = $derived(sessionId ? app.sessionById.get(sessionId) : undefined);
   const project = $derived(session ? app.projectById.get(session.project_id) : undefined);
 
+  // A terminal that was on screen stays (with its exit banner) after the process ends, until
+  // the user asks for the details view or switches sessions. Resuming it remounts the pane
+  // (`epoch`) so it attaches to the new process.
+  let terminalFor: string | null = $state(null);
+  let epoch = $state(0);
+  let wasLive = false;
+  $effect(() => {
+    const id = sessionId;
+    const live = session !== undefined && hasTerminal(session);
+    untrack(() => {
+      if (live) {
+        if (!wasLive && terminalFor === id) epoch++;
+        terminalFor = id;
+      } else if (terminalFor !== id) {
+        terminalFor = null;
+      }
+    });
+    wasLive = live;
+  });
+  const showTerminal = $derived(session !== undefined && (hasTerminal(session) || terminalFor === session.id));
+
   // Sessions older than the sidebar window are fetched on demand.
   let missing: string | null = $state(null);
   $effect(() => {
@@ -63,9 +84,14 @@
 
     <div class="frame card">
       {#if session}
-        {#if hasTerminal(session)}
-          {#key session.id}
-            <Terminal sessionId={session.id} label="Terminal: {sessionTitle(session)}" autofocus />
+        {#if showTerminal}
+          {#key `${session.id}:${epoch}`}
+            <Terminal
+              sessionId={session.id}
+              label="Terminal: {sessionTitle(session)}"
+              autofocus
+              ondetails={() => (terminalFor = null)}
+            />
           {/key}
         {:else}
           <SessionDetail {session} />

@@ -1,13 +1,13 @@
 <script lang="ts">
   import { untrack } from 'svelte';
   import { api } from '../../lib/api/client';
-  import type { BriefMode, Settings, Summarizer } from '../../lib/api/types';
+  import type { BriefMode, MemoryConfig, SettingsView, Summarizer } from '../../lib/api/types.gen';
   import { app } from '../../lib/app.svelte';
 
-  let { settings, onsaved }: { settings: Settings; onsaved: (s: Settings) => void } = $props();
+  let { settings, onsaved }: { settings: SettingsView; onsaved: (s: SettingsView) => void } = $props();
 
   // Local draft, initialised once; saving replaces the parent's settings.
-  let form: Settings['memory'] = $state(untrack(() => ({ ...settings.memory })));
+  let form: MemoryConfig = $state(untrack(() => ({ ...settings.config.memory })));
   let saving = $state(false);
   let formError: string | null = $state(null);
 
@@ -45,7 +45,7 @@
       return;
     }
     saving = true;
-    const s = await app.act(() => api.settings.patch({ memory: { ...form, ollama_model: form.ollama_model.trim() } }), 'Memory settings saved');
+    const s = await app.act(() => api.settings.patch({ config: { ...settings.config, memory: { ...form, ollama_model: form.ollama_model.trim() } } }), 'Memory settings saved');
     saving = false;
     if (s) onsaved(s);
   }

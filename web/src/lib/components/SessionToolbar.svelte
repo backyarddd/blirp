@@ -8,7 +8,7 @@
   import Brain from '@lucide/svelte/icons/brain';
   import Clock from '@lucide/svelte/icons/clock';
   import { api } from '../api/client';
-  import type { Session } from '../api/types';
+  import type { Session } from '../api/types.gen';
   import { app } from '../app.svelte';
   import { agentLabel, canResume, isLive, sessionTitle } from '../status';
   import { formatElapsed } from '../time';
@@ -29,20 +29,23 @@
 
   const continueItems: MenuItem[] = $derived(
     app.agents.map((a) => ({
-      label: a.name || agentLabel(a.id),
+      label: a.display_name || agentLabel(a.id),
       hint: a.installed ? (a.id === session.agent ? 'same agent' : '') : 'not installed',
       disabled: !a.installed,
       onselect: () => void app.launch({ continue_from: session.id, agent: a.id, project_id: session.project_id }),
     })),
   );
 
+  // The daemon answers 202 and reports the final status on the event stream.
   async function stop(): Promise<void> {
     if (!confirm(`Stop "${sessionTitle(session)}"? This ends the agent process and everything it started.`)) return;
     busy = true;
-    const s = await app.act(() => api.sessions.stop(session.id));
+    await app.act(() => api.sessions.stop(session.id));
     busy = false;
-    if (s) app.upsertSession(s);
   }
+
+  // Resume spawns the agent on this machine; other machines' sessions need the sync phase.
+  const resumable = $derived(canResume(session) && session.machine_id === app.health?.machine.id);
 
   async function resume(): Promise<void> {
     busy = true;
@@ -85,7 +88,7 @@
   </button>
   {#if live && session.origin === 'blirp'}
     <button type="button" class="btn sm danger" onclick={stop} disabled={busy}><Square size={12} fill="currentColor" aria-hidden="true" />Stop</button>
-  {:else if canResume(session)}
+  {:else if resumable}
     <button type="button" class="btn sm primary" onclick={resume} disabled={busy}><Play size={12} fill="currentColor" aria-hidden="true" />Resume</button>
   {/if}
 </div>

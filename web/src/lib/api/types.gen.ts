@@ -252,6 +252,13 @@ export type PatchSession = {
  */
 title: string | null, };
 
+/**
+ * Where `POST /api/sessions/:id/open` shows the session folder.
+ */
+export type OpenTarget = "folder" | "editor";
+
+export type OpenSession = { target: OpenTarget, };
+
 export type EventsPage = { items: Array<Event>, 
 /**
  * Pass as `after` to fetch the next page; null on the last page.

@@ -326,6 +326,8 @@ POST /api/sessions                       launch (§7)
 GET  /api/sessions/:id                   detail incl. summary; GET .../events?after=&limit=
 POST /api/sessions/:id/stop | /resume | /distill
 PATCH /api/sessions/:id                  {title}
+POST /api/sessions/:id/open              {target: "folder"|"editor"}: session folder in the OS file manager, or in
+                                         $VISUAL / $EDITOR / `code` (first on PATH), else the OS default; 204
 GET  /api/terminals/:id/ws               terminal attach (§6)
 GET  /api/search?q=&project=&kind=       FTS over events + records
 GET  /api/agents                         detected agents + versions + integration status
@@ -369,7 +371,7 @@ Request/response DTOs are defined in `blirp-core::model` and exported to `web/sr
 - Local desktop and `blirp open`: localhost + token cookie.
 - Hub with `portal.lan = true`: axum-server with rustls on `0.0.0.0:lan_port`, self-signed cert generated with `rcgen` and persisted; fingerprint shown in the UI. Browser devices log in by scanning a one-time QR (5 min, single use) shown on an already-authenticated screen, which issues a long-lived device cookie (random 256-bit token, stored hashed). Devices listed and revocable in Settings > Devices. Terminal control from a browser device requires `can_control_terminals`.
 - Users with Tailscale can instead run `tailscale serve` in front of the hub port (documented).
-- Security headers: CSP (self only, no inline scripts), `X-Frame-Options: DENY`, `SameSite=Strict` cookies, CSRF protection via same-site cookie + `Origin` check on mutations and WS upgrades.
+- Security headers: CSP (scripts self only, no inline scripts; `style-src 'self' 'unsafe-inline'` for xterm.js; `img-src 'self' data:`; `connect-src 'self' ws://<host> wss://<host>`), `X-Frame-Options: DENY`, `SameSite=Strict` cookies, CSRF protection via same-site cookie + `Origin` check on mutations and WS upgrades.
 
 ## 14. Web UI (Svelte 5, TypeScript strict)
 
@@ -394,7 +396,7 @@ Layout mirrors the reference (Xirp-style):
 ## 16. Quality bar
 
 - Rust: edition 2024, `cargo fmt --check`, `cargo clippy --workspace --all-targets -- -D warnings`, `cargo test --workspace`. No `unwrap()`/`expect()` outside tests and provably-infallible cases (comment why). Errors: `thiserror` in libraries, `anyhow` at binary edges, never silently swallowed (log with context). No `unsafe` except where a platform API demands it, with a `SAFETY:` comment.
-- Web: `pnpm -C web check` (svelte-check, strict TS, no `any`), `pnpm -C web test` (vitest), `pnpm -C web build`.
+- Web: `pnpm -C web check` (svelte-check, strict TS, no `any`), `pnpm -C web test` (vitest), `pnpm -C web build`. `pnpm -C web e2e` (not part of `test`) builds the SPA, starts the real daemon on a temp `BLIRP_HOME` and drives the UI with Playwright in the installed Edge (`BLIRP_E2E_CHANNEL` picks another browser, `BLIRP_E2E_KEEP=1` keeps the temp dir and `daemon.log`).
 - Every adapter, redaction rule, migration, the distill JSON contract, project resolution, pairing, and replication have tests. An integration test starts a daemon on a temp `BLIRP_HOME`, launches a PTY session running a shell echo, attaches over WS, and asserts snapshot + stream.
 - CI matrix: windows-latest, macos-latest, ubuntu-latest.
 - Logs never contain transcript text or secrets.

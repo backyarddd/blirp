@@ -7,7 +7,9 @@ use axum::http::{HeaderValue, StatusCode, Uri, header};
 use axum::response::{IntoResponse, Response};
 
 #[derive(rust_embed::RustEmbed)]
-#[folder = "$CARGO_MANIFEST_DIR/../../web/dist"]
+// Relative to this crate's Cargo.toml (`$VAR` paths need rust-embed's
+// `interpolate-folder-path` feature; without it they silently resolve to nothing).
+#[folder = "../../web/dist"]
 #[allow_missing = true]
 struct Assets;
 

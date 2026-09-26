@@ -1,5 +1,5 @@
 <script lang="ts" module>
-  import type { RecordKind } from '../api/types';
+  import type { RecordKind } from '../api/types.gen';
 
   export const KIND_LABEL: Record<RecordKind, string> = {
     decision: 'Decision',
@@ -18,7 +18,7 @@
   import Check from '@lucide/svelte/icons/check';
   import RotateCcw from '@lucide/svelte/icons/rotate-ccw';
   import { api } from '../api/client';
-  import type { MemoryRecord, RecordInput } from '../api/types';
+  import type { PatchRecord, Record as MemoryRecord } from '../api/types.gen';
   import { app } from '../app.svelte';
   import { formatRelative } from '../time';
   import { href } from '../router';
@@ -37,7 +37,7 @@
   let body = $state('');
   let busy = $state(false);
 
-  async function patch(p: Partial<RecordInput>): Promise<void> {
+  async function patch(p: PatchRecord): Promise<void> {
     busy = true;
     const r = await app.act(() => api.projects.updateRecord(record.project_id, record.id, p));
     busy = false;

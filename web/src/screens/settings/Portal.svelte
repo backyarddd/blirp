@@ -1,25 +1,27 @@
 <script lang="ts">
   import { untrack } from 'svelte';
   import { api } from '../../lib/api/client';
-  import type { BrowserInvite, Settings } from '../../lib/api/types';
+  import type { PortalConfig, SettingsView } from '../../lib/api/types.gen';
+  import type { BrowserInvite } from '../../lib/api/types.pending';
   import { app } from '../../lib/app.svelte';
   import { Resource } from '../../lib/resource.svelte';
   import { formatDateTime } from '../../lib/time';
   import QrCode from '../../lib/components/QrCode.svelte';
 
-  let { settings, onsaved }: { settings: Settings; onsaved: (s: Settings) => void } = $props();
+  let { settings, onsaved }: { settings: SettingsView; onsaved: (s: SettingsView) => void } = $props();
 
   const status = new Resource(() => api.sync.status());
   $effect(() => {
     void status.load();
   });
 
-  let port = $state(untrack(() => settings.portal.lan_port));
+  let port = $state(untrack(() => settings.config.portal.lan_port));
   let saving = $state(false);
 
-  async function patchPortal(p: Partial<Settings['portal']>): Promise<void> {
+  async function patchPortal(p: Partial<PortalConfig>): Promise<void> {
     saving = true;
-    const s = await app.act(() => api.settings.patch({ portal: p }), 'Portal settings saved');
+    const config = { ...settings.config, portal: { ...settings.config.portal, ...p } };
+    const s = await app.act(() => api.settings.patch({ config }), 'Portal settings saved');
     saving = false;
     if (s) {
       onsaved(s);
@@ -50,7 +52,7 @@
     outside your network.
   </p>
   <label class="check">
-    <input type="checkbox" checked={settings.portal.lan} disabled={saving} onchange={(e) => patchPortal({ lan: e.currentTarget.checked })} />
+    <input type="checkbox" checked={settings.config.portal.lan} disabled={saving} onchange={(e) => patchPortal({ lan: e.currentTarget.checked })} />
     <span>Serve the portal on the local network</span>
   </label>
   <form class="row wrap port" onsubmit={savePort}>
@@ -58,9 +60,9 @@
       <span>HTTPS port</span>
       <input class="input" type="number" min="1024" max="65535" bind:value={port} />
     </label>
-    <button type="submit" class="btn" disabled={saving || port === settings.portal.lan_port}>Save port</button>
+    <button type="submit" class="btn" disabled={saving || port === settings.config.portal.lan_port}>Save port</button>
   </form>
-  {#if settings.portal.lan && status.data}
+  {#if settings.config.portal.lan && status.data}
     <dl class="facts">
       <dt>Address</dt>
       <dd class="mono small">{status.data.portal_url ?? 'Starting…'}</dd>
@@ -71,7 +73,7 @@
   {/if}
 </section>
 
-{#if settings.portal.lan}
+{#if settings.config.portal.lan}
   <section class="card panel-pad">
     <div class="row">
       <h2 class="h">Sign in a phone or browser</h2>

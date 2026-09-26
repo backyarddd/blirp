@@ -28,7 +28,10 @@
     { id: 'files', label: 'Files' },
     { id: 'git', label: 'Git' },
   ];
-  const tabs = $derived(TABS.filter((t) => t.id !== 'git' || project?.is_git));
+  // Files and git read this machine's folders; git only exists for folders that are repos.
+  const hasLocal = $derived(project?.paths.some((p) => p.local) ?? false);
+  const hasGit = $derived(project?.paths.some((p) => p.local && p.is_git) ?? false);
+  const tabs = $derived(TABS.filter((t) => (t.id !== 'git' || hasGit) && (t.id !== 'files' || hasLocal)));
 
   let renaming = $state(false);
   let newName = $state('');
@@ -121,9 +124,13 @@
         {:else if tab === 'resources'}
           <Resources {project} />
         {:else if tab === 'files'}
-          <Files {project} />
+          {#if hasLocal}
+            <Files {project} />
+          {:else}
+            <p class="muted">This project has no folder on this machine.</p>
+          {/if}
         {:else if tab === 'git'}
-          {#if project.is_git}
+          {#if hasGit}
             <Git {project} />
           {:else}
             <p class="muted">This project is a plain folder, so there is no git view.</p>

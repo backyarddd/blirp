@@ -1,40 +1,38 @@
 // The only module that talks HTTP to the daemon. Everything else imports `api`.
 import type {
-  AgentInfo,
   Brief,
-  BriefVersion,
-  BrowserInvite,
+  CreateRecord,
+  CreateResource,
+  CreateWikiPage,
   Device,
+  DirListing,
+  EventsPage,
   FileContent,
-  FileListing,
   GitDiff,
   GitStatus,
   Health,
-  Id,
-  Injection,
-  Invite,
-  LaunchSessionRequest,
+  LaunchSession,
   Machine,
-  MemoryRecord,
-  Page,
-  Project,
+  OpenTarget,
+  PatchRecord,
+  PatchResource,
   ProjectMemory,
-  RecordInput,
+  ProjectSummary,
+  PutWikiPage,
+  Record as MemoryRecord,
   Resource,
-  ResourceInput,
-  SearchHit,
-  SearchQuery,
+  SearchHitKind,
+  SearchResults,
   Session,
-  SessionDetail,
-  SessionEvent,
-  SessionQuery,
-  Settings,
+  SessionStatus,
+  SessionsPage,
   SettingsPatch,
+  SettingsView,
   Suggestion,
-  SyncStatus,
+  SuggestionStatus,
   WikiPage,
-  WikiPageInput,
-} from './types';
+} from './types.gen';
+import type { AgentView, BrowserInvite, DevicePatch, Injection, Invite, JoinRequest, SyncStatus } from './types.pending';
 
 export class ApiError extends Error {
   constructor(
@@ -48,6 +46,11 @@ export class ApiError extends Error {
 
   get unauthorized(): boolean {
     return this.status === 401;
+  }
+
+  /** The endpoint belongs to a phase this daemon does not ship yet (§11). */
+  get notImplemented(): boolean {
+    return this.status === 501;
   }
 }
 
@@ -134,86 +137,113 @@ export function errorMessage(e: unknown): string {
 }
 
 const enc = encodeURIComponent;
-const p = (id: Id): string => `/api/projects/${enc(id)}`;
-const s = (id: Id): string => `/api/sessions/${enc(id)}`;
+const p = (id: string): string => `/api/projects/${enc(id)}`;
+const s = (id: string): string => `/api/sessions/${enc(id)}`;
+
+export interface SessionQuery {
+  project?: string;
+  status?: SessionStatus;
+  agent?: string;
+  machine?: string;
+  q?: string;
+  cursor?: string;
+  limit?: number;
+}
+
+export interface SearchQuery {
+  q: string;
+  project?: string;
+  kind?: SearchHitKind;
+  limit?: number;
+}
+
+/** Projects with several folders on this machine pick one with `root` (its absolute path). */
+export interface Rooted {
+  root?: string | undefined;
+}
 
 export const api = {
   health: () => request<Health>('GET', '/api/health'),
   machines: {
     list: () => request<Machine[]>('GET', '/api/machines'),
-    revoke: (id: Id) => request<void>('DELETE', `/api/machines/${enc(id)}`),
+    revoke: (id: string) => request<void>('DELETE', `/api/machines/${enc(id)}`),
   },
   projects: {
-    list: () => request<Project[]>('GET', '/api/projects'),
-    create: (path: string, name?: string) => request<Project>('POST', '/api/projects', { path, name }),
-    rename: (id: Id, name: string) => request<Project>('PATCH', p(id), { name }),
-    remove: (id: Id) => request<void>('DELETE', p(id)),
-    merge: (id: Id, into: Id) => request<Project>('POST', `${p(id)}/merge`, { into }),
-    memory: (id: Id) => request<ProjectMemory>('GET', `${p(id)}/memory`),
-    putBrief: (id: Id, body_md: string) => request<Brief>('PUT', `${p(id)}/brief`, { body_md }),
-    briefHistory: (id: Id) => request<BriefVersion[]>('GET', `${p(id)}/brief/history`),
-    revertBrief: (id: Id, version: number) => request<Brief>('POST', `${p(id)}/brief/revert`, { version }),
-    records: (id: Id) => request<MemoryRecord[]>('GET', `${p(id)}/records`),
-    createRecord: (id: Id, r: RecordInput) => request<MemoryRecord>('POST', `${p(id)}/records`, r),
-    updateRecord: (id: Id, rid: Id, r: Partial<RecordInput>) =>
+    list: () => request<ProjectSummary[]>('GET', '/api/projects'),
+    get: (id: string) => request<ProjectSummary>('GET', p(id)),
+    create: (path: string, name?: string) => request<ProjectSummary>('POST', '/api/projects', { path, name }),
+    rename: (id: string, name: string) => request<ProjectSummary>('PATCH', p(id), { name }),
+    remove: (id: string) => request<void>('DELETE', p(id)),
+    merge: (id: string, into: string) => request<ProjectSummary>('POST', `${p(id)}/merge`, { into }),
+    memory: (id: string) => request<ProjectMemory>('GET', `${p(id)}/memory`),
+    putBrief: (id: string, body_md: string) => request<Brief>('PUT', `${p(id)}/brief`, { body_md }),
+    briefHistory: (id: string) => request<Brief[]>('GET', `${p(id)}/brief/history`),
+    revertBrief: (id: string, version: number) => request<Brief>('POST', `${p(id)}/brief/revert`, { version }),
+    records: (id: string) => request<MemoryRecord[]>('GET', `${p(id)}/records`),
+    createRecord: (id: string, r: CreateRecord) => request<MemoryRecord>('POST', `${p(id)}/records`, r),
+    updateRecord: (id: string, rid: string, r: PatchRecord) =>
       request<MemoryRecord>('PATCH', `${p(id)}/records/${enc(rid)}`, r),
-    deleteRecord: (id: Id, rid: Id) => request<void>('DELETE', `${p(id)}/records/${enc(rid)}`),
-    wiki: (id: Id) => request<WikiPage[]>('GET', `${p(id)}/wiki`),
-    wikiPage: (id: Id, slug: string) => request<WikiPage>('GET', `${p(id)}/wiki/${enc(slug)}`),
-    createWiki: (id: Id, w: WikiPageInput) => request<WikiPage>('POST', `${p(id)}/wiki`, w),
-    updateWiki: (id: Id, slug: string, w: WikiPageInput) =>
+    deleteRecord: (id: string, rid: string) => request<void>('DELETE', `${p(id)}/records/${enc(rid)}`),
+    wiki: (id: string) => request<WikiPage[]>('GET', `${p(id)}/wiki`),
+    wikiPage: (id: string, slug: string) => request<WikiPage>('GET', `${p(id)}/wiki/${enc(slug)}`),
+    createWiki: (id: string, w: CreateWikiPage) => request<WikiPage>('POST', `${p(id)}/wiki`, w),
+    updateWiki: (id: string, slug: string, w: PutWikiPage) =>
       request<WikiPage>('PUT', `${p(id)}/wiki/${enc(slug)}`, w),
-    deleteWiki: (id: Id, slug: string) => request<void>('DELETE', `${p(id)}/wiki/${enc(slug)}`),
-    resources: (id: Id) => request<Resource[]>('GET', `${p(id)}/resources`),
-    createResource: (id: Id, r: ResourceInput) => request<Resource>('POST', `${p(id)}/resources`, r),
-    updateResource: (id: Id, rid: Id, r: ResourceInput) =>
+    deleteWiki: (id: string, slug: string) => request<void>('DELETE', `${p(id)}/wiki/${enc(slug)}`),
+    resources: (id: string) => request<Resource[]>('GET', `${p(id)}/resources`),
+    createResource: (id: string, r: CreateResource) => request<Resource>('POST', `${p(id)}/resources`, r),
+    updateResource: (id: string, rid: string, r: PatchResource) =>
       request<Resource>('PATCH', `${p(id)}/resources/${enc(rid)}`, r),
-    deleteResource: (id: Id, rid: Id) => request<void>('DELETE', `${p(id)}/resources/${enc(rid)}`),
-    suggestions: (id: Id) => request<Suggestion[]>('GET', `${p(id)}/suggestions`),
-    git: (id: Id) => request<GitStatus>('GET', `${p(id)}/git`),
-    gitDiff: (id: Id, path: string) => request<GitDiff>('GET', `${p(id)}/git/diff`, undefined, { path }),
-    files: (id: Id, path: string) => request<FileListing>('GET', `${p(id)}/files`, undefined, { path }),
-    fileContent: (id: Id, path: string) =>
-      request<FileContent>('GET', `${p(id)}/files/content`, undefined, { path }),
+    deleteResource: (id: string, rid: string) => request<void>('DELETE', `${p(id)}/resources/${enc(rid)}`),
+    suggestions: (id: string, status?: SuggestionStatus) =>
+      request<Suggestion[]>('GET', `${p(id)}/suggestions`, undefined, { status }),
+    git: (id: string, q: Rooted = {}) => request<GitStatus>('GET', `${p(id)}/git`, undefined, { root: q.root }),
+    gitDiff: (id: string, path: string, q: Rooted = {}) =>
+      request<GitDiff>('GET', `${p(id)}/git/diff`, undefined, { path, root: q.root }),
+    files: (id: string, path: string, q: Rooted = {}) =>
+      request<DirListing>('GET', `${p(id)}/files`, undefined, { path, root: q.root }),
+    fileContent: (id: string, path: string, q: Rooted = {}) =>
+      request<FileContent>('GET', `${p(id)}/files/content`, undefined, { path, root: q.root }),
   },
   suggestions: {
-    decide: (id: Id, decision: 'accept' | 'reject' | 'dismiss') =>
+    decide: (id: string, decision: 'accept' | 'reject' | 'dismiss') =>
       request<Suggestion>('POST', `/api/suggestions/${enc(id)}/${decision}`),
   },
   sessions: {
-    list: (q: SessionQuery = {}) => request<Page<Session>>('GET', '/api/sessions', undefined, { ...q }),
-    launch: (body: LaunchSessionRequest) => request<Session>('POST', '/api/sessions', body),
-    get: (id: Id) => request<SessionDetail>('GET', s(id)),
-    events: (id: Id, after: number, limit: number) =>
-      request<SessionEvent[]>('GET', `${s(id)}/events`, undefined, { after, limit }),
-    stop: (id: Id) => request<Session>('POST', `${s(id)}/stop`),
-    resume: (id: Id) => request<Session>('POST', `${s(id)}/resume`),
-    distill: (id: Id) => request<void>('POST', `${s(id)}/distill`),
-    rename: (id: Id, title: string) => request<Session>('PATCH', s(id), { title }),
-    open: (id: Id, target: 'folder' | 'editor') => request<void>('POST', `${s(id)}/open`, { target }),
+    list: (q: SessionQuery = {}) => request<SessionsPage>('GET', '/api/sessions', undefined, { ...q }),
+    launch: (body: LaunchSession) => request<Session>('POST', '/api/sessions', body),
+    get: (id: string) => request<Session>('GET', s(id)),
+    events: (id: string, after: number, limit: number) =>
+      request<EventsPage>('GET', `${s(id)}/events`, undefined, { after, limit }),
+    /** 202: the kill is under way; the final status arrives as a `session_updated` event. */
+    stop: (id: string) => request<void>('POST', `${s(id)}/stop`),
+    resume: (id: string) => request<Session>('POST', `${s(id)}/resume`),
+    distill: (id: string) => request<void>('POST', `${s(id)}/distill`),
+    rename: (id: string, title: string | null) => request<Session>('PATCH', s(id), { title }),
+    open: (id: string, target: OpenTarget) => request<void>('POST', `${s(id)}/open`, { target }),
   },
-  search: (q: SearchQuery) => request<SearchHit[]>('GET', '/api/search', undefined, { ...q }),
+  search: (q: SearchQuery) => request<SearchResults>('GET', '/api/search', undefined, { ...q }),
   agents: {
-    list: () => request<AgentInfo[]>('GET', '/api/agents'),
-    installHooks: (id: string) => request<AgentInfo>('POST', `/api/agents/${enc(id)}/hooks/install`),
-    uninstallHooks: (id: string) => request<AgentInfo>('POST', `/api/agents/${enc(id)}/hooks/uninstall`),
+    list: () => request<AgentView[]>('GET', '/api/agents'),
+    installHooks: (id: string) => request<AgentView>('POST', `/api/agents/${enc(id)}/hooks/install`),
+    uninstallHooks: (id: string) => request<AgentView>('POST', `/api/agents/${enc(id)}/hooks/uninstall`),
   },
-  inject: (session: Id) => request<Injection>('GET', '/api/inject', undefined, { session }),
+  inject: (session: string) => request<Injection>('GET', '/api/inject', undefined, { session }),
   settings: {
-    get: () => request<Settings>('GET', '/api/settings'),
-    patch: (patch: SettingsPatch) => request<Settings>('PATCH', '/api/settings', patch),
+    get: () => request<SettingsView>('GET', '/api/settings'),
+    /** `config` replaces the whole config file; `values` keys are set (null deletes). */
+    patch: (patch: SettingsPatch) => request<SettingsView>('PATCH', '/api/settings', patch),
   },
   sync: {
     status: () => request<SyncStatus>('GET', '/api/sync/status'),
     enableHub: () => request<SyncStatus>('POST', '/api/sync/hub/enable'),
     invite: () => request<Invite>('POST', '/api/sync/invite'),
-    join: (invite: string, code: string) => request<SyncStatus>('POST', '/api/sync/join', { invite, code }),
+    join: (body: JoinRequest) => request<SyncStatus>('POST', '/api/sync/join', body),
   },
   devices: {
     list: () => request<Device[]>('GET', '/api/devices'),
-    revoke: (id: Id) => request<void>('DELETE', `/api/devices/${enc(id)}`),
-    setControl: (id: Id, can_control_terminals: boolean) =>
-      request<Device>('PATCH', `/api/devices/${enc(id)}`, { can_control_terminals }),
+    revoke: (id: string) => request<void>('DELETE', `/api/devices/${enc(id)}`),
+    patch: (id: string, body: DevicePatch) => request<Device>('PATCH', `/api/devices/${enc(id)}`, body),
     browserInvite: () => request<BrowserInvite>('POST', '/api/devices/browser-invite'),
   },
 };
@@ -223,5 +253,5 @@ export function wsUrl(path: string, loc: Pick<Location, 'protocol' | 'host'> = l
   return `${loc.protocol === 'https:' ? 'wss:' : 'ws:'}//${loc.host}${path}`;
 }
 
-export const terminalWsPath = (id: Id): string => `/api/terminals/${enc(id)}/ws`;
+export const terminalWsPath = (id: string): string => `/api/terminals/${enc(id)}/ws`;
 export const eventsWsPath = '/api/events/ws';

@@ -1,5 +1,6 @@
 import { ApiError, api, errorMessage, eventsWsPath, onUnauthorized, wsUrl } from './api/client';
-import type { AgentInfo, Health, Id, LaunchSessionRequest, Project, ServerEvent, Session } from './api/types';
+import type { Health, LaunchSession, ProjectSummary, ServerEvent, Session } from './api/types.gen';
+import type { AgentView } from './api/types.pending';
 import { backoffDelay } from './terminal/protocol';
 import { hasTerminal, notifiableTransition, sessionTitle, statusInfo } from './status';
 import { readPref, writePref } from './prefs';
@@ -20,21 +21,22 @@ const MEMORY_PANEL_PREF = readPref('blirp.memoryPanel', ['open', 'closed', 'unse
 
 const byStartedDesc = (a: Session, b: Session): number => b.started_at - a.started_at;
 
+const EVENT_TYPES: ReadonlySet<string> = new Set([
+  'session_created',
+  'session_updated',
+  'project_updated',
+  'memory_updated',
+  'resync',
+]);
+
+/** Shallow check of a daemon frame; payloads are generated DTOs from the same-origin daemon. */
 function isServerEvent(v: unknown): v is ServerEvent {
   if (typeof v !== 'object' || v === null) return false;
-  const o = v as Record<string, unknown>;
-  switch (o.type) {
-    case 'session':
-      return typeof o.session === 'object' && o.session !== null;
-    case 'project':
-      return typeof o.project === 'object' && o.project !== null;
-    case 'session_removed':
-      return typeof o.id === 'string';
-    case 'memory':
-      return typeof o.project_id === 'string';
-    default:
-      return false;
-  }
+  const o = v as { type?: unknown; session?: unknown; project_id?: unknown };
+  if (typeof o.type !== 'string' || !EVENT_TYPES.has(o.type)) return false;
+  if (o.type === 'session_created' || o.type === 'session_updated') return typeof o.session === 'object' && o.session !== null;
+  if (o.type === 'resync') return true;
+  return typeof o.project_id === 'string';
 }
 
 class AppState {
@@ -45,26 +47,27 @@ class AppState {
   sessions: Session[] = $state.raw([]);
   sessionsLoaded = $state(false);
   sessionsError: string | null = $state(null);
-  projects: Project[] = $state.raw([]);
+  projects: ProjectSummary[] = $state.raw([]);
   projectsLoaded = $state(false);
   projectsError: string | null = $state(null);
-  agents: AgentInfo[] = $state.raw([]);
+  agents: AgentView[] = $state.raw([]);
   agentsError: string | null = $state(null);
+  agentsLoaded = $state(false);
 
   conn: ConnState = $state('connecting');
   /** Bumped per project when the daemon reports a memory change; views re-fetch on change. */
-  memoryTick: Record<Id, number> = $state({});
+  memoryTick: Record<string, number> = $state({});
   toasts: Toast[] = $state([]);
 
   paletteOpen = $state(false);
-  newSession: { open: boolean; projectId: Id | null } = $state({ open: false, projectId: null });
+  newSession: { open: boolean; projectId: string | null } = $state({ open: false, projectId: null });
   sidebarOpen = $state(false);
   // Defaults to open only where it fits beside the terminal; an explicit choice is remembered.
   memoryPanel = $state(MEMORY_PANEL_PREF === 'unset' ? window.innerWidth > 1100 : MEMORY_PANEL_PREF === 'open');
   notify = $state(readPref('blirp.notify', ['on', 'off'], 'off') === 'on');
 
-  projectById: Map<Id, Project> = $derived(new Map(this.projects.map((p) => [p.id, p])));
-  sessionById: Map<Id, Session> = $derived(new Map(this.sessions.map((s) => [s.id, s])));
+  projectById: Map<string, ProjectSummary> = $derived(new Map(this.projects.map((p) => [p.id, p])));
+  sessionById: Map<string, Session> = $derived(new Map(this.sessions.map((s) => [s.id, s])));
   liveSessions: Session[] = $derived(this.sessions.filter(hasTerminal));
 
   #ws: WebSocket | null = null;
@@ -131,6 +134,8 @@ class AppState {
       this.agentsError = null;
     } catch (e) {
       this.agentsError = errorMessage(e);
+    } finally {
+      this.agentsLoaded = true;
     }
   }
 
@@ -142,17 +147,27 @@ class AppState {
     if (prev) this.#maybeNotify(prev, s);
   }
 
-  upsertProject(p: Project): void {
+  /** `project_updated` only carries the id: refetch it; a 404 means it was deleted or merged away. */
+  async refreshProject(id: string): Promise<void> {
+    try {
+      this.upsertProject(await api.projects.get(id));
+    } catch (e) {
+      if (e instanceof ApiError && e.status === 404) this.removeProject(id);
+      else console.warn(`blirp: could not refresh project ${id}`, e);
+    }
+  }
+
+  upsertProject(p: ProjectSummary): void {
     this.projects = this.projectById.has(p.id)
       ? this.projects.map((x) => (x.id === p.id ? p : x))
       : [...this.projects, p];
   }
 
-  removeProject(id: Id): void {
+  removeProject(id: string): void {
     this.projects = this.projects.filter((p) => p.id !== id);
   }
 
-  bumpMemory(projectId: Id): void {
+  bumpMemory(projectId: string): void {
     this.memoryTick[projectId] = (this.memoryTick[projectId] ?? 0) + 1;
   }
 
@@ -178,7 +193,7 @@ class AppState {
     }
   }
 
-  async launch(req: LaunchSessionRequest): Promise<Session | undefined> {
+  async launch(req: LaunchSession): Promise<Session | undefined> {
     const s = await this.act(() => api.sessions.launch(req));
     if (s) {
       this.upsertSession(s);
@@ -187,7 +202,7 @@ class AppState {
     return s;
   }
 
-  openNewSession(projectId: Id | null = null): void {
+  openNewSession(projectId: string | null = null): void {
     this.paletteOpen = false;
     this.newSession = { open: true, projectId };
   }
@@ -278,17 +293,20 @@ class AppState {
     // Unknown event types are ignored so older UIs keep working against newer daemons.
     if (!isServerEvent(msg)) return;
     switch (msg.type) {
-      case 'session':
+      case 'session_created':
+      case 'session_updated':
         this.upsertSession(msg.session);
         break;
-      case 'session_removed':
-        this.sessions = this.sessions.filter((s) => s.id !== msg.id);
+      case 'project_updated':
+        void this.refreshProject(msg.project_id);
         break;
-      case 'project':
-        this.upsertProject(msg.project);
-        break;
-      case 'memory':
+      case 'memory_updated':
         this.bumpMemory(msg.project_id);
+        break;
+      case 'resync':
+        // The daemon dropped events for this client; everything may be stale.
+        void Promise.all([this.refreshSessions(), this.refreshProjects()]);
+        for (const p of this.projects) this.bumpMemory(p.id);
         break;
     }
   }

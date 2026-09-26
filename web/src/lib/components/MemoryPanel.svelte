@@ -2,7 +2,7 @@
   import X from '@lucide/svelte/icons/x';
   import Plus from '@lucide/svelte/icons/plus';
   import { api } from '../api/client';
-  import type { MemoryRecord, ProjectMemory, Session } from '../api/types';
+  import type { ProjectMemory, Record as MemoryRecord, Session } from '../api/types.gen';
   import { app } from '../app.svelte';
   import { Resource } from '../resource.svelte';
   import { href } from '../router';
@@ -93,7 +93,9 @@
         loading={injection.loading}
         error={injection.error}
         empty={!injection.data?.markdown}
-        emptyText="Nothing was injected into this session."
+        emptyText={injection.unavailable
+          ? 'This version of blirp cannot show the injected memory yet.'
+          : 'Nothing was injected into this session.'}
         onretry={() => injection.load()}
       >
         <details class="inj">

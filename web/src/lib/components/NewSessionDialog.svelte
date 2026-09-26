@@ -3,7 +3,7 @@
   import { navigate } from '../router.svelte';
   import { href } from '../router';
   import { api, errorMessage } from '../api/client';
-  import type { LaunchSessionRequest, Machine } from '../api/types';
+  import type { LaunchSession, Machine } from '../api/types.gen';
   import { app } from '../app.svelte';
   import { agentLabel } from '../status';
   import Modal from './Modal.svelte';
@@ -39,6 +39,8 @@
     projectId = preset ?? app.projects[0]?.id ?? '';
     path = '';
     machine = '';
+    agent = '';
+    worktree = false;
     const [settings] = await Promise.all([
       api.settings.get().catch((e: unknown) => {
         console.warn('blirp: settings unavailable for new session defaults', e);
@@ -47,9 +49,10 @@
       app.refreshAgents(),
     ]);
     if (token !== opens) return;
-    const def = settings?.agents.default;
-    agent = installed.find((a) => a.id === def)?.id ?? installed[0]?.id ?? '';
-    worktree = settings?.sessions.worktree_default ?? false;
+    // Defaults arrive after the dialog is usable; never overwrite a choice made meanwhile.
+    const def = settings?.config.agents.default;
+    if (!agent) agent = installed.find((a) => a.id === def)?.id ?? installed[0]?.id ?? '';
+    if (!worktree) worktree = settings?.config.sessions.worktree_default ?? false;
     if (synced) {
       try {
         machines = (await api.machines.list()).filter((m) => !m.revoked);
@@ -70,7 +73,7 @@
       formError = 'Pick an installed agent.';
       return;
     }
-    const req: LaunchSessionRequest = { agent };
+    const req: LaunchSession = { agent };
     if (source === 'project') {
       if (!projectId) {
         formError = 'Pick a project.';
@@ -146,11 +149,11 @@
       <span>Agent</span>
       <select class="select" bind:value={agent} required>
         {#if app.agents.length === 0}
-          <option value="" disabled>{app.agentsError ? 'Could not load agents' : 'Detecting agents…'}</option>
+          <option value="" disabled>{app.agentsError ? 'Could not load agents' : app.agentsLoaded ? 'No agents detected' : 'Detecting agents…'}</option>
         {/if}
         {#each app.agents as a (a.id)}
           <option value={a.id} disabled={!a.installed}>
-            {a.name || agentLabel(a.id)}{a.version ? ` ${a.version}` : ''}{a.installed ? '' : ' (not installed)'}
+            {a.display_name || agentLabel(a.id)}{a.version ? ` ${a.version}` : ''}{a.installed ? '' : ' (not installed)'}
           </option>
         {/each}
       </select>

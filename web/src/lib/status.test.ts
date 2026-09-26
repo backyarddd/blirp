@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import type { Project, Session, SessionStatus } from './api/types';
+import type { ProjectSummary, Session, SessionStatus } from './api/types.gen';
 import { agentLabel, basename, canResume, groupSessions, hasTerminal, isLive, notifiableTransition, sessionTitle, statusInfo } from './status';
 
 const ALL: SessionStatus[] = ['starting', 'working', 'idle', 'waiting', 'completed', 'failed', 'detached'];
@@ -17,10 +17,11 @@ describe('status mapping', () => {
     expect(hasTerminal({ origin: 'external', status: 'working' })).toBe(false);
     expect(hasTerminal({ origin: 'blirp', status: 'detached' })).toBe(false);
   });
-  it('allows resume only with an agent session id', () => {
-    expect(canResume({ status: 'detached', agent_session_id: 'u' })).toBe(true);
-    expect(canResume({ status: 'detached', agent_session_id: null })).toBe(false);
-    expect(canResume({ status: 'working', agent_session_id: 'u' })).toBe(false);
+  it('resumes ended sessions with an agent id, or blirp sessions by relaunching', () => {
+    expect(canResume({ status: 'detached', agent_session_id: 'u', origin: 'external' })).toBe(true);
+    expect(canResume({ status: 'completed', agent_session_id: null, origin: 'blirp' })).toBe(true);
+    expect(canResume({ status: 'failed', agent_session_id: null, origin: 'external' })).toBe(false);
+    expect(canResume({ status: 'working', agent_session_id: 'u', origin: 'blirp' })).toBe(false);
   });
   it('notifies on waiting and finish transitions only', () => {
     expect(notifiableTransition('working', 'waiting')).toBe(true);
@@ -55,26 +56,30 @@ describe('groupSessions', () => {
     status: 'idle',
     branch: null,
     worktree: null,
+    transcript_path: null,
     started_at: 0,
     ended_at: null,
     last_activity_at: 0,
     exit_code: null,
+    summary: null,
+    distilled_through_seq: 0,
     tokens_in: 0,
     tokens_out: 0,
     cost_usd: 0,
     parent_session_id: null,
   });
-  const alpha: Project = {
+  const alpha: ProjectSummary = {
     id: 'a',
     name: 'Alpha',
     created_at: 0,
     updated_at: 0,
+    deleted: false,
     paths: [],
     is_git: false,
+    is_home: false,
     session_count: 1,
     live_session_count: 0,
     last_activity_at: null,
-    machine_ids: [],
   };
   it('groups by project in first-seen order', () => {
     const groups = groupSessions([mk('1', 'b'), mk('2', 'a'), mk('3', 'b')], new Map([['a', alpha]]));

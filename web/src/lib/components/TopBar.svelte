@@ -20,7 +20,7 @@
   const inGrid = $derived(nav.route.name === 'grid');
 
   const connLabel = $derived.by(() => {
-    const where = app.health ? `${app.health.machine} (${app.health.role})` : 'daemon';
+    const where = app.health ? `${app.health.machine.name} (${app.health.role})` : 'daemon';
     if (app.conn === 'open') return `Live updates connected to ${where}`;
     if (app.conn === 'connecting') return `Connecting to ${where}…`;
     return `Connection to ${where} lost, reconnecting…`;
@@ -67,7 +67,7 @@
   </a>
   <span class="conn {app.conn}" role="img" aria-label={connLabel} title={connLabel}>
     <span class="dot" aria-hidden="true"></span>
-    <span class="conn-text hide-sm">{app.health?.machine ?? ''}</span>
+    <span class="conn-text hide-sm">{app.health?.machine.name ?? ''}</span>
   </span>
   <button
     type="button"

@@ -3,6 +3,7 @@
 mod files;
 mod memory;
 mod misc;
+mod open;
 mod projects;
 mod sessions;
 mod terminal;
@@ -132,6 +133,7 @@ pub fn router(state: SharedState) -> Router {
         .merge(memory::routes())
         .merge(files::routes())
         .merge(sessions::routes())
+        .merge(open::routes())
         .route("/api/terminals/{id}/ws", get(terminal::attach))
         .merge(later_phase_routes())
         .route("/api/{*rest}", any(api_not_found))
@@ -287,18 +289,42 @@ async fn check_origin(req: Request, next: Next) -> Response {
     next.run(req).await
 }
 
-const CSP: &str = "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; \
-img-src 'self' data: blob:; font-src 'self' data:; connect-src 'self'; worker-src 'self' blob:; \
-object-src 'none'; base-uri 'self'; form-action 'self'; frame-ancestors 'none'";
+/// Scripts are self-only (no inline, no eval). Inline styles are allowed because
+/// xterm.js and Svelte `style:` directives set element styles. Images allow
+/// `data:` for generated QR codes and icons.
+const CSP_BASE: &str = "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; \
+img-src 'self' data:; font-src 'self'; object-src 'none'; base-uri 'self'; \
+form-action 'self'; frame-ancestors 'none'";
+
+/// `connect-src` names the same-origin WebSocket URLs explicitly: older
+/// browsers do not match `ws:`/`wss:` against `'self'`.
+fn csp(host: Option<&str>) -> String {
+    let host = host.filter(|h| {
+        !h.is_empty()
+            && h.bytes()
+                .all(|b| b.is_ascii_alphanumeric() || b".-:[]".contains(&b))
+    });
+    match host {
+        Some(h) => format!("{CSP_BASE}; connect-src 'self' ws://{h} wss://{h}"),
+        None => format!("{CSP_BASE}; connect-src 'self'"),
+    }
+}
 
 async fn security_headers(req: Request, next: Next) -> Response {
     let is_api = req.uri().path().starts_with("/api/");
+    let policy = csp(req
+        .headers()
+        .get(header::HOST)
+        .and_then(|h| h.to_str().ok()));
     let mut resp = next.run(req).await;
     let h = resp.headers_mut();
-    h.insert(
-        header::CONTENT_SECURITY_POLICY,
-        HeaderValue::from_static(CSP),
-    );
+    match HeaderValue::from_str(&policy) {
+        Ok(v) => {
+            h.insert(header::CONTENT_SECURITY_POLICY, v);
+        }
+        // Unreachable: `csp` only emits ASCII from a filtered host.
+        Err(e) => tracing::error!(error = %e, "invalid CSP header"),
+    }
     h.insert(header::X_FRAME_OPTIONS, HeaderValue::from_static("DENY"));
     h.insert(
         header::X_CONTENT_TYPE_OPTIONS,
@@ -323,6 +349,19 @@ mod tests {
         assert!(token_eq("abc", "abc"));
         assert!(!token_eq("abc", "abd"));
         assert!(!token_eq("abc", "abcd"));
+    }
+
+    #[test]
+    fn csp_allows_same_origin_websockets_only() {
+        let p = csp(Some("127.0.0.1:47770"));
+        assert!(p.contains("script-src 'self';"));
+        assert!(p.ends_with("connect-src 'self' ws://127.0.0.1:47770 wss://127.0.0.1:47770"));
+        assert!(csp(Some("[::1]:47770")).contains("ws://[::1]:47770"));
+        // A hostile Host header must not be able to add directives.
+        for bad in ["evil; script-src *", "a b", ""] {
+            assert!(csp(Some(bad)).ends_with("connect-src 'self'"), "{bad}");
+        }
+        assert!(csp(None).ends_with("connect-src 'self'"));
     }
 
     #[test]

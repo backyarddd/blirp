@@ -71,6 +71,14 @@ describe('request', () => {
     const f = mockFetch(async () => new Response('{"path":"a b","diff":""}', { status: 200 }));
     await api.projects.gitDiff('p/1', 'src/a b.ts');
     expect(f.mock.calls[0]?.[0]).toBe('/api/projects/p%2F1/git/diff?path=src%2Fa+b.ts');
+    await api.projects.files('p', '', { root: 'C:\\w\\app' });
+    expect(f.mock.calls[1]?.[0]).toBe('/api/projects/p/files?root=C%3A%5Cw%5Capp');
+  });
+
+  it('flags endpoints of later phases as not implemented', async () => {
+    mockFetch(async () => new Response('{"error":{"code":"not_implemented","message":"later"}}', { status: 501 }));
+    const err = await api.inject('s').catch((e: unknown) => e);
+    expect(err instanceof ApiError && err.notImplemented).toBe(true);
   });
 });
 

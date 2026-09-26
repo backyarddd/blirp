@@ -11,16 +11,11 @@
   import { isMac } from '../prefs';
   import { matchShortcut } from '../shortcuts';
   import { app } from '../app.svelte';
-  import {
-    backoffDelay,
-    classifyClose,
-    decodeServerFrame,
-    encodeBinaryInput,
-    encodeInput,
-    encodeResize,
-  } from './protocol';
+  import { hasTerminal, statusInfo } from '../status';
+  import type { SessionStatus } from '../api/types.gen';
+  import { backoffDelay, decodeServerFrame, encodeBinaryInput, encodeInput, encodeResize } from './protocol';
 
-  type ConnState = 'connecting' | 'open' | 'reconnecting' | 'ended' | 'forbidden' | 'not_found';
+  type ConnState = 'connecting' | 'open' | 'reconnecting' | 'exited' | 'ended';
 
   interface Props {
     sessionId: string;
@@ -29,13 +24,16 @@
     autofocus?: boolean;
     fontSize?: number;
     label: string;
+    /** Offered in the exit banner, e.g. to switch to the transcript view. */
+    ondetails?: () => void;
   }
 
-  let { sessionId, webgl = true, autofocus = false, fontSize = 13, label }: Props = $props();
+  let { sessionId, webgl = true, autofocus = false, fontSize = 13, label, ondetails }: Props = $props();
 
   let host: HTMLDivElement | undefined = $state();
   let term: Terminal | undefined = $state.raw();
   let conn: ConnState = $state('connecting');
+  let exit = $state<{ status: SessionStatus; exit_code: number | null } | null>(null);
 
   const LIGHT: ITheme = {
     background: '#ffffff',
@@ -89,9 +87,12 @@
   });
 
   // Only the host element and session id recreate the terminal; options update in place.
+  // `sessionId` is usually passed as `session.id`, which re-fires on every status push; the
+  // derived only changes with the value, so a status update never drops the connection.
+  const sid = $derived(sessionId);
   $effect(() => {
     const el = host;
-    const id = sessionId;
+    const id = sid;
     if (!el) return;
     return untrack(() => mount(el, id));
   });
@@ -128,12 +129,23 @@
     let timer: ReturnType<typeof setTimeout> | undefined;
     let disposed = false;
     let warned = false;
+    // Set while applying a size the daemon reported, so it is not echoed back as our own.
+    let remoteResize = false;
 
     const send = (data: Uint8Array<ArrayBuffer> | string): void => {
       if (ws?.readyState === WebSocket.OPEN) ws.send(data);
     };
     const sendResize = (): void => {
-      if (t.cols > 0 && t.rows > 0) send(encodeResize(t.cols, t.rows));
+      if (!remoteResize && t.cols > 0 && t.rows > 0) send(encodeResize(t.cols, t.rows));
+    };
+    const applyRemoteSize = (cols: number, rows: number): void => {
+      if (cols === t.cols && rows === t.rows) return;
+      remoteResize = true;
+      try {
+        t.resize(cols, rows);
+      } finally {
+        remoteResize = false;
+      }
     };
     const refit = (): void => {
       if (el.clientWidth === 0 || el.clientHeight === 0) return; // hidden
@@ -159,27 +171,47 @@
         const data = ev.data;
         if (typeof data !== 'string' && !(data instanceof ArrayBuffer)) return;
         const frame = decodeServerFrame(data);
-        if (frame.type === 'snapshot') {
-          // Every (re)attach starts from a full screen snapshot.
-          t.reset();
-          t.write(frame.data);
-        } else if (frame.type === 'output') {
-          t.write(frame.data);
-        } else if (!warned) {
-          warned = true;
-          console.warn(`blirp: ignoring terminal frame (${frame.reason})`);
+        switch (frame.type) {
+          case 'snapshot':
+            // Sent on attach and whenever this client fell behind. The snapshot is laid out for
+            // the PTY's size at that moment; our own resize (sent on open) follows as `resize`.
+            applyRemoteSize(frame.cols, frame.rows);
+            t.reset();
+            t.write(frame.data);
+            break;
+          case 'output':
+            t.write(frame.data);
+            break;
+          case 'resize':
+            // Last resize wins (§6): mirror the PTY size so output wraps the way the app drew it.
+            applyRemoteSize(frame.cols, frame.rows);
+            break;
+          case 'exit':
+            exit = { status: frame.status, exit_code: frame.exit_code };
+            conn = 'exited';
+            t.options.disableStdin = true;
+            t.options.cursorBlink = false;
+            break;
+          case 'ignored':
+            if (!warned) {
+              warned = true;
+              console.warn(`blirp: ignoring terminal frame (${frame.reason})`);
+            }
         }
       };
-      sock.onclose = (ev) => {
+      sock.onclose = () => {
         if (disposed || ws !== sock) return;
         ws = null;
-        const kind = classifyClose(ev.code);
-        if (kind === 'retry') {
-          conn = 'reconnecting';
-          timer = setTimeout(connect, backoffDelay(attempt++));
-        } else {
-          conn = kind;
+        if (conn === 'exited') return;
+        // The daemon uses no close codes (see protocol.ts). A refused upgrade or a drop looks the
+        // same, so keep retrying only while the daemon still reports the session as live.
+        const s = app.sessionById.get(id);
+        if (s && !hasTerminal(s)) {
+          conn = 'ended';
+          return;
         }
+        conn = 'reconnecting';
+        timer = setTimeout(connect, backoffDelay(attempt++));
       };
     };
 
@@ -215,6 +247,9 @@
       raf = requestAnimationFrame(refit);
     });
     ro.observe(el);
+    // Another client may have resized the PTY; typing here takes the size back.
+    const reclaim = (): void => refit();
+    t.textarea?.addEventListener('focus', reclaim);
 
     term = t;
     refit();
@@ -226,6 +261,7 @@
       clearTimeout(timer);
       cancelAnimationFrame(raf);
       ro.disconnect();
+      t.textarea?.removeEventListener('focus', reclaim);
       ws?.close(1000);
       ws = null;
       term = undefined;
@@ -233,19 +269,31 @@
     };
   }
 
-  const MESSAGES: Record<Exclude<ConnState, 'open'>, string> = {
+  const MESSAGES: Record<Exclude<ConnState, 'open' | 'exited'>, string> = {
     connecting: 'Connecting to terminal…',
     reconnecting: 'Connection lost. Reconnecting…',
-    ended: 'The terminal has ended.',
-    forbidden: 'This device is not allowed to control terminals. Enable terminal control for it in Settings > Machines & Sync.',
-    not_found: 'This terminal is no longer running.',
+    ended: 'This terminal is no longer running.',
   };
+
+  const exitText = $derived(
+    exit
+      ? `Process exited · ${statusInfo(exit.status).label}${exit.exit_code !== null ? ` (exit code ${exit.exit_code})` : ''}`
+      : '',
+  );
 </script>
 
 <div class="wrap" role="group" aria-label={label}>
   <div class="term" bind:this={host}></div>
-  {#if conn !== 'open'}
-    <div class="banner" class:warn={conn !== 'connecting'} role="status" aria-live="polite">{MESSAGES[conn]}</div>
+  {#if conn === 'exited'}
+    <div class="banner exit" class:failed={exit?.status === 'failed'} role="status" aria-live="polite" data-testid="terminal-exit">
+      {exitText}
+      {#if ondetails}<button type="button" class="btn sm" onclick={ondetails}>Show details</button>{/if}
+    </div>
+  {:else if conn !== 'open'}
+    <div class="banner" class:warn={conn !== 'connecting'} role="status" aria-live="polite">
+      {MESSAGES[conn]}
+      {#if conn === 'ended' && ondetails}<button type="button" class="btn sm" onclick={ondetails}>Show details</button>{/if}
+    </div>
   {/if}
 </div>
 
@@ -281,5 +329,17 @@
   }
   .banner.warn {
     color: var(--waiting);
+  }
+  .banner.exit {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    top: auto;
+    bottom: 12px;
+    padding: 4px 6px 4px 14px;
+    color: var(--text);
+  }
+  .banner.exit.failed {
+    color: var(--failed);
   }
 </style>

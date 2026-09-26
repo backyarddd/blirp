@@ -1,5 +1,5 @@
 <script lang="ts">
-  import type { SessionStatus } from '../api/types';
+  import type { SessionStatus } from '../api/types.gen';
   import { statusInfo } from '../status';
 
   let { status }: { status: SessionStatus } = $props();

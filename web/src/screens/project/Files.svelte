@@ -5,17 +5,21 @@
   import FolderOpen from '@lucide/svelte/icons/folder-open';
   import FileIcon from '@lucide/svelte/icons/file';
   import { api, errorMessage } from '../../lib/api/client';
-  import type { FileEntry, Project } from '../../lib/api/types';
+  import type { FileEntry, ProjectSummary } from '../../lib/api/types.gen';
   import { Resource } from '../../lib/resource.svelte';
   import Loadable from '../../lib/components/Loadable.svelte';
 
-  let { project }: { project: Project } = $props();
+  let { project }: { project: ProjectSummary } = $props();
   const pid = $derived(project.id);
 
   interface DirState {
     entries: FileEntry[] | null;
     error: string | null;
   }
+
+  // Multi-folder projects browse one folder of this machine at a time (`root=`).
+  const roots = $derived(project.paths.filter((p) => p.local).map((p) => p.path));
+  let root: string | undefined = $state(untrack(() => roots[0]));
 
   const dirs = new SvelteMap<string, DirState>();
   const expanded = new SvelteMap<string, boolean>();
@@ -24,20 +28,24 @@
   async function loadDir(path: string): Promise<void> {
     dirs.set(path, { entries: null, error: null });
     try {
-      const listing = await api.projects.files(pid, path);
-      const sorted = [...listing.entries].sort((a, b) =>
-        a.kind === b.kind ? a.name.localeCompare(b.name) : a.kind === 'dir' ? -1 : 1,
-      );
-      dirs.set(path, { entries: sorted, error: null });
+      // The daemon sorts directories first, then by name.
+      const listing = await api.projects.files(pid, path, { root });
+      dirs.set(path, { entries: listing.entries, error: null });
     } catch (e) {
       dirs.set(path, { entries: null, error: errorMessage(e) });
     }
   }
 
-  // untracked: loadDir writes the SvelteMap, which must not become a dependency of this effect.
+  // untracked: loadDir writes the SvelteMaps, which must not become dependencies of this effect.
   $effect(() => {
     void pid;
-    untrack(() => loadDir(''));
+    void root;
+    untrack(() => {
+      dirs.clear();
+      expanded.clear();
+      selected = null;
+      void loadDir('');
+    });
   });
 
   function toggle(entry: FileEntry): void {
@@ -46,12 +54,14 @@
     if (open && !dirs.has(entry.path)) void loadDir(entry.path);
   }
 
-  const content = new Resource(() => (selected ? api.projects.fileContent(pid, selected) : Promise.resolve(null)));
+  const content = new Resource(() =>
+    selected ? api.projects.fileContent(pid, selected, { root }) : Promise.resolve(null),
+  );
   $effect(() => {
     void content.load();
   });
 
-  const lines = $derived(content.data && !content.data.binary ? content.data.content.split('\n') : []);
+  const lines = $derived(content.data ? content.data.content.split('\n') : []);
 </script>
 
 {#snippet tree(path: string, depth: number)}
@@ -99,6 +109,15 @@
   {/if}
 {/snippet}
 
+{#if roots.length > 1}
+  <label class="field roots">
+    <span>Folder</span>
+    <select class="select mono" bind:value={root}>
+      {#each roots as r (r)}<option value={r}>{r}</option>{/each}
+    </select>
+  </label>
+{/if}
+
 <div class="files">
   <nav class="card side" aria-label="Project files">
     <ul class="tree">{@render tree('', 0)}</ul>
@@ -109,15 +128,11 @@
     {:else}
       <header class="vhead mono small ellipsis">{selected}</header>
       <Loadable loading={content.loading} error={content.error} empty={!content.data} onretry={() => content.load()}>
-        {#if content.data?.binary}
-          <p class="muted pad">Binary file, not shown.</p>
-        {:else}
-          {#if content.data?.truncated}<p class="warn small">Showing the first 1 MiB of this file.</p>{/if}
-          <div class="code">
-            <pre class="nums" aria-hidden="true">{lines.map((_, i) => i + 1).join('\n')}</pre>
-            <pre class="text">{content.data?.content}</pre>
-          </div>
-        {/if}
+        <!-- Binary and >1 MiB files arrive as errors (415 binary_file, 413 file_too_large). -->
+        <div class="code">
+          <pre class="nums" aria-hidden="true">{lines.map((_, i) => i + 1).join('\n')}</pre>
+          <pre class="text">{content.data?.content}</pre>
+        </div>
       </Loadable>
     {/if}
   </section>
@@ -182,10 +197,8 @@
   .pad {
     padding: 16px;
   }
-  .warn {
-    color: var(--waiting);
-    padding: 8px 14px 0;
-    margin: 0;
+  .roots {
+    max-width: 520px;
   }
   .code {
     display: flex;

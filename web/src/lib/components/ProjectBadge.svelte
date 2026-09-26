@@ -1,9 +1,9 @@
 <script lang="ts">
   import GitBranch from '@lucide/svelte/icons/git-branch';
   import Folder from '@lucide/svelte/icons/folder';
-  import type { Project } from '../api/types';
+  import type { ProjectSummary } from '../api/types.gen';
 
-  let { project }: { project: Pick<Project, 'is_git'> } = $props();
+  let { project }: { project: Pick<ProjectSummary, 'is_git'> } = $props();
 </script>
 
 {#if project.is_git}
