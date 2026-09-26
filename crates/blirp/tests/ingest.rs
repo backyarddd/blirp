@@ -10,7 +10,7 @@ use blirp::ingest::{Engine, IngestEnv, IngestService};
 use blirp_core::model::{
     Event, EventKind, Machine, MachineRole, ServerEvent, Session, SessionOrigin, SessionStatus,
 };
-use blirp_core::store::Store;
+use blirp_core::store::{NonProjectDirs, Store};
 use serde_json::json;
 use std::io::Write as _;
 use std::path::{Path, PathBuf};
@@ -76,7 +76,11 @@ impl H {
         let engine = Engine::new(
             store.clone(),
             machine,
-            IngestEnv::at_home(&home, &blirp_home),
+            IngestEnv {
+                // `root/tmp` stands in for the temp folder.
+                non_projects: NonProjectDirs::auto(Some(home.clone()), vec![root.join("tmp")]),
+                ..IngestEnv::at_home(&home, &blirp_home)
+            },
             Arc::new(move |e| sink.lock().unwrap().push(e)),
         );
         H {
@@ -764,6 +768,58 @@ fn codex_external_session_gets_folder_project() {
     h.pass();
     let s = h.session("codex", CODEX_SID);
     h.common(&s);
+}
+
+#[test]
+fn codex_rollouts_in_scratch_folders_create_no_project() {
+    let h = H::new();
+    let cwds = [
+        (h.root.join("tmp").join("sandbox"), true),
+        (h.home.join(".codex").join("worktrees").join("w1"), true),
+        (h.home.join(".tool").join("profiles").join("default"), true),
+        (
+            h.home
+                .join("Documents")
+                .join("Codex")
+                .join("2026-01-02")
+                .join("new-chat"),
+            true,
+        ),
+        (h.home.clone(), true),
+        (h.cwd.clone(), false),
+    ];
+    let mut ids = Vec::new();
+    for (i, (cwd, _)) in cwds.iter().enumerate() {
+        std::fs::create_dir_all(cwd).unwrap();
+        let sid = format!("0198a1b2-c3d4-7e5f-8a9b-0c1d2e3f4a{i:02}");
+        let raw = cwd.to_string_lossy().into_owned();
+        let json = serde_json::to_string(&raw).unwrap();
+        let text = fixture("codex/rollout.jsonl")
+            .replace(CODEX_SID, &sid)
+            .replace("{{CWD}}", &json[1..json.len() - 1])
+            .replace("{{SECRET}}", "x");
+        h.put(
+            &format!(".codex/sessions/2026/01/02/rollout-2026-01-02T09-00-0{i}-{sid}.jsonl"),
+            text.as_bytes(),
+        );
+        ids.push(sid);
+    }
+    h.pass();
+    let home_project = h.store.home_project_id().unwrap().unwrap();
+    for ((cwd, scratch), sid) in cwds.iter().zip(&ids) {
+        let s = h.session("codex", sid);
+        assert_eq!(s.project_id == home_project, *scratch, "{}", cwd.display());
+    }
+    // Only the real folder became a project (next to Home).
+    let names: Vec<String> = h
+        .store
+        .list_project_summaries("")
+        .unwrap()
+        .into_iter()
+        .filter(|p| !p.is_home)
+        .map(|p| p.project.name)
+        .collect();
+    assert_eq!(names, ["proj"]);
 }
 
 // ---------------------------------------------------------------- opencode

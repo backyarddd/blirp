@@ -13,7 +13,7 @@ use blirp_core::model::{
     BUILTIN_AGENTS, InjectMode, ServerEvent, Session, SessionOrigin, SessionStatus,
 };
 use blirp_core::paths::{Paths, RuntimeInfo};
-use blirp_core::store::Store;
+use blirp_core::store::{NonProjectDirs, Store};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::io::Read;
@@ -179,7 +179,13 @@ pub fn handle(
                 return Ok(HookReply::default());
             };
             let resolved =
-                store.resolve_project(&state.machine.id, &state.machine.name, Path::new(&cwd))?;
+                // An external session: the auto rules apply as for ingest (§5).
+                store.resolve_project_with(
+                    &state.machine.id,
+                    &state.machine.name,
+                    Path::new(&cwd),
+                    &NonProjectDirs::from_process(),
+                )?;
             if resolved.created {
                 state.emit(ServerEvent::ProjectUpdated {
                     project_id: resolved.project.id.clone(),

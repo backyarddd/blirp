@@ -12,17 +12,7 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, PoisonError};
 
-/// Comparison key for watched roots and sources. Windows paths are case
-/// insensitive and may carry a verbatim `\\?\` prefix or `/` separators
-/// (hooks report them as the agent spelled them); elsewhere paths compare
-/// as they are.
-pub(crate) fn path_key(p: &Path) -> PathBuf {
-    if cfg!(windows) {
-        PathBuf::from(dunce::simplified(p).to_string_lossy().to_lowercase())
-    } else {
-        p.to_path_buf()
-    }
-}
+pub(crate) use blirp_core::paths::path_key;
 
 /// What a pass should look at.
 #[derive(Debug, Clone, Default)]
@@ -309,6 +299,37 @@ impl Engine {
                 "re-reading transcripts filed under the home folder"
             ),
             Err(e) => tracing::warn!(error = %e, "ingest repair failed"),
+        }
+    }
+
+    /// One-time cleanup after upgrading to the scratch-folder rules (§5):
+    /// projects earlier ingest created for temp, tool, system or Codex
+    /// chat folders are merged into the Home project when nothing shows
+    /// the user made or used them as a project (`Store::retire_non_projects`).
+    pub fn retire_non_projects(&self) {
+        const KEY: &str = "projects.cleanup.non_projects";
+        match self.store.get_setting(KEY) {
+            Ok(None) => {}
+            Ok(Some(_)) => return,
+            Err(e) => {
+                tracing::warn!(error = %e, "reading project cleanup state failed");
+                return;
+            }
+        }
+        let res = self
+            .store
+            .retire_non_projects(&self.machine.id, &self.machine.name, &self.env.non_projects)
+            .and_then(|names| {
+                self.store.set_setting(KEY, &json!(blirp_core::now_ms()))?;
+                Ok(names)
+            });
+        match res {
+            Ok(names) if names.is_empty() => {}
+            Ok(names) => tracing::info!(
+                projects = names.len(),
+                "merged projects of scratch folders into the Home project"
+            ),
+            Err(e) => tracing::warn!(error = %e, "project cleanup failed"),
         }
     }
 

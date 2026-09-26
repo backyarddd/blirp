@@ -466,7 +466,7 @@ impl Store {
 }
 
 #[cfg(test)]
-mod tests {
+pub(super) mod tests {
     use super::super::tests::temp_store;
     use super::*;
     use crate::model::{EventKind, Record, RecordKind, RecordStatus, SessionOrigin};

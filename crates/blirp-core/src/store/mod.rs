@@ -21,7 +21,7 @@ pub use engine::{
 pub use ingest::IngestTx;
 pub use memory::RecordFilter;
 pub use migrations::MigrationError;
-pub use projects::ResolvedProject;
+pub use projects::{NonProjectDirs, ResolvedProject};
 pub use sessions::SessionFilter;
 pub use sync::{Compacted, HubPage, IngestOutcome, PulledEntry, SyncCursors, WireEntry};
 

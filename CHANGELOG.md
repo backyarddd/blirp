@@ -22,6 +22,14 @@ so every tag needs one.
 
 - The web UI header, sign-in screen and favicon show the same "b" logo as
   the desktop app icon instead of an older mark.
+- Sessions found in transcripts no longer create a project for scratch
+  folders: the temp folder, the Windows folder, hidden tool folders in the
+  home directory (`~/.codex`, ...) and Codex desktop chat folders
+  (`~/Documents/Codex/<date>/<chat>`). They go to the machine's Home project.
+  Projects created for them earlier are merged into Home once, unless you
+  renamed, used or edited them.
+- Transcripts of a folder that no longer exists no longer create a second
+  project when the folder is spelled differently (case, separators, `\\?\`).
 
 ## [0.1.0] - 2026-09-26
 

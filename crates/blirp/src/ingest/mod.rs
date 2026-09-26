@@ -26,7 +26,7 @@ mod sink;
 mod text;
 
 use blirp_core::model::EventKind;
-use blirp_core::store::Store;
+use blirp_core::store::{NonProjectDirs, Store};
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use serde_json::Value as JsonValue;
@@ -51,6 +51,8 @@ pub struct IngestEnv {
     pub blirp_home: PathBuf,
     /// Environment overrides adapters honor (`CLAUDE_CONFIG_DIR`, ...).
     pub vars: HashMap<String, OsString>,
+    /// Folders ingested sessions never create a project for (§5).
+    pub non_projects: NonProjectDirs,
 }
 
 /// Env vars adapters consult; anything else is ignored.
@@ -82,15 +84,18 @@ impl IngestEnv {
             home,
             blirp_home: blirp_home.to_path_buf(),
             vars,
+            non_projects: NonProjectDirs::from_process(),
         })
     }
 
-    /// A self-contained environment rooted at `home` (tests).
+    /// A self-contained environment rooted at `home` (tests): no temp or
+    /// system folders, since tests work in the temp folder.
     pub fn at_home(home: &Path, blirp_home: &Path) -> Self {
         Self {
             home: home.to_path_buf(),
             blirp_home: blirp_home.to_path_buf(),
             vars: HashMap::new(),
+            non_projects: NonProjectDirs::auto(Some(home.to_path_buf()), Vec::new()),
         }
     }
 

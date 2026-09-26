@@ -41,6 +41,17 @@ pub fn user_home() -> Option<PathBuf> {
     std::env::home_dir().filter(|p| !p.as_os_str().is_empty())
 }
 
+/// Comparison key for paths. Windows paths are case insensitive and may
+/// carry a verbatim `\\?\` prefix or `/` separators (agents and hooks report
+/// them as they spelled them); elsewhere paths compare as they are.
+pub fn path_key(p: &Path) -> PathBuf {
+    if cfg!(windows) {
+        PathBuf::from(dunce::simplified(p).to_string_lossy().to_lowercase())
+    } else {
+        p.to_path_buf()
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct Paths {
     home: PathBuf,

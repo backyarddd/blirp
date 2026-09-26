@@ -148,6 +148,7 @@ impl<'e> StoreSink<'e> {
                     &eng.machine.id,
                     &eng.machine.name,
                     Path::new(&cwd),
+                    &eng.env.non_projects,
                 )?;
                 refile = Some((cwd, r.project.id, r.created));
             }
@@ -177,8 +178,12 @@ impl<'e> StoreSink<'e> {
                 link = self.link_candidate(&p)?;
                 if link.is_none() {
                     let dir = cwd.map_or_else(|| eng.env.home.clone(), Into::into);
-                    let r =
-                        store.resolve_project_lenient(&eng.machine.id, &eng.machine.name, &dir)?;
+                    let r = store.resolve_project_lenient(
+                        &eng.machine.id,
+                        &eng.machine.name,
+                        &dir,
+                        &eng.env.non_projects,
+                    )?;
                     project = Some((r.project.id, r.created));
                 }
             }
