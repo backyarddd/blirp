@@ -176,12 +176,15 @@ impl Adapter for Codex {
                     if let Some(c) = p.get("cwd").and_then(Value::as_str) {
                         meta.cwd = Some(c.to_string());
                     }
-                    if let Some(b) = p
-                        .get("git")
-                        .and_then(|g| g.get("branch"))
+                    let git = p.get("git");
+                    if let Some(b) = git.and_then(|g| g.get("branch")).and_then(Value::as_str) {
+                        meta.branch = Some(b.to_string());
+                    }
+                    if let Some(u) = git
+                        .and_then(|g| g.get("repository_url"))
                         .and_then(Value::as_str)
                     {
-                        meta.branch = Some(b.to_string());
+                        meta.git_remote = Some(u.to_string());
                     }
                     let asid = st.asid.clone().unwrap_or_else(|| fallback.clone());
                     super::report_cwd(sink, &asid, &meta, &mut reported);

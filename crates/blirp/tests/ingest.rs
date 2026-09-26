@@ -10,7 +10,7 @@ use blirp::ingest::{Engine, IngestEnv, IngestService};
 use blirp_core::model::{
     Event, EventKind, Machine, MachineRole, ServerEvent, Session, SessionOrigin, SessionStatus,
 };
-use blirp_core::store::{NonProjectDirs, Store};
+use blirp_core::store::{HubPage, NonProjectDirs, Store};
 use serde_json::json;
 use std::io::Write as _;
 use std::path::{Path, PathBuf};
@@ -820,6 +820,68 @@ fn codex_rollouts_in_scratch_folders_create_no_project() {
         .map(|p| p.project.name)
         .collect();
     assert_eq!(names, ["proj"]);
+}
+
+#[test]
+fn scratch_projects_from_before_are_retired_once_a_node_is_in_sync() {
+    let h = H::new();
+    let chat = h
+        .home
+        .join("Documents")
+        .join("Codex")
+        .join("2026-01-02")
+        .join("chat");
+    std::fs::create_dir_all(&chat).unwrap();
+    // As blirp 0.1.0 filed it: a project for the chat folder.
+    let machine_id = h
+        .store
+        .get_setting("machine_id")
+        .unwrap()
+        .unwrap()
+        .as_str()
+        .unwrap()
+        .to_string();
+    let old = NonProjectDirs {
+        home: Some(h.home.clone()),
+        ..NonProjectDirs::default()
+    };
+    let p = h
+        .store
+        .resolve_project_with(&machine_id, "test-box", &chat, &old)
+        .unwrap()
+        .project;
+    let raw = chat.to_string_lossy().into_owned();
+    let json = serde_json::to_string(&raw).unwrap();
+    h.put(
+        &format!(".codex/sessions/2026/01/02/rollout-2026-01-02T09-00-00-{CODEX_SID}.jsonl"),
+        fixture("codex/rollout.jsonl")
+            .replace("{{CWD}}", &json[1..json.len() - 1])
+            .replace("{{SECRET}}", "x")
+            .as_bytes(),
+    );
+    // A node waits until a pull reached the hub's head.
+    let mut m = h.store.get_machine(&machine_id).unwrap().unwrap();
+    m.role = MachineRole::Node;
+    h.store.upsert_machine(&m).unwrap();
+    h.pass();
+    assert_eq!(h.session("codex", CODEX_SID).project_id, p.id);
+    h.pass();
+    assert!(!h.store.get_project(&p.id).unwrap().unwrap().deleted);
+    h.store
+        .node_apply_pull(
+            "hub",
+            &HubPage {
+                own_seen: 0,
+                entries: Vec::new(),
+                up_to: 1,
+                more: false,
+            },
+        )
+        .unwrap();
+    h.pass();
+    assert!(h.store.get_project(&p.id).unwrap().unwrap().deleted);
+    let home = h.store.home_project_id().unwrap().unwrap();
+    assert_eq!(h.session("codex", CODEX_SID).project_id, home);
 }
 
 // ---------------------------------------------------------------- opencode

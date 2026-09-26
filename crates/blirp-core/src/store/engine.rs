@@ -142,6 +142,7 @@ impl Store {
             path: path.to_path_buf(),
             writer: Mutex::new(open()?),
             readers: Mutex::new(Vec::new()),
+            pulled_to_head: std::sync::atomic::AtomicBool::new(false),
         })
     }
 

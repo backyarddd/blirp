@@ -219,6 +219,8 @@ pub struct SessionMeta {
     /// First user prompt; the title fallback.
     pub first_prompt: Option<String>,
     pub branch: Option<String>,
+    /// The repository's remote URL as the transcript records it (codex).
+    pub git_remote: Option<String>,
     pub model: Option<String>,
     pub started_at: Option<i64>,
     /// Latest activity the store itself records (e.g. a database row's
@@ -245,6 +247,7 @@ impl SessionMeta {
             self.first_prompt = o.first_prompt;
         }
         take(&mut self.branch, o.branch);
+        take(&mut self.git_remote, o.git_remote);
         take(&mut self.model, o.model);
         self.started_at = match (self.started_at, o.started_at) {
             (Some(a), Some(b)) => Some(a.min(b)),

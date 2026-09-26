@@ -1006,6 +1006,22 @@ impl Store {
     /// Node: apply a pull page from `hub` and advance the pull cursor in the
     /// same transaction. Returns how many remote entries were applied.
     pub fn node_apply_pull(&self, hub: &str, page: &HubPage) -> Result<usize> {
+        let applied = self.node_apply_pull_in(hub, page)?;
+        if !page.more {
+            self.pulled_to_head
+                .store(true, std::sync::atomic::Ordering::Relaxed);
+        }
+        Ok(applied)
+    }
+
+    /// Whether a node pull reached the hub's head since the store was
+    /// opened (this machine has seen every change the hub had then).
+    pub fn pulled_to_head(&self) -> bool {
+        self.pulled_to_head
+            .load(std::sync::atomic::Ordering::Relaxed)
+    }
+
+    fn node_apply_pull_in(&self, hub: &str, page: &HubPage) -> Result<usize> {
         self.write(|tx| {
             let mut cur = cursors_in(tx, hub)?;
             if page.up_to <= cur.last_pulled_hub_seq {

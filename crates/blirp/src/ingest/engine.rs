@@ -4,7 +4,7 @@
 
 use super::sink::{ACTIVE_MS, Emit, Notifier, StoreSink};
 use super::{Adapter, Cursor, IngestEnv, Result, Source};
-use blirp_core::model::{Machine, SessionStatus};
+use blirp_core::model::{Machine, MachineRole, SessionStatus};
 use blirp_core::store::Store;
 use serde_json::json;
 use std::collections::{HashMap, HashSet};
@@ -64,6 +64,8 @@ pub struct Engine {
     warned: Mutex<HashSet<String>>,
     /// Sources seen by each adapter's last full scan.
     known: Mutex<HashMap<usize, Vec<Source>>>,
+    /// `retire_non_projects` ran (or had run before).
+    retired: AtomicBool,
 }
 
 fn lock<T>(m: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
@@ -93,6 +95,7 @@ impl Engine {
             stop: AtomicBool::new(false),
             warned: Mutex::new(HashSet::new()),
             known: Mutex::new(HashMap::new()),
+            retired: AtomicBool::new(false),
         }
     }
 
@@ -134,6 +137,7 @@ impl Engine {
 
     /// Run `work`; adapters run in parallel, sources within one sequentially.
     pub fn run(&self, work: &Work) -> HashMap<&'static str, PassStats> {
+        self.retire_non_projects();
         let mut ids: Vec<usize> = work.full.iter().chain(work.paths.keys()).copied().collect();
         ids.sort_unstable();
         ids.dedup();
@@ -306,11 +310,31 @@ impl Engine {
     /// projects earlier ingest created for temp, tool, system or Codex
     /// chat folders are merged into the Home project when nothing shows
     /// the user made or used them as a project (`Store::retire_non_projects`).
+    /// Runs at the start of an ingest pass, so never concurrently with
+    /// one; a node waits for a pull to reach the hub's head first, so a
+    /// change another machine made to such a project is seen (and makes it
+    /// ineligible) before it is removed.
     pub fn retire_non_projects(&self) {
         const KEY: &str = "projects.cleanup.non_projects";
+        if self.retired.load(Ordering::Relaxed) {
+            return;
+        }
+        let role = match self.store.get_machine(&self.machine.id) {
+            Ok(m) => m.map_or(self.machine.role, |m| m.role),
+            Err(e) => {
+                tracing::warn!(error = %e, "reading this machine's role failed");
+                return;
+            }
+        };
+        if role == MachineRole::Node && !self.store.pulled_to_head() {
+            return;
+        }
         match self.store.get_setting(KEY) {
             Ok(None) => {}
-            Ok(Some(_)) => return,
+            Ok(Some(_)) => {
+                self.retired.store(true, Ordering::Relaxed);
+                return;
+            }
             Err(e) => {
                 tracing::warn!(error = %e, "reading project cleanup state failed");
                 return;
@@ -319,16 +343,27 @@ impl Engine {
         let res = self
             .store
             .retire_non_projects(&self.machine.id, &self.machine.name, &self.env.non_projects)
-            .and_then(|names| {
+            .and_then(|retired| {
                 self.store.set_setting(KEY, &json!(blirp_core::now_ms()))?;
-                Ok(names)
+                Ok(retired)
             });
+        if res.is_ok() {
+            self.retired.store(true, Ordering::Relaxed);
+        }
         match res {
-            Ok(names) if names.is_empty() => {}
-            Ok(names) => tracing::info!(
-                projects = names.len(),
-                "merged projects of scratch folders into the Home project"
-            ),
+            Ok(retired) if retired.is_empty() => {}
+            Ok(retired) => {
+                tracing::info!(
+                    projects = retired.len(),
+                    "merged projects of scratch folders into the Home project"
+                );
+                for p in &retired {
+                    self.notifier.project(&p.id);
+                }
+                if let Ok(Some(home)) = self.store.home_project_id() {
+                    self.notifier.project(&home);
+                }
+            }
             Err(e) => tracing::warn!(error = %e, "project cleanup failed"),
         }
     }

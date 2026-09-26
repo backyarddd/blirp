@@ -140,6 +140,8 @@ pub struct Store {
     path: PathBuf,
     writer: Mutex<Connection>,
     readers: Mutex<Vec<Connection>>,
+    /// A node pull reached the hub's head since this store was opened.
+    pulled_to_head: std::sync::atomic::AtomicBool,
 }
 
 impl std::fmt::Debug for Store {
@@ -170,6 +172,7 @@ impl Store {
             path: path.to_path_buf(),
             writer: Mutex::new(conn),
             readers: Mutex::new(Vec::new()),
+            pulled_to_head: std::sync::atomic::AtomicBool::new(false),
         })
     }
 
@@ -393,6 +396,25 @@ pub(crate) fn apply_in(tx: &Transaction<'_>, change: &Change) -> Result<bool> {
     };
     stamp_after_stored(tx, &mut change)?;
     let change = change.as_ref();
+    if let Change::Session(s) = change {
+        // A session filed under a project that was removed (or merged into
+        // Home by `retire_non_projects`) after the caller resolved it: fail
+        // so the caller resolves again. Sessions already in a removed
+        // project stay writable.
+        let into_deleted: Option<i64> = one(
+            tx,
+            "SELECT 1 FROM projects p WHERE p.id = ?1 AND p.deleted = 1
+               AND NOT EXISTS (SELECT 1 FROM sessions WHERE id = ?2 AND project_id = ?1)",
+            params![s.project_id, s.id],
+            |r| r.get(0),
+        )?;
+        if into_deleted.is_some() {
+            return Err(StoreError::Conflict(format!(
+                "project {} was removed",
+                s.project_id
+            )));
+        }
+    }
     let written = write_row(tx, change)?;
     if written == 0
         && matches!(

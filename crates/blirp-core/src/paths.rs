@@ -41,6 +41,48 @@ pub fn user_home() -> Option<PathBuf> {
     std::env::home_dir().filter(|p| !p.as_os_str().is_empty())
 }
 
+/// The user's Documents folder as the OS reports it, when it can: on
+/// Windows the known folder (it may be redirected, e.g. to OneDrive),
+/// elsewhere `$XDG_DOCUMENTS_DIR`. `~/Documents` is the fallback callers
+/// check as well.
+#[cfg(windows)]
+pub fn documents_dir() -> Option<PathBuf> {
+    use std::os::windows::ffi::OsStringExt;
+    use windows_sys::Win32::System::Com::CoTaskMemFree;
+    use windows_sys::Win32::UI::Shell::{FOLDERID_Documents, SHGetKnownFolderPath};
+    let mut raw: windows_sys::core::PWSTR = std::ptr::null_mut();
+    // SAFETY: valid GUID and out pointer; a null token means the current
+    // user. On success `raw` is a NUL-terminated wide string we own.
+    #[allow(unsafe_code)]
+    let hr =
+        unsafe { SHGetKnownFolderPath(&FOLDERID_Documents, 0, std::ptr::null_mut(), &mut raw) };
+    let path = if hr >= 0 && !raw.is_null() {
+        // SAFETY: `raw` is NUL-terminated (checked above that it is set).
+        #[allow(unsafe_code)]
+        let wide = unsafe {
+            let len = (0..).take_while(|&i| *raw.add(i) != 0).count();
+            std::slice::from_raw_parts(raw, len)
+        };
+        Some(PathBuf::from(std::ffi::OsString::from_wide(wide)))
+    } else {
+        None
+    };
+    // SAFETY: the API requires freeing the buffer also on failure; null is allowed.
+    #[allow(unsafe_code)]
+    unsafe {
+        CoTaskMemFree(raw as *const std::ffi::c_void)
+    };
+    path.filter(|p| !p.as_os_str().is_empty())
+}
+
+/// See the Windows variant.
+#[cfg(not(windows))]
+pub fn documents_dir() -> Option<PathBuf> {
+    std::env::var_os("XDG_DOCUMENTS_DIR")
+        .filter(|v| !v.is_empty())
+        .map(PathBuf::from)
+}
+
 /// Comparison key for paths. Windows paths are case insensitive and may
 /// carry a verbatim `\\?\` prefix or `/` separators (agents and hooks report
 /// them as they spelled them); elsewhere paths compare as they are.

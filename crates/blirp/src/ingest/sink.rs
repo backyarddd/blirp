@@ -148,6 +148,7 @@ impl<'e> StoreSink<'e> {
                     &eng.machine.id,
                     &eng.machine.name,
                     Path::new(&cwd),
+                    p.meta.git_remote.as_deref(),
                     &eng.env.non_projects,
                 )?;
                 refile = Some((cwd, r.project.id, r.created));
@@ -182,6 +183,7 @@ impl<'e> StoreSink<'e> {
                         &eng.machine.id,
                         &eng.machine.name,
                         &dir,
+                        p.meta.git_remote.as_deref(),
                         &eng.env.non_projects,
                     )?;
                     project = Some((r.project.id, r.created));

@@ -43,13 +43,16 @@ pub struct ResolvedProject {
 /// (`auto`: ingested transcripts, hooks) also the places agents and tools
 /// run scratch work in: hidden folders directly under home (tool data such
 /// as `~/.codex`, `~/.claude`, `~/.blirp`), Codex desktop chat folders
-/// (`~/Documents/Codex/<YYYY-MM-DD>/<chat>`, one per chat) and `scratch`
-/// (the temp folder, the Windows folder). Registered folders always win:
-/// resolution matches them before these rules apply.
+/// (`<Documents>/Codex/<YYYY-MM-DD>/<chat>`, one per chat, for each folder
+/// in `documents`) and `scratch` (temp and system folders). Registered
+/// folders always win: resolution matches them before these rules apply.
 #[derive(Debug, Clone, Default)]
 pub struct NonProjectDirs {
     pub home: Option<PathBuf>,
     pub scratch: Vec<PathBuf>,
+    /// Documents folders (`~/Documents` and the OS's, which may be
+    /// redirected, e.g. to OneDrive).
+    pub documents: Vec<PathBuf>,
     pub auto: bool,
 }
 
@@ -58,8 +61,7 @@ impl NonProjectDirs {
     pub fn launch() -> Self {
         Self {
             home: crate::paths::user_home().map(|h| canonical_or_same(&h)),
-            scratch: Vec::new(),
-            auto: false,
+            ..Self::default()
         }
     }
 
@@ -68,14 +70,28 @@ impl NonProjectDirs {
         let mut scratch = vec![std::env::temp_dir()];
         if cfg!(windows) {
             scratch.extend(std::env::var_os("SystemRoot").map(PathBuf::from));
+        } else {
+            // `temp_dir` is `$TMPDIR` (per user on macOS); agents also use
+            // these (macOS: `/private/tmp` after canonicalizing).
+            scratch.extend([PathBuf::from("/tmp"), PathBuf::from("/var/tmp")]);
         }
-        Self::auto(crate::paths::user_home(), scratch)
+        let mut dirs = Self::auto(crate::paths::user_home(), scratch);
+        if let Some(d) = crate::paths::documents_dir().filter(|d| d.is_absolute()) {
+            dirs.documents.push(canonical_or_same(&d));
+        }
+        dirs
     }
 
-    /// Auto rules for `home` and `scratch` (canonicalized where they exist).
+    /// Auto rules for `home` (with `home/Documents`) and `scratch`
+    /// (canonicalized where they exist).
     pub fn auto(home: Option<PathBuf>, scratch: Vec<PathBuf>) -> Self {
+        let home = home.map(|h| canonical_or_same(&h));
         Self {
-            home: home.map(|h| canonical_or_same(&h)),
+            documents: home
+                .iter()
+                .map(|h| canonical_or_same(&h.join("Documents")))
+                .collect(),
+            home,
             scratch: scratch
                 .into_iter()
                 .filter(|d| d.is_absolute())
@@ -87,38 +103,37 @@ impl NonProjectDirs {
 
     /// Whether `root` (absolute) must not be registered as a project.
     pub fn contains(&self, root: &Path) -> bool {
+        use crate::paths::path_key;
         if root.parent().is_none() {
             return true;
         }
-        let key = crate::paths::path_key(root);
-        let home = self.home.as_deref().map(crate::paths::path_key);
+        let key = path_key(root);
+        let home = self.home.as_deref().map(path_key);
         if home.as_ref().is_some_and(|h| h.starts_with(&key)) {
             return true;
         }
         if !self.auto {
             return false;
         }
-        if self
-            .scratch
-            .iter()
-            .any(|d| key.starts_with(crate::paths::path_key(d)))
+        let under = |base: &Path| key.strip_prefix(path_key(base)).ok().map(Path::to_path_buf);
+        let first = |rel: &Path| {
+            rel.components()
+                .map(|c| c.as_os_str().to_string_lossy().into_owned())
+                .collect::<Vec<_>>()
+        };
+        if self.scratch.iter().any(|d| under(d).is_some()) {
+            return true;
+        }
+        if let Some(h) = &self.home
+            && let Some(rel) = under(h)
+            && first(&rel).first().is_some_and(|c| c.starts_with('.'))
         {
             return true;
         }
-        let Some(rel) = home.as_ref().and_then(|h| key.strip_prefix(h).ok()) else {
-            return false;
-        };
-        let mut parts = rel.components().map(|c| c.as_os_str().to_string_lossy());
-        match parts.next() {
-            Some(first) if first.starts_with('.') => true,
-            Some(first) if first.eq_ignore_ascii_case("documents") => {
-                parts
-                    .next()
-                    .is_some_and(|c| c.eq_ignore_ascii_case("codex"))
-                    && parts.next().is_some_and(|d| is_iso_date(&d))
-            }
-            _ => false,
-        }
+        self.documents.iter().filter_map(|d| under(d)).any(|rel| {
+            let parts = first(&rel);
+            parts.len() >= 2 && parts[0].eq_ignore_ascii_case("codex") && is_iso_date(&parts[1])
+        })
     }
 }
 
@@ -136,10 +151,23 @@ fn canonical_or_same(p: &Path) -> PathBuf {
 }
 
 /// A recorded folder in one spelling: no `\\?\` prefix, no trailing or
-/// doubled separators, `/` as `\` on Windows. For folders that no longer
-/// exist (existing ones are canonicalized).
+/// doubled separators, `.` and `..` resolved lexically, `/` as `\` on
+/// Windows. For folders that no longer exist (existing ones are
+/// canonicalized).
 fn normalize(p: &Path) -> PathBuf {
-    dunce::simplified(p).components().collect()
+    use std::path::Component;
+    let mut out = PathBuf::new();
+    for c in dunce::simplified(p).components() {
+        match c {
+            Component::CurDir => {}
+            // At a root `pop` keeps the root, like the OS does.
+            Component::ParentDir => {
+                out.pop();
+            }
+            c => out.push(c),
+        }
+    }
+    out
 }
 
 fn canonical_dir(p: &Path) -> Result<PathBuf> {
@@ -197,13 +225,17 @@ pub(super) fn live_project_in(c: &Connection, id: &str) -> Result<Project> {
         .ok_or(StoreError::NotFound("project"))
 }
 
-fn new_project(tx: &Transaction<'_>, name: &str) -> Result<Project> {
+/// `registered`: added by the user (Add folder). Such a project starts
+/// with `updated_at = created_at + 1`, which tells it apart from one
+/// resolution created (`updated_at = created_at` until its first edit) for
+/// [`Store::retire_non_projects`] without a schema change.
+fn new_project(tx: &Transaction<'_>, name: &str, registered: bool) -> Result<Project> {
     let now = crate::now_ms();
     let p = Project {
         id: crate::new_id(),
         name: name.to_string(),
         created_at: now,
-        updated_at: now,
+        updated_at: now + i64::from(registered),
         deleted: false,
     };
     apply_in(tx, &Change::Project(p.clone()))?;
@@ -421,7 +453,7 @@ impl Store {
                     });
                 }
             }
-            let project = new_project(tx, &folder_name(&root))?;
+            let project = new_project(tx, &folder_name(&root), false)?;
             attach_path(tx, &project.id, machine_id, &root, remote)?;
             Ok(ResolvedProject {
                 project,
@@ -441,6 +473,7 @@ impl Store {
         machine_id: &str,
         machine_name: &str,
         cwd: &Path,
+        git_remote: Option<&str>,
         dirs: &NonProjectDirs,
     ) -> Result<ResolvedProject> {
         if cwd.is_dir() {
@@ -463,6 +496,27 @@ impl Store {
                     created: false,
                 });
             }
+            // A worktree or clone that is gone (e.g. under
+            // `~/.codex/worktrees`): the transcript's remote names its repo.
+            // This machine's folder of that repo first, else any machine's.
+            if let Some(remote) = git_remote.and_then(crate::git::normalize_remote) {
+                let pid: Option<String> = one(
+                    tx,
+                    "SELECT pp.project_id FROM project_paths pp JOIN projects p ON p.id = pp.project_id
+                     WHERE pp.git_remote = ?1 AND p.deleted = 0
+                     ORDER BY pp.machine_id != ?2 LIMIT 1",
+                    params![remote, machine_id],
+                    |r| r.get(0),
+                )?;
+                if let Some(pid) = pid {
+                    return Ok(ResolvedProject {
+                        project: live_project_in(tx, &pid)?,
+                        root: cwd.to_path_buf(),
+                        is_home: false,
+                        created: false,
+                    });
+                }
+            }
             if dirs.contains(cwd) {
                 return Ok(ResolvedProject {
                     project: home_project(tx, machine_name)?,
@@ -471,7 +525,7 @@ impl Store {
                     created: false,
                 });
             }
-            let project = new_project(tx, &folder_name(cwd))?;
+            let project = new_project(tx, &folder_name(cwd), false)?;
             attach_path(tx, &project.id, machine_id, cwd, None)?;
             Ok(ResolvedProject {
                 project,
@@ -518,7 +572,7 @@ impl Store {
                     "{key} is already registered to project {pid}"
                 )));
             }
-            let project = new_project(tx, &name)?;
+            let project = new_project(tx, &name, true)?;
             attach_path(tx, &project.id, machine_id, &path, remote)?;
             Ok(project)
         })
@@ -560,25 +614,28 @@ impl Store {
                 "cannot merge a project into itself".into(),
             ));
         }
-        self.write(|tx| merge_in(tx, from, into, true))
+        self.write(|tx| merge_in(tx, from, into, false))
     }
 
     /// Cleanup for projects that resolution created before `dirs` said
     /// their folder is no project (§5): each is merged into this machine's
     /// Home project, where resolution now files such sessions, without its
-    /// folders. Only projects that show no sign of the user: never renamed
-    /// or merged into (`updated_at = created_at`), every folder on this
-    /// machine and matched by `dirs`, every session this machine's and none
-    /// started in blirp, no wiki pages or resources, and only unpinned
-    /// distiller records and distiller brief versions. Sessions and records
-    /// move to Home; the project is soft-deleted, so every change replicates.
-    /// Returns the names of the merged projects.
+    /// folders or brief. Only projects that show no sign of the user:
+    /// created by resolution and never renamed or merged into (`updated_at
+    /// = created_at`; registered ones start one higher), named after their
+    /// folder, at least one session and every session this machine's and
+    /// not started in blirp, every folder on this machine, not git with a
+    /// remote (another machine may have joined it by that remote) and
+    /// matched by `dirs`, no wiki pages or resources, and only unpinned
+    /// distiller records and distiller brief versions. Sessions, records and
+    /// suggestions move to Home; the project is soft-deleted, so every
+    /// change replicates. Returns the merged projects (as they were).
     pub fn retire_non_projects(
         &self,
         machine_id: &str,
         machine_name: &str,
         dirs: &NonProjectDirs,
-    ) -> Result<Vec<String>> {
+    ) -> Result<Vec<Project>> {
         self.write(|tx| {
             let home_id: Option<String> = one(
                 tx,
@@ -592,8 +649,9 @@ impl Store {
                 "SELECT p.* FROM projects p
                  WHERE p.deleted = 0 AND p.updated_at = p.created_at AND p.id != ?2
                    AND EXISTS (SELECT 1 FROM project_paths pp WHERE pp.project_id = p.id)
-                   AND NOT EXISTS (SELECT 1 FROM project_paths pp
-                                   WHERE pp.project_id = p.id AND pp.machine_id != ?1)
+                   AND EXISTS (SELECT 1 FROM sessions s WHERE s.project_id = p.id)
+                   AND NOT EXISTS (SELECT 1 FROM project_paths pp WHERE pp.project_id = p.id
+                                   AND (pp.machine_id != ?1 OR pp.git_remote IS NOT NULL))
                    AND NOT EXISTS (SELECT 1 FROM sessions s WHERE s.project_id = p.id
                                    AND (s.machine_id != ?1 OR s.origin != 'external'))
                    AND NOT EXISTS (SELECT 1 FROM records r WHERE r.project_id = p.id
@@ -613,15 +671,19 @@ impl Store {
                     params![p.id],
                     path_row,
                 )?;
-                if !paths
+                let named_after = paths
                     .iter()
-                    .all(|pp| dirs.contains(&normalize(Path::new(&pp.path))))
+                    .any(|pp| folder_name(Path::new(&pp.path)) == p.name);
+                if !named_after
+                    || !paths
+                        .iter()
+                        .all(|pp| dirs.contains(&normalize(Path::new(&pp.path))))
                 {
                     continue;
                 }
                 let home = home_project(tx, machine_name)?;
-                merge_in(tx, &p.id, &home.id, false)?;
-                retired.push(p.name);
+                merge_in(tx, &p.id, &home.id, true)?;
+                retired.push(p);
             }
             Ok(retired)
         })
@@ -639,15 +701,15 @@ impl Store {
     }
 }
 
-/// See [`Store::merge_projects`]; `move_paths = false` leaves `from`'s
-/// folders behind (they go with the deleted project).
-fn merge_in(tx: &Transaction<'_>, from: &str, into: &str, move_paths: bool) -> Result<Project> {
+/// See [`Store::merge_projects`]; `retire` leaves `from`'s folders (they go
+/// with the deleted project) and brief behind.
+fn merge_in(tx: &Transaction<'_>, from: &str, into: &str, retire: bool) -> Result<Project> {
     let mut src = live_project_in(tx, from)?;
     let mut dst = live_project_in(tx, into)?;
     let now = crate::now_ms();
     let mut changes = Vec::new();
     // Folders left behind are dropped with the deleted project.
-    if move_paths {
+    if !retire {
         for mut pp in all(
             tx,
             "SELECT * FROM project_paths WHERE project_id = ?1",
@@ -711,9 +773,11 @@ fn merge_in(tx: &Transaction<'_>, from: &str, into: &str, move_paths: bool) -> R
         w.updated_at = now;
         changes.push(Change::WikiPage(w));
     }
-    let dst_brief = super::memory::get_brief_in(tx, into)?;
-    if let (None, Some(b)) = (dst_brief, super::memory::get_brief_in(tx, from)?) {
-        super::memory::put_brief_in(tx, into, &b.body_md, &b.updated_by)?;
+    if !retire {
+        let dst_brief = super::memory::get_brief_in(tx, into)?;
+        if let (None, Some(b)) = (dst_brief, super::memory::get_brief_in(tx, from)?) {
+            super::memory::put_brief_in(tx, into, &b.body_md, &b.updated_by)?;
+        }
     }
     for c in &changes {
         apply_in(tx, c)?;
@@ -744,7 +808,7 @@ fn home_project(tx: &Transaction<'_>, machine_name: &str) -> Result<Project> {
     {
         return Ok(p);
     }
-    let p = new_project(tx, &format!("Home ({machine_name})"))?;
+    let p = new_project(tx, &format!("Home ({machine_name})"), false)?;
     tx.execute(
         "INSERT INTO settings(key, value_json) VALUES (?1, ?2)
          ON CONFLICT(key) DO UPDATE SET value_json = excluded.value_json",
@@ -764,8 +828,7 @@ mod tests {
     fn launch(home: &Path) -> NonProjectDirs {
         NonProjectDirs {
             home: Some(home.to_path_buf()),
-            scratch: Vec::new(),
-            auto: false,
+            ..NonProjectDirs::default()
         }
     }
 
@@ -797,7 +860,7 @@ mod tests {
             // A folder that no longer exists behaves the same.
             let gone = s.join("gone");
             let r = store
-                .resolve_project_lenient("m", "box", &gone, &dirs)
+                .resolve_project_lenient("m", "box", &gone, None, &dirs)
                 .unwrap();
             assert!(r.is_home && !r.created, "{}", gone.display());
         }
@@ -837,11 +900,31 @@ mod tests {
     }
 
     #[test]
+    fn redirected_documents_and_normalized_paths() {
+        let (_d, _store, root, mut dirs) = auto_env();
+        let chat = root.join("cloud/Documents/Codex/2026-01-02/chat");
+        assert!(!dirs.contains(&chat));
+        dirs.documents.push(root.join("cloud/Documents"));
+        assert!(dirs.contains(&chat));
+        assert!(!dirs.contains(&root.join("cloud/Documents/Codex")));
+        assert!(!dirs.contains(&root.join("cloud/Documents/Game")));
+
+        let n = normalize(&root.join("a/b/../c/./d/"));
+        assert_eq!(n, root.join("a/c/d"));
+        #[cfg(unix)]
+        {
+            let p = NonProjectDirs::from_process();
+            assert!(p.contains(Path::new("/tmp/agent/run")));
+            assert!(p.contains(Path::new("/var/tmp/agent")));
+        }
+    }
+
+    #[test]
     fn missing_folders_in_other_spellings_resolve_to_one_project() {
         let (_d, store, root, dirs) = auto_env();
         let gone = root.join("home/old-project");
         let first = store
-            .resolve_project_lenient("m", "box", &gone, &dirs)
+            .resolve_project_lenient("m", "box", &gone, None, &dirs)
             .unwrap();
         assert!(first.created);
         let s = gone.display().to_string();
@@ -855,7 +938,7 @@ mod tests {
         }
         for sp in spellings {
             let r = store
-                .resolve_project_lenient("m", "box", Path::new(&sp), &dirs)
+                .resolve_project_lenient("m", "box", Path::new(&sp), None, &dirs)
                 .unwrap();
             assert_eq!(r.project.id, first.project.id, "{sp}");
             assert!(!r.created);
@@ -908,7 +991,48 @@ mod tests {
         let launched = make("tmp/launched");
         let foreign_session = make("tmp/foreign-session");
         let real = make("home/code/app");
+        let no_session = make("tmp/no-session");
+        let remote = make("tmp/remote");
+        // Another machine may have joined a project by its remote.
+        let mut pp = store.project_paths(&remote.id).unwrap().remove(0);
+        pp.git_remote = Some("example.com/acme/app".into());
+        store.apply(Change::ProjectPath(pp)).unwrap();
+        // Registered by the user (Add folder): marked, never retired.
+        std::fs::create_dir_all(root.join("tmp/added")).unwrap();
+        let added = store
+            .register_project("m", &root.join("tmp/added"), None)
+            .unwrap();
+        assert_eq!(added.updated_at, added.created_at + 1);
+        // Not named after its folder (e.g. created under another name).
+        let odd = make("tmp/odd");
+        let mut odd_row = store.get_project(&odd.id).unwrap().unwrap();
+        odd_row.name = "Other".into();
+        store
+            .write(|tx| {
+                tx.execute(
+                    "UPDATE projects SET name = ?1 WHERE id = ?2",
+                    params![odd_row.name, odd_row.id],
+                )?;
+                Ok(())
+            })
+            .unwrap();
         store.set_replication(true).unwrap();
+        for (i, p) in [
+            &renamed,
+            &user_record,
+            &pinned,
+            &user_brief,
+            &remote,
+            &added,
+            &odd,
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            store
+                .insert_session(&external(&format!("k{i}"), &p.id, "m"))
+                .unwrap();
+        }
 
         store
             .insert_session(&external("s1", &chat.id, "m"))
@@ -939,7 +1063,12 @@ mod tests {
             .unwrap();
         let before = store.outbox_head().unwrap();
 
-        let mut retired = store.retire_non_projects("m", "box", &launch_dirs).unwrap();
+        let mut retired: Vec<String> = store
+            .retire_non_projects("m", "box", &launch_dirs)
+            .unwrap()
+            .into_iter()
+            .map(|p| p.name)
+            .collect();
         retired.sort();
         assert_eq!(retired, ["chat", "run"]);
         let home = store.home_project_id().unwrap().unwrap();
@@ -958,6 +1087,8 @@ mod tests {
         assert_eq!(moved.len(), 2);
         let recs = store.list_records(&home, &Default::default()).unwrap();
         assert_eq!(recs.len(), 1);
+        // The retired projects' briefs stay behind.
+        assert!(store.get_brief(&home).unwrap().is_none());
         for kept in [
             &renamed,
             &user_record,
@@ -966,6 +1097,10 @@ mod tests {
             &launched,
             &foreign_session,
             &real,
+            &no_session,
+            &remote,
+            &added,
+            &odd,
         ] {
             assert!(!store.get_project(&kept.id).unwrap().unwrap().deleted);
         }
@@ -978,6 +1113,18 @@ mod tests {
         assert!(has("projects", &chat.id) && has("projects", &tmp.id));
         assert!(has("sessions", "s1") && has("sessions", "s2"));
         assert!(has("records", "r1"));
+
+        // A session resolved before the cleanup cannot land in a retired
+        // project; its caller resolves again.
+        assert!(matches!(
+            store.insert_session(&external("late", &chat.id, "m")),
+            Err(StoreError::Conflict(_))
+        ));
+        // Sessions already there stay writable.
+        store.delete_project(&real.id).unwrap();
+        let mut s5 = store.get_session("s5").unwrap().unwrap();
+        s5.title = Some("still writable".into());
+        store.apply(Change::Session(s5)).unwrap();
 
         // Idempotent.
         assert!(
@@ -1102,6 +1249,55 @@ mod tests {
         assert_eq!(c.project.id, r.project.id);
         assert!(!c.created);
         assert_eq!(store.project_paths(&r.project.id).unwrap().len(), 2);
+    }
+
+    #[test]
+    fn codex_worktrees_resolve_to_their_repo() {
+        if !git::is_installed() {
+            eprintln!("git missing; skipping");
+            return;
+        }
+        let (_d, store, root, dirs) = auto_env();
+        let repo = root.join("home/code/app");
+        std::fs::create_dir_all(&repo).unwrap();
+        run_git(&repo, &["init"]);
+        run_git(
+            &repo,
+            &[
+                "remote",
+                "add",
+                "origin",
+                "https://example.com/acme/app.git",
+            ],
+        );
+        std::fs::write(repo.join("a.txt"), "a").unwrap();
+        run_git(&repo, &["add", "."]);
+        run_git(&repo, &["commit", "-m", "init"]);
+        let wt = root.join("home/.codex/worktrees/abcd/app");
+        std::fs::create_dir_all(wt.parent().unwrap()).unwrap();
+        git::worktree_add(&repo, &wt, "codex/x").unwrap();
+
+        let r = store.resolve_project_with("m", "box", &wt, &dirs).unwrap();
+        assert!(r.created && !r.is_home);
+        assert_eq!(r.root, repo);
+
+        // Gone: the transcript's remote finds the repo's project.
+        let gone = root.join("home/.codex/worktrees/ef01/app");
+        let g = store
+            .resolve_project_lenient(
+                "m",
+                "box",
+                &gone,
+                Some("git@example.com:acme/app.git"),
+                &dirs,
+            )
+            .unwrap();
+        assert_eq!(g.project.id, r.project.id);
+        // Without one it is scratch.
+        let h = store
+            .resolve_project_lenient("m", "box", &gone, None, &dirs)
+            .unwrap();
+        assert!(h.is_home);
     }
 
     #[test]
