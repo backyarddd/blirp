@@ -48,7 +48,7 @@ These appear only for files downloaded with a browser: macOS quarantines them an
 
 `blirp logs` prints the daemon log from the terminal. For more detail start the daemon with `BLIRP_LOG=debug` (or e.g. `BLIRP_LOG=info,blirp::ingest=debug`). Logs never contain transcript text, so they are safe to attach to an issue after a quick look.
 
-Lines that can repeat for as long as a problem lasts (mDNS and relay retries, the hub connection, the status tick, keep-awake, the ingest and distill schedulers) are logged the first time and then at most once every 10 minutes, with `(N identical lines suppressed in the last 10 min)` appended. A different message is always logged.
+Warnings and errors that can repeat for as long as a problem lasts (mDNS and relay retries, the hub connection, the status tick, keep-awake, the ingest and distill schedulers) are logged the first time and then at most once every 10 minutes, with `(N identical lines suppressed in the last 10 min)` appended. A different message, and every info line, is always logged.
 
 ## The daemon does not start
 

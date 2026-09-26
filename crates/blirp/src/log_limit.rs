@@ -3,11 +3,13 @@
 //! Some sources log the same line forever: iroh's mDNS (swarm-discovery)
 //! logs "error sending mDNS: No route to host" several times a second when
 //! macOS denies blirp the Local Network permission, and retry loops or the
-//! status tick repeat one failure for as long as it lasts. For the targets
-//! in [`LIMITED_TARGETS`], a line (target, level, message and fields) seen
-//! within the last [`WINDOW`] is dropped and counted; the first one after
-//! the window is logged with the count appended. Every other line, and each
-//! distinct line of a limited target, is logged as before.
+//! status tick repeat one failure for as long as it lasts. For warnings and
+//! errors of the targets in [`LIMITED_TARGETS`], a line (target, level,
+//! message and fields) seen within the last [`WINDOW`] is dropped and
+//! counted; the first one after the window is logged with the count
+//! appended. Info and debug lines (state changes such as "keeping this
+//! machine awake" or "sync endpoint started"), every other target, and each
+//! distinct line are logged as before.
 //!
 //! [`LogLimit`] decides once per event (in `event_enabled`, so the line is
 //! dropped for every output) and hands the count of a line that ends a
@@ -50,8 +52,16 @@ pub const LIMITED_TARGETS: &[&str] = &[
 ];
 
 /// Distinct lines tracked at once. When full, lines whose window passed are
-/// forgotten; a new line that still finds no room is logged untracked.
+/// forgotten (at most one sweep per [`SWEEP_EVERY`]); a new line that finds
+/// no room is logged untracked. A forgotten line loses the count of repeats
+/// dropped before it went quiet; it only matters if it comes back, and then
+/// it is logged at once.
 const MAX_TRACKED: usize = 1024;
+const SWEEP_EVERY: Duration = Duration::from_secs(60);
+
+fn is_limited_level(level: Level) -> bool {
+    level == Level::WARN || level == Level::ERROR
+}
 
 fn is_limited(target: &str) -> bool {
     LIMITED_TARGETS.iter().any(|t| {
@@ -80,6 +90,7 @@ struct Seen {
 #[derive(Default)]
 pub struct Limiter {
     seen: HashMap<(&'static str, Level, String), Seen>,
+    swept_at: Option<Instant>,
 }
 
 impl Limiter {
@@ -100,7 +111,11 @@ impl Limiter {
             s.logged_at = now;
             return Verdict::Log { suppressed };
         }
-        if self.seen.len() >= MAX_TRACKED {
+        let may_sweep = self
+            .swept_at
+            .is_none_or(|t| now.saturating_duration_since(t) >= SWEEP_EVERY);
+        if self.seen.len() >= MAX_TRACKED && may_sweep {
+            self.swept_at = Some(now);
             self.seen
                 .retain(|_, s| now.saturating_duration_since(s.logged_at) < WINDOW);
         }
@@ -162,7 +177,7 @@ impl LogLimit {
 impl<S: Subscriber> Layer<S> for LogLimit {
     fn event_enabled(&self, event: &Event<'_>, _ctx: Context<'_, S>) -> bool {
         let meta = event.metadata();
-        if !is_limited(meta.target()) {
+        if !is_limited_level(*meta.level()) || !is_limited(meta.target()) {
             PENDING.set((0, 0));
             return true;
         }
@@ -298,12 +313,36 @@ mod tests {
         // Full and nothing expired: logged, and logged again (untracked).
         assert_eq!(check(&mut l, "new", t0), Verdict::Log { suppressed: 0 });
         assert_eq!(check(&mut l, "new", t0), Verdict::Log { suppressed: 0 });
-        // Once the window passed, old lines make room.
+        // Once the window passed, old lines make room (the last sweep was
+        // over a minute ago).
         assert_eq!(
             check(&mut l, "new", t0 + WINDOW),
             Verdict::Log { suppressed: 0 }
         );
         assert_eq!(check(&mut l, "new", t0 + WINDOW), Verdict::Drop);
+        // Refill with lines logged at t0 + WINDOW; the next sweep waits a minute.
+        for i in 0..MAX_TRACKED - 1 {
+            check(&mut l, &format!("b{i}"), t0 + WINDOW);
+        }
+        let later = t0 + WINDOW * 2;
+        assert_eq!(check(&mut l, "c", later), Verdict::Log { suppressed: 0 });
+        assert_eq!(l.swept_at, Some(later));
+        assert_eq!(check(&mut l, "c", later), Verdict::Drop);
+        // Full again within the minute: no sweep, the extra line is untracked.
+        for i in 0..MAX_TRACKED {
+            check(&mut l, &format!("d{i}"), later);
+        }
+        let d = format!("d{}", MAX_TRACKED - 1);
+        assert_eq!(
+            check(&mut l, &d, later + Duration::from_secs(30)),
+            Verdict::Log { suppressed: 0 }
+        );
+        assert_eq!(l.swept_at, Some(later));
+        assert_eq!(l.seen.len(), MAX_TRACKED);
+        // A minute on and every line expired: one sweep frees the table.
+        let next = later + WINDOW;
+        assert_eq!(check(&mut l, "e", next), Verdict::Log { suppressed: 0 });
+        assert_eq!(l.seen.len(), 1);
     }
 
     #[test]
@@ -363,6 +402,8 @@ mod tests {
             }
             tracing::warn!(target: "blirp::api", "not limited");
             tracing::warn!(target: "blirp::api", "not limited");
+            tracing::info!(target: "blirp::keep_awake", "state change");
+            tracing::info!(target: "blirp::keep_awake", "state change");
             *now.lock().unwrap() = t0 + WINDOW;
             tracing::warn!(target: "swarm_discovery::socket", "error sending mDNS: {}", "No route to host");
         });
@@ -374,6 +415,8 @@ mod tests {
                 " WARN swarm_discovery::socket: error sending mDNS: No route to host",
                 " WARN blirp::api: not limited",
                 " WARN blirp::api: not limited",
+                " INFO blirp::keep_awake: state change",
+                " INFO blirp::keep_awake: state change",
                 " WARN swarm_discovery::socket: error sending mDNS: No route to host (3 identical lines suppressed in the last 10 min)",
             ],
             "{text}"
