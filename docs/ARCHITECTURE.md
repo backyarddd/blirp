@@ -347,7 +347,7 @@ Current project = `BLIRP_PROJECT_ID` env, else the registered project containing
 
 ## 10. Sync (`blirp-sync`)
 
-Roles: `standalone` (default), `hub`, `node`. Transport: iroh 1.x (QUIC, NAT traversal, relay fallback). `sync.relay`: `default` = n0 relays plus n0 DNS address publishing/lookup (peers are found by id alone), `disabled` = direct addresses only, `<url>` = that relay only. Local-network discovery (mDNS, service `blirp`) is always on; hubs advertise the user data `blirp-hub`. ALPNs: `blirp/pair/1`, `blirp/sync/1`, `blirp/proxy/1`. One accept loop routes by ALPN: a hub accepts pairing from anyone and sync/proxy only from paired, non-revoked machines (`devices` kind `machine`, matched on the TLS-authenticated endpoint id); a node accepts proxy only from its hub. Standalone machines open no endpoint at all.
+Roles: `standalone` (default), `hub`, `node`. Transport: iroh 1.x (QUIC, NAT traversal, relay fallback). `sync.relay`: `default` = n0 relays plus n0 DNS address publishing/lookup (peers are found by id alone), `disabled` = direct addresses only, `<url>` = that relay only. Local-network discovery (mDNS, service `blirp`) is on unless `sync.lan_discovery = false` (then a join without an invite answers 400 `invite_required`; changing it restarts a running endpoint); hubs advertise the user data `blirp-hub`. ALPNs: `blirp/pair/1`, `blirp/sync/1`, `blirp/proxy/1`. One accept loop routes by ALPN: a hub accepts pairing from anyone and sync/proxy only from paired, non-revoked machines (`devices` kind `machine`, matched on the TLS-authenticated endpoint id); a node accepts proxy only from its hub. Standalone machines open no endpoint at all.
 
 Wire format (all three protocols): frames of a 4-byte big-endian length + JSON. JSON because replicated payloads are already JSON and stay debuggable. Frames are size-checked before reading (8 MiB hard cap, 64 KiB for handshake/control frames). Each protocol opens with a hello carrying the sender's `versions`; the receiver picks the highest common version or answers `unsupported_version` (current: 1).
 
@@ -504,6 +504,7 @@ The loopback listener answers only requests whose `Host` is `127.0.0.1:<port>`, 
            allow_hub_control = false   # node: accept control relayed by the hub; set by the join dialog
                                        # (unchecked by default) or Settings; reset when leaving the hub;
                                        # changing it closes relayed WebSockets so they reopen with the new rights
+           lan_discovery = true        # mDNS on the LAN (§10); macOS needs the Local Network permission
 [portal]   lan = false          # hub: serve portal on LAN with HTTPS
            lan_port = 47771
 [update]   check = true         # GET /api/update may ask GitHub for the latest release

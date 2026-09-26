@@ -49,6 +49,8 @@ pub struct StartOptions {
     pub secret: SecretKey,
     /// `default`, `disabled` or a relay URL (§12).
     pub relay: String,
+    /// mDNS on the local network (`sync.lan_discovery`).
+    pub lan_discovery: bool,
     pub store: Arc<Store>,
     /// This machine's row; its id is the endpoint id.
     pub machine: Machine,
@@ -130,11 +132,12 @@ impl std::fmt::Debug for SyncService {
     }
 }
 
-/// Bind an endpoint with this machine's identity, relay mode and LAN
-/// discovery. Hubs mark themselves in mDNS so nodes can find them.
+/// Bind an endpoint with this machine's identity, relay mode and, when
+/// `lan_discovery` is on, mDNS. Hubs mark themselves so nodes can find them.
 async fn bind(
     secret: &SecretKey,
     relay: &str,
+    lan_discovery: bool,
     alpns: Vec<Vec<u8>>,
     hub: bool,
 ) -> Result<(Endpoint, Option<MdnsAddressLookup>)> {
@@ -152,18 +155,22 @@ async fn bind(
     }
     .secret_key(secret.clone())
     .alpns(alpns);
-    let mdns = match MdnsAddressLookup::builder()
-        .service_name(MDNS_SERVICE)
-        .build(secret.public())
-    {
-        Ok(m) => {
-            builder = builder.address_lookup(m.clone());
-            Some(m)
+    let mdns = if lan_discovery {
+        match MdnsAddressLookup::builder()
+            .service_name(MDNS_SERVICE)
+            .build(secret.public())
+        {
+            Ok(m) => {
+                builder = builder.address_lookup(m.clone());
+                Some(m)
+            }
+            Err(e) => {
+                tracing::warn!(error = %e, "local network discovery unavailable");
+                None
+            }
         }
-        Err(e) => {
-            tracing::warn!(error = %e, "local network discovery unavailable");
-            None
-        }
+    } else {
+        None
     };
     if hub {
         let marker = HUB_MARKER
@@ -190,7 +197,7 @@ impl SyncService {
         } else {
             vec![ALPN_PROXY.to_vec()]
         };
-        let (ep, _mdns) = bind(&opts.secret, &opts.relay, alpns, hub).await?;
+        let (ep, _mdns) = bind(&opts.secret, &opts.relay, opts.lan_discovery, alpns, hub).await?;
         let own_id = ep.id().to_string();
         if own_id != opts.machine.id {
             return Err(SyncError::Bind(format!(
@@ -342,17 +349,19 @@ impl SyncService {
 }
 
 /// Pair this machine with a hub using a temporary endpoint. Without an
-/// invite, the only hub advertising itself on the LAN is used.
+/// invite, the only hub advertising itself on the LAN is used (which needs
+/// `lan_discovery`).
 pub async fn join(
     secret: &SecretKey,
     relay: &str,
+    lan_discovery: bool,
     invite: Option<&str>,
     code: &str,
     me: MachineMeta,
 ) -> Result<Joined> {
     pair::normalize_code(code)?;
     let ticket = invite.map(Ticket::decode).transpose()?;
-    let (ep, mdns) = bind(secret, relay, Vec::new(), false).await?;
+    let (ep, mdns) = bind(secret, relay, lan_discovery, Vec::new(), false).await?;
     let result = async {
         let (addr, invite_id) = match ticket {
             Some(t) => (t.addr, Some(t.invite_id)),

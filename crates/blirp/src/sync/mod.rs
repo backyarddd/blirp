@@ -115,6 +115,21 @@ pub(crate) async fn apply_portal_config(s: &SharedState) -> ApiResult<()> {
         .map_err(|e| portal_failed(&e))
 }
 
+/// `sync.lan_discovery` changed: restart a running sync endpoint so mDNS
+/// starts or stops now, not at the next daemon start. Like at daemon start,
+/// a failure is logged and shows in the sync status; the config is kept.
+pub(crate) async fn apply_discovery_config(s: &SharedState) {
+    let _guard = s.sync.transition.lock().await;
+    if s.sync.service().is_none() {
+        return;
+    }
+    stop_service(s).await;
+    if let Err(e) = start_service(s).await {
+        tracing::error!(error = %e.message, "sync did not restart");
+        emit_status(s);
+    }
+}
+
 /// The LAN portal could not start (port taken, certificate); the config
 /// that asked for it is kept.
 fn portal_failed(e: &anyhow::Error) -> ApiError {
@@ -208,6 +223,7 @@ async fn start_service(state: &SharedState) -> ApiResult<()> {
     let svc = SyncService::start(blirp_sync::StartOptions {
         secret: state.sync.identity()?,
         relay: config.sync.relay.clone(),
+        lan_discovery: config.sync.lan_discovery,
         store: state.store.clone(),
         machine: Machine {
             role: config.sync.role,
@@ -424,9 +440,17 @@ async fn join(
         None => (body.invite, body.code),
     };
     let invite = Some(invite.trim().to_string()).filter(|i| !i.is_empty());
+    if invite.is_none() && !config.sync.lan_discovery {
+        return Err(ApiError::new(
+            StatusCode::BAD_REQUEST,
+            "invite_required",
+            "LAN discovery is off (sync.lan_discovery = false); pair with the hub's invite",
+        ));
+    }
     let joined = blirp_sync::service::join(
         &s.sync.identity()?,
         &config.sync.relay,
+        config.sync.lan_discovery,
         invite.as_deref(),
         &code,
         MachineMeta {

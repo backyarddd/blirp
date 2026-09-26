@@ -4,7 +4,7 @@
 
 `~/.blirp/config.toml` (`$BLIRP_HOME/config.toml`). The daemon writes a file with all defaults on first start. Every section and key is optional; missing keys take their default. Unknown keys and invalid values are errors: the daemon refuses to start and names the key (`blirp doctor` shows the same message).
 
-When the UI saves settings (**Settings**, `PATCH /api/settings`) it validates the whole config and rewrites the file: comments you added are not kept. Hand edits take effect when the daemon restarts; the daemon does not watch the file. Changes saved through the UI take effect immediately for `[agents]`, `[sessions]` and `[memory]`; `daemon.port`, `machine.name`, `[sync]` and `[portal]` changes need a daemon restart (the hub and pairing buttons apply role changes themselves).
+When the UI saves settings (**Settings**, `PATCH /api/settings`) it validates the whole config and rewrites the file: comments you added are not kept. Hand edits take effect when the daemon restarts; the daemon does not watch the file. Changes saved through the UI take effect immediately for `[agents]`, `[sessions]` and `[memory]`; `daemon.port`, `machine.name`, `[sync]` and `[portal]` changes need a daemon restart (the hub and pairing buttons apply role changes themselves), except `sync.allow_hub_control` and `sync.lan_discovery`, which apply at once.
 
 ```toml
 [daemon]
@@ -39,6 +39,7 @@ role = "standalone"
 # hub = "<hub endpoint id>"
 relay = "default"
 allow_hub_control = false
+lan_discovery = true
 
 [portal]
 lan = false
@@ -96,7 +97,7 @@ check = true
 
 ### `[sync]`
 
-Normally managed by `blirp hub enable|disable`, `blirp pair` and **Settings > Machines & Sync**. Edit by hand only to change `relay`.
+Normally managed by `blirp hub enable|disable`, `blirp pair` and **Settings > Machines & Sync**. Edit by hand only to change `relay` or `lan_discovery`.
 
 | Key | Type | Default | Description |
 |---|---|---|---|
@@ -104,6 +105,7 @@ Normally managed by `blirp hub enable|disable`, `blirp pair` and **Settings > Ma
 | `hub` | string | unset | Endpoint id of the paired hub; required when `role = "node"`. |
 | `relay` | `"default"` \| `"disabled"` \| `http(s)://` URL | `"default"` | How machines find and reach each other: n0 public relays and DNS discovery, direct/LAN only, or only your own iroh relay. See [sync-and-hub.md](sync-and-hub.md#network-relay-and-privacy). |
 | `allow_hub_control` | bool | `false` | Node only: let the hub and other paired machines launch, stop, resume and delete sessions, type into terminals and change memory on this machine. Off: they can only read it. Takes effect immediately. |
+| `lan_discovery` | bool | `true` | Find and announce machines on the local network with mDNS (hub and node). Off: `blirp pair <code>` without an invite does not work, and peers connect through the relay or the addresses they already know. On macOS it needs the Local Network permission ([troubleshooting.md](troubleshooting.md#error-sending-mdns-no-route-to-host-in-the-log-macos)). Also in **Settings > Machines & Sync**; takes effect immediately (a running sync endpoint restarts). |
 
 ### `[portal]`
 

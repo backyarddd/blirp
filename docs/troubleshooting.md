@@ -131,7 +131,7 @@ The daemon, not your shell, looks the agent up on its own `PATH`.
 
 - `blirp hub status` on both sides: role, hub id, connected, pending changes.
 - **Pairing fails** with `wrong_code`, `expired`, `too_many_attempts` or `unknown_invite`: create a new invite (`blirp hub invite`). Invites expire after 10 minutes, after 5 attempts, after one success, and when the hub restarts.
-- **`blirp pair <code>` cannot find the hub**: LAN discovery needs both machines on the same network with mDNS allowed and exactly one hub with one open invite. Use `blirp pair <invite> <code>` instead.
+- **`blirp pair <code>` cannot find the hub**: LAN discovery needs both machines on the same network with mDNS allowed (`sync.lan_discovery` on both, and on macOS the Local Network permission) and exactly one hub with one open invite. Use `blirp pair <invite> <code>` instead.
 - **`sync.relay = "disabled"`** only works when the machines can reach each other directly (same LAN, Tailscale, open UDP). Across NATs use `default` or your own relay.
 - Firewalls must allow UDP for the daemon (QUIC). Corporate networks that block UDP need the relay (`default`), which also carries traffic when no direct path exists.
 - A revoked machine is refused; pair it again with a new invite.

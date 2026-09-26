@@ -185,6 +185,19 @@
     else input.checked = settings.config.sync.allow_hub_control;
   }
 
+  // mDNS on the local network (`sync.lan_discovery`); a running sync endpoint restarts to apply it.
+  let savingDiscovery = $state(false);
+  async function setLanDiscovery(on: boolean, input: HTMLInputElement): Promise<void> {
+    savingDiscovery = true;
+    const s = await app.saveSettings(
+      { config: { ...settings.config, sync: { ...settings.config.sync, lan_discovery: on } } },
+      on ? 'Local network discovery on' : 'Local network discovery off',
+    );
+    savingDiscovery = false;
+    if (s) onsaved(s);
+    else input.checked = settings.config.sync.lan_discovery;
+  }
+
   async function copy(text: string, what: string): Promise<void> {
     try {
       await navigator.clipboard.writeText(text);
@@ -272,6 +285,22 @@
           </p>
         </div>
       {/if}
+      <div class="gap">
+        <label class="check">
+          <input
+            type="checkbox"
+            checked={settings.config.sync.lan_discovery}
+            disabled={!app.admin || savingDiscovery}
+            onchange={(e) => setLanDiscovery(e.currentTarget.checked, e.currentTarget)}
+          />
+          Find machines on the local network
+        </label>
+        <p class="small muted">
+          Uses mDNS while this machine is a hub or node, so <code>blirp pair &lt;code&gt;</code> can find the hub without an
+          invite. On macOS it needs the Local Network permission. When off, pairing needs the invite; paired machines still
+          connect.
+        </p>
+      </div>
       {#if app.admin && status.role === 'hub'}
         <button type="button" class="btn sm danger gap" onclick={disableHub} disabled={busy}>Disable hub</button>
       {:else if app.admin && status.role === 'node'}

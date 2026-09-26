@@ -174,6 +174,10 @@ pub struct SyncConfig {
     /// resume, stop, terminal input and other changes). Off by default:
     /// the hub and other paired machines can only read.
     pub allow_hub_control: bool,
+    /// Find and announce machines on the local network over mDNS (hub, node
+    /// and `blirp pair <code>` without an invite). Off: pairing needs the
+    /// invite, and peers connect through relays or the addresses they know.
+    pub lan_discovery: bool,
 }
 
 impl Default for SyncConfig {
@@ -183,6 +187,7 @@ impl Default for SyncConfig {
             hub: None,
             relay: "default".into(),
             allow_hub_control: false,
+            lan_discovery: true,
         }
     }
 }
@@ -396,6 +401,7 @@ inject_disabled_agents = ["codex", "custom:mine"]
 role = "node"
 hub = "abc"
 relay = "https://relay.example"
+lan_discovery = false
 [portal]
 lan = true
 lan_port = 9000
@@ -414,6 +420,8 @@ check = false
         let off = parse("[memory]\ninject = false").unwrap();
         assert!(!off.memory.inject_enabled("claude"));
         assert_eq!(c.sync.role, MachineRole::Node);
+        assert!(!c.sync.lan_discovery);
+        assert!(Config::default().sync.lan_discovery);
         assert!(c.portal.lan);
         assert!(!c.update.check);
         assert!(Config::default().update.check);

@@ -129,7 +129,7 @@ Machines talk over QUIC using [iroh](https://iroh.computer): each machine is ide
 | `"disabled"` | No relays and no DNS publishing: only direct addresses and local network discovery. Works on one LAN, or across networks where machines can reach each other directly (e.g. over Tailscale). |
 | `"https://relay.example"` | Only your own [iroh relay](https://github.com/n0-computer/iroh). |
 
-Local network discovery (mDNS, service `blirp`) is always on for hubs and nodes; hubs advertise themselves so `blirp pair <code>` can find them. Relay changes apply after restarting the daemon.
+Local network discovery (mDNS, service `blirp`) is on for hubs and nodes unless `sync.lan_discovery = false`; hubs advertise themselves so `blirp pair <code>` can find them. On macOS it needs the Local Network permission ([troubleshooting.md](troubleshooting.md#error-sending-mdns-no-route-to-host-in-the-log-macos)). Relay changes apply after restarting the daemon; `lan_discovery` changes apply at once.
 
 ### Tailscale
 

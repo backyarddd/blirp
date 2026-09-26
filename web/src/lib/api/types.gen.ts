@@ -804,7 +804,13 @@ relay: string,
  * resume, stop, terminal input and other changes). Off by default:
  * the hub and other paired machines can only read.
  */
-allow_hub_control: boolean, };
+allow_hub_control: boolean, 
+/**
+ * Find and announce machines on the local network over mDNS (hub, node
+ * and `blirp pair <code>` without an invite). Off: pairing needs the
+ * invite, and peers connect through relays or the addresses they know.
+ */
+lan_discovery: boolean, };
 
 export type PortalConfig = { lan: boolean, lan_port: number, };
 
