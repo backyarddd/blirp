@@ -72,7 +72,7 @@ port = 47790   # or 0: a free port at every start
 
 ## "unauthorized" / blank UI in the browser after a restart
 
-The runtime token changes at every daemon start, so a browser tab opened with `blirp open` loses its login when the daemon restarts. Run `blirp open` again. The desktop app logs in again by itself. Bookmarks of `http://127.0.0.1:<port>/` keep working after that: the UI keeps the token in the browser's storage for that address. If your browser blocks site storage for `127.0.0.1`, the login lasts only for the open tab.
+The runtime token changes at every daemon start, so a browser tab opened with `blirp open` loses its login when the daemon restarts. Run `blirp open` again. The desktop app logs in again by itself once the restarted daemon answers: when its window gets focus or is opened again, or when you press **Try again** on its "Sign in required" screen. Bookmarks of `http://127.0.0.1:<port>/` keep working after that: the UI keeps the token in the browser's storage for that address. If your browser blocks site storage for `127.0.0.1`, the login lasts only for the open tab.
 
 ## Windows: ConPTY and terminals
 

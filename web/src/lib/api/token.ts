@@ -29,25 +29,26 @@ const browserEnv = (): TokenEnv => ({ location, history, storage: browserStorage
 
 /**
  * Takes `token` out of the URL fragment (other fragment parameters stay), stores it and replaces
- * the history entry so the token does not stay in the address bar or the back button. Call once,
- * before the first request.
+ * the history entry so the token does not stay in the address bar or the back button. Call before
+ * the first request, and again when the fragment changes. Returns whether a token was taken.
  */
-export function bootstrapToken(env: TokenEnv = browserEnv()): void {
+export function bootstrapToken(env: TokenEnv = browserEnv()): boolean {
   const { hash, pathname, search } = env.location;
-  if (!hash.startsWith('#')) return;
+  if (!hash.startsWith('#')) return false;
   const params = new URLSearchParams(hash.slice(1));
   const token = params.get('token');
-  if (token === null) return;
+  if (token === null) return false;
   params.delete('token');
   const rest = params.toString();
   env.history.replaceState(env.history.state, '', `${pathname}${search}${rest ? `#${rest}` : ''}`);
-  if (!TOKEN.test(token)) return;
+  if (!TOKEN.test(token)) return false;
   memory = token;
   try {
     env.storage()?.setItem(KEY, token);
   } catch {
     // Quota or blocked storage: the in-memory copy serves this page.
   }
+  return true;
 }
 
 /** The runtime token of this origin, or null (portal pages, not signed in). */

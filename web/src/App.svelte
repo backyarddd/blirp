@@ -129,10 +129,11 @@
         <h1>Sign in required</h1>
         <p>
           Open blirp from the desktop app or run <code>blirp open</code> in a terminal. Both sign this browser in; the
-          sign-in ends when the daemon restarts.
+          sign-in ends when the daemon restarts. In the desktop app, Try again signs the window in again.
         </p>
         <p class="muted small">On another device, scan the login QR code from Settings &gt; Machines &amp; Sync on an already signed-in screen.</p>
-        <button class="btn" type="button" onclick={() => app.boot()}>Try again</button>
+        <!-- A reload: the desktop app signs the window in again when a page loads. -->
+        <button class="btn" type="button" onclick={() => location.reload()}>Try again</button>
       {:else}
         <h1>Cannot reach the blirp daemon</h1>
         <p>Start it with <code>blirp daemon</code> (or open the desktop app), then try again.</p>

@@ -32,7 +32,7 @@ describe('token bootstrap', () => {
   it('moves the fragment token into storage and strips it from the URL', () => {
     const storage = memoryStorage();
     const e = env(`#token=${TOKEN}&x=1`, () => storage);
-    bootstrapToken(e);
+    expect(bootstrapToken(e)).toBe(true);
     expect(storage.getItem('blirp.token')).toBe(TOKEN);
     expect(e.replaced).toEqual(['/settings/sync?join=x#x=1']);
     expect(authToken({ storage: () => storage })).toBe(TOKEN);
@@ -47,7 +47,7 @@ describe('token bootstrap', () => {
   it('leaves URLs without a token alone', () => {
     for (const hash of ['', '#', '#section']) {
       const e = env(hash, () => memoryStorage());
-      bootstrapToken(e);
+      expect(bootstrapToken(e)).toBe(false);
       expect(e.replaced).toEqual([]);
     }
   });
@@ -55,7 +55,7 @@ describe('token bootstrap', () => {
   it('strips but never stores a malformed token', () => {
     const storage = memoryStorage();
     const e = env('#token=abc%0D%0AX-Evil:1', () => storage);
-    bootstrapToken(e);
+    expect(bootstrapToken(e)).toBe(false);
     expect(e.replaced).toHaveLength(1);
     expect(storage.getItem('blirp.token')).toBeNull();
     storage.setItem('blirp.token', 'not-a-token');

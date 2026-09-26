@@ -10,7 +10,7 @@
 
 mod daemon;
 
-use blirp_core::paths::Paths;
+use blirp_core::paths::{Paths, RuntimeInfo};
 use serde::Serialize;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
@@ -43,6 +43,10 @@ struct Shell {
     starting: AtomicBool,
     /// Daemon origin (`http://127.0.0.1:<port>`) once known.
     origin: Mutex<Option<String>>,
+    /// Runtime token the window was last signed in with. Every daemon start
+    /// issues a new one, so a different token in runtime.json means the SPA's
+    /// stored token is dead (401, "Sign in required").
+    token: Mutex<Option<String>>,
     /// The bundled loading page, to return to when the daemon must restart.
     local_url: Mutex<Option<Url>>,
     /// SPA route from a deep link, opened once the UI is logged in.
@@ -122,12 +126,7 @@ fn start(app: AppHandle) {
     tauri::async_runtime::spawn(async move {
         let result = daemon::ensure(&shell.paths).await;
         match result {
-            Ok(info) => {
-                *lock(&shell.origin) = Some(info.base_url());
-                shell.set_phase(Phase::Ready);
-                let url = format!("{}/#token={}", info.base_url(), info.token);
-                navigate(&app, &url);
-            }
+            Ok(info) => sign_in(&app, &shell, &info),
             Err(e) => {
                 tracing::error!(error = format!("{e:#}"), "daemon start failed");
                 shell.set_phase(Phase::Failed {
@@ -139,6 +138,81 @@ fn start(app: AppHandle) {
         }
         shell.starting.store(false, Ordering::SeqCst);
     });
+}
+
+/// Where to sign the window in to `info`'s daemon: the SPA route it shows
+/// (kept across a daemon restart), else the start page. The SPA takes the
+/// token out of the fragment and keeps the rest of the URL.
+fn login_url(info: &RuntimeInfo, route: Option<&Url>) -> String {
+    let (path, query) = route.map_or(("/", None), |u| (u.path(), u.query()));
+    let query = query.map(|q| format!("?{q}")).unwrap_or_default();
+    format!("{}{path}{query}#token={}", info.base_url(), info.token)
+}
+
+/// Whether the window, signed in to `origin` with `token`, is signed in to
+/// the daemon `info` describes.
+fn signed_in_to(origin: Option<&str>, token: Option<&str>, info: &RuntimeInfo) -> bool {
+    origin == Some(info.base_url().as_str()) && token == Some(info.token.as_str())
+}
+
+/// Log the window in to a healthy daemon, keeping the SPA route it shows.
+fn sign_in(app: &AppHandle, shell: &Shell, info: &RuntimeInfo) {
+    let route = app
+        .get_webview_window(MAIN)
+        .and_then(|w| w.url().ok())
+        .filter(|u| shell.is_daemon_url(u));
+    let url = login_url(info, route.as_ref());
+    *lock(&shell.origin) = Some(info.base_url());
+    *lock(&shell.token) = Some(info.token.clone());
+    shell.set_phase(Phase::Ready);
+    navigate(app, &url);
+}
+
+/// Sign the window in again when the daemon restarted since it was signed in
+/// (`blirp update`, `blirp stop` and a new start, a crash the autostart
+/// service recovered): the new daemon is healthy but has a new token, so the
+/// SPA would stay on "Sign in required". Runs on focus, reopen and page loads
+/// (the SPA's "Try again" reloads), so it reads runtime.json first and only
+/// asks the daemon when that changed.
+async fn refresh_sign_in(app: &AppHandle, shell: &Shell) {
+    if shell.starting.load(Ordering::SeqCst) {
+        return;
+    }
+    let on_ui = app
+        .get_webview_window(MAIN)
+        .and_then(|w| w.url().ok())
+        .is_some_and(|u| shell.is_daemon_url(&u));
+    // The loading page belongs to `start`, which signs in when it is done.
+    if !on_ui {
+        return;
+    }
+    let current = |info: &RuntimeInfo| {
+        signed_in_to(
+            lock(&shell.origin).as_deref(),
+            lock(&shell.token).as_deref(),
+            info,
+        )
+    };
+    match RuntimeInfo::read(&shell.paths) {
+        Ok(Some(info)) if !current(&info) => {}
+        // Same daemon, or none (stopped: the SPA says it cannot reach it).
+        Ok(_) => return,
+        Err(e) => {
+            tracing::warn!(error = %e, "unreadable runtime.json");
+            return;
+        }
+    }
+    // runtime.json is written before the daemon answers; wait for health.
+    let Some(info) = daemon::probe(&shell.paths).await else {
+        return;
+    };
+    if !current(&info) && !shell.starting.load(Ordering::SeqCst) {
+        tracing::info!(
+            port = info.port,
+            "daemon restarted; signing the window in again"
+        );
+        sign_in(app, shell, &info);
+    }
 }
 
 fn navigate(app: &AppHandle, url: &str) {
@@ -175,7 +249,8 @@ fn show_window(app: &AppHandle) {
     }
 }
 
-/// Tray "Open" / reopen: show the window and restart the daemon if it died.
+/// Tray "Open" / reopen: show the window, restart the daemon if it died and
+/// sign in again if it restarted.
 fn reopen(app: &AppHandle) {
     show_window(app);
     let app = app.clone();
@@ -190,6 +265,8 @@ fn reopen(app: &AppHandle) {
         if on_local || daemon::probe(&shell.paths).await.is_none() {
             show_local_page(&app, &shell);
             start(app);
+        } else {
+            refresh_sign_in(&app, &shell).await;
         }
     });
 }
@@ -249,6 +326,9 @@ fn on_page_loaded(win: &WebviewWindow, url: &Url) {
         return;
     }
     tracing::info!(path = url.path(), "ui loaded");
+    let app = win.app_handle().clone();
+    let check = shell.clone();
+    tauri::async_runtime::spawn(async move { refresh_sign_in(&app, &check).await });
     let pending = lock(&shell.pending_route).take();
     if let (Some(route), Some(origin)) = (pending, lock(&shell.origin).clone()) {
         navigate(win.app_handle(), &format!("{origin}{route}"));
@@ -384,6 +464,7 @@ pub fn run() -> anyhow::Result<()> {
         phase: Mutex::new(Phase::Starting),
         starting: AtomicBool::new(false),
         origin: Mutex::new(None),
+        token: Mutex::new(None),
         local_url: Mutex::new(None),
         pending_route: Mutex::new(None),
         tray_status: Mutex::new(None),
@@ -465,13 +546,25 @@ pub fn run() -> anyhow::Result<()> {
             Ok(())
         })
         .on_window_event(|window, event| {
-            // Closing the window hides it; the daemon, its sessions and the
-            // tray stay. Tray "Quit" ends everything.
-            if let tauri::WindowEvent::CloseRequested { api, .. } = event
-                && window.label() == MAIN
-            {
-                api.prevent_close();
-                let _ = window.hide();
+            if window.label() != MAIN {
+                return;
+            }
+            match event {
+                // Closing the window hides it; the daemon, its sessions and
+                // the tray stay. Tray "Quit" ends everything.
+                tauri::WindowEvent::CloseRequested { api, .. } => {
+                    api.prevent_close();
+                    let _ = window.hide();
+                }
+                // E.g. back from the terminal that ran `blirp update`.
+                tauri::WindowEvent::Focused(true) => {
+                    let app = window.app_handle().clone();
+                    tauri::async_runtime::spawn(async move {
+                        let shell = app.state::<Arc<Shell>>().inner().clone();
+                        refresh_sign_in(&app, &shell).await;
+                    });
+                }
+                _ => {}
             }
         })
         .build(tauri::generate_context!())?;
@@ -522,6 +615,44 @@ mod tests {
         assert_eq!(join_route(&u("blirp://join/a/b")), None);
         assert_eq!(join_route(&u("blirp://evil/x")), None);
         assert_eq!(join_route(&u("https://join/x")), None);
+    }
+
+    fn runtime(port: u16, token: &str) -> RuntimeInfo {
+        RuntimeInfo {
+            pid: 1,
+            port,
+            token: token.into(),
+            version: "0.1.0".into(),
+            started_at: 0,
+        }
+    }
+
+    #[test]
+    fn restarted_daemon_needs_a_new_sign_in() {
+        let (a, b) = ("a".repeat(64), "b".repeat(64));
+        let o = Some("http://127.0.0.1:47770");
+        assert!(signed_in_to(o, Some(&a), &runtime(47770, &a)));
+        // Restart: same port, new token.
+        assert!(!signed_in_to(o, Some(&a), &runtime(47770, &b)));
+        // Restart on another port.
+        assert!(!signed_in_to(o, Some(&a), &runtime(47771, &a)));
+        // Never signed in.
+        assert!(!signed_in_to(None, None, &runtime(47770, &a)));
+    }
+
+    #[test]
+    fn sign_in_keeps_the_route() {
+        let t = "c".repeat(64);
+        let info = runtime(47771, &t);
+        assert_eq!(
+            login_url(&info, None),
+            format!("http://127.0.0.1:47771/#token={t}")
+        );
+        let route = Url::parse("http://127.0.0.1:47770/settings/sync?join=x#y").unwrap();
+        assert_eq!(
+            login_url(&info, Some(&route)),
+            format!("http://127.0.0.1:47771/settings/sync?join=x#token={t}")
+        );
     }
 
     #[test]

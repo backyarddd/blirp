@@ -108,6 +108,14 @@ test.afterAll(async () => {
 test('rejects a missing login, then signs in with /#token= and keeps no cookie', async () => {
   await page.goto(`${env.url}/`);
   await expect(page.getByRole('heading', { name: 'Sign in required' })).toBeVisible();
+  // The desktop app signs its window in again after a daemon restart by setting `#token=` on the
+  // page it shows, which does not reload it.
+  await page.evaluate((t) => {
+    location.hash = `token=${t}`;
+  }, env.token);
+  await expect(page.getByRole('heading', { name: 'Pick a session' })).toBeVisible();
+  await expect(page).toHaveURL(`${env.url}/`);
+  await page.evaluate(() => localStorage.clear());
   // An old `/auth?token=` link still works: it forwards to the fragment and sets no cookie.
   await page.goto(`${env.url}/auth?token=${env.token}`);
   await expect(page).toHaveURL(`${env.url}/`); // fragment read and stripped
