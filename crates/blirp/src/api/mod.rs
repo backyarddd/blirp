@@ -205,6 +205,33 @@ impl From<StoreError> for ApiError {
     }
 }
 
+/// WebSocket close code and reason when a stream is done (§6): the
+/// terminal's process exited.
+pub(crate) const WS_DONE: (u16, &str) = (1000, "exited");
+/// The daemon is shutting down, or the client's access changed (device
+/// revoked or its rights edited): reconnect.
+pub(crate) const WS_GOING_AWAY: (u16, &str) = (1001, "going away");
+
+/// End a WebSocket with a proper close handshake. `ours: None` means the
+/// client closed first: its close is answered automatically, and reading on
+/// flushes that answer. Otherwise we send our close and wait (bounded) for
+/// the client's. Without this the peer sees an abnormal close (1006).
+pub(crate) async fn close_ws(socket: &mut axum::extract::ws::WebSocket, ours: Option<(u16, &str)>) {
+    use axum::extract::ws::{CloseFrame, Message};
+    if let Some((code, reason)) = ours {
+        let frame = CloseFrame {
+            code,
+            reason: reason.into(),
+        };
+        if socket.send(Message::Close(Some(frame))).await.is_err() {
+            return;
+        }
+    }
+    let drain = async { while let Some(Ok(_)) = socket.recv().await {} };
+    // A client that never answers must not pin the task.
+    let _ = tokio::time::timeout(std::time::Duration::from_secs(2), drain).await;
+}
+
 /// Run blocking work (SQLite, git, filesystem) off the async runtime.
 pub async fn blocking<T: Send + 'static>(
     f: impl FnOnce() -> ApiResult<T> + Send + 'static,

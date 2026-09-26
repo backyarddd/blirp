@@ -60,7 +60,12 @@ pub struct ExitInfo {
 #[derive(Debug, Clone)]
 pub enum TermEvent {
     Data(Bytes),
-    Resize { cols: u16, rows: u16 },
+    /// `by`: the client that asked for it (see [`Terminal::resize`]).
+    Resize {
+        cols: u16,
+        rows: u16,
+        by: u64,
+    },
     Exit(ExitInfo),
 }
 
@@ -314,7 +319,9 @@ impl Terminal {
         }
     }
 
-    pub fn resize(&self, cols: u16, rows: u16) -> anyhow::Result<()> {
+    /// Resize the PTY and screen; `by` identifies the requesting client so
+    /// the broadcast is not echoed back to it.
+    pub fn resize(&self, cols: u16, rows: u16, by: u64) -> anyhow::Result<()> {
         if !(1..=1000).contains(&cols) || !(1..=1000).contains(&rows) {
             anyhow::bail!("terminal size must be 1-1000 columns and rows");
         }
@@ -336,7 +343,7 @@ impl Terminal {
             .context("resize pty")?;
         }
         lock(&self.screen).parser.screen_mut().set_size(rows, cols);
-        let _ = self.tx.send(TermEvent::Resize { cols, rows });
+        let _ = self.tx.send(TermEvent::Resize { cols, rows, by });
         Ok(())
     }
 

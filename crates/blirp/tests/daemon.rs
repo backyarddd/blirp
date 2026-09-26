@@ -758,3 +758,98 @@ async fn portal_devices_get_only_their_rights() {
     assert_eq!(r.status(), 200);
     h.daemon.shutdown().await.unwrap();
 }
+
+async fn ws_with(url: String, header: (&'static str, String)) -> Ws {
+    let mut req = url.into_client_request().unwrap();
+    req.headers_mut()
+        .insert(header.0, header.1.parse().unwrap());
+    tokio_tungstenite::connect_async(req).await.unwrap().0
+}
+
+// Terminal socket protocol details: read-only clients are told so, a
+// resize is not echoed to its sender, and both close directions complete
+// the close handshake with the documented codes.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn terminal_socket_protocol() {
+    let h = Harness::start().await;
+    let proj = h._home.path().join("proto");
+    std::fs::create_dir(&proj).unwrap();
+    let r = h
+        .send(
+            reqwest::Method::POST,
+            "/api/sessions",
+            json!({"cwd": proj, "agent": "shell"}),
+        )
+        .await;
+    assert_eq!(r.status(), 201);
+    let session: Session = r.json().await.unwrap();
+
+    // A portal device without terminal control gets `readonly` after the snapshot.
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let portal = listener.local_addr().unwrap();
+    let app = blirp::api::portal_router(h.daemon.state.clone());
+    tokio::spawn(async move { axum::serve(listener, app).await });
+    let viewer = portal_device(&h, false);
+    let mut v = ws_with(
+        format!("ws://{portal}/api/terminals/{}/ws", session.id),
+        ("Cookie", viewer),
+    )
+    .await;
+    assert!(matches!(
+        next_text(&mut v).await,
+        TerminalServerMessage::Snapshot { .. }
+    ));
+    assert!(matches!(
+        next_text(&mut v).await,
+        TerminalServerMessage::Readonly
+    ));
+    drop(v);
+
+    let mut a = h.ws(&session.id).await;
+    let mut b = h.ws(&session.id).await;
+    next_text(&mut a).await;
+    next_text(&mut b).await;
+    let resize = json!({"type": "resize", "cols": 90, "rows": 20}).to_string();
+    a.send(Message::Text(resize.into())).await.unwrap();
+    let TerminalServerMessage::Resize { cols, rows } = next_text(&mut b).await else {
+        panic!("the other client must hear about the resize");
+    };
+    assert_eq!((cols, rows), (90, 20));
+    let input = json!({"type": "input", "data": "echo AFT$()ER-RESIZE\r"}).to_string();
+    a.send(Message::Text(input.into())).await.unwrap();
+    let mut screen = vt100::Parser::new(20, 90, 100);
+    let control = read_until(&mut a, &mut screen, "AFTER-RESIZE").await;
+    assert!(
+        !control
+            .iter()
+            .any(|m| matches!(m, TerminalServerMessage::Resize { .. })),
+        "resize echoed to its sender: {control:?}"
+    );
+
+    // Client-initiated close: the server answers it.
+    a.close(None).await.unwrap();
+    let reply = tokio::time::timeout(Duration::from_secs(5), a.next())
+        .await
+        .unwrap();
+    assert!(matches!(reply, Some(Ok(Message::Close(_)))), "{reply:?}");
+
+    // Server-initiated close after the exit frame: 1000 "exited".
+    let stop = format!("/api/sessions/{}/stop", session.id);
+    assert_eq!(
+        h.send(reqwest::Method::POST, &stop, json!({}))
+            .await
+            .status(),
+        202
+    );
+    let close = loop {
+        match tokio::time::timeout(Duration::from_secs(20), b.next()).await {
+            Ok(Some(Ok(Message::Close(f)))) => break f,
+            Ok(Some(Ok(_))) => continue,
+            other => panic!("expected a close frame, got {other:?}"),
+        }
+    };
+    let close = close.expect("close frame without code");
+    assert_eq!(u16::from(close.code), 1000);
+    assert_eq!(close.reason.as_str(), "exited");
+    h.daemon.shutdown().await.unwrap();
+}

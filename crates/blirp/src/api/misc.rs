@@ -155,14 +155,15 @@ async fn push_events(
     mut shutdown: tokio::sync::watch::Receiver<bool>,
 ) {
     let mut rx = s.events.subscribe();
-    loop {
+    // None: the client closed (or vanished); Some: we close with that code.
+    let ours = loop {
         tokio::select! {
             ev = rx.recv() => {
                 let ev = match ev {
                     Ok(ev) => ev,
                     // Missed events: tell the client to refetch.
                     Err(RecvError::Lagged(_)) => ServerEvent::Resync,
-                    Err(RecvError::Closed) => break,
+                    Err(RecvError::Closed) => break Some(super::WS_GOING_AWAY),
                 };
                 let text = match serde_json::to_string(&ev) {
                     Ok(t) => t,
@@ -172,17 +173,16 @@ async fn push_events(
                     }
                 };
                 if socket.send(Message::Text(text.into())).await.is_err() {
-                    break;
+                    break None;
                 }
             }
             msg = socket.recv() => match msg {
-                Some(Ok(Message::Close(_))) | None | Some(Err(_)) => break,
+                Some(Ok(Message::Close(_))) | None | Some(Err(_)) => break None,
                 // Clients have nothing to say on this stream; pings are answered by axum.
                 Some(Ok(_)) => {}
             },
-            _ = shutdown.changed() => break,
+            _ = shutdown.changed() => break Some(super::WS_GOING_AWAY),
         }
-    }
-    // Best effort: the peer may already be gone.
-    let _ = socket.send(Message::Close(None)).await;
+    };
+    super::close_ws(&mut socket, ours).await;
 }

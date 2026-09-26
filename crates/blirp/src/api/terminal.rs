@@ -18,6 +18,7 @@ use axum::http::StatusCode;
 use axum::response::Response;
 use blirp_core::model::{TerminalClientMessage, TerminalServerMessage};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 use tokio::sync::broadcast;
 use tokio::sync::broadcast::error::RecvError;
 
@@ -100,44 +101,87 @@ async fn send_all(socket: &mut WebSocket, frames: Vec<Message>) -> bool {
     true
 }
 
+/// Distinguishes attached clients, so a resize is not echoed to its sender.
+static NEXT_CLIENT: AtomicU64 = AtomicU64::new(1);
+
+/// How a terminal stream ended.
+enum End {
+    /// The client closed the socket (or vanished).
+    Client,
+    /// The process exited, or the terminal went away.
+    Exited,
+    /// The daemon is shutting down or the client's access changed.
+    Shutdown,
+}
+
 async fn session(
     term: Arc<Terminal>,
     mut socket: WebSocket,
     mut shutdown: tokio::sync::watch::Receiver<bool>,
     control: bool,
 ) {
-    let (frames, mut rx, ended) = start_frames(&term);
-    if !send_all(&mut socket, frames).await {
-        return;
+    let me = NEXT_CLIENT.fetch_add(1, Ordering::Relaxed);
+    let (mut frames, mut rx, ended) = start_frames(&term);
+    if !control {
+        // Right after the snapshot: this client's input is ignored.
+        frames.extend(text(&TerminalServerMessage::Readonly));
     }
-    if ended {
-        let _ = socket.send(Message::Close(None)).await;
-        return;
+    let end = if !send_all(&mut socket, frames).await {
+        End::Client
+    } else if ended {
+        End::Exited
+    } else {
+        stream(&term, &mut socket, &mut rx, &mut shutdown, control, me).await
+    };
+    match end {
+        End::Client => super::close_ws(&mut socket, None).await,
+        End::Exited => super::close_ws(&mut socket, Some(super::WS_DONE)).await,
+        End::Shutdown => super::close_ws(&mut socket, Some(super::WS_GOING_AWAY)).await,
     }
+}
+
+async fn stream(
+    term: &Arc<Terminal>,
+    socket: &mut WebSocket,
+    rx: &mut broadcast::Receiver<TermEvent>,
+    shutdown: &mut tokio::sync::watch::Receiver<bool>,
+    control: bool,
+    me: u64,
+) -> End {
     loop {
         tokio::select! {
             ev = rx.recv() => {
                 let ok = match ev {
                     Ok(TermEvent::Data(bytes)) => socket.send(Message::Binary(bytes)).await.is_ok(),
-                    Ok(TermEvent::Resize { cols, rows }) => {
-                        send(&mut socket, text(&TerminalServerMessage::Resize { cols, rows })).await
+                    Ok(TermEvent::Resize { by, .. }) if by == me => true,
+                    Ok(TermEvent::Resize { cols, rows, .. }) => {
+                        send(socket, text(&TerminalServerMessage::Resize { cols, rows })).await
                     }
                     Ok(TermEvent::Exit(info)) => {
-                        send(&mut socket, exit_msg(info)).await;
-                        break;
+                        return if send(socket, exit_msg(info)).await {
+                            End::Exited
+                        } else {
+                            End::Client
+                        };
                     }
                     // Too slow to keep up: start over from a fresh snapshot,
                     // which ends the stream when the process exited meanwhile
                     // (its exit event may be among the dropped ones).
                     Err(RecvError::Lagged(_)) => {
-                        let (frames, new_rx, ended) = start_frames(&term);
-                        rx = new_rx;
-                        send_all(&mut socket, frames).await && !ended
+                        let (frames, new_rx, ended) = start_frames(term);
+                        *rx = new_rx;
+                        if !send_all(socket, frames).await {
+                            return End::Client;
+                        }
+                        if ended {
+                            return End::Exited;
+                        }
+                        true
                     }
-                    Err(RecvError::Closed) => false,
+                    Err(RecvError::Closed) => return End::Exited,
                 };
                 if !ok {
-                    break;
+                    return End::Client;
                 }
             }
             msg = socket.recv() => match msg {
@@ -146,7 +190,7 @@ async fn session(
                 Some(Ok(Message::Text(t))) => match serde_json::from_str::<TerminalClientMessage>(&t) {
                     Ok(TerminalClientMessage::Input { data }) => term.write(data.into_bytes()),
                     Ok(TerminalClientMessage::Resize { cols, rows }) => {
-                        if let Err(e) = term.resize(cols, rows) {
+                        if let Err(e) = term.resize(cols, rows, me) {
                             tracing::debug!(session = %term.session_id, error = %e, "resize rejected");
                         }
                     }
@@ -154,14 +198,12 @@ async fn session(
                         tracing::debug!(session = %term.session_id, error = %e, "ignoring malformed terminal frame");
                     }
                 },
-                Some(Ok(Message::Close(_))) | None | Some(Err(_)) => break,
+                Some(Ok(Message::Close(_))) | None | Some(Err(_)) => return End::Client,
                 Some(Ok(Message::Ping(_) | Message::Pong(_))) => {}
             },
-            _ = shutdown.changed() => break,
+            _ = shutdown.changed() => return End::Shutdown,
         }
     }
-    // Best effort: the peer may already be gone.
-    let _ = socket.send(Message::Close(None)).await;
 }
 
 #[cfg(test)]

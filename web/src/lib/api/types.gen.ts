@@ -516,7 +516,7 @@ export type ServerEvent = { "type": "session_created", session: Session, } | { "
  * Text frames sent by the server on `/api/terminals/:id/ws` (§6). Raw
  * terminal output is sent as binary frames.
  */
-export type TerminalServerMessage = { "type": "snapshot", cols: number, rows: number, data: string, } | { "type": "resize", cols: number, rows: number, } | { "type": "exit", status: SessionStatus, exit_code: number | null, };
+export type TerminalServerMessage = { "type": "snapshot", cols: number, rows: number, data: string, } | { "type": "readonly" } | { "type": "resize", cols: number, rows: number, } | { "type": "exit", status: SessionStatus, exit_code: number | null, };
 
 /**
  * Text frames accepted from clients on `/api/terminals/:id/ws`. Binary frames

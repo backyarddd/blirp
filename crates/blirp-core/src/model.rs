@@ -910,9 +910,13 @@ pub enum TerminalServerMessage {
     /// Reset the terminal and write `data`; reproduces scrollback, screen,
     /// modes, cursor and title. Sent first, and again after the client lagged.
     Snapshot { cols: u16, rows: u16, data: String },
-    /// Another client resized the terminal (last resize wins).
+    /// Sent right after the first snapshot when this client may not control
+    /// the terminal: its input and resize frames are ignored.
+    Readonly,
+    /// Another client resized the terminal (last resize wins); never sent
+    /// to the client that asked for the resize.
     Resize { cols: u16, rows: u16 },
-    /// The process exited; the socket closes after this frame.
+    /// The process exited; the socket closes (code 1000) after this frame.
     Exit {
         status: SessionStatus,
         exit_code: Option<i32>,
