@@ -109,10 +109,21 @@ async fn patch_settings(
     _: Admin,
     ApiJson(patch): ApiJson<SettingsPatch>,
 ) -> ApiResult<Json<SettingsView>> {
+    // Role changes (hub enable/disable, join, leave) write the config too.
+    let guard = crate::sync::lock_transition(&s).await;
     let state = s.clone();
     let before = s.config().sync;
     blocking(move || {
-        if let Some(cfg) = patch.config {
+        if let Some(edited) = patch.config {
+            let current = state.config();
+            let mut cfg = match patch.base {
+                Some(base) => current
+                    .with_changes(&base, &edited)
+                    .map_err(|e| ApiError::bad_request(e.to_string()))?,
+                None => edited,
+            };
+            cfg.sync.role = current.sync.role;
+            cfg.sync.hub = current.sync.hub;
             cfg.validate()
                 .map_err(|e| ApiError::bad_request(e.to_string()))?;
             cfg.save(&state.paths.config_file())
@@ -141,6 +152,7 @@ async fn patch_settings(
     };
     // Apply portal changes (portal.lan, lan_port) now, not at the next start.
     crate::sync::apply_portal_config(&s).await?;
+    drop(guard);
     discovery?;
     get_settings(State(s)).await
 }

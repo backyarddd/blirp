@@ -453,8 +453,13 @@ PUT  /api/agents/claude/token {token} ; DELETE   store / remove claude's login t
                                          claude's AgentInfo, never the token; 422 `unsupported` for other ids
 POST /api/hooks/:agent/:event            hook ingress (from `blirp hook`)
 GET  /api/inject?session=&cwd=&agent=    {markdown}: the session's launch memory.md, else a render for the session's / folder's project
-GET  /api/settings ; PATCH /api/settings  {config: Config, values: {key: json}, distill: DistillStatus}; PATCH {config?: full Config
-                                         (validated, written to config.toml), values?: {key: json|null}}
+GET  /api/settings ; PATCH /api/settings  {config: Config, values: {key: json}, distill: DistillStatus}; PATCH {config?: Config,
+                                         base?: Config, values?: {key: json|null}} (admin; serialized with role
+                                         changes): with `base` (the config the client edited) only the values
+                                         that differ from it are applied to the current config, so a stale copy
+                                         never reverts newer changes; without it `config` replaces every value.
+                                         `sync.role` / `sync.hub` always stay (owned by hub enable/disable, join
+                                         and leave). Validated, written to config.toml
 GET  /api/sync/status                    SyncStatus {role, machine_id, hub, connected, last_sync_at, pending_outbox,
                                          portal_url, portal_cert_fingerprint}
 POST /api/sync/hub/enable | /hub/disable SyncStatus (admin); enable fails with 409 `paired_node` on a node

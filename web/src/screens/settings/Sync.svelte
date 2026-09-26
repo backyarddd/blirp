@@ -63,7 +63,10 @@
     e.preventDefault();
     const name = machineName.trim();
     if (!name) return;
-    const s = await app.saveSettings({ config: { ...settings.config, machine: { ...settings.config.machine, name } } }, 'Machine name saved');
+    const s = await app.saveSettings(
+      { config: { ...settings.config, machine: { ...settings.config.machine, name } }, base: settings.config },
+      'Machine name saved',
+    );
     if (s) onsaved(s);
   }
 
@@ -75,6 +78,9 @@
     if (out !== undefined) {
       await app.refreshSync();
       void app.refreshHealth();
+      // The role change rewrote the config (role, hub, hub control).
+      const s = await app.act(() => api.settings.get());
+      if (s) onsaved(s);
     }
   }
 
@@ -177,7 +183,7 @@
     }
     savingControl = true;
     const s = await app.saveSettings(
-      { config: { ...settings.config, sync: { ...settings.config.sync, allow_hub_control: on } } },
+      { config: { ...settings.config, sync: { ...settings.config.sync, allow_hub_control: on } }, base: settings.config },
       on ? 'The hub may now control this machine' : 'The hub can no longer control this machine',
     );
     savingControl = false;
@@ -190,7 +196,7 @@
   async function setLanDiscovery(on: boolean, input: HTMLInputElement): Promise<void> {
     savingDiscovery = true;
     const s = await app.saveSettings(
-      { config: { ...settings.config, sync: { ...settings.config.sync, lan_discovery: on } } },
+      { config: { ...settings.config, sync: { ...settings.config.sync, lan_discovery: on } }, base: settings.config },
       on ? 'Local network discovery on' : 'Local network discovery off',
     );
     savingDiscovery = false;

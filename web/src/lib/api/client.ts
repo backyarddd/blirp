@@ -265,7 +265,10 @@ export const api = {
   inject: (session: string) => request<Injection>('GET', '/api/inject', undefined, { session }),
   settings: {
     get: () => request<SettingsView>('GET', '/api/settings'),
-    /** `config` replaces the whole config file; `values` keys are set (null deletes). */
+    /**
+     * `config` with `base` (the config it was edited from) applies only what changed; `sync.role` and
+     * `sync.hub` are never written here. `values` keys are set (null deletes).
+     */
     patch: (patch: SettingsPatch) => request<SettingsView>('PATCH', '/api/settings', patch),
   },
   sync: {

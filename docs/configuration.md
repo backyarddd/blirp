@@ -4,7 +4,7 @@
 
 `~/.blirp/config.toml` (`$BLIRP_HOME/config.toml`). The daemon writes a file with all defaults on first start. Every section and key is optional; missing keys take their default. Unknown keys and invalid values are errors: the daemon refuses to start and names the key (`blirp doctor` shows the same message).
 
-When the UI saves settings (**Settings**, `PATCH /api/settings`) it validates the whole config and edits the file in place: only changed values are rewritten, and your comments and layout are kept. Hand edits take effect when the daemon restarts; the daemon does not watch the file. Changes saved through the UI take effect immediately for `[agents]`, `[sessions]` and `[memory]`; `daemon.port`, `machine.name`, `[sync]` and `[portal]` changes need a daemon restart (the hub and pairing buttons apply role changes themselves), except `sync.allow_hub_control` and `sync.lan_discovery`, which apply at once.
+When the UI saves settings (**Settings**, `PATCH /api/settings`) it validates the whole config and edits the file in place: only changed values are rewritten, and your comments and layout are kept. Hand edits take effect when the daemon restarts; the daemon does not watch the file. Changes saved through the UI take effect immediately for `[agents]`, `[sessions]`, `[memory]`, `[portal]`, `sync.allow_hub_control` and `sync.lan_discovery`; `daemon.port`, `machine.name` and `sync.relay` need a daemon restart. `sync.role` and `sync.hub` are only changed by the hub, pairing and leave buttons (and their CLI and API equivalents), never by a settings save.
 
 ```toml
 [daemon]

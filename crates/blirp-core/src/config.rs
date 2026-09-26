@@ -256,6 +256,19 @@ impl Config {
         Ok(cfg)
     }
 
+    /// `edited` is `base` (a copy a client read earlier) with the client's
+    /// changes: apply only those changes to `self` (the current config), so
+    /// a stale copy never reverts values that changed since it was read.
+    pub fn with_changes(&self, base: &Config, edited: &Config) -> Result<Config, ConfigError> {
+        let json = |c: &Config| {
+            serde_json::to_value(c)
+                .map_err(|e| ConfigError::Invalid(format!("cannot serialize: {e}")))
+        };
+        let mut current = json(self)?;
+        merge_changes(&mut current, &json(base)?, &json(edited)?);
+        serde_json::from_value(current).map_err(|e| ConfigError::Invalid(e.to_string()))
+    }
+
     /// Validate and write atomically. An existing file is edited in place:
     /// only keys whose value changed are rewritten, so the user's comments
     /// and layout survive UI saves.
@@ -363,6 +376,34 @@ impl Config {
             return bad("portal.lan_port must be > 0".into());
         }
         Ok(())
+    }
+}
+
+/// Three-way merge for [`Config::with_changes`]: where `edited` differs from
+/// `base`, `current` takes `edited`'s value (lists are single values);
+/// everything else keeps `current`'s.
+fn merge_changes(
+    current: &mut serde_json::Value,
+    base: &serde_json::Value,
+    edited: &serde_json::Value,
+) {
+    use serde_json::Value;
+    if let (Value::Object(c), Value::Object(b), Value::Object(e)) = (&mut *current, base, edited) {
+        // Unset options are left out of the JSON.
+        for k in b.keys().filter(|k| !e.contains_key(*k)) {
+            c.remove(k);
+        }
+        for (k, ev) in e {
+            match (b.get(k), c.get_mut(k)) {
+                (Some(bv), Some(cv)) => merge_changes(cv, bv, ev),
+                (bv, _) if bv != Some(ev) => {
+                    c.insert(k.clone(), ev.clone());
+                }
+                _ => {}
+            }
+        }
+    } else if base != edited {
+        *current = edited.clone();
     }
 }
 
@@ -599,6 +640,34 @@ check = false
             let err = parse(toml).unwrap_err().to_string();
             assert!(err.contains(needle), "{toml:?} -> {err}");
         }
+    }
+
+    #[test]
+    fn changes_from_a_stale_copy_apply_only_what_the_client_changed() {
+        // The client read the config while standalone and with hub control
+        // on; since then the machine became a hub and control was turned off.
+        let mut base = Config::default();
+        base.sync.allow_hub_control = true;
+        base.sessions.keep_awake = Some(true);
+        let mut current = Config::default();
+        current.sync.role = MachineRole::Hub;
+        current.machine.name = "renamed".into();
+        current.sessions.keep_awake = Some(true);
+
+        let mut edited = base.clone();
+        edited.portal.lan = true;
+        edited.sessions.keep_awake = None;
+        edited.memory.inject_disabled_agents = vec!["codex".into()];
+        let merged = current.with_changes(&base, &edited).unwrap();
+
+        assert!(merged.portal.lan);
+        assert_eq!(merged.sessions.keep_awake, None, "unset by the client");
+        assert_eq!(merged.memory.inject_disabled_agents, ["codex"]);
+        assert_eq!(merged.sync.role, MachineRole::Hub);
+        assert!(!merged.sync.allow_hub_control, "stale value brought back");
+        assert_eq!(merged.machine.name, "renamed");
+        // Nothing changed: the current config stays as it is.
+        assert_eq!(current.with_changes(&base, &base).unwrap(), current);
     }
 
     #[test]

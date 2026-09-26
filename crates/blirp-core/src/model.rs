@@ -1006,11 +1006,20 @@ pub struct DistillStatus {
 #[derive(Debug, Clone, Default, Serialize, Deserialize, TS)]
 #[serde(deny_unknown_fields)]
 pub struct SettingsPatch {
-    /// Full replacement config, validated and written to `config.toml`.
-    /// `daemon.port` takes effect after a daemon restart.
+    /// The edited config, validated and written to `config.toml`.
+    /// `daemon.port` takes effect after a daemon restart. `sync.role` and
+    /// `sync.hub` are never taken from it: hub enable/disable, join and
+    /// leave own them.
     #[serde(default)]
     #[ts(optional)]
     pub config: Option<Config>,
+    /// The config `config` was edited from (as read from `GET /api/settings`).
+    /// With it only the values the client changed are applied, so a stale
+    /// copy never reverts what changed since; without it `config` replaces
+    /// every other value.
+    #[serde(default)]
+    #[ts(optional)]
+    pub base: Option<Config>,
     /// Keys to set; a null value deletes the key.
     #[serde(default)]
     #[ts(optional)]

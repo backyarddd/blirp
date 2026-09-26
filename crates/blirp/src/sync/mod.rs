@@ -107,9 +107,15 @@ pub fn routes() -> Router<SharedState> {
         .route("/api/devices/{id}/{*rest}", axum::routing::any(unknown))
 }
 
-/// Start, stop or move the LAN portal to match a changed config.
+/// Held while the role changes or anything else writes the config, so a
+/// settings save never races a role change.
+pub(crate) async fn lock_transition(s: &SharedState) -> tokio::sync::MutexGuard<'_, ()> {
+    s.sync.transition.lock().await
+}
+
+/// Start, stop or move the LAN portal to match a changed config. The caller
+/// holds [`lock_transition`].
 pub(crate) async fn apply_portal_config(s: &SharedState) -> ApiResult<()> {
-    let _guard = s.sync.transition.lock().await;
     crate::portal::sync_with_config(s)
         .await
         .map_err(|e| portal_failed(&e))
@@ -118,9 +124,9 @@ pub(crate) async fn apply_portal_config(s: &SharedState) -> ApiResult<()> {
 /// `sync.lan_discovery` changed: restart a running sync endpoint so mDNS
 /// starts or stops now, not at the next daemon start. A failed restart
 /// leaves sync stopped (shown in the sync status) and answers 502
-/// `sync_failed`; the saved config is kept.
+/// `sync_failed`; the saved config is kept. The caller holds
+/// [`lock_transition`].
 pub(crate) async fn apply_discovery_config(s: &SharedState) -> ApiResult<()> {
-    let _guard = s.sync.transition.lock().await;
     if s.sync.service().is_none() {
         return Ok(());
     }

@@ -354,7 +354,7 @@ test('search finds memory records', async () => {
   await expect(page).toHaveURL(new RegExp(`${plainProjectUrl}/memory$`));
 });
 
-test('settings load and save (full config replace)', async () => {
+test('settings load and save (only the changed values)', async () => {
   await page.goto(`${env.url}/settings/memory`);
   const idle = page.getByLabel('Distill after idle (seconds)');
   await expect(idle).toHaveValue('300');
@@ -372,7 +372,7 @@ test('settings load and save (full config replace)', async () => {
   await expect(page.getByText('Saved', { exact: true })).toBeVisible();
   await page.reload();
   await expect(page.getByRole('checkbox', { name: /new worktree by default/ })).toBeChecked();
-  // The earlier memory change survived the second full-config write.
+  // The earlier memory change survived the second save.
   const res = await page.request.get(`${env.url}/api/settings`, { headers: AUTH });
   const view = (await res.json()) as { config: { memory: { distill_idle_secs: number }; sessions: { worktree_default: boolean } } };
   expect(view.config.memory.distill_idle_secs).toBe(600);
@@ -498,6 +498,17 @@ test('sync: enabling the hub gives an invite with QR; a join link only prefills 
   await confirmNextDialog();
   await page.getByRole('button', { name: 'Enable hub' }).click();
   await expect(page.getByTestId('sync-role')).toHaveText('hub');
+  // A settings save right after the role change keeps the role.
+  const nameForm = page.locator('form.name');
+  const machineName = nameForm.getByLabel('Machine name');
+  const originalName = await machineName.inputValue();
+  await machineName.fill(`${originalName}-hub`);
+  await nameForm.getByRole('button', { name: 'Save' }).click();
+  await expect(page.getByText('Machine name saved')).toBeVisible();
+  expect((await apiCall<{ role: string }>('GET', '/api/sync/status')).role).toBe('hub');
+  await machineName.fill(originalName);
+  await nameForm.getByRole('button', { name: 'Save' }).click();
+  await expect(nameForm.getByRole('button', { name: 'Save' })).toBeDisabled();
   await page.getByRole('button', { name: 'Create invite' }).click();
   await expect(page.getByTestId('pairing-code')).toHaveText(/^[2-9A-HJ-NP-Z]{4}-[2-9A-HJ-NP-Z]{4}$/);
   await expect(page.getByRole('img', { name: 'Pairing QR code' }).locator('canvas')).toBeVisible();

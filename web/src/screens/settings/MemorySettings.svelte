@@ -73,7 +73,7 @@
     }
     saving = true;
     const s = await app.saveSettings(
-      { config: { ...settings.config, memory: { ...form, ollama_model: form.ollama_model.trim() } } },
+      { config: { ...settings.config, memory: { ...form, ollama_model: form.ollama_model.trim() } }, base: settings.config },
       'Memory settings saved',
     );
     saving = false;

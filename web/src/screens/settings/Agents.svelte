@@ -104,9 +104,9 @@
     }
   }
 
-  // PATCH replaces the whole config, so every change starts from the loaded one.
+  // Sent with its base, so only this change is applied (§11).
   async function saveConfig(change: (c: Config) => Config): Promise<void> {
-    const s = await app.saveSettings({ config: change(settings.config) }, 'Saved');
+    const s = await app.saveSettings({ config: change(settings.config), base: settings.config }, 'Saved');
     if (s) onsaved(s);
   }
 </script>

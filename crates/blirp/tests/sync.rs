@@ -698,6 +698,48 @@ async fn pair_replicate_proxy_revoke_and_portal() {
     a.daemon.shutdown().await.unwrap();
 }
 
+// A settings save from a copy read before "Enable hub" (the UI's snapshot)
+// must not write the old role back.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn settings_saved_from_a_stale_copy_keep_the_role() {
+    let tmp = tempfile::tempdir().unwrap();
+    let a = Node::start(&tmp.path().join("a"), "hub-a", None).await;
+    let stale: Value = a.get("/api/settings").await;
+    assert_eq!(stale["config"]["sync"]["role"], "standalone");
+    let _: SyncStatus = a.ok(Method::POST, "/api/sync/hub/enable", None).await;
+
+    // Rename the machine from the stale copy, with and without its base.
+    let mut edited = stale["config"].clone();
+    edited["machine"]["name"] = json!("renamed");
+    let view: Value = a
+        .ok(
+            Method::PATCH,
+            "/api/settings",
+            Some(json!({"config": edited, "base": stale["config"]})),
+        )
+        .await;
+    assert_eq!(view["config"]["sync"]["role"], "hub");
+    assert_eq!(view["config"]["machine"]["name"], "renamed");
+    edited["portal"]["lan_port"] = json!(free_port());
+    let view: Value = a
+        .ok(
+            Method::PATCH,
+            "/api/settings",
+            Some(json!({"config": edited})),
+        )
+        .await;
+    assert_eq!(view["config"]["sync"]["role"], "hub");
+    assert_eq!(
+        view["config"]["portal"]["lan_port"],
+        edited["portal"]["lan_port"]
+    );
+
+    assert_eq!(sync_status(&a).await.role.as_str(), "hub");
+    let on_disk = std::fs::read_to_string(a.home.join("config.toml")).unwrap();
+    assert!(on_disk.contains("role = \"hub\""), "{on_disk}");
+    a.daemon.shutdown().await.unwrap();
+}
+
 /// Whether something accepts TCP connections on `port` (loopback).
 async fn listening(port: u16) -> bool {
     tokio::net::TcpStream::connect(("127.0.0.1", port))

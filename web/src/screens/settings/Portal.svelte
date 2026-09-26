@@ -17,7 +17,7 @@
   async function patchPortal(p: Partial<PortalConfig>): Promise<void> {
     saving = true;
     const config = { ...settings.config, portal: { ...settings.config.portal, ...p } };
-    const s = await app.saveSettings({ config }, 'Portal settings saved');
+    const s = await app.saveSettings({ config, base: settings.config }, 'Portal settings saved');
     saving = false;
     if (s) {
       onsaved(s);
