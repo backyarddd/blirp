@@ -7,7 +7,7 @@ blirp ships in two forms from the same release:
 
 Both keep all data in `~/.blirp` (`%USERPROFILE%\.blirp` on Windows; override with `BLIRP_HOME`). Installing, upgrading or removing blirp never touches that directory.
 
-Download everything from [GitHub Releases](https://github.com/blirp/blirp/releases). Each release has `SHA256SUMS.txt` and a `.sha256` file next to every CLI archive:
+Download everything from [GitHub Releases](https://github.com/backyarddd/blirp/releases). Each release has `SHA256SUMS.txt` and a `.sha256` file next to every CLI archive:
 
 ```sh
 sha256sum -c blirp-0.1.0-x86_64-unknown-linux-gnu.tar.gz.sha256      # Linux

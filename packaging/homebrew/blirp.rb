@@ -3,28 +3,28 @@
 # in the release workflow; the rendered file is attached to each GitHub release.
 class Blirp < Formula
   desc "Workspace and cross-session memory for CLI coding agents"
-  homepage "https://github.com/blirp/blirp"
+  homepage "https://github.com/backyarddd/blirp"
   version "{{VERSION}}"
   license "Apache-2.0"
 
   on_macos do
     on_arm do
-      url "https://github.com/blirp/blirp/releases/download/v{{VERSION}}/blirp-{{VERSION}}-aarch64-apple-darwin.tar.gz"
+      url "https://github.com/backyarddd/blirp/releases/download/v{{VERSION}}/blirp-{{VERSION}}-aarch64-apple-darwin.tar.gz"
       sha256 "{{SHA256_CLI_MACOS_ARM64}}"
     end
     on_intel do
-      url "https://github.com/blirp/blirp/releases/download/v{{VERSION}}/blirp-{{VERSION}}-x86_64-apple-darwin.tar.gz"
+      url "https://github.com/backyarddd/blirp/releases/download/v{{VERSION}}/blirp-{{VERSION}}-x86_64-apple-darwin.tar.gz"
       sha256 "{{SHA256_CLI_MACOS_X64}}"
     end
   end
 
   on_linux do
     on_arm do
-      url "https://github.com/blirp/blirp/releases/download/v{{VERSION}}/blirp-{{VERSION}}-aarch64-unknown-linux-gnu.tar.gz"
+      url "https://github.com/backyarddd/blirp/releases/download/v{{VERSION}}/blirp-{{VERSION}}-aarch64-unknown-linux-gnu.tar.gz"
       sha256 "{{SHA256_CLI_LINUX_ARM64}}"
     end
     on_intel do
-      url "https://github.com/blirp/blirp/releases/download/v{{VERSION}}/blirp-{{VERSION}}-x86_64-unknown-linux-gnu.tar.gz"
+      url "https://github.com/backyarddd/blirp/releases/download/v{{VERSION}}/blirp-{{VERSION}}-x86_64-unknown-linux-gnu.tar.gz"
       sha256 "{{SHA256_CLI_LINUX_X64}}"
     end
   end

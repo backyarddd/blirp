@@ -6,9 +6,9 @@ PackageLocale: en-US
 Publisher: blirp contributors
 PublisherUrl: https://github.com/blirp
 PackageName: blirp
-PackageUrl: https://github.com/blirp/blirp
+PackageUrl: https://github.com/backyarddd/blirp
 License: Apache-2.0
-LicenseUrl: https://github.com/blirp/blirp/blob/main/LICENSE
+LicenseUrl: https://github.com/backyarddd/blirp/blob/main/LICENSE
 ShortDescription: Workspace and cross-session memory for CLI coding agents
 Description: blirp runs your CLI coding agents (Claude Code, Codex, opencode, Gemini CLI and more) in one workspace, tracks every session, and gives each new session automatic memory of prior work in the same project.
 Moniker: blirp
@@ -19,6 +19,6 @@ Tags:
   - codex
   - terminal
   - memory
-ReleaseNotesUrl: https://github.com/blirp/blirp/releases/tag/v{{VERSION}}
+ReleaseNotesUrl: https://github.com/backyarddd/blirp/releases/tag/v{{VERSION}}
 ManifestType: defaultLocale
 ManifestVersion: 1.6.0

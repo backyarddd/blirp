@@ -2,7 +2,7 @@
 
 ## Reporting a vulnerability
 
-Please report vulnerabilities privately through GitHub: **Security > Report a vulnerability** on https://github.com/blirp/blirp (private vulnerability reporting). Do not open a public issue.
+Please report vulnerabilities privately through GitHub: **Security > Report a vulnerability** on https://github.com/backyarddd/blirp (private vulnerability reporting). Do not open a public issue.
 
 Include what you found, how to reproduce it, the blirp version (`blirp --version`) and OS. We aim to acknowledge reports within 3 working days and to ship a fix or mitigation for confirmed high-severity issues within 30 days, and we will credit you in the release notes unless you prefer otherwise.
 

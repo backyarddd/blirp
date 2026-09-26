@@ -163,7 +163,7 @@ pub fn systemd_unit(exe: &Path, home: Option<&Path>, path_env: Option<&str>) -> 
     format!(
         "[Unit]
 Description=blirp daemon (workspace and memory for CLI coding agents)
-Documentation=https://github.com/blirp/blirp
+Documentation=https://github.com/backyarddd/blirp
 
 [Service]
 Type=simple
@@ -579,7 +579,7 @@ mod tests {
             u,
             "[Unit]
 Description=blirp daemon (workspace and memory for CLI coding agents)
-Documentation=https://github.com/blirp/blirp
+Documentation=https://github.com/backyarddd/blirp
 
 [Service]
 Type=simple

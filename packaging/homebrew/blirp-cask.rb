@@ -8,10 +8,10 @@ cask "blirp" do
   sha256 arm:   "{{SHA256_DMG_ARM64}}",
          intel: "{{SHA256_DMG_X64}}"
 
-  url "https://github.com/blirp/blirp/releases/download/v#{version}/blirp_#{version}_#{arch}.dmg"
+  url "https://github.com/backyarddd/blirp/releases/download/v#{version}/blirp_#{version}_#{arch}.dmg"
   name "blirp"
   desc "Workspace and cross-session memory for CLI coding agents"
-  homepage "https://github.com/blirp/blirp"
+  homepage "https://github.com/backyarddd/blirp"
 
   # The app updates itself (signed updater); brew should not fight it.
   auto_updates true

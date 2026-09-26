@@ -7,7 +7,7 @@ version = "0.1.0"
 edition = "2024"
 rust-version = "1.89"
 license = "Apache-2.0"
-repository = "https://github.com/blirp/blirp"
+repository = "https://github.com/backyarddd/blirp"
 
 [workspace.dependencies]
 blirp-core = { path = "crates/blirp-core" }

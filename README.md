@@ -22,7 +22,7 @@ Pick one; details, uninstall steps and troubleshooting are in [docs/install.md](
 
 | | Desktop app | Standalone CLI / daemon |
 |---|---|---|
-| Windows 10 1809+ (x64) | `blirp_<version>_x64-setup.exe` (per user) or `.msi` from [Releases](https://github.com/blirp/blirp/releases) | `blirp-<version>-x86_64-pc-windows-msvc.zip` |
+| Windows 10 1809+ (x64) | `blirp_<version>_x64-setup.exe` (per user) or `.msi` from [Releases](https://github.com/backyarddd/blirp/releases) | `blirp-<version>-x86_64-pc-windows-msvc.zip` |
 | macOS 11+ (Apple silicon, Intel) | `blirp_<version>_aarch64.dmg` / `_x64.dmg` | `blirp-<version>-<arch>-apple-darwin.tar.gz` |
 | Linux x64 / arm64 (glibc 2.35+) | `.AppImage`, `.deb` or `.rpm` | `blirp-<version>-<arch>-unknown-linux-gnu.tar.gz` |
 
