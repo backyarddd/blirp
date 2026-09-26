@@ -410,9 +410,58 @@ async fn doctor(paths: &Paths) -> anyhow::Result<ExitCode> {
         }
     );
 
+    match crate::ingest::IngestEnv::from_process(paths.home()) {
+        Some(env) => {
+            let db_path = paths.db_file();
+            let status = tokio::task::spawn_blocking(move || -> anyhow::Result<_> {
+                let store = blirp_core::store::Store::open(&db_path)?;
+                Ok(crate::ingest::engine::status(&store, &env))
+            })
+            .await?;
+            match status {
+                Ok(list) => {
+                    for s in list {
+                        println!("[info] ingest {}: {}", s.id, ingest_line(&s));
+                    }
+                }
+                Err(e) => println!("[info] ingest: status unavailable ({e:#})"),
+            }
+        }
+        None => println!("[info] ingest: home directory unknown, ingest disabled"),
+    }
+
     Ok(if failed {
         ExitCode::FAILURE
     } else {
         ExitCode::SUCCESS
     })
+}
+
+/// `root <path>, <n> sources, last ingest <time>` for `blirp doctor`.
+fn ingest_line(s: &crate::ingest::engine::AdapterStatus) -> String {
+    use chrono::TimeZone as _;
+    let root = match s.roots_found.as_slice() {
+        [] if !s.has_roots => "scans registered project folders".to_string(),
+        [] => "no store found".to_string(),
+        roots => format!(
+            "root {}",
+            roots
+                .iter()
+                .map(|r| r.display().to_string())
+                .collect::<Vec<_>>()
+                .join(", ")
+        ),
+    };
+    let sources = match &s.sources {
+        Ok(n) => format!("{n} sources"),
+        Err(e) => format!("scan failed: {e}"),
+    };
+    let last = s
+        .last_ingest_at
+        .and_then(|ms| chrono::Local.timestamp_millis_opt(ms).single())
+        .map_or_else(
+            || "never ingested".to_string(),
+            |t| format!("last ingest {}", t.format("%Y-%m-%d %H:%M:%S")),
+        );
+    format!("{root}, {sources}, {last}")
 }

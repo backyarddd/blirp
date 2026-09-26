@@ -28,6 +28,7 @@ impl Harness {
         let daemon = Daemon::start(DaemonOptions {
             paths: Paths::at(home.path()),
             port: Some(0),
+            ingest: None,
         })
         .await
         .unwrap();

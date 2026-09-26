@@ -6,6 +6,7 @@
 //! same transaction. Typed helpers for non-replicated tables write directly.
 
 mod engine;
+mod ingest;
 mod memory;
 mod migrations;
 mod misc;
@@ -14,6 +15,7 @@ mod sessions;
 mod sync;
 
 pub use engine::{BY_DISTILLER, BriefApply, DistillOutcome, DistillPlan, MACHINE_ID_KEY};
+pub use ingest::IngestTx;
 pub use memory::RecordFilter;
 pub use migrations::MigrationError;
 pub use projects::ResolvedProject;

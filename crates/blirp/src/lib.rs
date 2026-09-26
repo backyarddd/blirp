@@ -6,6 +6,7 @@ pub mod api;
 pub mod cli;
 pub mod daemon;
 pub mod hooks;
+pub mod ingest;
 pub mod mcp;
 pub mod memory;
 pub mod portal;

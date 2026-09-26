@@ -1,0 +1,199 @@
+//! Background ingest: filesystem watcher (debounced 500 ms), startup scan,
+//! 5-minute rescan (which also picks up roots created after start), stale
+//! status sweep and notification flushing. Passes run on the blocking pool,
+//! one at a time; changes arriving meanwhile are merged into the next pass.
+
+use super::engine::{Engine, Work};
+use notify_debouncer_full::notify::{RecommendedWatcher, RecursiveMode};
+use notify_debouncer_full::{DebounceEventResult, Debouncer, RecommendedCache, new_debouncer};
+use std::collections::HashSet;
+use std::path::PathBuf;
+use std::sync::Arc;
+use std::time::Duration;
+use tokio::sync::{mpsc, watch};
+use tokio::task::JoinHandle;
+
+const DEBOUNCE: Duration = Duration::from_millis(500);
+const RESCAN: Duration = Duration::from_secs(300);
+const TICK: Duration = Duration::from_secs(1);
+/// Stale-status sweep period, in ticks.
+const SWEEP_TICKS: u32 = 30;
+const STOP_GRACE: Duration = Duration::from_secs(5);
+
+type Watcher = Debouncer<RecommendedWatcher, RecommendedCache>;
+
+pub struct IngestService {
+    engine: Arc<Engine>,
+    stop_tx: watch::Sender<bool>,
+    task: JoinHandle<()>,
+}
+
+impl IngestService {
+    /// Start watching and run the startup scan. Must be called inside a
+    /// tokio runtime.
+    pub fn start(engine: Arc<Engine>) -> IngestService {
+        let (stop_tx, stop_rx) = watch::channel(false);
+        let task = tokio::spawn(run(engine.clone(), stop_rx));
+        IngestService {
+            engine,
+            stop_tx,
+            task,
+        }
+    }
+
+    pub fn engine(&self) -> &Arc<Engine> {
+        &self.engine
+    }
+
+    /// Stop watching and wait (bounded) for a running pass to notice.
+    pub async fn shutdown(self) {
+        self.engine.request_stop();
+        let _ = self.stop_tx.send(true);
+        match tokio::time::timeout(STOP_GRACE, self.task).await {
+            Ok(Ok(())) => {}
+            Ok(Err(e)) => tracing::error!(error = %e, "ingest task failed"),
+            Err(_) => tracing::warn!("ingest pass did not stop in time"),
+        }
+    }
+}
+
+fn start_watcher(tx: mpsc::UnboundedSender<Vec<PathBuf>>) -> Option<Watcher> {
+    let res = new_debouncer(DEBOUNCE, None, move |res: DebounceEventResult| match res {
+        Ok(events) => {
+            let paths: Vec<PathBuf> = events.into_iter().flat_map(|e| e.event.paths).collect();
+            if !paths.is_empty() {
+                // The receiver only goes away at shutdown.
+                let _ = tx.send(paths);
+            }
+        }
+        Err(errors) => {
+            for e in errors {
+                tracing::warn!(error = %e, "transcript watcher error");
+            }
+        }
+    });
+    match res {
+        Ok(w) => Some(w),
+        Err(e) => {
+            tracing::warn!(error = %e, "cannot start transcript watcher; relying on periodic rescans");
+            None
+        }
+    }
+}
+
+/// Watch roots that exist and are not watched yet.
+fn refresh_watches(engine: &Engine, watcher: &mut Option<Watcher>, watched: &mut HashSet<PathBuf>) {
+    let Some(w) = watcher else { return };
+    for root in engine.adapters().iter().flat_map(|a| a.roots()) {
+        if watched.contains(&root) || !root.is_dir() {
+            continue;
+        }
+        match w.watch(&root, RecursiveMode::Recursive) {
+            Ok(()) => {
+                tracing::debug!(root = %root.display(), "watching transcripts");
+                watched.insert(root);
+            }
+            Err(e) => {
+                tracing::warn!(root = %root.display(), error = %e, "cannot watch transcript root")
+            }
+        }
+    }
+    // A removed root is dropped so it is re-watched if it comes back.
+    watched.retain(|r| {
+        let keep = r.is_dir();
+        if !keep {
+            let _ = w.unwatch(r);
+        }
+        keep
+    });
+}
+
+async fn run(engine: Arc<Engine>, mut stop_rx: watch::Receiver<bool>) {
+    let (tx, mut rx) = mpsc::unbounded_channel::<Vec<PathBuf>>();
+    let e = engine.clone();
+    let mut w = start_watcher(tx);
+    let (mut watcher, mut watched) = match tokio::task::spawn_blocking(move || {
+        let mut set = HashSet::new();
+        refresh_watches(&e, &mut w, &mut set);
+        (w, set)
+    })
+    .await
+    {
+        Ok(r) => r,
+        Err(e) => {
+            tracing::error!(error = %e, "setting up transcript watches failed");
+            (None, HashSet::new())
+        }
+    };
+
+    let n = engine.adapters().len();
+    let mut pending = Work::all(n);
+    let (done_tx, mut done_rx) = mpsc::unbounded_channel::<()>();
+    let mut running = false;
+    let mut rescan = tokio::time::interval_at(tokio::time::Instant::now() + RESCAN, RESCAN);
+    let mut tick = tokio::time::interval(TICK);
+    let mut ticks = 0u32;
+
+    loop {
+        if !running && !pending.is_empty() {
+            running = true;
+            let work = std::mem::take(&mut pending);
+            let e = engine.clone();
+            let done = done_tx.clone();
+            tokio::task::spawn_blocking(move || {
+                let started = std::time::Instant::now();
+                let stats = e.run(&work);
+                let ingested: usize = stats.values().map(|s| s.ingested).sum();
+                if ingested > 0 {
+                    tracing::info!(
+                        sources = ingested,
+                        ms = started.elapsed().as_millis() as u64,
+                        "ingested transcripts"
+                    );
+                }
+                let _ = done.send(());
+            });
+        }
+        tokio::select! {
+            _ = stop_rx.changed() => break,
+            Some(paths) = rx.recv() => {
+                let mut w = Work::default();
+                for p in paths {
+                    if let Some(ix) = engine.adapter_for(&p) {
+                        w.paths.entry(ix).or_default().insert(p);
+                    }
+                }
+                pending.merge(w);
+            }
+            Some(()) = done_rx.recv() => running = false,
+            _ = rescan.tick() => {
+                let e = engine.clone();
+                let mut w = watcher.take();
+                let mut set = std::mem::take(&mut watched);
+                match tokio::task::spawn_blocking(move || {
+                    refresh_watches(&e, &mut w, &mut set);
+                    (w, set)
+                }).await {
+                    Ok((w, set)) => {
+                        watcher = w;
+                        watched = set;
+                    }
+                    Err(e) => tracing::error!(error = %e, "refreshing transcript watches failed"),
+                }
+                pending.merge(Work::all(n));
+            }
+            _ = tick.tick() => {
+                engine.notifier().flush();
+                ticks += 1;
+                if ticks.is_multiple_of(SWEEP_TICKS) {
+                    let e = engine.clone();
+                    tokio::task::spawn_blocking(move || e.sweep_stale());
+                }
+            }
+        }
+    }
+    drop(watcher);
+    if running {
+        let _ = done_rx.recv().await;
+    }
+}

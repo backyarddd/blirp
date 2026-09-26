@@ -50,6 +50,7 @@ impl Node {
         let daemon = Daemon::start(DaemonOptions {
             paths: Paths::at(home),
             port: Some(0),
+            ingest: None,
         })
         .await
         .unwrap();

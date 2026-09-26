@@ -86,7 +86,7 @@ sessions(id TEXT PK, project_id TEXT, machine_id TEXT,
          summary_json TEXT NULL,      -- distill output (see §8)
          distilled_through_seq INT DEFAULT 0,
          tokens_in INT DEFAULT 0, tokens_out INT DEFAULT 0, cost_usd REAL DEFAULT 0,
-         parent_session_id TEXT NULL, -- fork / continue-in lineage
+         parent_session_id TEXT NULL, -- fork / continue-in lineage; parent of an ingested subagent
          UNIQUE(agent, agent_session_id))
 
 events(session_id TEXT, seq INT, ts INT,
@@ -184,7 +184,7 @@ Status:
 - Else heuristics: output within the last 2 s -> working; otherwise idle.
 - Process exit: code 0 -> completed, else failed. A user Stop -> completed regardless of exit code. Daemon shutdown ends running sessions as `detached`.
 - Heuristics never overwrite `waiting` (hook-owned) or a final status.
-- On daemon restart, sessions whose process is gone become `detached`; UI offers Resume (agent resume flag with `agent_session_id`).
+- On daemon restart, blirp-launched sessions whose process is gone become `detached` (ingested external sessions keep their status); UI offers Resume (agent resume flag with `agent_session_id`).
 
 Continue in / fork: `continue_from` builds a handoff pack (§9) from the source session and passes it as the initial context of a new session with any agent; `parent_session_id` records lineage. Without `project_id`/`cwd` the new session starts in the source session's folder (or its project when that folder is not on this machine). Fork is `continue_from` with the same agent.
 
@@ -201,26 +201,33 @@ trait Adapter {
 }
 ```
 
-- Watch roots with `notify` (debounced 500 ms) plus a full rescan every 5 min and at startup.
-- Incremental: cursors store byte offset (+ file identity/size/mtime) for JSONL, last rowid/time for SQLite stores, message count for JSON files. Truncation or rotation -> re-read from 0, dedupe on `(session_id, seq)`.
-- Handles compressed Codex rollouts (`.jsonl.zst`) via `zstd`.
-- Normalizes into `sessions` + `events`. `text` is human-readable and redacted; tool calls store tool name + a compact argument preview in text and full (redacted) args in `meta_json` (capped 16 KiB per event).
-- Links to blirp-launched sessions: by `agent_session_id` (claude, set at launch), else by (agent, cwd, first event within 60 s after launch).
-- Sessions started outside blirp are ingested as origin `external`.
-- Token usage / cost where the transcript has it.
-- Each adapter ships fixture transcripts under `crates/blirp/tests/fixtures/<agent>/` and a test asserting the normalized output.
+- Watch roots with `notify` (debounced 500 ms) plus a full rescan every 5 min and at startup. Only roots that exist are watched; the rescan adds roots created later (agent installed after blirp). A watcher event re-reads just the changed known file; anything else (new file, database) rescans that adapter.
+- Passes run on the blocking pool, one at a time (adapters of a pass in parallel, sources of one adapter sequentially, most recently modified first), never on the async runtime or the PTY path. Events are written in `Store::ingest_tx` transactions of at most 1000 events with `apply` semantics (row + outbox); a source's cursor is stored in the transaction of its last batch. Shutdown stops a pass between events.
+- Incremental: a `Source` carries a fingerprint (size + mtime for files, `time_updated` for database rows); an equal fingerprint in the stored cursor skips the source. JSONL cursors store byte offset + line count guarded by file identity (creation time / inode) and a hash of the first 256 bytes; only complete lines are consumed (a final line without newline counts once the file has been quiet for 60 s). SQLite stores keep the last consumed `(time_created, id)`; JSON files the message count. Truncation, rotation or a changed head -> re-read from 0, dedupe on `(session_id, seq)` (so a file rewritten with *different* content at the same positions is not re-imported; agents append, so this only affects hand-edited files).
+- Seqs are deterministic for the same source content and increase with arrival (the distiller consumes events past `distilled_through_seq`): line-oriented sources use `line_index * 1024 + n`; sources without stable lines (gemini, cursor `store.db`, opencode) keep a counter in the cursor and dedupe by message / tool-call / blob id.
+- Handles compressed Codex rollouts (`.jsonl.zst`) and dsh logs (`.jsonl.zstd`) via `zstd` (appended frames are read incrementally; a torn last frame waits).
+- Normalizes into `sessions` + `events`. `text` is human-readable and redacted (`blirp_core::redact`, applied to text, titles and meta); tool calls are `tool(args preview)` in text with full (redacted) args in `meta_json`; tool results are cut to 4 KiB of text, other text to 64 KiB; `meta_json` is capped at 16 KiB. Edit/write tool calls (and `apply_patch` payloads) add one `file_edit` event per path (`meta.path`). Compaction summaries are `summary` events; injected context (Codex `<environment_context>`, Claude local-command output) is `system`. Reasoning/thinking is not stored.
+- Sessions: `project_id` from `resolve_project` on the transcript's cwd (`resolve_project_lenient` when the folder no longer exists: prefix match, else a folder project at the recorded path; no cwd -> Home project). Title: the agent's own title (Claude `ai-title`, opencode/pi/amp/cursor names, Gemini summary, dsh title), else the first user prompt (first line, 80 chars); set only while the title is empty, so a distiller or user title is never overwritten. Tokens and cost are absolute totals: the transcript's own cost when it has one (Claude `cost-state`, opencode, pi, aider), else an estimate from the dated static price table in `ingest/pricing.rs` (unknown models cost 0). `started_at` / `last_activity_at` come from event timestamps (or the store's own update time); external sessions are `working` while their source changed in the last 2 min, else `completed` with `ended_at = last_activity_at`; a 30 s sweep completes external sessions that went quiet.
+- Subagents are child sessions with `parent_session_id` set: Claude `<sessionId>/subagents/agent-<id>.jsonl` (`agent_session_id = "<sessionId>:agent-<id>"`, title from its `.meta.json`), opencode `session.parent_id`, Gemini `chats/<parentId>/`, Cursor `subagents/`. Claude tool output spilled to `tool-results/*.txt` is linked by path in the result's `meta.result_file` with at most a 4 KiB preview.
+- Links to blirp-launched sessions: by `agent_session_id` (claude, set at launch), else by (agent, same folder, first event within 60 s after launch, closest launch wins) on this machine; linking sets `agent_session_id`. A linked or blirp-owned row keeps its `origin`, `status`, `started_at` / `ended_at`, `worktree` and `cwd`; ingest only fills the title (if empty), tokens, cost, transcript path, branch and last activity.
+- Sessions started outside blirp are ingested as origin `external`; the daemon's restart handling (`detached`) applies to blirp-launched sessions only.
+- Transcripts whose cwd is inside `BLIRP_HOME` (except `worktrees/`) are blirp's own background runs (e.g. the distiller's scratch dir) and are skipped.
+- Retention: history is permanent. A source file or database row that disappears never deletes blirp rows.
+- Server events: `session_created`, `session_updated` (at most one per session per second; a suppressed update is sent once its second has passed) and `project_updated` for projects created by resolution.
+- `blirp doctor` prints one line per adapter: root found, source count, last ingest time (settings keys `ingest.<adapter>.last_at` and `.sources`).
+- Each adapter ships fixture transcripts under `crates/blirp/tests/fixtures/<agent>/` and a test asserting the normalized output (`crates/blirp/tests/ingest.rs`).
 
-| Agent | Source (defaults; honor env overrides) |
-|---|---|
-| claude | `$CLAUDE_CONFIG_DIR` or `~/.claude/projects/*/*.jsonl` |
-| codex | `$CODEX_HOME` or `~/.codex/sessions/YYYY/MM/DD/rollout-*.jsonl[.zst]` |
-| opencode | `~/.local/share/opencode/opencode*.db` (Windows: check `%USERPROFILE%\.local\share\opencode` and `%APPDATA%\opencode`), legacy JSON `storage/` tree; open read-only |
-| pi | `$PI_CODING_AGENT_DIR`/`~/.pi/agent/sessions/**/*.jsonl` |
-| gemini | `~/.gemini/tmp/*/chats/*.json[l]` |
-| cursor | `~/.cursor/chats/**/store.db`, `~/.cursor/projects/*/agent-transcripts/*.jsonl` |
-| amp | `~/.local/share/amp/threads/*.json` |
-| aider | `.aider.chat.history.md` in registered project paths |
-| dsh | `~/.dsh/**` (verify format from local install; skip gracefully if unknown) |
+| Agent | Source (defaults; honor env overrides) | Format verified against |
+|---|---|---|
+| claude | `$CLAUDE_CONFIG_DIR/projects` or `~/.claude/projects/*/*.jsonl`; subagents `*/<sessionId>/subagents/*.jsonl` | real data |
+| codex | `$CODEX_HOME` or `~/.codex/{sessions/YYYY/MM/DD,archived_sessions}/rollout-*.jsonl[.zst]`; conversation from `response_item`, cumulative usage from `token_usage_record` / `token_count` | real data |
+| opencode | `$XDG_DATA_HOME/opencode` or `~/.local/share/opencode/opencode*.db` (Windows also `%APPDATA%\opencode`); one source per `session` row; opened `mode=ro` (not `immutable`, it is live), `SQLITE_BUSY` retried. The legacy JSON `storage/` tree is not read (opencode migrates it into the database) | real data |
+| pi | `$PI_CODING_AGENT_DIR/sessions` or `~/.pi/agent/sessions/--<cwd>--/<ts>_<id>.jsonl`; every tree entry kept in file order | published format (v3) |
+| gemini | `$GEMINI_CLI_HOME/.gemini` or `~/.gemini/tmp/<project>/chats/session-*.json[l]` (+ `chats/<parentId>/*.jsonl`); cwd from `tmp/<project>/.project_root` or `projects.json`; messages re-appended with the same id are deduped | gemini-cli source |
+| cursor | `$CURSOR_CONFIG_DIR` or `~/.cursor/chats/<hash>/<id>/store.db` (preferred: blob tree from `meta.latestRootBlobId`, cwd from the sibling `meta.json`) and `~/.cursor/projects/<encoded-cwd>/agent-transcripts/**/*.jsonl` (no timestamps; cwd decoded from the folder name). The Cursor editor's `state.vscdb` is not ingested | transcripts: real (sparse) data; store.db: community documentation |
+| amp | `$AMP_DATA_DIR` or `~/.local/share/amp/threads/T-*.json` (Windows also `%APPDATA%\amp`); a streaming last message waits | public format descriptions |
+| aider | `.aider.chat.history.md` in this machine's registered project folders (periodic rescan only, not watched) | aider docs |
+| dsh | `$DSH_HOME` or `~/.dsh/sessions/<cwd>/session-<id>/session.v3.jsonl.zstd` (other log versions are skipped) | real data (decoded) |
 
 Unknown or changed formats must never crash the daemon: log once per source, skip the line, continue.
 

@@ -1,0 +1,5 @@
+{"role":"user","message":{"content":[{"type":"text","text":"<user_info>OS: windows</user_info>\n<user_query>\nList the TODOs\nkey {{SECRET}}\n</user_query>"}]}}
+{"role":"assistant","message":{"content":[{"type":"text","text":"Searching."},{"type":"tool_use","name":"Grep","input":{"pattern":"TODO"}}]}}
+{"role":"user","message":{"content":[{"type":"tool_result","tool_use_id":"tu_1","content":"src/a.rs:3: TODO"}]}}
+{"role":"assistant","message":{"content":[{"type":"text","text":"One TODO in src/a.rs."}]}}
+{"type":"turn_ended","status":"success"}

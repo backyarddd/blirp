@@ -1,0 +1,7 @@
+[
+  {"role":"system","content":"You are a coding agent."},
+  {"role":"user","content":[{"type":"text","text":"<user_info>OS: linux</user_info>\n<user_query>\nAdd logging\ntoken {{SECRET}}\n</user_query>"}]},
+  {"role":"assistant","id":"1","content":[{"type":"reasoning","text":"plan"},{"type":"text","text":"Adding a logger."},{"type":"tool-call","toolCallId":"tc1","toolName":"edit_file","args":{"target_file":"src/log.rs","code_edit":"fn log() {}"}}]},
+  {"role":"tool","id":"1","content":[{"type":"tool-result","toolCallId":"tc1","toolName":"edit_file","result":"applied","isError":false}]},
+  {"role":"assistant","id":"1","content":[{"type":"text","text":"Done."}]}
+]

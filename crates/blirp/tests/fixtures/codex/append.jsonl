@@ -1,0 +1,2 @@
+{"timestamp":"2026-01-02T09:05:00.000Z","ordinal":13,"type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"Also update the README"}]}}
+{"timestamp":"2026-01-02T09:05:01.000Z","ordinal":14,"type":"token_usage_record","payload":{"thread_id":"x","turn_id":"t2","usage":{"input_tokens":1,"output_tokens":1},"turn_token_usage":{"input_tokens":1,"output_tokens":1},"thread_token_usage":{"input_tokens":3000,"cached_input_tokens":2000,"cache_write_input_tokens":0,"output_tokens":400,"reasoning_output_tokens":120,"total_tokens":3400}}}

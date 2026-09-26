@@ -23,6 +23,9 @@ pub struct DaemonOptions {
     pub paths: Paths,
     /// Overrides `daemon.port`; `Some(0)` binds an ephemeral port.
     pub port: Option<u16>,
+    /// Where transcript ingest (§8) looks for agent stores; `None` disables
+    /// ingest (tests that must not read the real user's agent stores).
+    pub ingest: Option<crate::ingest::IngestEnv>,
 }
 
 pub struct Daemon {
@@ -31,6 +34,7 @@ pub struct Daemon {
     shutdown_tx: watch::Sender<bool>,
     server: JoinHandle<std::io::Result<()>>,
     monitor: JoinHandle<()>,
+    ingest: Option<crate::ingest::IngestService>,
     // Held for the daemon's lifetime; the OS releases it if the process dies.
     _lock: File,
 }
@@ -102,6 +106,7 @@ impl Daemon {
     pub async fn start(opts: DaemonOptions) -> anyhow::Result<Daemon> {
         crate::install_crypto_provider();
         let paths = opts.paths;
+        let ingest_env = opts.ingest;
         paths.ensure_dirs()?;
         let lock = acquire_lock(&paths)?;
         let config = Config::load_or_init(&paths.config_file())?;
@@ -168,6 +173,16 @@ impl Daemon {
         });
 
         crate::sync::start(&state).await;
+        let ingest = ingest_env.map(|env| {
+            let emit_state = state.clone();
+            let engine = crate::ingest::Engine::new(
+                state.store.clone(),
+                state.machine.clone(),
+                env,
+                Arc::new(move |e| emit_state.emit(e)),
+            );
+            crate::ingest::IngestService::start(Arc::new(engine))
+        });
 
         RuntimeInfo {
             pid: std::process::id(),
@@ -184,6 +199,7 @@ impl Daemon {
             shutdown_tx,
             server,
             monitor,
+            ingest,
             _lock: lock,
         })
     }
@@ -201,6 +217,9 @@ impl Daemon {
         }
         let _ = self.shutdown_tx.send(true);
         crate::sync::stop(&self.state).await;
+        if let Some(ingest) = self.ingest {
+            ingest.shutdown().await;
+        }
         let deadline = tokio::time::Instant::now() + SHUTDOWN_GRACE;
         while !self.state.terminals.is_empty() && tokio::time::Instant::now() < deadline {
             tokio::time::sleep(Duration::from_millis(50)).await;
@@ -262,7 +281,16 @@ fn log_signal_err(r: std::io::Result<()>) {
 
 /// `blirp daemon` in the foreground.
 pub async fn run_foreground(paths: Paths, port: Option<u16>) -> anyhow::Result<()> {
-    let daemon = Daemon::start(DaemonOptions { paths, port }).await?;
+    let ingest = crate::ingest::IngestEnv::from_process(paths.home());
+    if ingest.is_none() {
+        tracing::warn!("home directory unknown; transcript ingest disabled");
+    }
+    let daemon = Daemon::start(DaemonOptions {
+        paths,
+        port,
+        ingest,
+    })
+    .await?;
     shutdown_signal().await;
     tracing::info!("shutting down");
     daemon.shutdown().await

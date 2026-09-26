@@ -1,0 +1,314 @@
+//! Ingest passes: scan adapters, ingest changed sources, keep per-adapter
+//! bookkeeping. Everything here is blocking; the service runs it on the
+//! blocking pool.
+
+use super::sink::{ACTIVE_MS, Emit, Notifier, StoreSink};
+use super::{Adapter, Cursor, IngestEnv, Result, Source};
+use blirp_core::model::{Machine, SessionStatus};
+use blirp_core::store::Store;
+use serde_json::json;
+use std::collections::{HashMap, HashSet};
+use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex, PoisonError};
+
+/// What a pass should look at.
+#[derive(Debug, Clone, Default)]
+pub struct Work {
+    /// Adapters to scan completely.
+    pub full: HashSet<usize>,
+    /// Changed paths per adapter (from the watcher).
+    pub paths: HashMap<usize, HashSet<PathBuf>>,
+}
+
+impl Work {
+    pub fn all(n: usize) -> Work {
+        Work {
+            full: (0..n).collect(),
+            paths: HashMap::new(),
+        }
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.full.is_empty() && self.paths.is_empty()
+    }
+
+    pub fn merge(&mut self, o: Work) {
+        self.full.extend(o.full);
+        for (k, v) in o.paths {
+            self.paths.entry(k).or_default().extend(v);
+        }
+        for k in &self.full {
+            self.paths.remove(k);
+        }
+    }
+}
+
+/// Result of one adapter pass.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct PassStats {
+    pub sources: usize,
+    pub ingested: usize,
+    pub failed: usize,
+}
+
+pub struct Engine {
+    pub(crate) store: Arc<Store>,
+    pub(crate) machine: Machine,
+    pub(crate) env: IngestEnv,
+    adapters: Vec<Box<dyn Adapter>>,
+    pub(crate) notifier: Notifier,
+    stop: AtomicBool,
+    warned: Mutex<HashSet<String>>,
+    /// Sources seen by each adapter's last full scan.
+    known: Mutex<HashMap<usize, Vec<Source>>>,
+}
+
+fn lock<T>(m: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
+    // Guarded values are plain collections, valid after a panic elsewhere.
+    m.lock().unwrap_or_else(PoisonError::into_inner)
+}
+
+impl Engine {
+    pub fn new(store: Arc<Store>, machine: Machine, env: IngestEnv, emit: Emit) -> Engine {
+        let adapters = super::adapters(&env);
+        Self::with_adapters(store, machine, env, adapters, emit)
+    }
+
+    pub fn with_adapters(
+        store: Arc<Store>,
+        machine: Machine,
+        env: IngestEnv,
+        adapters: Vec<Box<dyn Adapter>>,
+        emit: Emit,
+    ) -> Engine {
+        Engine {
+            store,
+            machine,
+            env,
+            adapters,
+            notifier: Notifier::new(emit),
+            stop: AtomicBool::new(false),
+            warned: Mutex::new(HashSet::new()),
+            known: Mutex::new(HashMap::new()),
+        }
+    }
+
+    pub fn adapters(&self) -> &[Box<dyn Adapter>] {
+        &self.adapters
+    }
+
+    pub fn notifier(&self) -> &Notifier {
+        &self.notifier
+    }
+
+    /// Ask running passes to stop at the next source or event.
+    pub fn request_stop(&self) {
+        self.stop.store(true, Ordering::SeqCst);
+    }
+
+    pub fn stopping(&self) -> bool {
+        self.stop.load(Ordering::SeqCst)
+    }
+
+    pub(crate) fn warn_once(&self, adapter: &str, source: &str, what: &str) {
+        if lock(&self.warned).insert(format!("{adapter}\n{source}\n{what}")) {
+            tracing::warn!(adapter, source, "{what}");
+        }
+    }
+
+    /// Adapter index owning `path` (longest matching root).
+    pub fn adapter_for(&self, path: &Path) -> Option<usize> {
+        self.adapters
+            .iter()
+            .enumerate()
+            .flat_map(|(i, a)| a.roots().into_iter().map(move |r| (i, r)))
+            .filter(|(_, r)| path.starts_with(r))
+            .max_by_key(|(_, r)| r.as_os_str().len())
+            .map(|(i, _)| i)
+    }
+
+    /// Run `work`; adapters run in parallel, sources within one sequentially.
+    pub fn run(&self, work: &Work) -> HashMap<&'static str, PassStats> {
+        let mut ids: Vec<usize> = work.full.iter().chain(work.paths.keys()).copied().collect();
+        ids.sort_unstable();
+        ids.dedup();
+        std::thread::scope(|scope| {
+            let handles: Vec<_> = ids
+                .into_iter()
+                .filter_map(|i| self.adapters.get(i).map(|a| (i, a)))
+                .map(|(i, a)| {
+                    let changed = if work.full.contains(&i) {
+                        None
+                    } else {
+                        work.paths.get(&i)
+                    };
+                    (a.id(), scope.spawn(move || self.run_adapter(i, changed)))
+                })
+                .collect();
+            handles
+                .into_iter()
+                .filter_map(|(id, h)| match h.join() {
+                    Ok(stats) => Some((id, stats)),
+                    Err(_) => {
+                        tracing::error!(adapter = id, "ingest pass panicked");
+                        None
+                    }
+                })
+                .collect()
+        })
+    }
+
+    /// Sources to look at: the known ones matching `changed`, or a full scan
+    /// when there is no change list or a change is not a known source.
+    fn sources_for(&self, ix: usize, changed: Option<&HashSet<PathBuf>>) -> Result<Vec<Source>> {
+        let adapter = &self.adapters[ix];
+        if let Some(changed) = changed
+            && let Some(known) = lock(&self.known).get(&ix)
+        {
+            // File sources are keyed by path (item None); database sources
+            // always rescan because one file holds many of them.
+            let known_file = |c: &PathBuf| known.iter().any(|s| &s.path == c && s.item.is_none());
+            if changed.iter().all(known_file) {
+                return Ok(changed.iter().filter_map(|p| Source::file(p)).collect());
+            }
+        }
+        let mut sources = adapter.scan(&self.store)?;
+        sources.sort_by(|a, b| b.mtime_ms.cmp(&a.mtime_ms).then_with(|| a.key.cmp(&b.key)));
+        lock(&self.known).insert(ix, sources.clone());
+        Ok(sources)
+    }
+
+    pub fn run_adapter(&self, ix: usize, changed: Option<&HashSet<PathBuf>>) -> PassStats {
+        let adapter = &self.adapters[ix];
+        let id = adapter.id();
+        let mut stats = PassStats::default();
+        let sources = match self.sources_for(ix, changed) {
+            Ok(s) => s,
+            Err(e) => {
+                self.warn_once(id, "(scan)", &format!("scan failed: {e:#}"));
+                stats.failed += 1;
+                return stats;
+            }
+        };
+        stats.sources = sources.len();
+        for src in &sources {
+            if self.stopping() {
+                break;
+            }
+            match self.ingest_source(adapter.as_ref(), src) {
+                Ok(true) => stats.ingested += 1,
+                Ok(false) => {}
+                Err(e) => {
+                    stats.failed += 1;
+                    if !self.stopping() {
+                        self.warn_once(id, &src.key, &format!("ingest failed: {e:#}"));
+                    }
+                }
+            }
+        }
+        if changed.is_none() {
+            let now = blirp_core::now_ms();
+            let values = [
+                (format!("ingest.{id}.last_at"), Some(json!(now))),
+                (format!("ingest.{id}.sources"), Some(json!(stats.sources))),
+            ]
+            .into_iter()
+            .collect();
+            if let Err(e) = self.store.set_settings(&values) {
+                tracing::warn!(adapter = id, error = %e, "recording ingest status failed");
+            }
+        } else if stats.ingested > 0
+            && let Err(e) = self.store.set_setting(
+                &format!("ingest.{id}.last_at"),
+                &json!(blirp_core::now_ms()),
+            )
+        {
+            tracing::warn!(adapter = id, error = %e, "recording ingest status failed");
+        }
+        stats
+    }
+
+    /// Ingest one source if it changed since its cursor. True when read.
+    pub fn ingest_source(&self, adapter: &dyn Adapter, src: &Source) -> Result<bool> {
+        let id = adapter.id();
+        let cursor: Option<Cursor> = self
+            .store
+            .get_cursor(id, &src.key)?
+            .and_then(|v| serde_json::from_value(v).ok());
+        if cursor
+            .as_ref()
+            .is_some_and(|c| !c.fp.is_empty() && c.fp == src.fingerprint)
+        {
+            return Ok(false);
+        }
+        let mut sink = StoreSink::new(self, id, &src.key, src.mtime_ms);
+        let mut next = adapter.ingest(src, cursor, &mut sink)?;
+        next.fp = if next.retry {
+            String::new()
+        } else {
+            src.fingerprint.clone()
+        };
+        sink.finish(&next)?;
+        Ok(true)
+    }
+
+    /// External sessions still `working` without activity for 2 minutes
+    /// become `completed` (no further transcript writes will say so).
+    pub fn sweep_stale(&self) {
+        let now = blirp_core::now_ms();
+        let stale = match self
+            .store
+            .stale_external_sessions(&self.machine.id, now - ACTIVE_MS)
+        {
+            Ok(s) => s,
+            Err(e) => {
+                tracing::warn!(error = %e, "listing stale sessions failed");
+                return;
+            }
+        };
+        for s in stale {
+            let res = self.store.modify_session(&s.id, |s| {
+                if s.status == SessionStatus::Working && now - s.last_activity_at >= ACTIVE_MS {
+                    s.status = SessionStatus::Completed;
+                    s.ended_at = Some(s.last_activity_at);
+                }
+            });
+            match res {
+                Ok(s) => self.notifier.updated(s),
+                Err(e) => {
+                    tracing::warn!(session = %s.id, error = %e, "completing stale session failed")
+                }
+            }
+        }
+    }
+}
+
+/// `blirp doctor` line data for one adapter.
+#[derive(Debug, Clone)]
+pub struct AdapterStatus {
+    pub id: &'static str,
+    /// False for adapters that only scan project folders (aider).
+    pub has_roots: bool,
+    pub roots_found: Vec<PathBuf>,
+    pub sources: std::result::Result<usize, String>,
+    pub last_ingest_at: Option<i64>,
+}
+
+/// Roots, source counts and last ingest time per adapter (read-only).
+pub fn status(store: &Store, env: &IngestEnv) -> Vec<AdapterStatus> {
+    super::adapters(env)
+        .iter()
+        .map(|a| AdapterStatus {
+            id: a.id(),
+            has_roots: !a.roots().is_empty(),
+            roots_found: a.roots().into_iter().filter(|r| r.exists()).collect(),
+            sources: a.scan(store).map(|s| s.len()).map_err(|e| format!("{e:#}")),
+            last_ingest_at: store
+                .get_setting(&format!("ingest.{}.last_at", a.id()))
+                .ok()
+                .flatten()
+                .and_then(|v| v.as_i64()),
+        })
+        .collect()
+}
