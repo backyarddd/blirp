@@ -55,7 +55,7 @@ Edit, resolve or delete records and edit or revert the brief in the Memory tab. 
 `blirp uninstall --purge`: stops the daemon, removes autostart, blirp's agent hooks, the app and the CLI, and deletes `~/.blirp` (it asks first). Without `--purge` your data stays. See [install.md](install.md#uninstalling).
 
 **Which agent should I use for summaries?**
-Whichever you have: `auto` picks `claude`, then `codex`, then Ollama. Summaries are short and structured, so a small model is enough.
+Whichever you have: `auto` picks `claude`, then Ollama. `codex` works too but only when you choose it (see [memory.md](memory.md#summarizer-backends) for why). Summaries are short and structured, so a small model is enough.
 
 **An agent I use is not supported.**
 Add it as a [custom agent](agents.md#custom-agents) today (tracked sessions, memory file in the environment), or add an adapter ([development.md](development.md#adding-an-agent-adapter)).

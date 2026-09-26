@@ -6,7 +6,7 @@ use rusqlite::{Row, params};
 use serde_json::Value as JsonValue;
 use std::collections::BTreeMap;
 
-fn machine_row(r: &Row<'_>) -> rusqlite::Result<Machine> {
+pub(super) fn machine_row(r: &Row<'_>) -> rusqlite::Result<Machine> {
     Ok(Machine {
         id: r.get("id")?,
         name: r.get("name")?,
@@ -168,6 +168,18 @@ impl Store {
         })
     }
 
+    /// Bump only `last_seen`: a concurrent revoke or rights change made
+    /// between reading the device and this write must survive it.
+    pub fn touch_device(&self, id: &str, now: i64) -> Result<()> {
+        self.write(|tx| {
+            tx.execute(
+                "UPDATE devices SET last_seen = ?1 WHERE id = ?2",
+                params![now, id],
+            )?;
+            Ok(())
+        })
+    }
+
     // ---------------------------------------------------------------- ingest cursors
 
     pub fn get_cursor(&self, adapter: &str, source: &str) -> Result<Option<JsonValue>> {
@@ -237,7 +249,17 @@ mod tests {
         };
         store.upsert_device(&d).unwrap();
         assert_eq!(store.device_by_token_hash("h").unwrap(), Some(d.clone()));
-        store.upsert_device(&Device { revoked: true, ..d }).unwrap();
+        // A stale read-modify-write of last_seen must not undo a revoke.
+        store
+            .upsert_device(&Device {
+                revoked: true,
+                ..d.clone()
+            })
+            .unwrap();
+        store.touch_device(&d.id, 99).unwrap();
+        let back = &store.list_devices().unwrap()[0];
+        assert!(back.revoked);
+        assert_eq!(back.last_seen, 99);
         assert_eq!(store.device_by_token_hash("h").unwrap(), None);
         assert_eq!(store.list_devices().unwrap().len(), 1);
 

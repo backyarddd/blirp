@@ -546,10 +546,7 @@ fn touch_device(inner: &Inner, remote: &str) {
     let id = remote.to_string();
     tokio::task::spawn_blocking(move || {
         let r = store.machine_device(&id).and_then(|d| match d {
-            Some(d) => store.upsert_device(&Device {
-                last_seen: blirp_core::now_ms(),
-                ..d
-            }),
+            Some(d) => store.touch_device(&d.id, blirp_core::now_ms()),
             None => Ok(()),
         });
         if let Err(e) = r {

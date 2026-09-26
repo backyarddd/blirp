@@ -190,8 +190,17 @@ async fn stream(
                 Some(Ok(Message::Text(t))) => match serde_json::from_str::<TerminalClientMessage>(&t) {
                     Ok(TerminalClientMessage::Input { data }) => term.write(data.into_bytes()),
                     Ok(TerminalClientMessage::Resize { cols, rows }) => {
-                        if let Err(e) = term.resize(cols, rows, me) {
-                            tracing::debug!(session = %term.session_id, error = %e, "resize rejected");
+                        // ResizePseudoConsole can wait for the PTY reader:
+                        // never on an async worker.
+                        let t = term.clone();
+                        match tokio::task::spawn_blocking(move || t.resize(cols, rows, me)).await {
+                            Ok(Ok(())) => {}
+                            Ok(Err(e)) => {
+                                tracing::debug!(session = %term.session_id, error = %e, "resize rejected");
+                            }
+                            Err(e) => {
+                                tracing::error!(session = %term.session_id, error = %e, "resize task failed");
+                            }
                         }
                     }
                     Err(e) => {

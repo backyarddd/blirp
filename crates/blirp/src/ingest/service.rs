@@ -153,6 +153,7 @@ async fn run(
     let e = engine.clone();
     let mut w = start_watcher(tx);
     let (mut watcher, mut watched) = match tokio::task::spawn_blocking(move || {
+        e.repair_home_filed();
         let mut set = HashSet::new();
         refresh_watches(&e, &mut w, &mut set);
         (w, set)

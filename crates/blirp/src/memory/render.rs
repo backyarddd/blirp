@@ -469,6 +469,26 @@ Tools: search older history with the blirp MCP tools (mem_search, mem_session, m
         assert_eq!(a, expected);
     }
 
+    // Subagent children would push real sessions out of "Recent sessions";
+    // their parent's entry covers them.
+    #[test]
+    fn recent_sessions_leave_out_subagents() {
+        let (_d, store, pid) = project_store("P");
+        let mut parent = session("parent", &pid, 1000);
+        parent.title = Some("Parent work".into());
+        store.insert_session(&parent).unwrap();
+        for i in 0..3 {
+            let mut child = session(&format!("child{i}"), &pid, 2000 + i);
+            child.origin = blirp_core::model::SessionOrigin::External;
+            child.parent_session_id = Some("parent".into());
+            child.title = Some(format!("subagent {i}"));
+            store.insert_session(&child).unwrap();
+        }
+        let md = render_injection(&store, &pid, None, 8000).unwrap();
+        assert!(md.contains("Parent work"), "{md}");
+        assert!(!md.contains("subagent"), "{md}");
+    }
+
     #[test]
     fn caps_are_enforced() {
         let (_d, store, pid) = project_store("Big");

@@ -37,6 +37,7 @@ distill_max_chars = 60000
 role = "standalone"
 # hub = "<hub endpoint id>"
 relay = "default"
+allow_hub_control = false
 
 [portal]
 lan = false
@@ -83,7 +84,7 @@ check = true
 
 | Key | Type | Default | Description |
 |---|---|---|---|
-| `summarizer` | `"auto"` \| `"claude"` \| `"codex"` \| `"ollama"` \| `"none"` | `"auto"` | Backend that distills sessions. `auto` = first available of `claude` on PATH, `codex` on PATH, a reachable Ollama. `none` disables distilling. See [memory.md](memory.md#summarizer-backends). |
+| `summarizer` | `"auto"` \| `"claude"` \| `"codex"` \| `"ollama"` \| `"none"` | `"auto"` | Backend that distills sessions. `auto` = first available of `claude` on PATH, a reachable Ollama (`codex` only when chosen explicitly). `none` disables distilling. See [memory.md](memory.md#summarizer-backends). |
 | `ollama_model` | string | `"qwen2.5:7b"` | Ollama model; must be non-empty when `summarizer = "ollama"`. The Ollama URL comes from `OLLAMA_HOST` (default `http://127.0.0.1:11434`). |
 | `distill_idle_secs` | integer > 0 | `300` | A session idle this long with new events is distilled. |
 | `daily_distill_limit` | integer | `40` | Maximum distill runs per UTC day (automatic and manual). `0` stops all distilling. |
@@ -100,6 +101,7 @@ Normally managed by `blirp hub enable|disable`, `blirp pair` and **Settings > Ma
 | `role` | `"standalone"` \| `"hub"` \| `"node"` | `"standalone"` | This machine's sync role. |
 | `hub` | string | unset | Endpoint id of the paired hub; required when `role = "node"`. |
 | `relay` | `"default"` \| `"disabled"` \| `http(s)://` URL | `"default"` | How machines find and reach each other: n0 public relays and DNS discovery, direct/LAN only, or only your own iroh relay. See [sync-and-hub.md](sync-and-hub.md#network-relay-and-privacy). |
+| `allow_hub_control` | bool | `false` | Node only: let the hub and other paired machines launch, stop, resume and delete sessions, type into terminals and change memory on this machine. Off: they can only read it. Takes effect immediately. |
 
 ### `[portal]`
 

@@ -152,7 +152,11 @@ impl Adapter for Opencode {
         let Some(sid) = src.item.as_deref() else {
             return Cursor::from_state(&st);
         };
-        let conn = open_ro(&src.path)?;
+        let db = open_ro(&src.path)?;
+        // One read transaction: session, messages and parts from the same
+        // snapshot, so a message is never seen without parts that were
+        // committed together with it.
+        let conn = retry_busy(|| db.unchecked_transaction())?;
         let row = retry_busy(|| {
             conn.query_row(
                 "SELECT parent_id, directory, title, time_created, time_updated, cost,
@@ -197,6 +201,7 @@ impl Adapter for Opencode {
             transcript_path: Some(format!("{}#{sid}", src.path.display())),
             ..SessionMeta::default()
         };
+        super::report_cwd(sink, sid, &meta, &mut false);
         let messages: Vec<(String, i64, String)> = retry_busy(|| {
             let mut q = conn.prepare(
                 "SELECT id, time_created, data FROM message
@@ -243,6 +248,12 @@ impl Adapter for Opencode {
                 let rows = q.query_map(params![mid], |r| r.get(0))?;
                 rows.collect()
             })?;
+            // opencode writes a message before its parts: an empty one is
+            // still being written, unless it was left that way long ago.
+            if parts.is_empty() && now - mtime <= ABANDONED_MS {
+                retry = true;
+                break;
+            }
             let ts = m
                 .get("time")
                 .and_then(|t| t.get("created"))

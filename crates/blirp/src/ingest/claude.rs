@@ -157,6 +157,7 @@ impl Adapter for Claude {
         if parent.is_some() {
             meta.title = subagent_title(&src.path);
         }
+        let mut reported = false;
         lines.for_each(|ix, raw| {
             let v: Value = match serde_json::from_slice(raw) {
                 Ok(v) => v,
@@ -166,7 +167,9 @@ impl Adapter for Claude {
                 }
             };
             let mut e = Emit::line(sink, &asid, ix);
-            line(&v, &mut e, &mut st, &mut meta)
+            line(&v, &mut e, &mut st, &mut meta)?;
+            super::report_cwd(sink, &asid, &meta, &mut reported);
+            Ok(())
         })?;
         st.pos = lines.pos().clone();
         if meta.cwd.is_none() && st.pos.line > 0 {
@@ -206,10 +209,12 @@ fn decoded_cwd(path: &Path) -> Option<String> {
 
 fn line(v: &Value, e: &mut Emit<'_>, st: &mut State, meta: &mut SessionMeta) -> Result<()> {
     let ts = v.get("timestamp").and_then(parse_ts);
-    if let Some(cwd) = v
-        .get("cwd")
-        .and_then(Value::as_str)
-        .filter(|c| !c.is_empty())
+    // Where the session started; a later `cd` does not move it.
+    if meta.cwd.is_none()
+        && let Some(cwd) = v
+            .get("cwd")
+            .and_then(Value::as_str)
+            .filter(|c| !c.is_empty())
     {
         meta.cwd = Some(cwd.to_string());
     }

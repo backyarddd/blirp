@@ -32,8 +32,8 @@ fn blirp(home: &Path, user: &Path, args: &[&str]) -> Output {
     cmd.output().unwrap()
 }
 
-/// Stops the detached daemon even when a test fails half way: a leftover
-/// daemon would keep the test harness's inherited output pipe open.
+/// Stops the detached daemon even when a test fails half way, so no daemon
+/// outlives the test.
 struct StopOnDrop<'a>(&'a Path, &'a Path);
 
 impl Drop for StopOnDrop<'_> {
@@ -81,6 +81,50 @@ fn detach_logs_and_stop() {
     let o = blirp(&home, &user, &["stop"]);
     assert!(o.status.success(), "{}", text(&o));
     assert!(text(&o).contains("not running"), "{}", text(&o));
+}
+
+// The detached daemon must not inherit any handle of its caller: a caller
+// reading a pipe it handed down (or `blirp daemon --detach | ...`) would
+// otherwise wait until the daemon stops.
+#[cfg(windows)]
+#[test]
+fn detached_daemon_holds_none_of_the_callers_handles() {
+    use std::io::Read as _;
+    use std::os::windows::io::AsRawHandle as _;
+    use windows_sys::Win32::Foundation::{HANDLE_FLAG_INHERIT, SetHandleInformation};
+    let tmp = tempfile::tempdir().unwrap();
+    let home = tmp.path().join("blirp");
+    let user = tmp.path().join("user");
+    std::fs::create_dir_all(&user).unwrap();
+
+    let (mut reader, writer) = std::io::pipe().unwrap();
+    #[allow(unsafe_code)]
+    // SAFETY: `writer` is an open pipe handle owned by this test; only its
+    // inherit flag changes, so `blirp daemon --detach` receives a copy.
+    let ok = unsafe {
+        SetHandleInformation(
+            writer.as_raw_handle(),
+            HANDLE_FLAG_INHERIT,
+            HANDLE_FLAG_INHERIT,
+        )
+    };
+    assert_ne!(ok, 0);
+    let o = blirp(&home, &user, &["daemon", "--detach", "--port", "0"]);
+    let _stop = StopOnDrop(&home, &user);
+    assert!(o.status.success(), "{}", text(&o));
+    drop(writer);
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let mut buf = Vec::new();
+        let _ = reader.read_to_end(&mut buf);
+        let _ = tx.send(());
+    });
+    assert!(
+        rx.recv_timeout(std::time::Duration::from_secs(10)).is_ok(),
+        "the detached daemon keeps the caller's pipe open"
+    );
+    let o = blirp(&home, &user, &["stop"]);
+    assert!(o.status.success(), "{}", text(&o));
 }
 
 fn git(dir: &Path, args: &[&str]) {

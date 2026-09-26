@@ -163,6 +163,10 @@ impl Daemon {
                             if let Err(e) = st.store.flush_deferred(blirp_core::now_ms()) {
                                 tracing::warn!(error = %e, "queueing coalesced session updates failed");
                             }
+                            // Events of a backfill after pairing (§10), in batches.
+                            if let Err(e) = st.store.backfill_events(2000) {
+                                tracing::warn!(error = %e, "queueing events for replication failed");
+                            }
                             owned
                         })
                         .await
@@ -329,47 +333,16 @@ pub async fn detach(paths: &Paths, port: Option<u16>) -> anyhow::Result<RuntimeI
     let exe = std::env::current_exe().context("locate blirp executable")?;
     // It becomes the daemon's working directory, so it must exist first.
     paths.ensure_dirs()?;
-    let mut cmd = std::process::Command::new(exe);
-    // Never inherit the caller's folder: the daemon would keep it in use
-    // (on Windows it could not be deleted or renamed) for its lifetime.
-    cmd.arg("daemon")
-        .current_dir(paths.home())
-        .env(blirp_core::paths::HOME_ENV, paths.home())
-        .stdin(std::process::Stdio::null())
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null());
+    let mut args = vec!["daemon".to_string()];
     if let Some(p) = port {
-        cmd.args(["--port", &p.to_string()]);
+        args.extend(["--port".to_string(), p.to_string()]);
     }
-    #[cfg(windows)]
-    {
-        use std::os::windows::process::CommandExt;
-        keep_std_handles_private();
-        const DETACHED_PROCESS: u32 = 0x0000_0008;
-        const CREATE_NEW_PROCESS_GROUP: u32 = 0x0000_0200;
-        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
-        cmd.creation_flags(DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP | CREATE_NO_WINDOW);
-    }
-    #[cfg(unix)]
-    {
-        use std::os::unix::process::CommandExt;
-        #[allow(unsafe_code)]
-        // SAFETY: setsid is async-signal-safe and touches no Rust state in the
-        // forked child; it detaches the daemon from the controlling terminal.
-        unsafe {
-            cmd.pre_exec(|| {
-                if libc::setsid() == -1 {
-                    return Err(std::io::Error::last_os_error());
-                }
-                Ok(())
-            });
-        }
-    }
-    let mut child = cmd.spawn().context("spawn background daemon")?;
-    let pid = child.id();
+    let mut child =
+        spawn_background(&exe, &args, paths.home()).context("spawn background daemon")?;
+    let pid = child.pid;
     let deadline = std::time::Instant::now() + Duration::from_secs(20);
     loop {
-        if let Some(status) = child.try_wait()? {
+        if let Some(status) = child.exited()? {
             if let Some(info) = running_daemon(paths).await {
                 // Lost a race with another starter; that daemon is fine.
                 return Ok(info);
@@ -394,32 +367,168 @@ pub async fn detach(paths: &Paths, port: Option<u16>) -> anyhow::Result<RuntimeI
     }
 }
 
-/// CreateProcess passes every inheritable handle to the child. Our own std
-/// handles are usually inheritable (the caller created them so), so without
-/// this the daemon would hold the caller's stdout/stderr pipes open forever
-/// and `blirp daemon --detach | ...` (or any caller reading our output to
-/// EOF) would hang.
-#[cfg(windows)]
-#[allow(unsafe_code)]
-fn keep_std_handles_private() {
-    use windows_sys::Win32::Foundation::{
-        HANDLE_FLAG_INHERIT, INVALID_HANDLE_VALUE, SetHandleInformation,
-    };
-    use windows_sys::Win32::System::Console::{
-        GetStdHandle, STD_ERROR_HANDLE, STD_INPUT_HANDLE, STD_OUTPUT_HANDLE,
-    };
-    for id in [STD_INPUT_HANDLE, STD_OUTPUT_HANDLE, STD_ERROR_HANDLE] {
-        // SAFETY: GetStdHandle has no preconditions; the handle it returns is
-        // owned by this process for its lifetime, and SetHandleInformation
-        // only clears the inherit flag (it fails harmlessly on handles that
-        // cannot be changed).
+/// The background daemon `--detach` started, watched only until it is up.
+struct Background {
+    pid: u32,
+    #[cfg(unix)]
+    child: std::process::Child,
+    #[cfg(windows)]
+    process: std::os::windows::io::OwnedHandle,
+}
+
+impl Background {
+    /// `Some(exit status)` once the process has ended.
+    #[cfg(unix)]
+    fn exited(&mut self) -> std::io::Result<Option<String>> {
+        Ok(self.child.try_wait()?.map(|s| s.to_string()))
+    }
+
+    /// `Some(exit status)` once the process has ended.
+    #[cfg(windows)]
+    #[allow(unsafe_code)]
+    fn exited(&mut self) -> std::io::Result<Option<String>> {
+        use std::os::windows::io::AsRawHandle as _;
+        use windows_sys::Win32::Foundation::WAIT_OBJECT_0;
+        use windows_sys::Win32::System::Threading::{GetExitCodeProcess, WaitForSingleObject};
+        let h = self.process.as_raw_handle();
+        // SAFETY: `h` is our open process handle (owned by `self`); a zero
+        // timeout only polls, and the exit code is written to a local.
         unsafe {
-            let h = GetStdHandle(id);
-            if !h.is_null() && h != INVALID_HANDLE_VALUE {
-                SetHandleInformation(h, HANDLE_FLAG_INHERIT, 0);
+            if WaitForSingleObject(h, 0) != WAIT_OBJECT_0 {
+                return Ok(None);
             }
+            let mut code = 0u32;
+            if GetExitCodeProcess(h, &mut code) == 0 {
+                return Err(std::io::Error::last_os_error());
+            }
+            Ok(Some(format!("exit code {code}")))
         }
     }
+}
+
+/// Start `exe args` detached from the caller: its own session / process
+/// group, no console, `dir` as working directory (never the caller's
+/// folder, which it would keep in use), `BLIRP_HOME` set, no std streams.
+#[cfg(unix)]
+fn spawn_background(
+    exe: &std::path::Path,
+    args: &[String],
+    dir: &std::path::Path,
+) -> std::io::Result<Background> {
+    use std::os::unix::process::CommandExt;
+    let mut cmd = std::process::Command::new(exe);
+    cmd.args(args)
+        .current_dir(dir)
+        .env(blirp_core::paths::HOME_ENV, dir)
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null());
+    #[allow(unsafe_code)]
+    // SAFETY: setsid is async-signal-safe and touches no Rust state in the
+    // forked child; it detaches the daemon from the controlling terminal.
+    unsafe {
+        cmd.pre_exec(|| {
+            if libc::setsid() == -1 {
+                return Err(std::io::Error::last_os_error());
+            }
+            Ok(())
+        });
+    }
+    let child = cmd.spawn()?;
+    Ok(Background {
+        pid: child.id(),
+        child,
+    })
+}
+
+/// Windows: `CreateProcessW` with `bInheritHandles = FALSE` and no std
+/// handles. `std::process::Command` always lets the child inherit every
+/// inheritable handle of this process, whatever it was handed by its own
+/// caller (pipes it reads to EOF, log files); the daemon would hold them
+/// for its lifetime and such a caller would hang.
+#[cfg(windows)]
+#[allow(unsafe_code)]
+fn spawn_background(
+    exe: &std::path::Path,
+    args: &[String],
+    dir: &std::path::Path,
+) -> std::io::Result<Background> {
+    use std::ffi::{OsStr, OsString};
+    use std::os::windows::ffi::OsStrExt as _;
+    use std::os::windows::io::FromRawHandle as _;
+    use windows_sys::Win32::Foundation::CloseHandle;
+    use windows_sys::Win32::System::Threading::{
+        CREATE_NEW_PROCESS_GROUP, CREATE_NO_WINDOW, CREATE_UNICODE_ENVIRONMENT, CreateProcessW,
+        DETACHED_PROCESS, PROCESS_INFORMATION, STARTUPINFOW,
+    };
+    let wide = |s: &OsStr| -> Vec<u16> { s.encode_wide().chain([0]).collect() };
+    // Paths cannot contain `"`; the arguments are plain tokens.
+    let mut line = OsString::from("\"");
+    line.push(exe);
+    line.push("\"");
+    for a in args {
+        line.push(" ");
+        line.push(a);
+    }
+    let mut line = wide(&line);
+    // The caller's environment plus BLIRP_HOME, sorted like Windows keeps it.
+    let mut vars: Vec<(OsString, OsString)> = std::env::vars_os()
+        .filter(|(k, _)| !k.eq_ignore_ascii_case(blirp_core::paths::HOME_ENV))
+        .collect();
+    vars.push((
+        blirp_core::paths::HOME_ENV.into(),
+        dir.as_os_str().to_owned(),
+    ));
+    vars.sort_by_key(|(k, _)| k.to_ascii_uppercase());
+    let mut block: Vec<u16> = Vec::new();
+    for (k, v) in &vars {
+        block.extend(k.encode_wide());
+        block.push(u16::from(b'='));
+        block.extend(v.encode_wide());
+        block.push(0);
+    }
+    block.push(0);
+    let dir_w = wide(dir.as_os_str());
+    let si = STARTUPINFOW {
+        cb: std::mem::size_of::<STARTUPINFOW>() as u32,
+        ..STARTUPINFOW::default()
+    };
+    let mut pi = PROCESS_INFORMATION::default();
+    // SAFETY: every pointer is to a live, NUL-terminated buffer owned by
+    // this frame (`line` is mutable as CreateProcessW requires); `si` is
+    // initialized with its size and no std handles; on success the two
+    // returned handles are owned here (the thread handle is closed, the
+    // process handle moves into an OwnedHandle).
+    let ok = unsafe {
+        CreateProcessW(
+            std::ptr::null(),
+            line.as_mut_ptr(),
+            std::ptr::null(),
+            std::ptr::null(),
+            0,
+            DETACHED_PROCESS
+                | CREATE_NEW_PROCESS_GROUP
+                | CREATE_NO_WINDOW
+                | CREATE_UNICODE_ENVIRONMENT,
+            block.as_ptr().cast(),
+            dir_w.as_ptr(),
+            &si,
+            &mut pi,
+        )
+    };
+    if ok == 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    // SAFETY: both handles were just returned by a successful CreateProcessW
+    // and are closed / owned exactly once.
+    let process = unsafe {
+        CloseHandle(pi.hThread);
+        std::os::windows::io::OwnedHandle::from_raw_handle(pi.hProcess)
+    };
+    Ok(Background {
+        pid: pi.dwProcessId,
+        process,
+    })
 }
 
 /// Tracing to `logs/blirpd.<date>.log` (daily, keep 7) and stderr.

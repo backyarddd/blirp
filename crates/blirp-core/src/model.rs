@@ -276,11 +276,21 @@ pub struct Record {
 /// A project brief; also used for entries of the brief history.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
 pub struct Brief {
+    /// Id of this version's `brief_history` row: a UUIDv7, unique across
+    /// machines, so versions written concurrently on two machines never
+    /// overwrite each other. Empty in changes from older blirp versions.
+    #[serde(default)]
+    pub id: String,
     pub project_id: String,
     pub body_md: String,
+    /// Position in the project's history (1 = oldest, by time), derived
+    /// when read; for display and revert only.
     pub version: i64,
     pub updated_at: i64,
     pub updated_by: String,
+    /// Machine that wrote this version (empty when unknown).
+    #[serde(default)]
+    pub machine_id: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
@@ -481,7 +491,13 @@ pub struct PutBrief {
 #[derive(Debug, Clone, Serialize, Deserialize, TS)]
 #[serde(deny_unknown_fields)]
 pub struct RevertBrief {
-    pub version: i64,
+    /// History entry to restore, by its `version` number...
+    #[ts(optional)]
+    pub version: Option<i64>,
+    /// ...or by its id (preferred: numbers can shift when versions written
+    /// earlier on another machine arrive).
+    #[ts(optional)]
+    pub id: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, TS)]

@@ -361,16 +361,52 @@ fn build(state: SharedState, listener: Listener) -> Router {
             Router::new().merge(api).route("/auth", get(auth_login))
         }
     };
-    let app = app
+    let mut app = app
         .fallback(crate::static_files::serve)
         .layer(middleware::from_fn(check_origin))
-        .layer(middleware::from_fn(security_headers))
-        .with_state(state);
+        .layer(middleware::from_fn(security_headers));
+    if listener == Listener::Local {
+        app = app.layer(middleware::from_fn_with_state(
+            state.clone(),
+            check_local_host,
+        ));
+    }
+    let app = app.with_state(state);
     if listener == Listener::Portal {
         app.layer(axum::Extension(PortalListener))
     } else {
         app
     }
+}
+
+/// `Host` of a request to the loopback listener on `port`: a loopback
+/// name with that port.
+fn is_loopback_host(host: &str, port: u16) -> bool {
+    let Some((name, p)) = host.rsplit_once(':') else {
+        return false;
+    };
+    p.parse() == Ok(port)
+        && (name == "127.0.0.1" || name == "[::1]" || name.eq_ignore_ascii_case("localhost"))
+}
+
+/// DNS-rebinding defense (§11): a web page whose name resolves to
+/// 127.0.0.1 reaches this listener with its own name in `Host`; only
+/// requests addressed to a loopback name are answered.
+async fn check_local_host(State(state): State<SharedState>, req: Request, next: Next) -> Response {
+    let ok = req
+        .headers()
+        .get(header::HOST)
+        .and_then(|h| h.to_str().ok())
+        .is_some_and(|h| is_loopback_host(h, state.port));
+    if !ok {
+        return ApiError::new(
+            StatusCode::FORBIDDEN,
+            "forbidden_host",
+            "requests must address the daemon as 127.0.0.1, localhost or [::1]",
+        )
+        .into_response();
+    }
+    next.run(req).await
 }
 
 async fn api_not_found() -> ApiError {
@@ -577,6 +613,28 @@ async fn security_headers(req: Request, next: Next) -> Response {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn loopback_hosts_only() {
+        for ok in [
+            "127.0.0.1:47770",
+            "localhost:47770",
+            "LOCALHOST:47770",
+            "[::1]:47770",
+        ] {
+            assert!(is_loopback_host(ok, 47770), "{ok}");
+        }
+        for bad in [
+            "127.0.0.1:47771",
+            "127.0.0.1",
+            "evil.example:47770",
+            "localhost.evil.example:47770",
+            "127.0.0.1.nip.io:47770",
+            "",
+        ] {
+            assert!(!is_loopback_host(bad, 47770), "{bad}");
+        }
+    }
 
     #[test]
     fn token_comparison() {

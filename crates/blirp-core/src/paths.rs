@@ -17,6 +17,8 @@ pub enum PathsError {
         #[source]
         source: std::io::Error,
     },
+    #[error("invalid session id {0:?}")]
+    InvalidId(String),
     #[error("invalid runtime file {path}: {source}")]
     Runtime {
         path: PathBuf,
@@ -88,8 +90,13 @@ impl Paths {
     pub fn distill_dir(&self) -> PathBuf {
         self.home.join("distill")
     }
-    pub fn launch_dir(&self, session_id: &str) -> PathBuf {
-        self.home.join("launch").join(session_id)
+    /// `launch/<session_id>/`. Ids that are not a single safe path
+    /// component are refused, so no id can reach outside `launch/`.
+    pub fn launch_dir(&self, session_id: &str) -> Result<PathBuf, PathsError> {
+        if !crate::is_safe_id(session_id) {
+            return Err(PathsError::InvalidId(session_id.to_string()));
+        }
+        Ok(self.home.join("launch").join(session_id))
     }
 
     /// Create the data dir and its fixed subdirectories. On unix the data dir
@@ -223,6 +230,30 @@ mod tests {
         assert!(paths.runtime_file().exists());
         RuntimeInfo::remove_if_owned(&paths, 42).unwrap();
         assert!(!paths.runtime_file().exists());
+    }
+
+    #[test]
+    fn launch_dir_refuses_ids_that_escape() {
+        let paths = Paths::at("/b");
+        let ok = crate::new_id();
+        assert_eq!(
+            paths.launch_dir(&ok).unwrap(),
+            Path::new("/b").join("launch").join(&ok)
+        );
+        for bad in [
+            "",
+            "..",
+            "../x",
+            "a/b",
+            r"a\b",
+            "/etc",
+            r"C:\x",
+            "C:x",
+            "a.b",
+            &"x".repeat(129),
+        ] {
+            assert!(paths.launch_dir(bad).is_err(), "{bad:?}");
+        }
     }
 
     #[cfg(unix)]

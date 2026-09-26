@@ -111,6 +111,8 @@ struct Prepared {
     cwd: PathBuf,
     branch: Option<String>,
     worktree: Option<String>,
+    /// Main work tree of the repo a new worktree was added to.
+    repo_root: Option<PathBuf>,
 }
 
 /// §7 step 1: resolve project + cwd, optionally create a worktree.
@@ -174,6 +176,7 @@ fn prepare(state: &SharedState, req: &LaunchSession) -> ApiResult<Prepared> {
             project_id,
             cwd,
             worktree: None,
+            repo_root: None,
         });
     }
     let repo = git::repo_info(&cwd).map_err(|e| ApiError::internal("inspecting git repo", e))?;
@@ -191,6 +194,7 @@ fn prepare(state: &SharedState, req: &LaunchSession) -> ApiResult<Prepared> {
             project_id,
             cwd,
             worktree: None,
+            repo_root: None,
         });
     };
     let name = worktree_name()?;
@@ -222,6 +226,7 @@ fn prepare(state: &SharedState, req: &LaunchSession) -> ApiResult<Prepared> {
         },
         branch: Some(branch),
         worktree: Some(wt.display().to_string()),
+        repo_root: Some(repo.toplevel.clone()),
     })
 }
 
@@ -308,8 +313,17 @@ pub async fn launch(state: &SharedState, req: LaunchSession) -> ApiResult<Sessio
     let store = state.store.clone();
     let row = session.clone();
     let src = source.clone();
+    let repo_root = prepared.repo_root;
     let handoff = crate::api::blocking(move || {
-        store.insert_session(&row)?;
+        if let Err(e) = store.insert_session(&row) {
+            // No session will ever own the worktree just added for it.
+            if let (Some(wt), Some(root)) = (&row.worktree, &repo_root)
+                && let Err(ge) = git::worktree_remove(root, Path::new(wt), true)
+            {
+                tracing::warn!(worktree = %wt, error = %ge, "removing the worktree of a failed launch failed");
+            }
+            return Err(e.into());
+        }
         Ok(match src {
             Some(s) => Some(crate::memory::render::render_handoff(&store, &s)?),
             None => None,
@@ -410,7 +424,13 @@ fn integrate(
     agent: &Agent,
     handoff: Option<&str>,
 ) -> LaunchIntegration {
-    let launch_dir = state.paths.launch_dir(&session.id);
+    let launch_dir = match state.paths.launch_dir(&session.id) {
+        Ok(d) => d,
+        Err(e) => {
+            tracing::warn!(error = %e, "no launch dir; launching without memory");
+            return LaunchIntegration::default();
+        }
+    };
     let config = state.config().memory;
     let max = config.inject_max_chars as usize;
     // Turned off by the user (§12): no memory, but a handoff pack the user
@@ -515,7 +535,7 @@ async fn start(
         (Some(p), _) => Some(p),
         (None, Some(_)) if agent.id != "shell" => Some(continue_prompt(
             integ.inject,
-            &state.paths.launch_dir(&session.id).join(HANDOFF_FILE),
+            &integ.memory_file.with_file_name(HANDOFF_FILE),
         )),
         _ => None,
     };
@@ -737,7 +757,7 @@ fn record_exit(state: &SharedState, session_id: &str, info: ExitInfo) {
         Ok(s) => {
             state.emit(ServerEvent::SessionUpdated { session: s });
             // Ended sessions are distilled right away (§9 trigger).
-            state.distiller.enqueue(session_id, false);
+            state.distiller.enqueue_ended(session_id);
         }
         Err(e) => {
             tracing::error!(session = %session_id, error = %e, "recording session exit failed")

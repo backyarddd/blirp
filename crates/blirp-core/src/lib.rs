@@ -17,6 +17,17 @@ pub fn new_id() -> String {
     uuid::Uuid::now_v7().to_string()
 }
 
+/// Whether `id` has the shape of a blirp id: 1-128 chars of `[A-Za-z0-9_-]`.
+/// UUIDs and iroh endpoint ids pass. Ids name files (`launch/<session>/`)
+/// and arrive from other machines, so anything that could be a path (`..`,
+/// separators, a drive prefix) is refused.
+pub fn is_safe_id(id: &str) -> bool {
+    (1..=128).contains(&id.len())
+        && id
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_')
+}
+
 /// Current unix time in milliseconds.
 pub fn now_ms() -> i64 {
     // A clock before 1970 is a broken host; clamp to 0 rather than panic.

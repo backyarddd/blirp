@@ -10,7 +10,10 @@ use blirp_core::model::{
     ServerEvent, Session, SessionOrigin, SessionSummary, SummaryItem,
 };
 use blirp_core::process;
-use blirp_core::store::{BriefApply, DistillOutcome, DistillPlan, RecordFilter, Store, StoreError};
+use blirp_core::store::{
+    BriefApply, DistillEvents, DistillOutcome, DistillPlan, RecordFilter, Store, StoreError,
+    norm_title,
+};
 use serde::Deserialize;
 use std::collections::HashSet;
 use std::ffi::OsString;
@@ -79,6 +82,22 @@ pub fn compact_transcript(events: &[Event], max_chars: usize) -> String {
         .filter_map(event_line)
         .collect::<Vec<_>>()
         .join("\n");
+    cut(full, max_chars)
+}
+
+/// [`compact_transcript`] of events selected by `Store::distill_events`:
+/// the events left out between head and tail are marked in the text.
+pub fn compact_selected(ev: &DistillEvents, max_chars: usize) -> String {
+    let mut lines: Vec<String> = ev.head.iter().filter_map(event_line).collect();
+    if ev.omitted > 0 {
+        lines.push(format!("[... {} events omitted ...]", ev.omitted));
+    }
+    lines.extend(ev.tail.iter().filter_map(event_line));
+    cut(lines.join("\n"), max_chars)
+}
+
+/// Keep the first 20% and last 80% of `full` when it is over `max_chars`.
+fn cut(full: String, max_chars: usize) -> String {
     let total = full.chars().count();
     if total <= max_chars {
         return full;
@@ -178,6 +197,26 @@ pub fn parse_output(text: &str, known_ids: &HashSet<String>) -> Result<DistillOu
             "brief_md is longer than {MAX_BRIEF_CHARS} characters"
         ));
     }
+    // The model may echo a secret the transcript redaction missed or that
+    // it reconstructed; its output is stored, injected and replicated.
+    let red = |s: &mut String| {
+        if let std::borrow::Cow::Owned(r) = blirp_core::redact::redact(s) {
+            *s = r;
+        }
+    };
+    red(&mut out.title);
+    red(&mut out.summary);
+    red(&mut out.brief_md);
+    out.files.iter_mut().for_each(red);
+    for it in out
+        .decisions
+        .iter_mut()
+        .chain(&mut out.open_threads)
+        .chain(&mut out.gotchas)
+    {
+        red(&mut it.title);
+        red(&mut it.body);
+    }
     Ok(out)
 }
 
@@ -197,9 +236,43 @@ Rules:
 - brief_md: the full updated project brief in markdown (what the project is, how to build and run it, current state and priorities), at most 1500 tokens. Start from CURRENT BRIEF and change only what this session changed; return it unchanged if nothing changed, or "" if you do not know enough.
 - Never include secrets, tokens or credentials. Write in English. Keep item bodies to 1-3 sentences."#;
 
-pub fn build_prompt(brief: Option<&str>, records: &[Record], transcript: &str) -> String {
+pub fn build_prompt(
+    brief: Option<&str>,
+    records: &[Record],
+    previous: Option<&SessionSummary>,
+    transcript: &str,
+) -> String {
     let mut p = String::with_capacity(transcript.len() + 4096);
     p.push_str(INSTRUCTIONS);
+    if let Some(prev) = previous {
+        p.push_str(
+            "\n\nPREVIOUS SUMMARY OF THIS SESSION (covers the transcript before the part below):\n",
+        );
+        if let Some(t) = &prev.title {
+            p.push_str(&format!("Title: {}\n", one_line(t)));
+        }
+        if let Some(s) = &prev.summary {
+            p.push_str(&format!("Summary: {}\n", one_line(s)));
+        }
+        for (name, list) in [
+            ("Decision", &prev.decisions),
+            ("Open thread", &prev.open_threads),
+            ("Gotcha", &prev.gotchas),
+        ] {
+            for i in list {
+                p.push_str(&format!(
+                    "{name}: {}: {}\n",
+                    one_line(&i.title),
+                    clip(&one_line(&i.body), 300)
+                ));
+            }
+        }
+        p.push_str(
+            "The TRANSCRIPT below continues the session after that point. Return the title and summary \
+             of the whole session. In decisions, open_threads and gotchas list only items that are new \
+             or changed in this part (same title for a changed item).",
+        );
+    }
     p.push_str("\n\nCURRENT BRIEF:\n");
     p.push_str(
         brief
@@ -271,9 +344,55 @@ async fn ollama_up(base: &str) -> bool {
         .is_ok_and(|r| r.status().is_success())
 }
 
-/// Resolve `memory.summarizer` to a runnable backend (`auto`: claude, codex,
-/// ollama in that order). `Ok(None)` for `none`. CLI summarizers run in a
-/// fresh dir under `scratch`.
+/// `auto`: claude, else ollama. Codex is never picked automatically: its
+/// built-in tools cannot all be switched off (only shell, exec and the
+/// optional tools are, see [`codex_args`]), so it runs only when chosen.
+fn pick_auto(claude: Option<Backend>, ollama: Option<Backend>) -> Result<Backend, String> {
+    claude.or(ollama).ok_or_else(|| {
+        "neither claude nor ollama is available (codex runs only when chosen explicitly)".into()
+    })
+}
+
+/// `codex exec` for a summarizer run: no hooks, MCP servers, shell or exec
+/// tools, apps, plugins, browser, computer use, subagents or image tools
+/// (feature names verified against codex 0.153), read-only sandbox, no
+/// persisted session; the reply goes to `last`.
+fn codex_args(last: &Path) -> Vec<OsString> {
+    let mut args: Vec<OsString> = [
+        "exec",
+        "--json",
+        "--ephemeral",
+        "--skip-git-repo-check",
+        "--sandbox",
+        "read-only",
+        "-c",
+        "mcp_servers={}",
+    ]
+    .iter()
+    .map(OsString::from)
+    .collect();
+    for feature in [
+        "hooks",
+        "shell_tool",
+        "unified_exec",
+        "view_image",
+        "apps",
+        "plugins",
+        "browser_use",
+        "computer_use",
+        "multi_agent",
+        "image_generation",
+    ] {
+        args.push("--disable".into());
+        args.push(feature.into());
+    }
+    args.push("--output-last-message".into());
+    args.push(last.as_os_str().to_owned());
+    args
+}
+
+/// Resolve `memory.summarizer` to a runnable backend (see [`pick_auto`]).
+/// `Ok(None)` for `none`. CLI summarizers run in a fresh dir under `scratch`.
 pub async fn select_backend(cfg: &MemoryConfig, scratch: &Path) -> Result<Option<Backend>, String> {
     // PATH scans touch the filesystem: off the async runtime.
     let (claude_exe, codex_exe) =
@@ -313,13 +432,13 @@ pub async fn select_backend(cfg: &MemoryConfig, scratch: &Path) -> Result<Option
             }
         }
         Summarizer::Auto => {
-            if let Some(b) = claude().or_else(codex) {
-                return Ok(Some(b));
-            }
-            if ollama_up(&base).await {
-                return Ok(Some(ollama));
-            }
-            Err("none of claude, codex or ollama is available".into())
+            let claude = claude();
+            let ollama = if claude.is_none() && ollama_up(&base).await {
+                Some(ollama)
+            } else {
+                None
+            };
+            pick_auto(claude, ollama).map(Some)
         }
     }
 }
@@ -471,24 +590,7 @@ impl Backend {
             Backend::Codex { exe: path, scratch } => {
                 let dir = scratch_dir(scratch)?;
                 let last = dir.path().join("last-message.txt");
-                let mut args: Vec<OsString> = [
-                    "exec",
-                    "--json",
-                    "--ephemeral",
-                    "--skip-git-repo-check",
-                    "--sandbox",
-                    "read-only",
-                    "--disable",
-                    "hooks",
-                    "-c",
-                    "mcp_servers={}",
-                    "--output-last-message",
-                ]
-                .iter()
-                .map(OsString::from)
-                .collect();
-                args.push(last.clone().into_os_string());
-                let out = run_process(path, args, prompt, dir.path(), timeout).await?;
+                let out = run_process(path, codex_args(&last), prompt, dir.path(), timeout).await?;
                 match std::fs::read_to_string(&last) {
                     Ok(t) if !t.trim().is_empty() => Ok(t),
                     _ => parse_codex_jsonl(&out.stdout).map_err(|e| {
@@ -598,6 +700,25 @@ pub fn parse_codex_jsonl(stdout: &str) -> Result<String, String> {
 
 // ---------------------------------------------------------------- run + apply
 
+fn merge_items(prev: &[SummaryItem], new: Vec<SummaryItem>) -> Vec<SummaryItem> {
+    let mut out: Vec<SummaryItem> = prev
+        .iter()
+        .filter(|p| {
+            !new.iter()
+                .any(|n| norm_title(&n.title) == norm_title(&p.title))
+        })
+        .cloned()
+        .collect();
+    out.extend(new);
+    out
+}
+
+fn union(a: &[String], b: &[String]) -> Vec<String> {
+    let mut out = a.to_vec();
+    out.extend(b.iter().filter(|x| !a.contains(x)).cloned());
+    out
+}
+
 fn items(v: &[Item]) -> Vec<SummaryItem> {
     v.iter()
         .map(|i| SummaryItem {
@@ -624,11 +745,19 @@ pub async fn run_distill<S: Summarize>(
     cfg: &MemoryConfig,
 ) -> Result<DistillOutcome, DistillError> {
     let (st, sid) = (store.clone(), session_id.to_string());
-    let (session, events, brief, records) = blocking(move || {
+    let max = i64::from(cfg.distill_max_chars);
+    let (session, events, continued, brief, records) = blocking(move || {
         let session = st
             .get_session(&sid)?
             .ok_or(StoreError::NotFound("session"))?;
-        let events = st.session_events(&sid)?;
+        // Only what the last summary does not cover yet; with nothing new
+        // (a manual re-run) the whole session again.
+        let (head, tail) = (max / 5, max - max / 5);
+        let mut events = st.distill_events(&sid, session.distilled_through_seq, head, tail)?;
+        let continued = session.distilled_through_seq > 0 && !events.head.is_empty();
+        if events.head.is_empty() {
+            events = st.distill_events(&sid, 0, head, tail)?;
+        }
         let brief = st.get_brief(&session.project_id)?;
         let records = st.list_records(
             &session.project_id,
@@ -637,18 +766,26 @@ pub async fn run_distill<S: Summarize>(
                 kind: None,
             },
         )?;
-        Ok((session, events, brief, records))
+        Ok((session, events, continued, brief, records))
     })
     .await?;
     let through = events
+        .tail
         .last()
+        .or(events.head.last())
         .map(|e| e.seq)
         .ok_or(DistillError::NothingToDistill)?;
-    let transcript = compact_transcript(&events, cfg.distill_max_chars as usize);
+    let previous: Option<SessionSummary> = session
+        .summary
+        .as_ref()
+        .and_then(|v| serde_json::from_value(v.clone()).ok())
+        .filter(|p: &SessionSummary| continued && p.summary.is_some());
+    let transcript = compact_selected(&events, cfg.distill_max_chars as usize);
     let transcript = blirp_core::redact::redact(&transcript).into_owned();
     let prompt = build_prompt(
         brief.as_ref().map(|b| b.body_md.as_str()),
         &records,
+        previous.as_ref(),
         &transcript,
     );
     let known: HashSet<String> = records.iter().map(|r| r.id.clone()).collect();
@@ -672,14 +809,17 @@ pub async fn run_distill<S: Summarize>(
         }
     };
 
+    // A continued summary keeps the earlier items; a changed one replaces
+    // its namesake.
+    let prev = previous.unwrap_or_default();
     let summary = SessionSummary {
         title: Some(out.title.clone()),
         summary: Some(out.summary.clone()),
-        decisions: items(&out.decisions),
-        open_threads: items(&out.open_threads),
-        gotchas: items(&out.gotchas),
-        resolved_record_ids: out.resolved_record_ids.clone(),
-        files: out.files.clone(),
+        decisions: merge_items(&prev.decisions, items(&out.decisions)),
+        open_threads: merge_items(&prev.open_threads, items(&out.open_threads)),
+        gotchas: merge_items(&prev.gotchas, items(&out.gotchas)),
+        resolved_record_ids: union(&prev.resolved_record_ids, &out.resolved_record_ids),
+        files: union(&prev.files, &out.files),
         backend: Some(backend.name().to_string()),
         distilled_at: Some(blirp_core::now_ms()),
         through_seq: through,
@@ -706,6 +846,7 @@ pub async fn run_distill<S: Summarize>(
             BriefMode::Auto => BriefApply::Write,
             BriefMode::Review => BriefApply::Suggest,
         },
+        brief_base: brief.as_ref().map(|b| b.id.clone()),
     };
     blocking(move || store.apply_distill(&plan)).await
 }
@@ -825,7 +966,14 @@ impl Breaker {
 struct Job {
     session_id: String,
     manual: bool,
+    /// Unix ms before which the job does not start.
+    not_before: i64,
 }
+
+/// A session that just ended is distilled after this delay, so the
+/// transcript's last lines are ingested first and the SessionEnd hook and
+/// the process exit (both enqueue) make one job, not two.
+pub const ENDED_DELAY_MS: i64 = 10_000;
 
 /// Single-job distill queue with a daily budget (§9).
 pub struct Distiller {
@@ -913,6 +1061,16 @@ impl Distiller {
 
     /// Queue a session; false when it is already queued or running.
     pub fn enqueue(&self, session_id: &str, manual: bool) -> bool {
+        self.push(session_id, manual, 0)
+    }
+
+    /// Queue a session that just ended (SessionEnd hook, process exit),
+    /// starting after [`ENDED_DELAY_MS`].
+    pub fn enqueue_ended(&self, session_id: &str) -> bool {
+        self.push(session_id, false, blirp_core::now_ms() + ENDED_DELAY_MS)
+    }
+
+    fn push(&self, session_id: &str, manual: bool, not_before: i64) -> bool {
         let mut q = self.queued.lock().unwrap_or_else(PoisonError::into_inner);
         if !q.insert(session_id.to_string()) {
             return false;
@@ -921,6 +1079,7 @@ impl Distiller {
             .send(Job {
                 session_id: session_id.to_string(),
                 manual,
+                not_before,
             })
             .is_ok()
     }
@@ -945,6 +1104,14 @@ impl Distiller {
                     j = rx.recv() => match j { Some(j) => j, None => break },
                     _ = shutdown.changed() => break,
                 };
+                let wait = job.not_before - blirp_core::now_ms();
+                if wait > 0 {
+                    let wait = Duration::from_millis(wait.unsigned_abs());
+                    tokio::select! {
+                        _ = tokio::time::sleep(wait) => {}
+                        _ = shutdown.changed() => break,
+                    }
+                }
                 process(&worker_state, &job).await;
                 worker_state
                     .distiller
@@ -1013,10 +1180,20 @@ async fn process(state: &SharedState, job: &Job) {
     }
     let store = state.store.clone();
     let sid = job.session_id.clone();
-    match tokio::task::spawn_blocking(move || store.get_session(&sid)).await {
-        Ok(Ok(Some(s))) => {
+    let lookup = move || -> Result<_, StoreError> {
+        let s = store.get_session(&sid)?;
+        let max = store.max_event_seq(&sid)?;
+        Ok(s.map(|s| (s, max)))
+    };
+    match tokio::task::spawn_blocking(lookup).await {
+        Ok(Ok(Some((s, max_seq)))) => {
             if let Some(why) = skip_reason(&s, &state.machine.id, job.manual) {
                 tracing::debug!(session = %job.session_id, why, "not distilling");
+                return;
+            }
+            // Nothing past the last summary (e.g. queued twice): no budget spent.
+            if !job.manual && max_seq <= s.distilled_through_seq {
+                tracing::debug!(session = %job.session_id, "nothing new to distill");
                 return;
             }
         }
@@ -1101,6 +1278,7 @@ async fn process(state: &SharedState, job: &Job) {
             tracing::info!(
                 session = %job.session_id,
                 created = outcome.records_created,
+                updated = outcome.records_updated,
                 resolved = outcome.records_resolved,
                 suggestions = outcome.suggestions_created,
                 brief = outcome.brief_updated,
@@ -1150,11 +1328,22 @@ mod tests {
     use blirp_core::model::{SuggestionStatus, SuggestionTarget};
     use std::collections::VecDeque;
 
-    struct Fake(Mutex<VecDeque<Result<String, String>>>, Mutex<usize>);
+    struct Fake(
+        Mutex<VecDeque<Result<String, String>>>,
+        Mutex<usize>,
+        Mutex<Vec<String>>,
+    );
 
     impl Fake {
         fn new(replies: Vec<Result<String, String>>) -> Self {
-            Self(Mutex::new(replies.into()), Mutex::new(0))
+            Self(
+                Mutex::new(replies.into()),
+                Mutex::new(0),
+                Mutex::new(Vec::new()),
+            )
+        }
+        fn prompts(&self) -> Vec<String> {
+            self.2.lock().unwrap().clone()
         }
         fn calls(&self) -> usize {
             *self.1.lock().unwrap()
@@ -1165,8 +1354,9 @@ mod tests {
         fn name(&self) -> &'static str {
             "fake"
         }
-        fn complete(&self, _prompt: String) -> impl Future<Output = Result<String, String>> + Send {
+        fn complete(&self, prompt: String) -> impl Future<Output = Result<String, String>> + Send {
             *self.1.lock().unwrap() += 1;
+            self.2.lock().unwrap().push(prompt);
             let r = self
                 .0
                 .lock()
@@ -1223,6 +1413,32 @@ mod tests {
     }
 
     #[test]
+    fn codex_is_opt_in_and_runs_without_tools() {
+        let claude = Backend::Claude {
+            exe: "claude".into(),
+            scratch: "s".into(),
+        };
+        let ollama = Backend::Ollama {
+            base: "b".into(),
+            model: "m".into(),
+        };
+        assert_eq!(pick_auto(Some(claude), None).unwrap().name(), "claude");
+        assert_eq!(pick_auto(None, Some(ollama)).unwrap().name(), "ollama");
+        assert!(pick_auto(None, None).is_err());
+        let args: Vec<String> = codex_args(Path::new("last.txt"))
+            .into_iter()
+            .map(|a| a.to_string_lossy().into_owned())
+            .collect();
+        for f in ["hooks", "shell_tool", "unified_exec", "view_image"] {
+            assert!(
+                args.windows(2).any(|w| w[0] == "--disable" && w[1] == f),
+                "{f}: {args:?}"
+            );
+        }
+        assert_eq!(args.last().map(String::as_str), Some("last.txt"));
+    }
+
+    #[test]
     fn output_validation() {
         let known: HashSet<String> = ["r1".to_string()].into();
         let ok = r#"Here you go: ```json
@@ -1249,6 +1465,17 @@ mod tests {
             "b".repeat(13_000)
         );
         assert!(parse_output(&long_brief, &known).is_err());
+        // A secret echoed by the model never reaches the stored summary.
+        let key = "AKIAIOSFODNN7EXAMPLE";
+        let leaky = format!(
+            r#"{{"title":"t {key}","summary":"used {key}","gotchas":[{{"title":"g","body":"{key}"}}],"brief_md":"b {key}"}}"#
+        );
+        let o = parse_output(&leaky, &known).unwrap();
+        let all = format!(
+            "{} {} {} {}",
+            o.title, o.summary, o.gotchas[0].body, o.brief_md
+        );
+        assert!(!all.contains(key) && all.contains("[REDACTED:"), "{all}");
     }
 
     #[test]
@@ -1373,6 +1600,115 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(out.records_created, 0);
+    }
+
+    // A re-distill sends only the events after the last summary (with that
+    // summary as context), and refreshes the session's own records instead
+    // of adding near-duplicates.
+    #[tokio::test]
+    async fn redistill_continues_and_updates_its_own_records() {
+        let (_d, store, pid) = seed();
+        let first = Fake::new(vec![Ok(reply(&[]))]);
+        run_distill(store.clone(), "s", &first, &cfg(BriefMode::Auto))
+            .await
+            .unwrap();
+        event(&store, "s", 3, EventKind::User, "make it thread safe");
+        event(
+            &store,
+            "s",
+            4,
+            EventKind::Assistant,
+            "wrapped it in a mutex",
+        );
+        let second = serde_json::json!({
+            "title": "Add a thread-safe LRU cache",
+            "summary": "Added a cache and made it thread safe.",
+            "decisions": [{"title": "use LRU crate!", "body": "small and fast"}],
+            "open_threads": [],
+            "resolved_record_ids": [],
+            "gotchas": [{"title": "Mutex poisoning", "body": "recover the guard"}],
+            "files": ["src/lock.rs"],
+            "brief_md": ""
+        })
+        .to_string();
+        let again = Fake::new(vec![Ok(second)]);
+        let out = run_distill(store.clone(), "s", &again, &cfg(BriefMode::Auto))
+            .await
+            .unwrap();
+        let prompt = &again.prompts()[0];
+        assert!(
+            prompt.contains("PREVIOUS SUMMARY OF THIS SESSION"),
+            "{prompt}"
+        );
+        assert!(prompt.contains("Summary: Added a cache."), "{prompt}");
+        assert!(prompt.contains("make it thread safe"), "{prompt}");
+        assert!(
+            !prompt.contains("add a cache"),
+            "old events were sent again"
+        );
+        assert_eq!((out.records_created, out.records_updated), (1, 1));
+        let decisions = store
+            .list_records(
+                &pid,
+                &RecordFilter {
+                    status: None,
+                    kind: Some(RecordKind::Decision),
+                },
+            )
+            .unwrap();
+        assert_eq!(decisions.len(), 1, "{decisions:?}");
+        assert_eq!(decisions[0].body, "small and fast");
+
+        let s = store.get_session("s").unwrap().unwrap();
+        assert_eq!(s.distilled_through_seq, 4);
+        let sum: SessionSummary = serde_json::from_value(s.summary.unwrap()).unwrap();
+        assert_eq!(sum.decisions.len(), 1);
+        assert_eq!(sum.decisions[0].body, "small and fast");
+        assert_eq!(sum.open_threads.len(), 1, "earlier items are kept");
+        assert_eq!(sum.gotchas.len(), 1);
+        assert_eq!(sum.files, ["src/cache.rs", "src/lock.rs"]);
+    }
+
+    /// Edits the brief (like a user in the UI) while the summarizer runs.
+    struct EditsBrief(Arc<Store>, String);
+
+    impl Summarize for EditsBrief {
+        fn name(&self) -> &'static str {
+            "edits-brief"
+        }
+        fn complete(&self, _prompt: String) -> impl Future<Output = Result<String, String>> + Send {
+            self.0.put_brief(&self.1, "user edit", "user").unwrap();
+            async { Ok(reply(&[])) }
+        }
+    }
+
+    #[tokio::test]
+    async fn brief_edited_during_a_run_is_kept_and_the_update_suggested() {
+        let (_d, store, pid) = seed();
+        let backend = EditsBrief(store.clone(), pid.clone());
+        let out = run_distill(store.clone(), "s", &backend, &cfg(BriefMode::Auto))
+            .await
+            .unwrap();
+        assert!(!out.brief_updated);
+        assert_eq!(store.get_brief(&pid).unwrap().unwrap().body_md, "user edit");
+        let sugg = store.list_suggestions(&pid, None).unwrap();
+        assert_eq!(sugg.len(), 1);
+        assert_eq!(sugg[0].target, SuggestionTarget::Brief);
+        assert_eq!(sugg[0].proposal["body_md"], "new brief");
+    }
+
+    #[tokio::test]
+    async fn ended_sessions_are_queued_once_after_a_delay() {
+        let d = Distiller::default();
+        let before = blirp_core::now_ms();
+        assert!(d.enqueue_ended("s"));
+        // The process exit right after the SessionEnd hook joins that job.
+        assert!(!d.enqueue_ended("s"));
+        assert!(!d.enqueue("s", false));
+        let mut rx = d.rx.lock().unwrap().take().unwrap();
+        let job = rx.try_recv().unwrap();
+        assert!(job.not_before >= before + ENDED_DELAY_MS);
+        assert!(rx.try_recv().is_err());
     }
 
     #[tokio::test]

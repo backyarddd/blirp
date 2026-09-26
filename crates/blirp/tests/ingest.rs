@@ -454,6 +454,177 @@ fn claude_session_launched_by_blirp_keeps_its_fields() {
     assert_eq!(h.events(&s).len(), 9);
 }
 
+/// `n` user lines of a Claude transcript, with or without `cwd`.
+fn claude_lines(h: &H, from: usize, n: usize, with_cwd: bool) -> String {
+    (from..from + n)
+        .map(|i| {
+            let l = claude_line(&format!("u{i}"), &format!("prompt number {i}"), h);
+            let l = if with_cwd {
+                l
+            } else {
+                let at = l.find(r#","cwd":""#).unwrap();
+                let value = at + 8;
+                let end = value + l[value..].find('"').unwrap() + 1;
+                format!("{}{}", &l[..at], &l[end..])
+            };
+            format!("{l}\n")
+        })
+        .collect()
+}
+
+// A transcript longer than one ingest batch is flushed mid-read; the row
+// must still be created with the transcript's cwd (project, BLIRP_HOME
+// exclusion), not the home folder.
+#[test]
+fn long_transcripts_are_filed_by_their_cwd() {
+    let h = H::new();
+    // cwd on every line.
+    h.put(
+        &format!(".claude/projects/x/{CLAUDE_SID}.jsonl"),
+        claude_lines(&h, 0, 1100, true).as_bytes(),
+    );
+    // cwd only after the first batch.
+    let late = "aaaaaaaa-1111-4111-8111-111111111111";
+    let mut text = claude_lines(&h, 0, 1100, false);
+    text.push_str(&claude_lines(&h, 1100, 5, true));
+    h.put(&format!(".claude/projects/x/{late}.jsonl"), text.as_bytes());
+    h.pass();
+    let machine = h.store.machine_id().unwrap().unwrap();
+    let project = h
+        .store
+        .find_project_for_path(&machine, &h.cwd)
+        .unwrap()
+        .expect("the cwd became a project");
+    for asid in [CLAUDE_SID, late] {
+        let s = h.session("claude", asid);
+        assert_eq!(Path::new(&s.cwd), h.cwd, "{asid}");
+        assert_eq!(s.project_id, project.id, "{asid}");
+    }
+    let s = h.session("claude", CLAUDE_SID);
+    assert_eq!(h.store.max_event_seq(&s.id).unwrap(), 1099 * 1024);
+
+    // blirp's own long run is skipped as a whole.
+    let h = H::new();
+    let scratch = h.root.join("blirp").join("distill").join("run-1");
+    std::fs::create_dir_all(&scratch).unwrap();
+    let own = H { cwd: scratch, ..h };
+    own.put(
+        &format!(".claude/projects/x/{CLAUDE_SID}.jsonl"),
+        claude_lines(&own, 0, 1100, true).as_bytes(),
+    );
+    own.pass();
+    assert!(
+        own.store
+            .session_by_agent_id("claude", CLAUDE_SID)
+            .unwrap()
+            .is_none()
+    );
+}
+
+/// One source holding two sessions: A's cwd is reported before any of its
+/// events, then a batch of B's events forces a mid-read flush, then A's
+/// event arrives.
+struct TwoSessions(PathBuf);
+
+impl blirp::ingest::Adapter for TwoSessions {
+    fn id(&self) -> &'static str {
+        "claude"
+    }
+    fn roots(&self) -> Vec<PathBuf> {
+        Vec::new()
+    }
+    fn scan(&self, _: &Store) -> blirp::ingest::Result<Vec<blirp::ingest::Source>> {
+        Ok(vec![blirp::ingest::Source {
+            key: "two".into(),
+            path: self.0.clone(),
+            fingerprint: "1".into(),
+            mtime_ms: 1,
+            item: None,
+        }])
+    }
+    fn ingest(
+        &self,
+        _: &blirp::ingest::Source,
+        _: Option<blirp::ingest::Cursor>,
+        sink: &mut dyn blirp::ingest::EventSink,
+    ) -> blirp::ingest::Result<blirp::ingest::Cursor> {
+        let meta = |cwd: &Path| blirp::ingest::SessionMeta {
+            cwd: Some(cwd.display().to_string()),
+            ..Default::default()
+        };
+        let ev = |seq: i64| blirp::ingest::NormEvent {
+            seq,
+            ts: Some(1),
+            kind: EventKind::User,
+            text: "hi".into(),
+            meta: None,
+        };
+        sink.session("a", meta(&self.0));
+        sink.session("b", meta(&self.0));
+        for seq in 0..1000 {
+            sink.event("b", ev(seq))?;
+        }
+        sink.event("a", ev(0))?;
+        blirp::ingest::Cursor::from_state(&json!({}))
+    }
+}
+
+// A cwd reported before the session's first event survives a mid-read
+// flush triggered by another session of the same source.
+#[test]
+fn early_cwd_survives_another_sessions_flush() {
+    let h = H::new();
+    let machine = h.store.list_machines().unwrap().remove(0);
+    let engine = Engine::with_adapters(
+        h.store.clone(),
+        machine,
+        IngestEnv::at_home(&h.home, &h.root.join("blirp")),
+        vec![Box::new(TwoSessions(h.cwd.clone()))],
+        Arc::new(|_| {}),
+    );
+    let stats = engine.run(&Work::all(1));
+    assert_eq!(stats["claude"].failed, 0, "{stats:?}");
+    for asid in ["a", "b"] {
+        assert_eq!(Path::new(&h.session("claude", asid).cwd), h.cwd, "{asid}");
+    }
+}
+
+// Rows filed under the home folder by the old mid-read flush are re-filed
+// once: the repair re-reads their transcripts from the start. A later
+// incremental read never moves a row (a `cd` is not a new start).
+#[test]
+fn rows_filed_under_home_are_repaired_once() {
+    let h = H::new();
+    let path = h.put(
+        &format!(".claude/projects/x/{CLAUDE_SID}.jsonl"),
+        claude_lines(&h, 0, 3, false).as_bytes(),
+    );
+    h.pass();
+    let home = h.session("claude", CLAUDE_SID);
+    assert_eq!(Path::new(&home.cwd), h.home);
+    append(&path, claude_lines(&h, 3, 2, true).as_bytes());
+    h.pass();
+    let s = h.session("claude", CLAUDE_SID);
+    assert_eq!(
+        (s.cwd.as_str(), s.project_id.as_str()),
+        (home.cwd.as_str(), home.project_id.as_str())
+    );
+
+    h.engine.repair_home_filed();
+    h.pass();
+    let s = h.session("claude", CLAUDE_SID);
+    assert_eq!(Path::new(&s.cwd), h.cwd);
+    assert_ne!(s.project_id, home.project_id);
+    assert_eq!(h.events(&s).len(), 5, "re-read added no duplicates");
+    // Once only.
+    h.store
+        .modify_session(&s.id, |s| s.cwd = home.cwd.clone())
+        .unwrap();
+    h.engine.repair_home_filed();
+    h.pass();
+    assert_eq!(h.session("claude", CLAUDE_SID).cwd, home.cwd);
+}
+
 #[test]
 fn transcripts_of_blirp_own_runs_are_skipped() {
     let h = H::new();
@@ -672,6 +843,24 @@ fn opencode_sqlite_sessions() {
         (9, 8, "Add docs")
     );
 
+    // A message whose parts are not written yet waits for them.
+    let now = blirp_core::now_ms();
+    db.execute_batch(&format!(
+        "INSERT INTO message VALUES ('msg_005','ses_parent',{now},{now},'{{\"role\":\"user\"}}');
+         UPDATE session SET time_updated = time_updated + 1 WHERE id = 'ses_parent';"
+    ))
+    .unwrap();
+    h.pass();
+    assert_eq!(h.events(&s).len(), 9);
+    db.execute_batch(&format!(
+        "INSERT INTO part VALUES ('prt_011','msg_005','ses_parent',{now},{now},'{{\"type\":\"text\",\"text\":\"Parts came later\"}}');
+         UPDATE session SET time_updated = time_updated + 1 WHERE id = 'ses_parent';"
+    ))
+    .unwrap();
+    h.pass();
+    let ev = h.events(&s);
+    assert_eq!((ev.len(), ev[9].text.as_str()), (10, "Parts came later"));
+
     // Deleting a session in opencode never deletes blirp's copy.
     db.execute_batch("DELETE FROM part WHERE session_id = 'ses_child'; DELETE FROM message WHERE session_id = 'ses_child'; DELETE FROM session WHERE id = 'ses_child';").unwrap();
     h.pass();
@@ -827,8 +1016,10 @@ fn write_cursor_store(h: &H, db: &Path, messages: &[serde_json::Value]) {
     )
     .unwrap();
     let mut root = Vec::new();
-    for (i, m) in messages.iter().enumerate() {
-        let id = [u8::try_from(i + 1).unwrap(); 32];
+    for m in messages {
+        // Content addressed like Cursor's store: identical messages share a blob.
+        use sha2::Digest as _;
+        let id: [u8; 32] = sha2::Sha256::digest(m.to_string().as_bytes()).into();
         conn.execute(
             "INSERT OR REPLACE INTO blobs VALUES (?1, ?2)",
             rusqlite::params![hex::encode(id), m.to_string().into_bytes()],
@@ -897,6 +1088,17 @@ fn cursor_chat_store_db() {
     let ev = h.events(&s);
     assert_eq!((ev.len(), ev[6].text.as_str()), (7, "and metrics"));
 
+    // The same message again (same blob) is a new turn, not a duplicate.
+    more.push(json!({"role": "assistant", "content": [{"type": "text", "text": "ok"}]}));
+    more.push(json!({"role": "user", "content": "<user_query>\nand metrics\n</user_query>"}));
+    write_cursor_store(&h, &db, &more);
+    h.pass();
+    let ev = h.events(&s);
+    assert_eq!(
+        ev[7..].iter().map(|e| e.text.as_str()).collect::<Vec<_>>(),
+        ["ok", "and metrics"]
+    );
+
     // History rewritten shorter (e.g. a revert): nothing lost or duplicated.
     write_cursor_store(&h, &db, &more[..2]);
     h.pass();
@@ -947,6 +1149,18 @@ fn amp_threads() {
     std::fs::write(&path, v.to_string()).unwrap();
     h.pass();
     assert_eq!(h.events(&s), before);
+    // A message added after the edit is stored, past every earlier seq.
+    v["messages"]
+        .as_array_mut()
+        .unwrap()
+        .push(json!({"role": "user", "content": [{"type": "text", "text": "after the edit"}]}));
+    std::fs::write(&path, v.to_string()).unwrap();
+    h.pass();
+    let after = h.events(&s);
+    assert_eq!(after.len(), before.len() + 1);
+    let last = after.last().unwrap();
+    assert_eq!(last.text, "after the edit");
+    assert!(last.seq > before.last().unwrap().seq);
 }
 
 // ---------------------------------------------------------------- aider
@@ -1267,15 +1481,15 @@ async fn hook_transcript_path_is_ingested_promptly() {
     })
     .await;
     assert!(start.elapsed() < Duration::from_secs(5));
-    // Ingest filled the session the hook created, through the outbox.
+    // Ingest filled the session the hook created.
     let s = store
         .session_by_agent_id("claude", CLAUDE_SID)
         .unwrap()
         .unwrap();
     assert_eq!(s.id, hook_session);
     assert_eq!(s.title.as_deref(), Some("Greeting helper"));
-    let outbox = store.outbox_after(0, 1_000_000).unwrap();
-    assert_eq!(outbox.iter().filter(|e| e.entity == "events").count(), 9);
+    // A standalone daemon queues nothing for replication.
+    assert!(store.outbox_after(0, 1_000_000).unwrap().is_empty());
     daemon.shutdown().await.unwrap();
 }
 

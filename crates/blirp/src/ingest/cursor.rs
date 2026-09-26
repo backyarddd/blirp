@@ -54,8 +54,14 @@ struct TranscriptState {
 struct StoreState {
     root: String,
     next_seq: i64,
-    /// Message blobs already stored (16-hex-char prefixes).
+    /// Messages already stored, counted in tree order. Blobs are content
+    /// addressed, so two identical messages share an id: they are told
+    /// apart by their position, never by id.
     #[serde(default)]
+    consumed: Option<usize>,
+    /// Cursors written before `consumed`: blob id prefixes / content
+    /// hashes of the stored messages. Only read once to derive `consumed`.
+    #[serde(default, skip_serializing)]
     seen: BTreeSet<String>,
 }
 
@@ -185,6 +191,7 @@ fn ingest_transcript(
         .and_then(Path::file_name)
         .and_then(|n| super::decode_dashed_dir(&n.to_string_lossy()))
         .map(|p| p.display().to_string());
+    super::report_cwd(sink, &asid, &meta, &mut false);
     let mut lines = Lines::open(&src.path, &st.pos, false)?;
     lines.for_each(|ix, raw| {
         let v: Value = match serde_json::from_slice(raw) {
@@ -365,13 +372,16 @@ fn ingest_store(
         sink.session(&asid, meta);
         return IngestCursor::from_state(&st);
     };
-    // Depth-first from the root; children in order.
+    // Depth-first from the root; children in order. A shared (identical)
+    // subtree is visited at every position it occupies; content addressing
+    // rules out cycles, the node cap bounds the walk anyway.
     let mut messages: Vec<(String, Value)> = Vec::new();
     let mut stack = vec![root.clone()];
-    let mut visited = HashSet::new();
+    let mut nodes = 0usize;
     while let Some(id) = stack.pop() {
-        if !visited.insert(id.clone()) || visited.len() > 100_000 {
-            continue;
+        nodes += 1;
+        if nodes > 100_000 {
+            break;
         }
         let data: Option<Vec<u8>> = retry_busy(|| {
             conn.query_row("SELECT data FROM blobs WHERE id = ?1", params![id], |r| {
@@ -395,11 +405,20 @@ fn ingest_store(
         }
         stack.extend(children.into_iter().rev());
     }
+    super::report_cwd(sink, &asid, &meta, &mut false);
+    let consumed = match st.consumed {
+        Some(n) => n,
+        // An older cursor: the leading messages it had stored.
+        None => messages
+            .iter()
+            .take_while(|(key, _)| st.seen.contains(key))
+            .count(),
+    };
+    // A history rewritten shorter (a revert) continues after what is left;
+    // the seq counter keeps going, so nothing collides.
+    let consumed = consumed.min(messages.len());
     let mut e = Emit::counter(sink, &asid, st.next_seq);
-    for (key, m) in &messages {
-        if st.seen.contains(key) {
-            continue;
-        }
+    for (_, m) in &messages[consumed..] {
         let content = m.get("content").unwrap_or(&Value::Null);
         match m.get("role").and_then(Value::as_str).unwrap_or("") {
             "user" => {
@@ -437,8 +456,9 @@ fn ingest_store(
             }
             _ => {}
         }
-        st.seen.insert(key.clone());
     }
+    st.consumed = Some(messages.len());
+    st.seen.clear();
     st.next_seq = e.next_seq();
     st.root = root;
     sink.session(&asid, meta);

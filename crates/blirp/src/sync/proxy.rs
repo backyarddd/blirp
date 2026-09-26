@@ -8,7 +8,7 @@ use axum::body::Body;
 use axum::extract::ws::{Message, WebSocket};
 use axum::http::{Method, Request, StatusCode, header};
 use axum::response::Response;
-use blirp_core::model::{ErrorBody, LaunchSession, Session};
+use blirp_core::model::{ErrorBody, LaunchSession, MachineRole, Session};
 use blirp_sync::SyncError;
 use blirp_sync::proxy::{ProxyPrincipal, ProxyStream};
 use futures_util::{SinkExt, StreamExt};
@@ -25,8 +25,11 @@ pub type RemoteTerminal = WebSocketStream<ProxyStream>;
 
 /// Serve one proxied stream as an HTTP/1.1 connection to the local API.
 pub(super) async fn serve(state: SharedState, stream: ProxyStream, p: ProxyPrincipal) {
+    // A node is controlled from elsewhere only when its user opted in (§10).
+    let sync = state.config().sync;
+    let opted_in = sync.role != MachineRole::Node || sync.allow_hub_control;
     let principal = Principal {
-        control: p.control,
+        control: p.control && opted_in,
         admin: false,
         device: None,
         label: p.via,

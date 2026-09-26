@@ -14,7 +14,10 @@ mod projects;
 mod sessions;
 mod sync;
 
-pub use engine::{BY_DISTILLER, BriefApply, DistillOutcome, DistillPlan, MACHINE_ID_KEY};
+pub use engine::{
+    BY_DISTILLER, BriefApply, DistillEvents, DistillOutcome, DistillPlan, MACHINE_ID_KEY,
+    norm_title,
+};
 pub use ingest::IngestTx;
 pub use memory::RecordFilter;
 pub use migrations::MigrationError;
@@ -85,7 +88,8 @@ pub enum Change {
     DeleteRecord {
         id: String,
     },
-    /// Writes the brief and its `brief_history` row.
+    /// Writes the current brief and appends its `brief_history` row (history
+    /// rows are insert-only, keyed by `Brief::id`).
     Brief(Brief),
     WikiPage(WikiPage),
     Resource(Resource),
@@ -277,20 +281,67 @@ fn json_col(row: &rusqlite::Row<'_>, col: &str) -> rusqlite::Result<Option<JsonV
     .transpose()
 }
 
-/// Write the row(s) for `change` and append it to the outbox.
-pub(crate) fn apply_in(tx: &Transaction<'_>, change: &Change) -> Result<bool> {
-    let written = write_row(tx, change)?;
-    if written == 0 && matches!(change, Change::Event(_)) {
-        return Ok(false);
+/// Memory written on this machine (records, briefs, wiki pages, resources
+/// from users, MCP clients or the distiller) is redacted before it is stored
+/// and replicated (§9). `None` when nothing needed redacting.
+fn redact_memory(change: &Change) -> Option<Change> {
+    use crate::redact::{redact, redact_json};
+    use std::borrow::Cow;
+    let red = |s: &str| match redact(s) {
+        Cow::Borrowed(_) => None,
+        Cow::Owned(o) => Some(o),
+    };
+    let mut c = change.clone();
+    let mut changed = false;
+    let mut fix = |field: &mut String| {
+        if let Some(r) = red(field) {
+            *field = r;
+            changed = true;
+        }
+    };
+    match &mut c {
+        Change::Record(r) => {
+            fix(&mut r.title);
+            fix(&mut r.body);
+        }
+        Change::Brief(b) => fix(&mut b.body_md),
+        Change::WikiPage(w) => {
+            fix(&mut w.title);
+            fix(&mut w.body_md);
+        }
+        Change::Resource(r) => {
+            fix(&mut r.title);
+            fix(&mut r.url);
+            if let Some(m) = &mut r.meta {
+                let before = m.clone();
+                redact_json(m);
+                changed |= *m != before;
+            }
+        }
+        _ => return None,
+    }
+    changed.then_some(c)
+}
+
+/// This machine's id as the daemon recorded it ("" before the first start).
+pub(crate) fn local_machine_in(c: &Connection) -> Result<String> {
+    let v: Option<String> = one(
+        c,
+        "SELECT value_json FROM settings WHERE key = ?1",
+        params![MACHINE_ID_KEY],
+        |r| r.get(0),
+    )?;
+    Ok(v.and_then(|s| serde_json::from_str::<String>(&s).ok())
+        .unwrap_or_default())
+}
+
+/// Append `change` to the outbox (unless replication is off, see
+/// [`Store::set_replication`]).
+pub(crate) fn queue_in(tx: &Transaction<'_>, change: &Change) -> Result<()> {
+    if sync::outbox_off(tx)? {
+        return Ok(());
     }
     let (entity, op, key) = change.describe();
-    if matches!(change, Change::Session(_)) {
-        // The full row is queued now; a deferred status write is covered.
-        tx.execute(
-            "DELETE FROM outbox_deferred WHERE entity = ?1 AND key = ?2",
-            params![entity, key],
-        )?;
-    }
     tx.execute(
         "INSERT INTO outbox(entity, op, key, payload_json, ts) VALUES (?1,?2,?3,?4,?5)",
         params![
@@ -301,13 +352,70 @@ pub(crate) fn apply_in(tx: &Transaction<'_>, change: &Change) -> Result<bool> {
             crate::now_ms()
         ],
     )?;
+    Ok(())
+}
+
+/// Write the row(s) for `change` and append it to the outbox.
+pub(crate) fn apply_in(tx: &Transaction<'_>, change: &Change) -> Result<bool> {
+    let redacted = redact_memory(change);
+    let change = redacted.as_ref().unwrap_or(change);
+    let written = write_row(tx, change)?;
+    if written == 0 && matches!(change, Change::Event(_) | Change::Session(_)) {
+        // A duplicate event, or a write of a deleted session: nothing to queue.
+        return Ok(false);
+    }
+    if let Change::Session(s) = change {
+        // The full row is queued now; a deferred status write is covered.
+        tx.execute(
+            "DELETE FROM outbox_deferred WHERE entity = 'sessions' AND key = ?1",
+            params![s.id],
+        )?;
+    }
+    queue_in(tx, change)?;
     Ok(true)
+}
+
+/// Every id a change carries must have the shape of a blirp id
+/// ([`crate::is_safe_id`]): ids name files and arrive from other machines.
+pub(crate) fn check_ids(change: &Change) -> Result<()> {
+    let ids: Vec<Option<&str>> = match change {
+        Change::Machine(m) => vec![Some(&m.id)],
+        Change::DeleteMachine { id }
+        | Change::DeleteSession { id }
+        | Change::DeleteRecord { id } => vec![Some(id)],
+        Change::Project(p) => vec![Some(&p.id)],
+        Change::ProjectPath(p) => vec![Some(&p.project_id), Some(&p.machine_id)],
+        Change::DeleteProjectPath { machine_id, .. } => vec![Some(machine_id)],
+        Change::Session(s) => vec![
+            Some(&s.id),
+            Some(&s.project_id),
+            Some(&s.machine_id),
+            s.parent_session_id.as_deref(),
+        ],
+        Change::Event(e) => vec![Some(&e.session_id)],
+        Change::Record(r) => vec![
+            Some(&r.id),
+            Some(&r.project_id),
+            r.source_session_id.as_deref(),
+        ],
+        Change::Brief(b) => vec![
+            Some(&b.project_id),
+            Some(b.id.as_str()).filter(|i| !i.is_empty()),
+        ],
+        Change::WikiPage(w) => vec![Some(&w.id), Some(&w.project_id)],
+        Change::Resource(r) => vec![Some(&r.id), Some(&r.project_id)],
+    };
+    match ids.into_iter().flatten().find(|id| !crate::is_safe_id(id)) {
+        Some(bad) => Err(StoreError::Invalid(format!("invalid id {bad:?}"))),
+        None => Ok(()),
+    }
 }
 
 /// Write the row(s) for `change` only; returns the affected row count.
 /// Replication applies received changes with this so they are never
 /// queued again (no echo).
 fn write_row(tx: &Transaction<'_>, change: &Change) -> Result<usize> {
+    check_ids(change)?;
     Ok(match change {
         Change::Machine(m) => tx.execute(
             "INSERT INTO machines(id, name, os, role, last_seen, revoked) VALUES (?1,?2,?3,?4,?5,?6)
@@ -334,6 +442,7 @@ fn write_row(tx: &Transaction<'_>, change: &Change) -> Result<usize> {
             "DELETE FROM project_paths WHERE machine_id=?1 AND path=?2",
             params![machine_id, path],
         )?,
+        Change::Session(s) if tombstoned(tx, &s.id)? => 0,
         Change::Session(s) => tx.execute(
             "INSERT INTO sessions(id, project_id, machine_id, agent, agent_session_id, origin, cwd, title,
                status, branch, worktree, transcript_path, started_at, ended_at, last_activity_at, exit_code,
@@ -360,6 +469,14 @@ fn write_row(tx: &Transaction<'_>, change: &Change) -> Result<usize> {
             // The session and its ingested subagents (§8).
             const DOOMED: &str = "SELECT id FROM sessions WHERE id = ?1
                  OR (parent_session_id = ?1 AND origin = 'external')";
+            // Tombstones first: nothing may bring these rows back.
+            tx.execute(
+                &format!(
+                    "INSERT OR IGNORE INTO deleted_sessions(id, deleted_at)
+                     SELECT id, ?2 FROM ({DOOMED}) UNION SELECT ?1, ?2"
+                ),
+                params![id, crate::now_ms()],
+            )?;
             // The FTS triggers drop the events' full-text rows.
             tx.execute(
                 &format!("DELETE FROM events WHERE session_id IN ({DOOMED})"),
@@ -389,6 +506,7 @@ fn write_row(tx: &Transaction<'_>, change: &Change) -> Result<usize> {
                 params![id],
             )?
         }
+        Change::Event(e) if tombstoned(tx, &e.session_id)? => 0,
         Change::Event(e) => tx.execute(
             "INSERT INTO events(session_id, seq, ts, kind, text, meta_json) VALUES (?1,?2,?3,?4,?5,?6)
              ON CONFLICT(session_id, seq) DO NOTHING",
@@ -408,18 +526,15 @@ fn write_row(tx: &Transaction<'_>, change: &Change) -> Result<usize> {
         )?,
         Change::DeleteRecord { id } => tx.execute("DELETE FROM records WHERE id=?1", params![id])?,
         Change::Brief(b) => {
+            let id = memory::insert_brief_history(tx, b)?;
+            // The current brief is last-writer-wins by hub order like any row.
             tx.execute(
-                "INSERT INTO brief_history(project_id, version, body_md, updated_at, updated_by)
-                 VALUES (?1,?2,?3,?4,?5)
-                 ON CONFLICT(project_id, version) DO UPDATE SET body_md=excluded.body_md,
-                   updated_at=excluded.updated_at, updated_by=excluded.updated_by",
-                params![b.project_id, b.version, b.body_md, b.updated_at, b.updated_by],
-            )?;
-            tx.execute(
-                "INSERT INTO briefs(project_id, body_md, version, updated_at, updated_by) VALUES (?1,?2,?3,?4,?5)
+                "INSERT INTO briefs(project_id, body_md, version, updated_at, updated_by, history_id, machine_id)
+                 VALUES (?1,?2,?3,?4,?5,?6,?7)
                  ON CONFLICT(project_id) DO UPDATE SET body_md=excluded.body_md, version=excluded.version,
-                   updated_at=excluded.updated_at, updated_by=excluded.updated_by",
-                params![b.project_id, b.body_md, b.version, b.updated_at, b.updated_by],
+                   updated_at=excluded.updated_at, updated_by=excluded.updated_by,
+                   history_id=excluded.history_id, machine_id=excluded.machine_id",
+                params![b.project_id, b.body_md, b.version, b.updated_at, b.updated_by, id, b.machine_id],
             )?
         }
         Change::WikiPage(w) => tx.execute(
@@ -439,6 +554,17 @@ fn write_row(tx: &Transaction<'_>, change: &Change) -> Result<usize> {
             params![r.id, r.project_id, r.kind, r.url, r.title, json_text(&r.meta), r.created_at, r.deleted],
         )?,
     })
+}
+
+/// Whether session `id` was deleted (see migration 7).
+fn tombstoned(c: &Connection, id: &str) -> Result<bool> {
+    Ok(one(
+        c,
+        "SELECT 1 FROM deleted_sessions WHERE id = ?1",
+        params![id],
+        |_| Ok(()),
+    )?
+    .is_some())
 }
 
 /// `SELECT` helper returning at most one mapped row.
@@ -526,6 +652,45 @@ pub(crate) mod tests {
         assert_eq!(mode.to_lowercase(), "wal");
     }
 
+    // Migration 6 keeps every brief version under a deterministic id and
+    // points the current brief at its row.
+    #[test]
+    fn brief_history_migrates_to_unique_ids() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("blirp.db");
+        let c = Connection::open(&path).unwrap();
+        for sql in &migrations::MIGRATIONS[..5] {
+            c.execute_batch(sql).unwrap();
+        }
+        c.pragma_update(None, "user_version", 5).unwrap();
+        c.execute_batch(
+            "INSERT INTO brief_history VALUES ('p', 1, 'one', 10, 'user'), ('p', 2, 'two', 20, 'distiller');
+             INSERT INTO briefs VALUES ('p', 'two', 2, 20, 'distiller');",
+        )
+        .unwrap();
+        drop(c);
+        let store = Store::open(&path).unwrap();
+        let hist = store.brief_history("p").unwrap();
+        assert_eq!(
+            hist.iter()
+                .map(|h| (h.id.as_str(), h.version, h.body_md.as_str()))
+                .collect::<Vec<_>>(),
+            [("legacy-p-2", 2, "two"), ("legacy-p-1", 1, "one")]
+        );
+        let cur = store.get_brief("p").unwrap().unwrap();
+        assert_eq!((cur.id.as_str(), cur.version), ("legacy-p-2", 2));
+        let next = store.put_brief("p", "three", "user").unwrap();
+        assert_eq!(next.version, 3);
+        assert!(crate::is_safe_id(&next.id));
+        assert_eq!(
+            store
+                .revert_brief_to("p", "legacy-p-1", "user")
+                .unwrap()
+                .body_md,
+            "one"
+        );
+    }
+
     #[test]
     fn newer_schema_is_refused() {
         let dir = tempfile::tempdir().unwrap();
@@ -589,6 +754,46 @@ pub(crate) mod tests {
         assert!(store.apply(Change::Event(ev.clone())).unwrap());
         assert!(!store.apply(Change::Event(ev)).unwrap());
         assert_eq!(store.outbox_after(0, 10).unwrap().len(), 2);
+    }
+
+    #[test]
+    fn memory_is_redacted_before_it_is_stored_and_queued() {
+        let (_d, store) = temp_store();
+        let key = "AKIAIOSFODNN7EXAMPLE";
+        let r = store
+            .create_record(Record {
+                id: crate::new_id(),
+                project_id: "p".into(),
+                kind: RecordKind::Note,
+                title: format!("key {key}"),
+                body: format!("use {key}"),
+                status: RecordStatus::Active,
+                pinned: false,
+                source_session_id: None,
+                created_at: 1,
+                updated_at: 1,
+                updated_by: "user".into(),
+            })
+            .unwrap();
+        store
+            .put_brief("p", &format!("brief {key}"), "user")
+            .unwrap();
+        store
+            .create_wiki_page("p", "w", "wiki", &format!("page {key}"), "user")
+            .unwrap();
+        let stored = store.get_record(&r.id).unwrap().unwrap();
+        assert!(stored.body.contains("[REDACTED:") && !stored.title.contains(key));
+        assert!(!store.get_brief("p").unwrap().unwrap().body_md.contains(key));
+        assert!(
+            !store
+                .get_wiki_page("p", "w")
+                .unwrap()
+                .unwrap()
+                .body_md
+                .contains(key)
+        );
+        let outbox = serde_json::to_string(&store.outbox_after(0, 100).unwrap()).unwrap();
+        assert!(!outbox.contains(key), "{outbox}");
     }
 
     #[test]

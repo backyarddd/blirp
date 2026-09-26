@@ -134,6 +134,14 @@ async fn unknown() -> ApiError {
 /// Start sync (and the LAN portal on a hub) for the configured role.
 /// Failures are logged and reported in the status; the daemon keeps running.
 pub async fn start(state: &SharedState) {
+    let on = state.config().sync.role != MachineRole::Standalone;
+    let store = state.store.clone();
+    match tokio::task::spawn_blocking(move || store.set_replication(on)).await {
+        Ok(Ok(0)) => {}
+        Ok(Ok(n)) => tracing::info!(rows = n, "queued existing data for replication"),
+        Ok(Err(e)) => tracing::error!(error = %e, "switching replication failed"),
+        Err(e) => tracing::error!(error = %e, "switching replication failed"),
+    }
     if let Err(e) = start_service(state).await {
         tracing::error!(error = %e.message, "sync did not start");
     }
@@ -236,6 +244,9 @@ async fn set_role(state: &SharedState, role: MachineRole, hub: Option<String>) -
         cfg.save(&st.paths.config_file())
             .map_err(|e| ApiError::internal("writing config.toml", e))?;
         st.set_config(cfg);
+        // Standalone queues nothing; becoming a hub or node queues what
+        // exists (events in batches from the status tick).
+        st.store.set_replication(role != MachineRole::Standalone)?;
         st.store.upsert_machine(&Machine {
             role,
             last_seen: blirp_core::now_ms(),

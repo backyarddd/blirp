@@ -90,7 +90,7 @@ Files and git are read-only and take paths relative to the project folder on thi
 |---|---|
 | `PUT /api/projects/:id/brief` | `{body_md}`: new brief version; returns `Brief {project_id, body_md, version, updated_at, updated_by}` |
 | `GET /api/projects/:id/brief/history` | `Brief[]`, all versions |
-| `POST /api/projects/:id/brief/revert` | `{version}`: that version's text as a new version |
+| `POST /api/projects/:id/brief/revert` | `{id}` (a history entry's id, preferred) or `{version}` (its number, 1 = oldest; numbers can shift when older versions from another machine arrive): that version's text as a new version |
 | `GET /api/projects/:id/records?status=&kind=` | `Record[]`: `{id, project_id, kind, title, body, status, pinned, source_session_id, created_at, updated_at, updated_by}` |
 | `POST /api/projects/:id/records` | `{kind, title, body, status?, pinned?}`; 201 |
 | `GET/PATCH/DELETE /api/projects/:id/records/:rid` | read; patch any of `kind, title, body, status, pinned`; delete (204). User edits set `updated_by = "user"`, which the distiller never overwrites. |

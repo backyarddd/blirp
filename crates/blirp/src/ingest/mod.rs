@@ -254,6 +254,22 @@ impl SessionMeta {
     }
 }
 
+/// Hand `meta` to the sink once its cwd is known (once per read). The sink
+/// does not create a session row before it knows the cwd (it decides the
+/// project, the launch link and the BLIRP_HOME exclusion), so a long read
+/// reports it early instead of buffering every event until the end.
+pub(crate) fn report_cwd(
+    sink: &mut dyn EventSink,
+    asid: &str,
+    meta: &SessionMeta,
+    reported: &mut bool,
+) {
+    if !*reported && meta.cwd.is_some() {
+        *reported = true;
+        sink.session(asid, meta.clone());
+    }
+}
+
 /// A normalized event before redaction and storage.
 #[derive(Debug, Clone, PartialEq)]
 pub struct NormEvent {

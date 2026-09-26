@@ -24,6 +24,8 @@ use std::time::{Duration, Instant};
 pub const HOOK_BUDGET: Duration = Duration::from_millis(1800);
 /// Cap on the daemon round trip.
 const HTTP_BUDGET: Duration = Duration::from_millis(1500);
+/// Left for the offline fallback and printing after the round trip.
+const FALLBACK_RESERVE: Duration = Duration::from_millis(300);
 const STDIN_WAIT: Duration = Duration::from_millis(400);
 
 /// Body of `POST /api/hooks/:agent/:event`.
@@ -115,10 +117,10 @@ fn session_start_context(
     source: Option<&str>,
     memory: &MemoryConfig,
 ) -> ApiResult<Option<String>> {
-    let launch = paths.launch_dir(&session.id).join(MEMORY_FILE);
     if session.origin == SessionOrigin::Blirp
         && matches!(source, None | Some("startup"))
-        && let Ok(text) = std::fs::read_to_string(&launch)
+        && let Ok(dir) = paths.launch_dir(&session.id)
+        && let Ok(text) = std::fs::read_to_string(dir.join(MEMORY_FILE))
     {
         return Ok(Some(text));
     }
@@ -210,8 +212,12 @@ pub fn handle(
                 parent_session_id: None,
                 stopped_by_user: false,
             };
-            store.insert_session(&s)?;
-            created = true;
+            // Ingest may have created it since the lookup: use that row.
+            let (s, inserted) = store.insert_session_unless_known(&s)?;
+            if s.machine_id != state.machine.id {
+                return Ok(HookReply::default());
+            }
+            created = inserted;
             s
         }
     };
@@ -290,7 +296,7 @@ pub fn handle(
             .transcript_hint(agent, &updated.id, Path::new(t));
     }
     if event == HookEvent::SessionEnd && reason != Some("clear") {
-        state.distiller.enqueue(&updated.id, false);
+        state.distiller.enqueue_ended(&updated.id);
     }
     let additional_context = if event == HookEvent::SessionStart
         && !(req.global && launched && mode == InjectMode::Instructions)
@@ -337,6 +343,8 @@ pub fn format_output(agent: &str, event_name: &str, context: Option<&str>) -> Op
 
 /// Inputs of one hook invocation, injectable for tests.
 pub struct HookEnv<'a> {
+    /// When the hook process started: the watchdog's clock.
+    pub started: Instant,
     pub agent: &'a str,
     pub event: &'a str,
     pub global: bool,
@@ -353,7 +361,8 @@ fn offline_context(env: &HookEnv<'_>, payload: &Value) -> Option<String> {
         None => Paths::resolve().ok()?,
     };
     if let Some(sid) = (env.var)("BLIRP_SESSION_ID").filter(|v| !v.is_empty())
-        && let Ok(text) = std::fs::read_to_string(paths.launch_dir(&sid).join(MEMORY_FILE))
+        && let Ok(dir) = paths.launch_dir(&sid)
+        && let Ok(text) = std::fs::read_to_string(dir.join(MEMORY_FILE))
     {
         return Some(text);
     }
@@ -407,7 +416,6 @@ async fn post(
 /// Run one hook: forward to the daemon, fall back offline for SessionStart,
 /// and return what to print. Never fails; bounded by `HOOK_BUDGET`.
 pub fn run(env: &HookEnv<'_>) -> Option<String> {
-    let begin = Instant::now();
     // reqwest panics building a client without a rustls provider (the sync
     // stack enables `rustls-no-provider`); a hook must never panic.
     crate::install_crypto_provider();
@@ -426,8 +434,13 @@ pub fn run(env: &HookEnv<'_>) -> Option<String> {
         None => Paths::resolve().ok(),
     };
     let info = paths.and_then(|p| RuntimeInfo::read(&p).ok().flatten());
-    let remote = info.and_then(|info| {
-        let left = HTTP_BUDGET.saturating_sub(begin.elapsed());
+    // The watchdog counts from process start (stdin reading included); the
+    // round trip ends early enough for the fallback to still print.
+    let left = HOOK_BUDGET
+        .saturating_sub(env.started.elapsed())
+        .saturating_sub(FALLBACK_RESERVE)
+        .min(HTTP_BUDGET);
+    let remote = info.filter(|_| !left.is_zero()).and_then(|info| {
         let rt = tokio::runtime::Builder::new_current_thread()
             .enable_all()
             .build()
@@ -462,6 +475,7 @@ fn read_stdin() -> String {
 
 /// `blirp hook <agent> <event> [--global]` entry point. Always exits 0.
 pub fn main(agent: &str, event: &str, global: bool) {
+    let started = Instant::now();
     if std::env::var(DISTILLING_ENV).as_deref() == Ok("1") {
         return;
     }
@@ -473,6 +487,7 @@ pub fn main(agent: &str, event: &str, global: bool) {
     let stdin = read_stdin();
     let var = |k: &str| std::env::var(k).ok();
     let out = run(&HookEnv {
+        started,
         agent,
         event,
         global,
@@ -533,6 +548,7 @@ mod tests {
         let var = env_fn(vec![(DISTILLING_ENV, "1".into())]);
         let begin = Instant::now();
         let out = run(&HookEnv {
+            started: Instant::now(),
             agent: "claude",
             event: "SessionStart",
             global: false,
@@ -548,9 +564,9 @@ mod tests {
     fn daemon_down_falls_back_to_launch_file() {
         let home = tempfile::tempdir().unwrap();
         let paths = Paths::at(home.path());
-        std::fs::create_dir_all(paths.launch_dir("S1")).unwrap();
+        std::fs::create_dir_all(paths.launch_dir("S1").unwrap()).unwrap();
         std::fs::write(
-            paths.launch_dir("S1").join(MEMORY_FILE),
+            paths.launch_dir("S1").unwrap().join(MEMORY_FILE),
             "# blirp memory: X",
         )
         .unwrap();
@@ -559,6 +575,7 @@ mod tests {
             ("BLIRP_SESSION_ID", "S1".into()),
         ]);
         let out = run(&HookEnv {
+            started: Instant::now(),
             agent: "claude",
             event: "SessionStart",
             global: false,
@@ -575,6 +592,7 @@ mod tests {
         // Non-start events print nothing when the daemon is down.
         assert_eq!(
             run(&HookEnv {
+                started: Instant::now(),
                 agent: "claude",
                 event: "Stop",
                 global: false,
@@ -598,6 +616,7 @@ mod tests {
                 .to_string();
         std::fs::create_dir_all(folder.join("sub")).unwrap();
         let out = run(&HookEnv {
+            started: Instant::now(),
             agent: "claude",
             event: "SessionStart",
             global: true,
@@ -631,14 +650,16 @@ mod tests {
         }
         .write(&paths)
         .unwrap();
-        std::fs::create_dir_all(paths.launch_dir("S")).unwrap();
-        std::fs::write(paths.launch_dir("S").join(MEMORY_FILE), "M").unwrap();
+        std::fs::create_dir_all(paths.launch_dir("S").unwrap()).unwrap();
+        std::fs::write(paths.launch_dir("S").unwrap().join(MEMORY_FILE), "M").unwrap();
         let var = env_fn(vec![
             ("BLIRP_HOME", home.path().display().to_string()),
             ("BLIRP_SESSION_ID", "S".into()),
         ]);
-        let begin = Instant::now();
+        // The process already spent the stdin wait before `run`.
+        let started = Instant::now() - STDIN_WAIT;
         let out = run(&HookEnv {
+            started,
             agent: "claude",
             event: "SessionStart",
             global: false,
@@ -646,8 +667,8 @@ mod tests {
             cwd: None,
             var: &var,
         });
-        let took = begin.elapsed();
-        assert!(took < Duration::from_millis(1900), "{took:?}");
+        let took = started.elapsed();
+        assert!(took < HOOK_BUDGET - Duration::from_millis(100), "{took:?}");
         assert!(out.unwrap().contains("\"M\""));
     }
 }

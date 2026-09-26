@@ -104,6 +104,7 @@ impl Adapter for Dsh {
             transcript_path: Some(src.path.display().to_string()),
             ..SessionMeta::default()
         };
+        let mut reported = false;
         lines.for_each(|ix, raw| {
             let v: Value = match serde_json::from_slice(raw) {
                 Ok(v) => v,
@@ -119,6 +120,10 @@ impl Adapter for Dsh {
                 }
                 st.cwd = v.get("cwd").and_then(Value::as_str).map(str::to_string);
                 st.started_at = v.get("createdAt").and_then(parse_ts);
+                meta.cwd.clone_from(&st.cwd);
+                meta.started_at = st.started_at;
+                let asid = st.asid.clone().unwrap_or_else(|| fallback.clone());
+                super::report_cwd(sink, &asid, &meta, &mut reported);
                 return Ok(());
             }
             let ts = v.get("time").and_then(parse_ts);

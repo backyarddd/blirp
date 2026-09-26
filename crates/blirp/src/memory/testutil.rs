@@ -81,7 +81,11 @@ pub fn record(
     pinned: bool,
 ) -> Record {
     let r = Record {
-        id: format!("r-{title}"),
+        // Ids are `[A-Za-z0-9_-]` (§5); titles may carry anything else.
+        id: format!(
+            "r-{}",
+            title.replace(|c: char| !c.is_ascii_alphanumeric(), "_")
+        ),
         project_id: pid.into(),
         kind,
         title: title.into(),

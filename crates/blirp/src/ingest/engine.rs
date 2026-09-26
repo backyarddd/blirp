@@ -276,6 +276,42 @@ impl Engine {
         Ok(true)
     }
 
+    /// One-time repair: before ingest waited for a transcript's cwd, a long
+    /// transcript could be filed under the home folder (Home project, no
+    /// launch link) by a mid-read flush. Their cursors are reset once so
+    /// the next pass reads them from the start and the sink re-files them.
+    pub fn repair_home_filed(&self) {
+        const KEY: &str = "ingest.repair.home_filed";
+        match self.store.get_setting(KEY) {
+            Ok(None) => {}
+            Ok(Some(_)) => return,
+            Err(e) => {
+                tracing::warn!(error = %e, "reading ingest repair state failed");
+                return;
+            }
+        }
+        // Exactly the cwd the sink stored for rows without one.
+        let home = dunce::canonicalize(&self.env.home)
+            .unwrap_or_else(|_| self.env.home.clone())
+            .display()
+            .to_string();
+        let res = self
+            .store
+            .reset_cursors_filed_under(&self.machine.id, &home)
+            .and_then(|n| {
+                self.store.set_setting(KEY, &json!(blirp_core::now_ms()))?;
+                Ok(n)
+            });
+        match res {
+            Ok(0) => {}
+            Ok(n) => tracing::info!(
+                sources = n,
+                "re-reading transcripts filed under the home folder"
+            ),
+            Err(e) => tracing::warn!(error = %e, "ingest repair failed"),
+        }
+    }
+
     /// External sessions still `working` without activity for 2 minutes
     /// become `completed` (no further transcript writes will say so).
     pub fn sweep_stale(&self) {

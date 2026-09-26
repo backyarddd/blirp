@@ -434,6 +434,11 @@ impl Store {
     pub fn delete_project(&self, id: &str) -> Result<()> {
         self.write(|tx| {
             let mut p = live_project_in(tx, id)?;
+            // Deleted first: other machines accept the removal of their
+            // folders only for a deleted project (§10 ownership).
+            p.deleted = true;
+            p.updated_at = crate::now_ms();
+            apply_in(tx, &Change::Project(p))?;
             let paths = all(
                 tx,
                 "SELECT * FROM project_paths WHERE project_id = ?1",
@@ -449,9 +454,6 @@ impl Store {
                     },
                 )?;
             }
-            p.deleted = true;
-            p.updated_at = crate::now_ms();
-            apply_in(tx, &Change::Project(p))?;
             Ok(())
         })
     }
@@ -533,11 +535,8 @@ impl Store {
                 changes.push(Change::WikiPage(w));
             }
             let dst_brief = super::memory::get_brief_in(tx, into)?;
-            if let (None, Some(mut b)) = (dst_brief, super::memory::get_brief_in(tx, from)?) {
-                b.project_id = into.to_string();
-                b.version = 1;
-                b.updated_at = now;
-                changes.push(Change::Brief(b));
+            if let (None, Some(b)) = (dst_brief, super::memory::get_brief_in(tx, from)?) {
+                super::memory::put_brief_in(tx, into, &b.body_md, &b.updated_by)?;
             }
             for c in &changes {
                 apply_in(tx, c)?;

@@ -140,7 +140,8 @@ Sync does not need Tailscale; iroh finds a path on its own and also works across
 With sync, the new-session dialog has a **Machine** picker. A session started for another machine is created by that machine's daemon (its agents, its folders), and its terminal is attached through the hub, so you can drive a session on the hub from your laptop, and vice versa. Stop and Resume of a session that runs elsewhere are forwarded to its machine.
 
 - Every node keeps one connection to the hub, and the hub relays requests byte for byte to the target machine, so nodes behind NAT are reachable.
-- Paired machines are allowed to control terminals by default. Turn **Terminal control** off for a machine under **Devices** on the hub to make its view read-only: its launches, stops, resumes and terminal input for other machines are refused.
+- A node accepts control from elsewhere only when it opted in with `sync.allow_hub_control = true` in its own `config.toml` (default off): until then the hub and other machines can view its sessions, but their launches, stops, resumes, deletes, terminal input and memory edits on it are refused (`control_not_allowed`). The hub itself accepts control from paired machines unless you turn **Terminal control** off for a machine under **Devices** on the hub.
+- Each machine owns its folders, sessions and transcripts: other machines can retitle a session or move it and its folder to another project (merge), but never create, change the folder or agent id of, or delete another machine's sessions, folders or transcript events. Deleting a session of another machine is forwarded to that machine.
 - Only the request itself is forwarded, never local credentials; relayed requests have no admin rights (they cannot pair, revoke or change devices on the target).
 - If the target machine is offline, you get `machine_offline` / `machine_unreachable`.
 

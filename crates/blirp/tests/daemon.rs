@@ -291,6 +291,20 @@ async fn api_auth_projects_memory_files() {
         .await
         .unwrap();
     assert_eq!(r.status(), 403);
+    // DNS rebinding: a page on another name that resolves to 127.0.0.1.
+    let r = h
+        .http
+        .get(h.url("/api/health"))
+        .bearer_auth(&h.token)
+        .header("Host", format!("rebind.example:{}", h.daemon.port))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(r.status(), 403);
+    assert_eq!(
+        r.json::<ErrorBody>().await.unwrap().error.code,
+        "forbidden_host"
+    );
     let r = h.http.get(h.url("/")).send().await.unwrap();
     assert_eq!(r.status(), 200);
     assert_eq!(r.headers()["x-frame-options"], "DENY");
@@ -897,6 +911,58 @@ fn git(dir: &std::path::Path, args: &[&str]) {
         .output()
         .unwrap();
     assert!(st.status.success(), "git {args:?}: {st:?}");
+}
+
+// A worktree added for a launch whose session row could not be written is
+// removed again: no session would ever own it.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn failed_launch_removes_its_worktree() {
+    let h = Harness::start().await;
+    let repo = h._home.path().join("repo");
+    std::fs::create_dir(&repo).unwrap();
+    git(&repo, &["init"]);
+    std::fs::write(repo.join("a.txt"), "a\n").unwrap();
+    git(&repo, &["add", "."]);
+    git(&repo, &["commit", "-m", "init"]);
+    // Every session insert fails after the worktree was added.
+    let db = rusqlite::Connection::open(h._home.path().join("blirp.db")).unwrap();
+    db.execute_batch(
+        "CREATE TRIGGER no_sessions BEFORE INSERT ON sessions BEGIN SELECT RAISE(ABORT, 'no'); END;",
+    )
+    .unwrap();
+    let r = h
+        .send(
+            reqwest::Method::POST,
+            "/api/sessions",
+            json!({"cwd": repo, "agent": "shell", "worktree": true}),
+        )
+        .await;
+    assert_eq!(r.status(), 500);
+    let out = std::process::Command::new("git")
+        .arg("-C")
+        .arg(&repo)
+        .args(["worktree", "list", "--porcelain"])
+        .output()
+        .unwrap();
+    let list = String::from_utf8_lossy(&out.stdout);
+    assert_eq!(list.matches("worktree ").count(), 1, "{list}");
+    let dirs: Vec<_> = walk(&h._home.path().join("worktrees"));
+    assert!(dirs.is_empty(), "{dirs:?}");
+    h.daemon.shutdown().await.unwrap();
+}
+
+/// Files under `dir` (recursive).
+fn walk(dir: &std::path::Path) -> Vec<std::path::PathBuf> {
+    let mut out = Vec::new();
+    for e in std::fs::read_dir(dir).into_iter().flatten().flatten() {
+        let p = e.path();
+        if p.is_dir() {
+            out.extend(walk(&p));
+        } else {
+            out.push(p);
+        }
+    }
+    out
 }
 
 // A session's worktree is removed on request once the session ended, never

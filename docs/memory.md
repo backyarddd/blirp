@@ -33,13 +33,13 @@ Redaction is pattern based. A secret in an unusual format can survive; see [secu
 
 Distilling turns the new part of a session's transcript into memory.
 
-**When.** A session is distilled when it has been idle for `memory.distill_idle_secs` (default 300 s) with new events, or right after it ends (process exit or the agent's session-end hook). A scheduler checks every 30 s. Only sessions active in the last 7 days are distilled automatically, so importing old history does not use up the budget.
+**When.** A session is distilled when it has been idle for `memory.distill_idle_secs` (default 300 s) with new events, or shortly after it ends (process exit or the agent's session-end hook; the run waits 10 s so the last transcript lines are in, and both triggers make one run). A scheduler checks every 30 s. Only sessions active in the last 7 days are distilled automatically, so importing old history does not use up the budget.
 
 **Which sessions.** Only sessions that ran on this machine: a session replicated from another machine is distilled there and its results arrive by sync. Subagent sessions are skipped (their task and final report are already in the parent's transcript); **Distill now** still works on them.
 
 **Budget.** At most `memory.daily_distill_limit` runs (default 40) per UTC day, counting manual runs. One run at a time.
 
-**Input.** The redacted transcript since the last distill, compacted (prompts verbatim, assistant text, tool calls and results as short one-liners), capped at `memory.distill_max_chars` (default 60 000 characters: the first 20 % and last 80 % are kept around an omission marker), plus the current brief and the active records with their ids.
+**Input.** The redacted transcript since the last distill (with the session's previous summary as context, so a long session is summarized piece by piece and nothing is sent twice), compacted (prompts verbatim, assistant text, tool calls and results as short one-liners), capped at `memory.distill_max_chars` (default 60 000 characters: the first 20 % and last 80 % are kept around an omission marker), plus the current brief and the active records with their ids.
 
 **Output.** Strict JSON, validated (one retry with the validation error on bad output):
 
@@ -49,7 +49,7 @@ Distilling turns the new part of a session's transcript into memory.
 - `files` touched,
 - `brief_md`: a full replacement brief (up to 12 000 characters), or empty for no change.
 
-**Apply.** In one transaction: the session gets its summary (and a title if it has none); new records are added unless an active record of the same kind and title exists; resolved records are marked resolved; the brief gets a new version (`brief_mode = "auto"`, the default) or becomes a suggestion (`"review"`). Records you created or edited yourself are never changed by the distiller; if it wants to resolve one, it files a suggestion instead.
+**Apply.** In one transaction: the session gets its summary (and a title if it has none); new records are added unless an active record of the same kind and title exists (titles compare ignoring case, spacing and punctuation), and a record this session already produced is updated rather than added again; resolved records are marked resolved; the brief gets a new version (`brief_mode = "auto"`, the default) or becomes a suggestion (`"review"`, and always when you edited the brief while the run was in progress, so your edit is never overwritten). Records you created or edited yourself are never changed by the distiller; if it wants to resolve one, it files a suggestion instead.
 
 A failed run keeps the earlier summary, stores the error on the session (shown on the session page and by `blirp mem show`), and is retried only when new events arrive or you click **Distill now**. Backend failures (not installed, not logged in, timeout after 180 s) are not retried in a loop.
 
@@ -59,13 +59,13 @@ A failed run keeps the earlier summary, stores the error on the session (shown o
 
 | Value | What runs | Where your data goes | Cost / quota |
 |---|---|---|---|
-| `auto` (default) | first available of: `claude` on PATH, `codex` on PATH, Ollama answering at `$OLLAMA_HOST` or `http://127.0.0.1:11434` | depends on the pick | depends on the pick |
+| `auto` (default) | first available of: `claude` on PATH, Ollama answering at `$OLLAMA_HOST` or `http://127.0.0.1:11434` (never `codex`, see below) | depends on the pick | depends on the pick |
 | `claude` | `claude -p --model haiku --output-format json --safe-mode --strict-mcp-config --no-session-persistence --tools ""` | Anthropic, under your Claude Code login | Uses your Claude plan's usage limits or your API key's billing. One run sends up to about 60 000 characters (roughly 15 000 tokens) plus the brief and records to Haiku. |
-| `codex` | `codex exec --json --ephemeral --skip-git-repo-check --sandbox read-only --disable hooks -c mcp_servers={}` | OpenAI (or your configured Codex provider), under your Codex login | Uses Codex's configured default model, which may be a large one; counts against your ChatGPT plan or API billing. |
+| `codex` (explicit only) | `codex exec --json --ephemeral --skip-git-repo-check --sandbox read-only -c mcp_servers={}` plus `--disable` for `hooks`, `shell_tool`, `unified_exec`, `view_image`, `apps`, `plugins`, `browser_use`, `computer_use`, `multi_agent`, `image_generation` | OpenAI (or your configured Codex provider), under your Codex login | Uses Codex's configured default model, which may be a large one; counts against your ChatGPT plan or API billing. |
 | `ollama` | `POST /api/chat` with model `memory.ollama_model` (default `qwen2.5:7b`) | stays on the machine running Ollama | free; quality depends on the model (7B+ recommended) |
 | `none` | nothing | nowhere | none |
 
-Every CLI run happens in an empty scratch folder `~/.blirp/distill/run-*` (deleted afterwards) with hooks, plugins, MCP servers, tools and session persistence disabled, and with `BLIRP_DISTILLING=1`, so the summarizer run is never ingested, never triggers blirp hooks, and cannot touch your files. It is killed with its whole process tree after 180 s.
+Every CLI run happens in an empty scratch folder `~/.blirp/distill/run-*` (deleted afterwards) with hooks, plugins, MCP servers and session persistence disabled, and with `BLIRP_DISTILLING=1`, so the summarizer run is never ingested and never triggers blirp hooks. It is killed with its whole process tree after 180 s. `claude` runs with no tools at all. `codex` has no switch that removes every built-in tool: blirp turns off its shell and exec tools and the optional tools (feature names checked against codex 0.153) and keeps its read-only sandbox, but a transcript crafted to steer the model could still use a remaining built-in tool (for example to look at files). That is why `auto` never picks `codex`; choose it only if you accept that. The summarizer's reply is redacted before it is stored.
 
 To cap spend: lower `memory.daily_distill_limit`, raise `memory.distill_idle_secs` (fewer partial distills of long sessions), lower `memory.distill_max_chars`, or use `ollama`.
 

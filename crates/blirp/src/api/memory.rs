@@ -112,7 +112,11 @@ async fn revert_brief(
     ApiJson(b): ApiJson<RevertBrief>,
 ) -> ApiResult<Json<Brief>> {
     project_op(&s, id, Some(MemoryPart::Brief), move |st, pid| {
-        Ok(st.revert_brief(pid, b.version, BY_USER)?)
+        match (&b.id, b.version) {
+            (Some(id), _) => Ok(st.revert_brief_to(pid, id, BY_USER)?),
+            (None, Some(v)) => Ok(st.revert_brief(pid, v, BY_USER)?),
+            (None, None) => Err(ApiError::bad_request("version or id is required")),
+        }
     })
     .await
     .map(Json)
