@@ -294,8 +294,10 @@ pub async fn run_foreground(paths: Paths, port: Option<u16>) -> anyhow::Result<(
         ingest,
     })
     .await?;
-    shutdown_signal().await;
-    tracing::info!("shutting down");
+    tokio::select! {
+        () = shutdown_signal() => tracing::info!("shutting down (signal)"),
+        () = daemon.state.stop_requested.notified() => tracing::info!("shutting down (requested over the API)"),
+    }
     daemon.shutdown().await
 }
 
@@ -333,6 +335,7 @@ pub async fn detach(paths: &Paths, port: Option<u16>) -> anyhow::Result<RuntimeI
     #[cfg(windows)]
     {
         use std::os::windows::process::CommandExt;
+        keep_std_handles_private();
         const DETACHED_PROCESS: u32 = 0x0000_0008;
         const CREATE_NEW_PROCESS_GROUP: u32 = 0x0000_0200;
         const CREATE_NO_WINDOW: u32 = 0x0800_0000;
@@ -379,6 +382,34 @@ pub async fn detach(paths: &Paths, port: Option<u16>) -> anyhow::Result<RuntimeI
             );
         }
         tokio::time::sleep(Duration::from_millis(150)).await;
+    }
+}
+
+/// CreateProcess passes every inheritable handle to the child. Our own std
+/// handles are usually inheritable (the caller created them so), so without
+/// this the daemon would hold the caller's stdout/stderr pipes open forever
+/// and `blirp daemon --detach | ...` (or any caller reading our output to
+/// EOF) would hang.
+#[cfg(windows)]
+#[allow(unsafe_code)]
+fn keep_std_handles_private() {
+    use windows_sys::Win32::Foundation::{
+        HANDLE_FLAG_INHERIT, INVALID_HANDLE_VALUE, SetHandleInformation,
+    };
+    use windows_sys::Win32::System::Console::{
+        GetStdHandle, STD_ERROR_HANDLE, STD_INPUT_HANDLE, STD_OUTPUT_HANDLE,
+    };
+    for id in [STD_INPUT_HANDLE, STD_OUTPUT_HANDLE, STD_ERROR_HANDLE] {
+        // SAFETY: GetStdHandle has no preconditions; the handle it returns is
+        // owned by this process for its lifetime, and SetHandleInformation
+        // only clears the inherit flag (it fails harmlessly on handles that
+        // cannot be changed).
+        unsafe {
+            let h = GetStdHandle(id);
+            if !h.is_null() && h != INVALID_HANDLE_VALUE {
+                SetHandleInformation(h, HANDLE_FLAG_INHERIT, 0);
+            }
+        }
     }
 }
 

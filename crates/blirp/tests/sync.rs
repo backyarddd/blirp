@@ -442,6 +442,19 @@ async fn pair_replicate_proxy_revoke_and_portal() {
         .unwrap();
     let health: Health = serde_json::from_slice(&body).unwrap();
     assert_eq!(health.machine.id, a.id());
+    // Stopping a daemon is local-only: not mounted on the proxy router, even
+    // for a relayed admin principal.
+    let resp = blirp::sync::forward(
+        &b.daemon.state,
+        &a.id(),
+        &Principal::local(),
+        Method::POST,
+        "/api/daemon/shutdown",
+        None,
+    )
+    .await
+    .unwrap();
+    assert_eq!(resp.status(), 404);
 
     // ---- remote launch on A from B, then attach its terminal from B.
     let a_dir = tmp.path().join("work-a");
@@ -571,6 +584,11 @@ async fn pair_replicate_proxy_revoke_and_portal() {
         )
         .await;
     assert_eq!(status, 403);
+    // Stopping the daemon is local-only: not mounted on the portal.
+    let (status, _, _) = tls
+        .req("POST", "/api/daemon/shutdown", Some(&cookie), None)
+        .await;
+    assert_eq!(status, 404);
     // `/mcp` is local-only: not mounted on the portal, even with a loopback Host.
     let init = json!({"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {
         "protocolVersion": "2025-06-18", "capabilities": {}, "clientInfo": {"name": "t", "version": "1"}}});

@@ -1,13 +1,14 @@
 //! Health, machines, search, settings, agents and the server event stream.
 
-use super::{ApiError, ApiJson, ApiQuery, ApiResult, blocking};
+use super::{ApiError, ApiJson, ApiQuery, ApiResult, Principal, blocking};
 use crate::state::SharedState;
 use axum::Json;
 use axum::Router;
 use axum::extract::State;
 use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
+use axum::http::StatusCode;
 use axum::response::Response;
-use axum::routing::get;
+use axum::routing::{get, post};
 use blirp_core::model::{
     AgentInfo, Health, Machine, SearchHitKind, SearchResults, ServerEvent, SettingsPatch,
     SettingsView,
@@ -24,6 +25,21 @@ pub fn routes() -> Router<SharedState> {
         .route("/api/settings", get(get_settings).patch(patch_settings))
         .route("/api/agents", get(agents))
         .route("/api/events/ws", get(events_ws))
+}
+
+/// Routes mounted on the loopback listener only: never reachable from LAN
+/// portal devices or requests relayed by the sync proxy.
+pub fn local_routes() -> Router<SharedState> {
+    Router::new().route("/api/daemon/shutdown", post(shutdown))
+}
+
+/// Graceful stop for clients without a signal path to the daemon (the
+/// detached Windows daemon has no console): same as SIGTERM / Ctrl+C.
+async fn shutdown(State(s): State<SharedState>, principal: Principal) -> ApiResult<StatusCode> {
+    principal.require_admin()?;
+    tracing::info!("shutdown requested over the API");
+    s.stop_requested.notify_one();
+    Ok(StatusCode::ACCEPTED)
 }
 
 async fn health(State(s): State<SharedState>) -> Json<Health> {
@@ -125,7 +141,7 @@ async fn agents(State(s): State<SharedState>) -> ApiResult<Json<Vec<AgentInfo>>>
 
 async fn events_ws(
     State(s): State<SharedState>,
-    principal: crate::api::Principal,
+    principal: Principal,
     ws: WebSocketUpgrade,
 ) -> Response {
     let shutdown = crate::sync::connection_shutdown(&s, &principal);

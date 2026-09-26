@@ -9,7 +9,7 @@ use blirp_core::paths::Paths;
 use blirp_core::store::Store;
 use std::sync::{Arc, Mutex, PoisonError, RwLock};
 use std::time::Instant;
-use tokio::sync::{broadcast, watch};
+use tokio::sync::{Notify, broadcast, watch};
 
 pub type SharedState = Arc<AppState>;
 
@@ -25,6 +25,9 @@ pub struct AppState {
     /// Flips to true when the daemon begins shutting down; long-lived
     /// handlers (WebSockets) exit on it so graceful shutdown can finish.
     pub shutdown: watch::Receiver<bool>,
+    /// Notified by `POST /api/daemon/shutdown` (desktop tray "Quit"); the
+    /// foreground daemon treats it like a termination signal.
+    pub stop_requested: Notify,
     pub agents_cache: Mutex<Option<(Instant, Vec<AgentInfo>)>>,
     /// Distill queue (§9); its worker starts with the daemon.
     pub distiller: Distiller,
@@ -54,6 +57,7 @@ impl AppState {
             events,
             terminals: Registry::default(),
             shutdown,
+            stop_requested: Notify::new(),
             agents_cache: Mutex::new(None),
             distiller: Distiller::default(),
             ingest: RwLock::new(Arc::new(NoopIngest)),

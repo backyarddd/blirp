@@ -199,9 +199,10 @@ impl<S: Send + Sync, T: serde::de::DeserializeOwned> FromRequestParts<S> for Api
     }
 }
 
-/// Which listener a router serves. Only the loopback listener mounts `/mcp`:
-/// MCP clients are local agents, and the LAN portal and sync proxy have no
-/// device-authenticated MCP yet.
+/// Which listener a router serves. Only the loopback listener mounts `/mcp`
+/// (MCP clients are local agents, and the LAN portal and sync proxy have no
+/// device-authenticated MCP yet) and `POST /api/daemon/shutdown` (only this
+/// machine's own clients may stop its daemon).
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Listener {
     Local,
@@ -237,7 +238,9 @@ fn build(state: SharedState, listener: Listener) -> Router {
         .merge(crate::sync::routes())
         .route("/api/terminals/{id}/ws", get(terminal::attach));
     if listener == Listener::Local {
-        api = api.merge(integration::mcp_routes(&state));
+        api = api
+            .merge(integration::mcp_routes(&state))
+            .merge(misc::local_routes());
     }
     let api = api
         .route("/api/{*rest}", any(api_not_found))

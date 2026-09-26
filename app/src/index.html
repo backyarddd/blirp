@@ -1,0 +1,32 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>blirp</title>
+    <link rel="stylesheet" href="loading.css" />
+    <script src="loading.js" defer></script>
+  </head>
+  <body>
+    <main>
+      <svg class="logo" viewBox="0 0 1024 1024" aria-hidden="true">
+        <rect x="64" y="64" width="896" height="896" rx="208" fill="#F26B1D" />
+        <rect x="262" y="212" width="120" height="600" rx="60" fill="#fff" />
+        <circle cx="512" cy="562" r="190" fill="none" stroke="#fff" stroke-width="120" />
+      </svg>
+      <section id="starting" aria-live="polite">
+        <div class="spinner" aria-hidden="true"></div>
+        <p>Starting blirp…</p>
+      </section>
+      <section id="failed" hidden role="alert">
+        <h1>blirp could not start its daemon</h1>
+        <pre id="message"></pre>
+        <p class="hint">Logs are in <code id="logdir"></code></p>
+        <div class="actions">
+          <button id="retry" type="button" class="primary">Retry</button>
+          <button id="logs" type="button">Open log folder</button>
+        </div>
+      </section>
+    </main>
+  </body>
+</html>

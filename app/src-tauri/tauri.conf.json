@@ -1,0 +1,75 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "productName": "blirp",
+  "mainBinaryName": "blirp-desktop",
+  "identifier": "dev.blirp.desktop",
+  "build": {
+    "frontendDist": "../src",
+    "beforeDevCommand": "cargo build -p blirp"
+  },
+  "app": {
+    "windows": [
+      {
+        "label": "main",
+        "title": "blirp",
+        "url": "index.html",
+        "width": 1400,
+        "height": 900,
+        "minWidth": 900,
+        "minHeight": 600,
+        "center": true,
+        "create": false
+      }
+    ],
+    "security": {
+      "csp": "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:",
+      "capabilities": ["main-local"]
+    }
+  },
+  "bundle": {
+    "active": true,
+    "targets": "all",
+    "externalBin": ["binaries/blirp"],
+    "createUpdaterArtifacts": true,
+    "icon": [
+      "icons/32x32.png",
+      "icons/128x128.png",
+      "icons/128x128@2x.png",
+      "icons/icon.icns",
+      "icons/icon.ico"
+    ],
+    "publisher": "blirp contributors",
+    "copyright": "Copyright 2026 blirp contributors",
+    "license": "Apache-2.0",
+    "licenseFile": "../../LICENSE",
+    "homepage": "https://github.com/blirp/blirp",
+    "category": "DeveloperTool",
+    "shortDescription": "Workspace and memory for CLI coding agents",
+    "longDescription": "blirp runs your CLI coding agents (Claude Code, Codex, opencode, Gemini CLI and more) in one workspace, tracks every session, and gives each new session automatic memory of prior work in the same project.",
+    "windows": {
+      "nsis": {
+        "installMode": "currentUser",
+        "installerHooks": "./windows/hooks.nsh"
+      }
+    },
+    "macOS": {
+      "minimumSystemVersion": "11.0"
+    }
+  },
+  "plugins": {
+    "deep-link": {
+      "desktop": {
+        "schemes": ["blirp"]
+      }
+    },
+    "updater": {
+      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IDlFNzdCMUQ4QjEwQjE4MTQKUldRVUdBdXgyTEYzbnNJaGd6WnNaTDZPZmhWNk8zbXBOMWpVeUFwb3loMDRsblNWTHNvWjJOWDUK",
+      "endpoints": [
+        "https://github.com/blirp/blirp/releases/latest/download/latest.json"
+      ],
+      "windows": {
+        "installMode": "passive"
+      }
+    }
+  }
+}

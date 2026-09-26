@@ -1,0 +1,372 @@
+name: Release
+
+# Push a tag `vX.Y.Z` matching the workspace version. The workflow builds the
+# standalone CLI archives and the desktop bundles, uploads them with checksums,
+# updater signatures and latest.json to a DRAFT release, and renders the
+# Homebrew / winget manifests. Publish the draft by hand after checking it;
+# the in-app updater only sees published releases.
+#
+# Secrets (see CONTRIBUTING.md): TAURI_SIGNING_PRIVATE_KEY(+_PASSWORD) are
+# required. Code signing runs only when its secrets exist:
+#   macOS:   APPLE_CERTIFICATE, APPLE_CERTIFICATE_PASSWORD, APPLE_SIGNING_IDENTITY,
+#            notarization: APPLE_ID, APPLE_PASSWORD, APPLE_TEAM_ID
+#   Windows: Azure Artifact Signing: AZURE_TENANT_ID, AZURE_CLIENT_ID, AZURE_CLIENT_SECRET,
+#            AZURE_SIGNING_ENDPOINT, AZURE_SIGNING_ACCOUNT, AZURE_SIGNING_PROFILE
+#            or a certificate: WINDOWS_CERTIFICATE (base64 .pfx), WINDOWS_CERTIFICATE_PASSWORD
+
+on:
+  push:
+    tags: ["v*"]
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+permissions:
+  contents: write
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: 0
+  RUST_TOOLCHAIN: "1.94.0"
+
+jobs:
+  draft:
+    name: Draft release
+    runs-on: ubuntu-latest
+    outputs:
+      release_id: ${{ steps.release.outputs.id }}
+      version: ${{ steps.version.outputs.version }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Tag matches the workspace version
+        id: version
+        run: |
+          tag="${GITHUB_REF_NAME#v}"
+          version=$(sed -n '/^\[workspace.package\]/,/^\[/s/^version = "\(.*\)"/\1/p' Cargo.toml)
+          if [ "$tag" != "$version" ]; then
+            echo "::error::tag $GITHUB_REF_NAME does not match workspace version $version"
+            exit 1
+          fi
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+
+      - name: Create (or reuse) the draft release
+        id: release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          if ! gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1; then
+            gh release create "$GITHUB_REF_NAME" --draft --verify-tag \
+              --title "blirp ${GITHUB_REF_NAME#v}" --generate-notes
+          fi
+          echo "id=$(gh release view "$GITHUB_REF_NAME" --json databaseId --jq .databaseId)" >> "$GITHUB_OUTPUT"
+
+  cli:
+    name: CLI ${{ matrix.target }}
+    needs: draft
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { os: ubuntu-22.04, target: x86_64-unknown-linux-gnu }
+          - { os: ubuntu-22.04-arm, target: aarch64-unknown-linux-gnu }
+          - { os: macos-latest, target: aarch64-apple-darwin }
+          - { os: macos-latest, target: x86_64-apple-darwin }
+          - { os: windows-latest, target: x86_64-pc-windows-msvc }
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 60
+    env:
+      VERSION: ${{ needs.draft.outputs.version }}
+      TARGET: ${{ matrix.target }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ env.RUST_TOOLCHAIN }}
+          targets: ${{ matrix.target }}
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.target }}
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 12
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+          cache-dependency-path: web/pnpm-lock.yaml
+      - name: Build web UI
+        run: |
+          pnpm -C web install --frozen-lockfile
+          pnpm -C web build
+
+      - name: Build blirp (unix)
+        if: runner.os != 'Windows'
+        run: SKIP_WEB=1 sh scripts/build-sidecar.sh "$TARGET"
+      - name: Build blirp + ConPTY (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: scripts/build-sidecar.ps1 -Target $env:TARGET -SkipWeb
+
+      - name: Sign and notarize (macOS, when configured)
+        if: runner.os == 'macOS'
+        env:
+          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+        run: |
+          if [ -z "$APPLE_CERTIFICATE" ]; then
+            echo "::warning::APPLE_CERTIFICATE not set; the macOS CLI binary is unsigned"
+            exit 0
+          fi
+          bin="app/src-tauri/binaries/blirp-$TARGET"
+          kc="$RUNNER_TEMP/signing.keychain-db"
+          kcpw=$(openssl rand -hex 24)
+          printf '%s' "$APPLE_CERTIFICATE" | base64 --decode > "$RUNNER_TEMP/cert.p12"
+          security create-keychain -p "$kcpw" "$kc"
+          security set-keychain-settings -lut 3600 "$kc"
+          security unlock-keychain -p "$kcpw" "$kc"
+          security import "$RUNNER_TEMP/cert.p12" -P "$APPLE_CERTIFICATE_PASSWORD" -A -t cert -f pkcs12 -k "$kc"
+          security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k "$kcpw" "$kc" >/dev/null
+          existing=$(security list-keychains -d user | tr -d '"')
+          # shellcheck disable=SC2086 # one keychain path per word
+          security list-keychains -d user -s "$kc" $existing
+          rm -f "$RUNNER_TEMP/cert.p12"
+          codesign --force --options runtime --timestamp --sign "$APPLE_SIGNING_IDENTITY" "$bin"
+          if [ -n "$APPLE_ID" ]; then
+            ditto -c -k --keepParent "$bin" "$RUNNER_TEMP/notarize.zip"
+            xcrun notarytool submit "$RUNNER_TEMP/notarize.zip" --apple-id "$APPLE_ID" \
+              --password "$APPLE_PASSWORD" --team-id "$APPLE_TEAM_ID" --wait
+          fi
+
+      - name: Sign (Windows, when configured)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        env:
+          AZURE_TENANT_ID: ${{ secrets.AZURE_TENANT_ID }}
+          AZURE_CLIENT_ID: ${{ secrets.AZURE_CLIENT_ID }}
+          AZURE_CLIENT_SECRET: ${{ secrets.AZURE_CLIENT_SECRET }}
+          AZURE_SIGNING_ENDPOINT: ${{ secrets.AZURE_SIGNING_ENDPOINT }}
+          AZURE_SIGNING_ACCOUNT: ${{ secrets.AZURE_SIGNING_ACCOUNT }}
+          AZURE_SIGNING_PROFILE: ${{ secrets.AZURE_SIGNING_PROFILE }}
+          WINDOWS_CERTIFICATE: ${{ secrets.WINDOWS_CERTIFICATE }}
+          WINDOWS_CERTIFICATE_PASSWORD: ${{ secrets.WINDOWS_CERTIFICATE_PASSWORD }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $bin = "app/src-tauri/binaries/blirp-$env:TARGET.exe"
+          if ($env:AZURE_CLIENT_SECRET) {
+            cargo install trusted-signing-cli --locked
+            trusted-signing-cli -e $env:AZURE_SIGNING_ENDPOINT -a $env:AZURE_SIGNING_ACCOUNT -c $env:AZURE_SIGNING_PROFILE -d blirp $bin
+            if ($LASTEXITCODE -ne 0) { throw 'Azure Artifact Signing failed' }
+          } elseif ($env:WINDOWS_CERTIFICATE) {
+            $pfx = Join-Path $env:RUNNER_TEMP 'cert.pfx'
+            [IO.File]::WriteAllBytes($pfx, [Convert]::FromBase64String($env:WINDOWS_CERTIFICATE))
+            $pw = ConvertTo-SecureString $env:WINDOWS_CERTIFICATE_PASSWORD -AsPlainText -Force
+            $cert = Import-PfxCertificate -FilePath $pfx -CertStoreLocation Cert:\CurrentUser\My -Password $pw
+            [IO.File]::Delete($pfx)
+            $signtool = Get-ChildItem 'C:\Program Files (x86)\Windows Kits\10\bin\*\x64\signtool.exe' | Sort-Object FullName | Select-Object -Last 1
+            & $signtool.FullName sign /sha1 $cert.Thumbprint /fd sha256 /tr http://timestamp.digicert.com /td sha256 $bin
+            if ($LASTEXITCODE -ne 0) { throw 'signtool failed' }
+          } else {
+            Write-Output '::warning::no Windows signing secrets; the Windows CLI binary is unsigned'
+          }
+
+      - name: Package (unix)
+        if: runner.os != 'Windows'
+        run: |
+          name="blirp-$VERSION-$TARGET"
+          mkdir -p "dist/$name"
+          cp "app/src-tauri/binaries/blirp-$TARGET" "dist/$name/blirp"
+          cp LICENSE README.md "dist/$name/"
+          cd dist
+          tar -czf "$name.tar.gz" "$name"
+          shasum -a 256 "$name.tar.gz" > "$name.tar.gz.sha256"
+      - name: Package (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $name = "blirp-$env:VERSION-$env:TARGET"
+          $dir = "dist/$name"
+          New-Item -ItemType Directory -Force "$dir/x64" | Out-Null
+          Copy-Item "app/src-tauri/binaries/blirp-$env:TARGET.exe" "$dir/blirp.exe"
+          Copy-Item app/src-tauri/binaries/conpty/conpty.dll "$dir/"
+          Copy-Item app/src-tauri/binaries/conpty/x64/OpenConsole.exe "$dir/x64/"
+          Copy-Item LICENSE, README.md "$dir/"
+          Compress-Archive -Path $dir -DestinationPath "dist/$name.zip"
+          $hash = (Get-FileHash "dist/$name.zip" -Algorithm SHA256).Hash.ToLower()
+          Set-Content -Path "dist/$name.zip.sha256" -Value "$hash  $name.zip" -Encoding ascii
+
+      - name: Upload to the draft release
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release upload "$GITHUB_REF_NAME" dist/blirp-"$VERSION"-"$TARGET".* --clobber
+
+  desktop:
+    name: Desktop ${{ matrix.target }}
+    needs: draft
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { os: ubuntu-22.04, target: x86_64-unknown-linux-gnu }
+          - { os: ubuntu-22.04-arm, target: aarch64-unknown-linux-gnu }
+          - { os: macos-latest, target: aarch64-apple-darwin }
+          - { os: macos-latest, target: x86_64-apple-darwin }
+          - { os: windows-latest, target: x86_64-pc-windows-msvc }
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 90
+    env:
+      TARGET: ${{ matrix.target }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Require the updater signing key
+        env:
+          KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+        shell: bash
+        run: |
+          if [ -z "$KEY" ]; then
+            echo "::error::TAURI_SIGNING_PRIVATE_KEY is not set; updater artifacts cannot be signed"
+            exit 1
+          fi
+
+      - name: Install Linux build dependencies
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            libwebkit2gtk-4.1-dev libayatana-appindicator3-dev librsvg2-dev \
+            libxdo-dev libssl-dev pkg-config build-essential file patchelf xdg-utils
+
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ env.RUST_TOOLCHAIN }}
+          targets: ${{ matrix.target }}
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.target }}
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 12
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+          cache-dependency-path: |
+            web/pnpm-lock.yaml
+            app/pnpm-lock.yaml
+      - name: Build web UI
+        run: |
+          pnpm -C web install --frozen-lockfile
+          pnpm -C web build
+      - run: pnpm -C app install --frozen-lockfile
+
+      - name: Build sidecar (unix)
+        if: runner.os != 'Windows'
+        run: SKIP_WEB=1 sh scripts/build-sidecar.sh "$TARGET"
+      - name: Build sidecar + ConPTY (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: scripts/build-sidecar.ps1 -Target $env:TARGET -SkipWeb
+
+      # Tauri signs (and notarizes) the app and its sidecar when these are set;
+      # export them only when present, since empty values make it try and fail.
+      - name: Enable macOS signing (when configured)
+        if: runner.os == 'macOS'
+        env:
+          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+        run: |
+          if [ -z "$APPLE_CERTIFICATE" ]; then
+            echo "::warning::APPLE_CERTIFICATE not set; the macOS app is unsigned"
+            exit 0
+          fi
+          vars="APPLE_CERTIFICATE APPLE_CERTIFICATE_PASSWORD APPLE_SIGNING_IDENTITY"
+          if [ -n "$APPLE_ID" ]; then vars="$vars APPLE_ID APPLE_PASSWORD APPLE_TEAM_ID"; fi
+          for v in $vars; do
+            eval "val=\$$v"
+            { echo "$v<<__BLIRP_EOF__"; echo "$val"; echo "__BLIRP_EOF__"; } >> "$GITHUB_ENV"
+          done
+
+      - name: Enable Windows signing (when configured)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        env:
+          AZURE_CLIENT_SECRET: ${{ secrets.AZURE_CLIENT_SECRET }}
+          AZURE_SIGNING_ENDPOINT: ${{ secrets.AZURE_SIGNING_ENDPOINT }}
+          AZURE_SIGNING_ACCOUNT: ${{ secrets.AZURE_SIGNING_ACCOUNT }}
+          AZURE_SIGNING_PROFILE: ${{ secrets.AZURE_SIGNING_PROFILE }}
+          WINDOWS_CERTIFICATE: ${{ secrets.WINDOWS_CERTIFICATE }}
+          WINDOWS_CERTIFICATE_PASSWORD: ${{ secrets.WINDOWS_CERTIFICATE_PASSWORD }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $overlay = Join-Path $env:RUNNER_TEMP 'tauri.sign.json'
+          if ($env:AZURE_CLIENT_SECRET) {
+            cargo install trusted-signing-cli --locked
+            $cmd = "trusted-signing-cli -e $env:AZURE_SIGNING_ENDPOINT -a $env:AZURE_SIGNING_ACCOUNT -c $env:AZURE_SIGNING_PROFILE -d blirp %1"
+            @{ bundle = @{ windows = @{ signCommand = $cmd } } } | ConvertTo-Json -Depth 5 | Set-Content $overlay
+          } elseif ($env:WINDOWS_CERTIFICATE) {
+            $pfx = Join-Path $env:RUNNER_TEMP 'cert.pfx'
+            [IO.File]::WriteAllBytes($pfx, [Convert]::FromBase64String($env:WINDOWS_CERTIFICATE))
+            $pw = ConvertTo-SecureString $env:WINDOWS_CERTIFICATE_PASSWORD -AsPlainText -Force
+            $cert = Import-PfxCertificate -FilePath $pfx -CertStoreLocation Cert:\CurrentUser\My -Password $pw
+            [IO.File]::Delete($pfx)
+            @{ bundle = @{ windows = @{
+                certificateThumbprint = $cert.Thumbprint
+                digestAlgorithm = 'sha256'
+                timestampUrl = 'http://timestamp.digicert.com'
+            } } } | ConvertTo-Json -Depth 5 | Set-Content $overlay
+          } else {
+            Write-Output '::warning::no Windows signing secrets; the installers are unsigned'
+            exit 0
+          }
+          "TAURI_SIGN_ARGS=--config $overlay" | Out-File -Append -Encoding utf8 $env:GITHUB_ENV
+
+      - uses: tauri-apps/tauri-action@v0
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+          # Read by trusted-signing-cli through signCommand (Windows, Azure only).
+          AZURE_TENANT_ID: ${{ secrets.AZURE_TENANT_ID }}
+          AZURE_CLIENT_ID: ${{ secrets.AZURE_CLIENT_ID }}
+          AZURE_CLIENT_SECRET: ${{ secrets.AZURE_CLIENT_SECRET }}
+        with:
+          projectPath: app
+          tauriScript: pnpm tauri
+          args: --target ${{ matrix.target }} ${{ env.TAURI_SIGN_ARGS }}
+          releaseId: ${{ needs.draft.outputs.release_id }}
+          includeUpdaterJson: true
+          updaterJsonPreferNsis: true
+
+  packaging:
+    name: Checksums and package manifests
+    needs: [draft, cli, desktop]
+    runs-on: ubuntu-latest
+    env:
+      VERSION: ${{ needs.draft.outputs.version }}
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Download release assets
+        run: gh release download "$GITHUB_REF_NAME" --dir assets
+      - name: SHA256SUMS for every asset
+        run: |
+          cd assets
+          find . -maxdepth 1 -type f ! -name '*.sha256' ! -name '*.sig' ! -name 'SHA256SUMS.txt' \
+            -printf '%f\n' | sort | xargs sha256sum > SHA256SUMS.txt
+          cat SHA256SUMS.txt
+      - name: Render Homebrew and winget manifests
+        run: sh scripts/render-packaging.sh "$VERSION" assets packaging-out
+      - name: Upload
+        run: gh release upload "$GITHUB_REF_NAME" assets/SHA256SUMS.txt packaging-out/* --clobber

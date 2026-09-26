@@ -1,7 +1,7 @@
 //! Command line (§4).
 
-mod later;
 mod mem;
+pub mod service;
 mod sync;
 
 use anyhow::{Context as _, bail};
@@ -81,8 +81,11 @@ enum Command {
         #[command(subcommand)]
         action: sync::DevicesAction,
     },
-    #[command(flatten)]
-    Later(later::LaterCommand),
+    /// Install or remove autostart of the daemon at login.
+    Service {
+        #[command(subcommand)]
+        cmd: service::ServiceCommand,
+    },
 }
 
 pub fn main() -> ExitCode {
@@ -107,7 +110,6 @@ pub fn main() -> ExitCode {
         }
     };
     match cli.command {
-        Command::Later(cmd) => later::run(&cmd),
         Command::Mem(cmd) => report(mem::run_mem(&paths, cmd)),
         Command::Hooks(cmd) => report(mem::run_hooks(cmd)),
         command => run_async(command, paths),
@@ -157,7 +159,12 @@ async fn run(cmd: Command, paths: Paths) -> anyhow::Result<ExitCode> {
             port,
         } => {
             let _guard = crate::daemon::init_logging(&paths)?;
-            crate::daemon::run_foreground(paths, port).await?;
+            if let Err(e) = crate::daemon::run_foreground(paths, port).await {
+                // A detached daemon's stderr goes nowhere; the log is where
+                // `--detach` and the desktop app tell the user to look.
+                tracing::error!(error = format!("{e:#}"), "daemon failed");
+                return Err(e);
+            }
             Ok(ExitCode::SUCCESS)
         }
         Command::Status => status(&paths).await,
@@ -173,9 +180,9 @@ async fn run(cmd: Command, paths: Paths) -> anyhow::Result<ExitCode> {
         }
         Command::Hub { action } => sync::hub(&Client::connect(&paths).await?, action).await,
         Command::Devices { action } => sync::devices(&Client::connect(&paths).await?, action).await,
-        Command::Later(_) | Command::Hook { .. } | Command::Mem(_) | Command::Hooks(_) => {
-            Ok(ExitCode::from(2))
-        }
+        Command::Service { cmd } => service::run(&cmd, &paths).await,
+        // Dispatched synchronously in `main` before the runtime starts.
+        Command::Hook { .. } | Command::Mem(_) | Command::Hooks(_) => Ok(ExitCode::from(2)),
     }
 }
 

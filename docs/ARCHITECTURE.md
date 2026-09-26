@@ -43,6 +43,7 @@ Data dir `BLIRP_HOME`, default `~/.blirp` on every OS (Windows: `%USERPROFILE%\.
   tls/cert.pem, tls/key.pem   self-signed LAN portal certificate (hub, key 0600)
   daemon.lock        single-instance lock (OS file lock held by the daemon)
   logs/blirpd.<date>.log   rolling logs (tracing-appender, daily, keep 7)
+  logs/desktop.<date>.log  desktop shell log (same rotation); launchd.log: LaunchAgent stdout/stderr (macOS)
   worktrees/<project-id>/<name>/   optional per-session git worktrees
   launch/<session-id>/             per-launch generated files (claude settings.json, mcp.json, memory.md)
   distill/run-*/                   summarizer scratch dirs (§9), removed after each run
@@ -55,10 +56,10 @@ Data dir `BLIRP_HOME`, default `~/.blirp` on every OS (Windows: `%USERPROFILE%\.
 - `blirp daemon` - long-running per-user process. Owns PTYs, ingest watchers, memory jobs, SQLite writer, local HTTP/WS API, and (optionally) the iroh sync endpoint and LAN portal (hub). Single instance enforced by a lock file.
 - `blirp hook <agent> <event>` - short-lived; reads hook JSON from stdin, POSTs to daemon, prints injection output where the agent supports it. Always exits 0.
 - `blirp mcp` - stdio MCP server spawned by agents. Reads the local SQLite directly in read-only mode for queries; writes (e.g. `mem_record`) go through the daemon API.
-- `blirp <cli>` - `status`, `open` (opens UI/portal in browser with a login link), `mem search|brief|show`, `sessions`, `pair`, `hub enable|disable|invite|status`, `devices list|revoke`, `service install|uninstall`, `hooks install|uninstall|status`, `doctor`.
+- `blirp <cli>` - `status`, `open` (opens UI/portal in browser with a login link), `mem search|brief|show`, `sessions`, `pair`, `hub enable|disable|invite|status`, `devices list|revoke`, `service install|uninstall|status`, `hooks install|uninstall|status`, `doctor`.
 - Desktop app - on launch ensures the daemon is running (spawns sidecar `blirp daemon --detach` if not), reads runtime.json, opens a window at `http://127.0.0.1:<port>/auth?token=...` which sets an HttpOnly cookie and redirects to `/`. Closing the window does not stop the daemon or sessions.
 
-Autostart: `blirp service install` registers per-user autostart: macOS LaunchAgent, Linux `systemd --user` unit, Windows `HKCU\Software\Microsoft\Windows\CurrentVersion\Run` entry. Never a system service (it would not see the user's agent logins).
+Autostart: `blirp service install` registers per-user autostart: macOS LaunchAgent `~/Library/LaunchAgents/dev.blirp.daemon.plist` (`blirp daemon`, `KeepAlive.SuccessfulExit=false`), Linux `systemd --user` unit `blirp.service` (`Restart=on-failure`, `enable --now`; headless hubs also need `loginctl enable-linger`), Windows `HKCU\Software\Microsoft\Windows\CurrentVersion\Run` value `blirp` = `conhost.exe --headless "<blirp.exe>" daemon --detach` (no console window). The unit records the absolute binary path and, on macOS/Linux, the installing shell's `PATH` and an explicit `BLIRP_HOME`. Install is idempotent (an existing daemon is left running and the service takes over at next login); uninstall removes exactly that entry and leaves a running daemon alone. Never a system service (it would not see the user's agent logins).
 
 ## 5. Data model (SQLite, `blirp-core::store`)
 
@@ -393,15 +394,18 @@ GET  /api/devices                        Device[] ; DELETE /api/devices/:id (adm
 PATCH /api/devices/:id {can_control_terminals}   Device (admin)
 POST /api/devices/browser-invite         BrowserInvite {url, expires_at}: one-time login link/QR for a browser (hub portal)
 GET  /api/events/ws                      server push: session status changes, new sessions, memory updates
+POST /api/daemon/shutdown                202; graceful stop, same as SIGTERM (desktop tray Quit, updater;
+                                         the detached Windows daemon has no console to signal). Loopback
+                                         listener + local token only: not mounted on the portal or proxy
 GET  /mcp                                MCP Streamable HTTP
 GET  /*                                  embedded SPA
 ```
 
 Request/response DTOs are defined in `blirp-core::model` and exported to `web/src/lib/api/types.gen.ts` (`cargo test -p blirp-core export_bindings`). `/api/events/ws` pushes JSON `ServerEvent` frames: `session_created`, `session_updated`, `project_updated`, `memory_updated {project_id, part}`, `sync_updated {status}` (role, connection or portal changed), and `resync` when the client fell behind and must refetch.
 
-Every authenticated request carries a principal: local clients (runtime token or `blirp_session` cookie) have `control` and `admin`; portal browser devices have `control = can_control_terminals` and no `admin`; requests relayed by the sync proxy have the proxied `control` and no `admin`. `control` is required to launch, resume or stop sessions, to distill a session (403 `control_not_allowed`) and to send terminal input; `admin` is required for hub/pairing/device management, hook ingress, global integration install/uninstall and `POST /api/sessions/:id/open` (403 `admin_only`).
+Every authenticated request carries a principal: local clients (runtime token or `blirp_session` cookie) have `control` and `admin`; portal browser devices have `control = can_control_terminals` and no `admin`; requests relayed by the sync proxy have the proxied `control` and no `admin`. `control` is required to launch, resume or stop sessions, to distill a session (403 `control_not_allowed`) and to send terminal input; `admin` is required for hub/pairing/device management, hook ingress, global integration install/uninstall, `POST /api/sessions/:id/open` and `POST /api/daemon/shutdown` (403 `admin_only`).
 
-`/mcp` is local-only: it is mounted on the loopback listener alone (runtime token, loopback `Host`), not on the LAN portal and not for requests relayed by the sync proxy, where it falls through to the SPA. Remote MCP would need device-authenticated access and is not offered yet.
+`/mcp` is local-only: it is mounted on the loopback listener alone (runtime token, loopback `Host`), not on the LAN portal and not for requests relayed by the sync proxy, where it falls through to the SPA. Remote MCP would need device-authenticated access and is not offered yet. `POST /api/daemon/shutdown` is mounted the same way (loopback listener only, 404 elsewhere): only this machine's own clients may stop its daemon.
 
 ## 12. Config (`~/.blirp/config.toml`, validated at startup; unknown keys are an error with a clear message)
 
@@ -448,9 +452,13 @@ Layout mirrors the reference (Xirp-style):
 
 ## 15. Desktop shell (Tauri 2)
 
-- Sidecar `blirp` binary (externalBin). On start: `blirp daemon --detach` if runtime.json missing/stale; wait for `/api/health`; navigate main window to the auth URL.
-- Single instance plugin; window state plugin; deep links `blirp://join/...` forwarded to the join flow; updater plugin (GitHub Releases `latest.json`, minisign pubkey in config).
-- Tray icon with status and "Quit blirp (stop daemon)" vs "Close window".
+- Crate `app/src-tauri` (`blirp-desktop`), bundle product `blirp`, identifier `dev.blirp.desktop`. Its only frontend is a bundled loading/error page (`app/src`); everything else is the daemon's SPA.
+- Sidecar `blirp` binary (externalBin, next to the app executable in every bundle). On start: probe runtime.json + `/api/health`; if not healthy run `blirp daemon --detach` (stderr captured to `logs/desktop-daemon-start.log`, 40 s timeout), then navigate the main window to `http://127.0.0.1:<port>/auth?token=...`. On failure the loading page shows the error, the log folder, Retry and Open log folder. On macOS/Linux the daemon is started with the login shell's `PATH` (`$SHELL -ilc`) so agent CLIs are found when the app was launched from the Dock or a launcher. Debug builds (`tauri dev`, clippy, tests) use `target/<profile>/blirp`; `build.rs` drops the sidecar config for them and requires it for release builds.
+- IPC: only the bundled page (local origin) may call the app commands `startup_state`, `retry`, `open_logs` (`capabilities/main.json`); the daemon origin gets no capabilities. Navigation is limited to the bundled page and the daemon origin; other http(s)/mailto links and `window.open` go to the default browser.
+- Plugins: single instance (a second launch focuses the window and forwards deep links), window state (size/position, not visibility), deep link `blirp://join/<ticket>#<code>` -> SPA route `/settings/sync?join=<ticket>&code=<code>` (queued until the UI is logged in), dialog, opener, updater.
+- Updater: GitHub Releases `latest.json`, minisign pubkey in `tauri.conf.json`. Release builds check on launch and ask; installing stops the daemon first (the installer replaces the sidecar, which a running daemon locks on Windows), then restarts the app.
+- Window close hides the window; daemon, sessions and tray keep running. Tray: Open blirp (restarts the daemon if it died), status line, "Close window (sessions keep running)", "Quit blirp (stop daemon and sessions)" (confirm dialog, then `POST /api/daemon/shutdown` and exit).
+- Windows bundles ship `conpty.dll` and `x64\OpenConsole.exe` (NuGet `Microsoft.Windows.Console.ConPTY`, pinned) next to `blirp.exe`. portable-pty loads `conpty.dll` by name, which resolves from the executable's directory first, and that `conpty.dll` launches `<its dir>\x64\OpenConsole.exe`; without them the inbox ConPTY is used. The standalone Windows zip has the same layout.
 
 ## 16. Quality bar
 
