@@ -15,7 +15,7 @@ Read [ARCHITECTURE.md](ARCHITECTURE.md) first: it is the design contract, and a 
 | `scripts/` | `build-sidecar.{sh,ps1}` (stage `blirp` and ConPTY as the Tauri sidecar), `render-packaging.sh`, `third-party-notices.sh` (`THIRD_PARTY_NOTICES` from `about.toml` + `packaging/about.hbs`, npm licenses and `packaging/licenses/`) |
 | `install.sh`, `install.ps1` | the one-line installers ([install.md](install.md)); `crates/blirp/src/update/` is the matching `blirp update` / `uninstall` side |
 | `packaging/` | Homebrew formula (CLI) and winget manifest templates, `minisign.pub` (release signing public key, built into `blirp update`) |
-| `.github/workflows/` | `ci.yml` (every push and PR), `release.yml` (tags `v*`) |
+| `.github/workflows/` | `ci.yml` (every push and PR: web checks, Rust on Linux/macOS/Windows with the install-script test, Playwright e2e on Linux, `cargo deny` and `pnpm audit`), `release.yml` (tags `v*`, or a dry run started by hand); `.github/dependabot.yml` |
 | `docs/` | user and developer docs; `ARCHITECTURE.md`; `agent-formats.md` (survey of agents' on-disk transcript formats) |
 
 ## Requirements
@@ -99,7 +99,7 @@ The app has no updater; `blirp update` updates it. The daemon's origin gets no T
 pnpm -C web e2e
 ```
 
-Builds the SPA and `cargo build -p blirp`, starts the real daemon on a temporary `BLIRP_HOME` with a temporary git repository, and drives the UI with Playwright in the installed Microsoft Edge (no browser download). `BLIRP_E2E_CHANNEL=chrome` (or another Playwright channel) picks another browser; `BLIRP_E2E_KEEP=1` keeps the temp directory and `daemon.log` for inspection. Not part of `pnpm -C web test` or CI.
+Builds the SPA and `cargo build -p blirp`, starts the real daemon on a temporary `BLIRP_HOME` with a temporary git repository, and drives the UI with Playwright in the installed Microsoft Edge (no browser download). `BLIRP_E2E_CHANNEL=chrome` (or another Playwright channel) picks another browser; `BLIRP_E2E_KEEP=1` keeps the temp directory and `daemon.log` for inspection. Not part of `pnpm -C web test`; CI runs it on Linux with Playwright's Chromium (`BLIRP_E2E_CHANNEL=chromium`, after `pnpm -C web exec playwright install --with-deps chromium`).
 
 ## Adding an agent adapter
 
@@ -119,15 +119,16 @@ A new agent touches these places. Look at an existing agent with the same shape 
 ## Release process
 
 1. Bump `version` in `[workspace.package]` of the root `Cargo.toml` (app, CLI and installers take it from there), run `cargo check` to update `Cargo.lock`, move the `[Unreleased]` entries of `CHANGELOG.md` into a `## [X.Y.Z] - YYYY-MM-DD` section (with its compare link at the bottom), commit `chore(release): vX.Y.Z`. The draft's release notes are that section; the workflow fails without it.
-2. Tag and push: `git tag vX.Y.Z && git push origin vX.Y.Z`.
-3. `release.yml` creates a **draft** GitHub release with:
+2. Optional but cheap: run the release workflow by hand first (`gh workflow run release.yml --ref main`). The dry run builds every archive and installer, checks them against the expected asset list and the changelog section, and publishes nothing.
+3. Tag and push: `git tag vX.Y.Z && git push origin vX.Y.Z`.
+4. `release.yml` creates a **draft** GitHub release with:
    - CLI archives `blirp-<ver>-<target>.tar.gz` (Linux x64/arm64, macOS arm64/x64) and `.zip` (Windows x64, with ConPTY), each with a `.sha256`; every archive and installer includes `THIRD_PARTY_NOTICES` (made once by the `notices` job; a dependency under a license missing from `about.toml` fails it);
    - the desktop app as portable assets for the install scripts and `blirp update`: `blirp_<ver>_<aarch64|x64>.app.tar.gz`, `blirp_<ver>_<amd64|aarch64>.AppImage`, `blirp_<ver>_x64-portable.zip` (`blirp-desktop.exe`, `blirp.exe`, `conpty.dll`, `x64/OpenConsole.exe`);
    - the classic installers (NSIS + MSI, DMG, deb + rpm) as extras;
    - `SHA256SUMS.txt` over the expected assets (an explicit list in the `checksums` job; a missing or unexpected asset fails the run, so add new asset names there) and `SHA256SUMS.txt.sig`, its minisign signature (made by the `sign` job, which alone sees the key: no checkout, no token, no package installs, a minisign release binary pinned by SHA-256; the `packaging` job checks it against `packaging/minisign.pub` before uploading);
    - rendered Homebrew/winget manifests.
-4. Check the draft, then publish it. The install scripts, `blirp update` and the daemon's update check use `releases/latest`, which only returns published, non-prerelease releases, so nothing reaches users before you publish. The API does not serve drafts even by tag; to try the draft's assets with the scripts first, download them and serve them locally (see "Testing the installers" below).
-5. Optional: copy `homebrew-formula-blirp.rb` into a tap (`Formula/blirp.rb`) and open a `microsoft/winget-pkgs` PR with the three `winget-*.yaml` files (`manifests/b/blirp/blirp/X.Y.Z/`, without the `winget-` prefix).
+5. Check the draft, then publish it. The install scripts, `blirp update` and the daemon's update check use `releases/latest`, which only returns published, non-prerelease releases, so nothing reaches users before you publish. The API does not serve drafts even by tag; to try the draft's assets with the scripts first, download them and serve them locally (see "Testing the installers" below).
+6. Optional: copy `homebrew-formula-blirp.rb` into a tap (`Formula/blirp.rb`) and open a `microsoft/winget-pkgs` PR with the three `winget-*.yaml` files (`manifests/b/blirp/blirp/X.Y.Z/`, without the `winget-` prefix).
 
 Nothing is code signed by default, deliberately (see [faq.md](faq.md#why-is-blirp-not-code-signed)); the signing secrets below stay optional.
 
@@ -148,6 +149,7 @@ Code-signing steps are skipped with a warning when their secrets are missing. Th
 
 ### Testing the installers
 
+- Automated: `scripts/test-install.sh <blirp binary> <minisign binary>` (CI runs it on every OS) installs a freshly built `blirp` from a fake signed release on 127.0.0.1 into a temp home and checks that tampered assets and checksums are refused; on Windows it drives `install.ps1` from Git Bash.
 - Lint: `shellcheck install.sh`, `Invoke-ScriptAnalyzer install.ps1` (or at least `[scriptblock]::Create((Get-Content install.ps1 -Raw))` in both PowerShell editions), `actionlint`.
 - Signature checks: the scripts carry the release key in `RELEASE_PUBKEY` / `$ReleasePubkey`; a test copy with a throwaway key swapped in must install from a correctly signed fake release, refuse a changed `SHA256SUMS.txt` or `.sig`, print the notice without a verifier (e.g. only LibreSSL, or `Path` without Git) and refuse then with `BLIRP_REQUIRE_SIGNATURE=1`. A throwaway minisign key and signature can be made with OpenSSL 3 alone (`genpkey -algorithm ed25519`, `pkeyutl -sign -rawin` over `dgst -blake2b512`).
 - Private repository: `GITHUB_TOKEN=<token with read access> sh install.sh` (PowerShell: `$env:GITHUB_TOKEN`); the scripts and `blirp update` then download through the API.
