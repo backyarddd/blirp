@@ -7,18 +7,46 @@
 // because the UI and the terminal show absolute paths. It must not exist yet; it is removed at
 // the end. Seeds projects, memory and sessions through the HTTP API, then captures the SPA
 // headless in dark mode.
-import { execFileSync, spawn } from 'node:child_process';
+import { type ChildProcess, execFileSync, spawn } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
-import { createWriteStream, existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { createWriteStream, existsSync, mkdirSync, readFileSync, rmSync, type WriteStream, writeFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { delimiter, join, resolve } from 'node:path';
-import { chromium, type Page } from '@playwright/test';
+import { type Browser, chromium, type Page } from '@playwright/test';
 
 const repoRoot = resolve(import.meta.dirname, '../..');
 const outDir = join(repoRoot, 'docs', 'images');
-const root = process.env.BLIRP_SHOTS_ROOT ?? (process.platform === 'win32' ? 'C:\\demo' : '/tmp/demo');
+const root = process.env.BLIRP_SHOTS_ROOT || (process.platform === 'win32' ? 'C:\\demo' : '/tmp/demo');
 const PORT = 47791;
 const LIVE = ['starting', 'working', 'idle', 'waiting'];
+// The only parent variables the daemon (and through it git, node, npm and the demo shell) sees.
+const PASS_ENV = [
+  'LANG', 'LC_ALL', 'TERM',
+  // Windows system locations; SystemRoot is required for sockets.
+  'SystemRoot', 'SystemDrive', 'windir', 'ComSpec', 'PATHEXT', 'OS', 'NUMBER_OF_PROCESSORS',
+  'PROCESSOR_ARCHITECTURE', 'ProgramData', 'ProgramFiles', 'ProgramFiles(x86)', 'ProgramW6432',
+  'CommonProgramFiles', 'CommonProgramFiles(x86)', 'CommonProgramW6432',
+];
+
+/**
+ * A custom agent named "Shell" (labelled like the built-in one) that starts without the real
+ * user's profile or history: the built-in shell would run their $SHELL, or pwsh, whose $PROFILE
+ * and PSReadLine history path come from the Known Folder API and ignore the demo home.
+ */
+function demoShell(path: string): string {
+  let command = '/bin/sh';
+  let args: string[] = [];
+  if (process.platform === 'win32') {
+    const pwsh = path.split(delimiter).some((d) => existsSync(join(d, 'pwsh.exe')));
+    command = pwsh ? 'pwsh' : 'powershell';
+    args = ['-NoLogo', '-NoProfile', '-NoExit', '-Command', 'Set-PSReadLineOption -HistorySaveStyle SaveNothing'];
+  }
+  return `[[agents.custom]]
+name = "Shell"
+command = ${JSON.stringify(command)}
+args = ${JSON.stringify(args)}
+`;
+}
 
 interface Session {
   id: string;
@@ -211,59 +239,77 @@ async function main(): Promise<void> {
   const userHome = root;
   const blirpHome = join(root, '.blirp');
   const code = join(root, 'code');
-  mkdirSync(blirpHome, { recursive: true });
-  mkdirSync(join(userHome, '.claude', 'projects'), { recursive: true });
-  writeFileSync(
-    join(blirpHome, 'config.toml'),
-    '[machine]\nname = "workstation"\n\n[memory]\nsummarizer = "none"\n\n[sync]\nrelay = "disabled"\n\n[update]\ncheck = false\n',
-  );
-  seedDisk(code);
-
-  // Agents installed under the real home (npm globals, ~/.local/bin, ...) stay out of PATH, so
-  // no personal install path can appear in the UI.
-  const realHome = homedir().toLowerCase();
-  const path = (process.env.PATH ?? process.env.Path ?? '')
-    .split(delimiter)
-    .filter((p) => p && !p.toLowerCase().startsWith(realHome))
-    .join(delimiter);
-  const { CLAUDE_CODE_OAUTH_TOKEN: _token, Path: _winPath, ...parentEnv } = process.env;
-  const log = createWriteStream(join(root, 'daemon.log'));
-  const daemon = spawn(bin, ['daemon', '--port', String(PORT)], {
-    cwd: code,
-    windowsHide: true,
-    env: {
-      ...parentEnv,
-      PATH: path,
-      BLIRP_HOME: blirpHome,
-      BLIRP_LOOPBACK_ONLY: '1',
-      HOME: userHome,
-      USERPROFILE: userHome,
-      HOMEDRIVE: '',
-      HOMEPATH: '',
-      APPDATA: join(userHome, 'AppData', 'Roaming'),
-      LOCALAPPDATA: join(userHome, 'AppData', 'Local'),
-      XDG_CONFIG_HOME: join(userHome, '.config'),
-      XDG_DATA_HOME: join(userHome, '.local', 'share'),
-      XDG_STATE_HOME: join(userHome, '.local', 'state'),
-      XDG_CACHE_HOME: join(userHome, '.cache'),
-      CLAUDE_CONFIG_DIR: join(userHome, '.claude'),
-      CODEX_HOME: join(userHome, '.codex'),
-      GEMINI_CLI_HOME: userHome,
-      CURSOR_CONFIG_DIR: join(userHome, '.cursor'),
-      AMP_DATA_DIR: join(userHome, '.local', 'share', 'amp'),
-      PI_CODING_AGENT_DIR: join(userHome, '.pi', 'agent'),
-      DSH_HOME: join(userHome, '.dsh'),
-      RUST_LOG: 'info',
-    },
-    stdio: ['ignore', 'pipe', 'pipe'],
-  });
-  daemon.stdout.pipe(log);
-  daemon.stderr.pipe(log);
+  let daemon: ChildProcess | undefined;
   let exited = false;
-  daemon.on('exit', () => (exited = true));
-
-  const browser = await chromium.launch({ channel: process.env.BLIRP_E2E_CHANNEL ?? 'msedge', headless: true });
+  let log: WriteStream | undefined;
+  let browser: Browser | undefined;
   try {
+    mkdirSync(blirpHome, { recursive: true });
+    mkdirSync(join(userHome, '.claude', 'projects'), { recursive: true });
+    mkdirSync(join(userHome, 'AppData', 'Local', 'Temp'), { recursive: true });
+    seedDisk(code);
+
+    // Agents installed under the real home (npm globals, ~/.local/bin, ...) stay out of PATH, so
+    // no personal install path can appear in the UI.
+    const realHome = homedir().toLowerCase();
+    const path = (process.env.PATH ?? process.env.Path ?? '')
+      .split(delimiter)
+      .filter((p) => p && !p.toLowerCase().startsWith(realHome))
+      .join(delimiter);
+    writeFileSync(
+      join(blirpHome, 'config.toml'),
+      '[machine]\nname = "workstation"\n\n[memory]\nsummarizer = "none"\n\n[sync]\nrelay = "disabled"\n\n[update]\ncheck = false\n\n' +
+        demoShell(path),
+    );
+    // Allowlist, not the parent environment: anything else (SHELL, ZDOTDIR, HISTFILE, BASH_ENV,
+    // ENV, PSModulePath, tokens, ...) could pull the real user's profile, history or name in.
+    const inherited = Object.fromEntries(
+      PASS_ENV.flatMap((k) => (process.env[k] === undefined ? [] : [[k, process.env[k]]])),
+    );
+    const tmp = join(userHome, 'AppData', 'Local', 'Temp');
+    log = createWriteStream(join(root, 'daemon.log'));
+    daemon = spawn(bin, ['daemon', '--port', String(PORT)], {
+      cwd: code,
+      windowsHide: true,
+      env: {
+        ...inherited,
+        PATH: path,
+        TEMP: tmp,
+        TMP: tmp,
+        TMPDIR: tmp,
+        USER: 'demo',
+        USERNAME: 'demo',
+        LOGNAME: 'demo',
+        SHELL: '/bin/sh',
+        PS1: '$ ',
+        BLIRP_HOME: blirpHome,
+        BLIRP_LOOPBACK_ONLY: '1',
+        HOME: userHome,
+        USERPROFILE: userHome,
+        HOMEDRIVE: '',
+        HOMEPATH: '',
+        APPDATA: join(userHome, 'AppData', 'Roaming'),
+        LOCALAPPDATA: join(userHome, 'AppData', 'Local'),
+        XDG_CONFIG_HOME: join(userHome, '.config'),
+        XDG_DATA_HOME: join(userHome, '.local', 'share'),
+        XDG_STATE_HOME: join(userHome, '.local', 'state'),
+        XDG_CACHE_HOME: join(userHome, '.cache'),
+        CLAUDE_CONFIG_DIR: join(userHome, '.claude'),
+        CODEX_HOME: join(userHome, '.codex'),
+        GEMINI_CLI_HOME: userHome,
+        CURSOR_CONFIG_DIR: join(userHome, '.cursor'),
+        AMP_DATA_DIR: join(userHome, '.local', 'share', 'amp'),
+        PI_CODING_AGENT_DIR: join(userHome, '.pi', 'agent'),
+        DSH_HOME: join(userHome, '.dsh'),
+        RUST_LOG: 'info',
+      },
+      stdio: ['ignore', 'pipe', 'pipe'],
+    });
+    daemon.stdout?.pipe(log);
+    daemon.stderr?.pipe(log);
+    daemon.on('exit', () => (exited = true));
+
+    browser = await chromium.launch({ channel: process.env.BLIRP_E2E_CHANNEL ?? 'msedge', headless: true });
     const { token } = await waitFor('runtime.json', 60_000, async () => {
       if (exited) throw new Error(`daemon exited early; see ${join(root, 'daemon.log')}`);
       const file = join(blirpHome, 'runtime.json');
@@ -302,7 +348,7 @@ async function main(): Promise<void> {
     await api('PATCH', `/api/sessions/${claude.id}`, { title: 'Cursor pagination for GET /orders' });
 
     const launch = async (projectId: string, title: string): Promise<Session> => {
-      const s = await api<Session>('POST', '/api/sessions', { project_id: projectId, agent: 'shell', cols: 120, rows: 32 });
+      const s = await api<Session>('POST', '/api/sessions', { project_id: projectId, agent: 'custom:Shell', cols: 120, rows: 32 });
       await api('PATCH', `/api/sessions/${s.id}`, { title });
       await waitFor(`${title} to be idle`, 30_000, async () => ((await api<Session>('GET', `/api/sessions/${s.id}`)).status === 'idle' ? true : undefined));
       return s;
@@ -404,13 +450,17 @@ async function main(): Promise<void> {
     await shot('mobile');
     await context.close();
   } finally {
-    await browser.close();
-    if (!exited) {
-      const done = new Promise((r) => daemon.once('exit', r));
-      daemon.kill();
+    await browser?.close();
+    if (daemon && !exited) {
+      const d = daemon;
+      const done = new Promise((r) => d.once('exit', r));
+      d.kill();
       await done;
     }
-    await new Promise<void>((r) => log.end(r));
+    if (log) {
+      const l = log;
+      await new Promise<void>((r) => l.end(r));
+    }
     if (process.env.BLIRP_SHOTS_KEEP) console.log(`kept ${root}`);
     else rmSync(root, { recursive: true, force: true, maxRetries: 5, retryDelay: 300 });
   }
