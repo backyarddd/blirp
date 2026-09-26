@@ -10,7 +10,7 @@ use axum::{Json, Router};
 use blirp_core::git::{self, GitError};
 use blirp_core::model::{DirListing, FileContent, FileEntry, FileKind, GitDiff, GitStatus};
 use serde::Deserialize;
-use std::path::{Component, PathBuf};
+use std::path::{Component, Path, PathBuf};
 use std::time::UNIX_EPOCH;
 
 pub const MAX_FILE_BYTES: u64 = 1024 * 1024;
@@ -58,8 +58,11 @@ pub fn check_relative(rel: &str) -> ApiResult<PathBuf> {
 }
 
 /// Resolve `rel` under `root` following symlinks, rejecting anything whose
-/// real location is outside the real root.
-pub fn resolve_inside(root: &std::path::Path, rel: &str) -> ApiResult<PathBuf> {
+/// real location is outside the real root, or inside blirp's `data_dir`:
+/// that holds the runtime token and the machine identity, and a project
+/// folder may contain it (a home folder registered as a project, read by
+/// another machine through the hub).
+pub fn resolve_inside(root: &Path, rel: &str, data_dir: &Path) -> ApiResult<PathBuf> {
     let rel = check_relative(rel)?;
     let root = dunce::canonicalize(root).map_err(|e| {
         ApiError::new(
@@ -77,6 +80,14 @@ pub fn resolve_inside(root: &std::path::Path, rel: &str) -> ApiResult<PathBuf> {
             StatusCode::FORBIDDEN,
             "path_outside_root",
             "path resolves outside the project folder",
+        ));
+    }
+    let data_dir = dunce::canonicalize(data_dir).unwrap_or_else(|_| data_dir.to_path_buf());
+    if target.starts_with(&data_dir) {
+        return Err(ApiError::new(
+            StatusCode::FORBIDDEN,
+            "path_in_data_dir",
+            "blirp's own data folder is not served",
         ));
     }
     Ok(target)
@@ -130,7 +141,7 @@ async fn list_dir(
     blocking(move || {
         let root = project_root(&st, &id, q.root.as_deref())?;
         let rel = q.path.unwrap_or_default();
-        let dir = resolve_inside(&root, &rel)?;
+        let dir = resolve_inside(&root, &rel, st.paths.home())?;
         if !dir.is_dir() {
             return Err(ApiError::bad_request("path is not a directory"));
         }
@@ -191,7 +202,7 @@ async fn read_file(
             .path
             .filter(|p| !p.is_empty())
             .ok_or_else(|| ApiError::bad_request("path is required"))?;
-        let file = resolve_inside(&root, &rel)?;
+        let file = resolve_inside(&root, &rel, st.paths.home())?;
         read_text(&file).map(|(content, size)| FileContent {
             root: root.display().to_string(),
             path: rel_string(&check_relative(&rel).unwrap_or_default()),
@@ -318,20 +329,23 @@ mod tests {
         std::fs::create_dir_all(root.join("src")).unwrap();
         std::fs::write(root.join("src/a.txt"), "hi").unwrap();
         std::fs::write(dir.path().join("secret.txt"), "no").unwrap();
+        let data = dir.path().join("data");
 
-        assert!(resolve_inside(&root, "src/a.txt").is_ok());
-        assert!(resolve_inside(&root, "./src/../src/a.txt").is_err());
+        assert!(resolve_inside(&root, "src/a.txt", &data).is_ok());
+        assert!(resolve_inside(&root, "./src/../src/a.txt", &data).is_err());
         for bad in ["../secret.txt", "src/../../secret.txt", "..", "/etc/passwd"] {
-            let e = resolve_inside(&root, bad).unwrap_err();
+            let e = resolve_inside(&root, bad, &data).unwrap_err();
             assert_eq!(e.code, "path_outside_root", "{bad}");
         }
         #[cfg(windows)]
         for bad in [r"..\secret.txt", r"C:\Windows\win.ini", r"\\server\share\x"] {
-            let e = resolve_inside(&root, bad).unwrap_err();
+            let e = resolve_inside(&root, bad, &data).unwrap_err();
             assert_eq!(e.code, "path_outside_root", "{bad}");
         }
         assert_eq!(
-            resolve_inside(&root, "missing.txt").unwrap_err().code,
+            resolve_inside(&root, "missing.txt", &data)
+                .unwrap_err()
+                .code,
             "not_found"
         );
         assert!(check_relative("a\0b").is_err());
@@ -345,10 +359,31 @@ mod tests {
         std::fs::create_dir(&root).unwrap();
         std::fs::write(dir.path().join("secret.txt"), "no").unwrap();
         std::os::unix::fs::symlink(dir.path().join("secret.txt"), root.join("link")).unwrap();
+        let data = dir.path().join("data");
         assert_eq!(
-            resolve_inside(&root, "link").unwrap_err().code,
+            resolve_inside(&root, "link", &data).unwrap_err().code,
             "path_outside_root"
         );
+    }
+
+    // A project folder that contains the data dir (a home folder) never
+    // serves it: the runtime token and the machine key live there.
+    #[test]
+    fn data_dir_is_never_served() {
+        let dir = tempfile::tempdir().unwrap();
+        let data = dir.path().join(".blirp");
+        std::fs::create_dir(&data).unwrap();
+        std::fs::write(data.join("runtime.json"), "{}").unwrap();
+        std::fs::write(dir.path().join("notes.txt"), "hi").unwrap();
+        let root = dir.path();
+        assert!(resolve_inside(root, "notes.txt", &data).is_ok());
+        for bad in [".blirp", ".blirp/runtime.json"] {
+            let e = resolve_inside(root, bad, &data).unwrap_err();
+            assert_eq!(e.code, "path_in_data_dir", "{bad}");
+        }
+        // Also when the data dir is the project folder itself.
+        let e = resolve_inside(&data, "", &data).unwrap_err();
+        assert_eq!(e.code, "path_in_data_dir");
     }
 
     #[test]
