@@ -1,0 +1,7 @@
+{"sessionId":"33333333-3333-4333-8333-333333333333","projectHash":"abc123","startTime":"2026-01-05T08:00:00.000Z","lastUpdated":"2026-01-05T08:00:00.000Z","kind":"main"}
+{"id":"m-user-1","timestamp":"2026-01-05T08:00:01.000Z","type":"user","content":[{"text":"Write a changelog entry\nuse {{SECRET}}"}]}
+{"$set":{"lastUpdated":"2026-01-05T08:00:01.000Z"}}
+{"id":"m-gem-1","timestamp":"2026-01-05T08:00:02.000Z","type":"gemini","content":"","toolCalls":[{"id":"write_file-1","name":"write_file","args":{"file_path":"CHANGELOG.md","content":"- fix"},"status":"executing","timestamp":"2026-01-05T08:00:02.000Z"}],"thoughts":[],"model":"gemini-2.5-pro"}
+{"id":"m-gem-1","timestamp":"2026-01-05T08:00:02.000Z","type":"gemini","content":"","toolCalls":[{"id":"write_file-1","name":"write_file","args":{"file_path":"CHANGELOG.md","content":"- fix"},"status":"success","result":[{"functionResponse":{"id":"write_file-1","name":"write_file","response":{"output":"Wrote CHANGELOG.md"}}}],"timestamp":"2026-01-05T08:00:02.000Z"}],"thoughts":[],"model":"gemini-2.5-pro"}
+{"id":"m-gem-2","timestamp":"2026-01-05T08:00:03.000Z","type":"gemini","content":"Added the entry.","thoughts":[],"tokens":{"input":1000,"output":40,"cached":600,"thoughts":10,"tool":0,"total":1050},"model":"gemini-2.5-pro"}
+{"$set":{"summary":"Changelog entry"}}

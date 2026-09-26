@@ -1,0 +1,14 @@
+{
+  "v": 42,
+  "id": "T-55555555-5555-4555-8555-555555555555",
+  "created": 1767700000000,
+  "title": "Tidy imports",
+  "env": {"initial": {"trees": [{"displayName": "proj", "uri": "{{CWD_URI}}"}]}},
+  "messages": [
+    {"role": "user", "messageId": 0, "content": [{"type": "text", "text": "Tidy the imports\npw {{SECRET}}"}], "meta": {"sentAt": 1767700001000}},
+    {"role": "assistant", "messageId": 1, "content": [{"type": "text", "text": "Sorting them."}, {"type": "tool_use", "id": "tu_1", "name": "edit_file", "input": {"path": "src/main.rs", "old_str": "use b;", "new_str": "use a;"}}], "state": {"type": "complete", "stopReason": "tool_use"}, "usage": {"model": "claude-sonnet-4-5", "timestamp": "2026-01-06T12:00:02.000Z", "inputTokens": 200, "outputTokens": 30, "cacheCreationInputTokens": 100, "cacheReadInputTokens": 0, "totalTokens": 330}},
+    {"role": "user", "messageId": 2, "content": [{"type": "tool_result", "toolUseID": "tu_1", "run": {"status": "done", "result": "Edited src/main.rs"}}]},
+    {"role": "assistant", "messageId": 3, "content": [{"type": "text", "text": "Imports sorted."}], "state": {"type": "complete", "stopReason": "end_turn"}, "usage": {"model": "claude-sonnet-4-5", "timestamp": "2026-01-06T12:00:04.000Z", "inputTokens": 20, "outputTokens": 5, "cacheCreationInputTokens": 0, "cacheReadInputTokens": 300, "totalTokens": 325}},
+    {"role": "assistant", "messageId": 4, "content": [{"type": "text", "text": "Also"}], "state": {"type": "streaming"}}
+  ]
+}
