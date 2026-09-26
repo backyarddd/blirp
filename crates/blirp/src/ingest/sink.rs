@@ -153,7 +153,12 @@ impl<'e> StoreSink<'e> {
             }
             if existing.is_none() {
                 if p.events.is_empty() {
-                    // Never create an empty session; its facts arrive again.
+                    // Never create an empty session. Mid-read its facts (an
+                    // early cwd report) wait for its events; at the end of
+                    // the read they arrive again next time.
+                    if cursor.is_none() {
+                        waiting.push((asid, p));
+                    }
                     continue;
                 }
                 if cursor.is_none() && p.meta.cwd.is_none() {
