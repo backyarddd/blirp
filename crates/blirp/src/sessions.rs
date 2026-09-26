@@ -66,6 +66,7 @@ fn agent_error(e: AgentError) -> ApiError {
             "agent_not_installed",
             e.to_string(),
         ),
+        AgentError::InvalidArgument(_) => ApiError::bad_request(e.to_string()),
     }
 }
 
@@ -450,15 +451,25 @@ async fn start(
     };
     let st = state.clone();
     let (s2, a2, h2) = (session.clone(), agent.clone(), handoff.clone());
-    let integ = crate::api::blocking(move || Ok(integrate(&st, &s2, &a2, h2.as_deref()))).await?;
-    let (program, args) = agent
-        .command(&LaunchContext {
-            agent_session_id: session.agent_session_id.as_deref(),
+    // Both touch the filesystem (launch files, shim parsing).
+    let (integ, command) = crate::api::blocking(move || {
+        let integ = integrate(&st, &s2, &a2, h2.as_deref());
+        let command = a2.command(&LaunchContext {
+            agent_session_id: s2.agent_session_id.as_deref(),
             resume,
             args_before: &integ.args_before,
             args_after: &integ.args_after,
-        })
-        .map_err(agent_error)?;
+        });
+        Ok((integ, command))
+    })
+    .await?;
+    let command = match command {
+        Ok(c) => c,
+        Err(e) => {
+            mark_failed(state, &session.id).await?;
+            return Err(agent_error(e));
+        }
+    };
     let prompt = match (prompt, &handoff) {
         (Some(p), _) => Some(p),
         (None, Some(_)) if agent.id != "shell" => Some(continue_prompt(
@@ -480,9 +491,10 @@ async fn start(
         ("COLORTERM".to_string(), "truecolor".to_string()),
     ];
     env.extend(integ.env);
+    env.extend(command.env);
     let spawn = SpawnRequest {
-        program,
-        args,
+        program: command.program,
+        args: command.args,
         cwd: PathBuf::from(&session.cwd),
         env,
         env_remove: ENV_REMOVE.iter().map(|s| s.to_string()).collect(),
@@ -506,16 +518,7 @@ async fn start(
         Ok(t) => t,
         Err(e) => {
             tracing::warn!(session = %session.id, error = %format!("{e:#}"), "session failed to start");
-            let store = state.store.clone();
-            let id = session.id.clone();
-            let failed = crate::api::blocking(move || {
-                Ok(store.modify_session(&id, |s| {
-                    s.status = SessionStatus::Failed;
-                    s.ended_at = Some(now_ms());
-                })?)
-            })
-            .await?;
-            state.emit(ServerEvent::SessionUpdated { session: failed });
+            mark_failed(state, &session.id).await?;
             return Err(ApiError::new(
                 StatusCode::UNPROCESSABLE_ENTITY,
                 "spawn_failed",
@@ -534,6 +537,22 @@ async fn start(
         tokio::spawn(type_prompt(term, prompt));
     }
     Ok(session)
+}
+
+/// A launch or resume that could not start its process: the row (already
+/// `starting`) ends as `failed`.
+async fn mark_failed(state: &SharedState, id: &str) -> ApiResult<()> {
+    let store = state.store.clone();
+    let id = id.to_string();
+    let failed = crate::api::blocking(move || {
+        Ok(store.modify_session(&id, |s| {
+            s.status = SessionStatus::Failed;
+            s.ended_at = Some(now_ms());
+        })?)
+    })
+    .await?;
+    state.emit(ServerEvent::SessionUpdated { session: failed });
+    Ok(())
 }
 
 /// Type `prompt` once the agent's output has settled, then press Enter.

@@ -335,9 +335,10 @@ async fn run_process(
     dir: &Path,
     timeout: Duration,
 ) -> Result<ProcOut, String> {
-    let (prog, args) = wrap_for_platform(program, args);
-    let mut cmd = tokio::process::Command::new(&prog);
-    cmd.args(&args)
+    let wrapped = wrap_for_platform(program, args).map_err(|e| e.to_string())?;
+    let mut cmd = tokio::process::Command::new(&wrapped.program);
+    cmd.args(&wrapped.args)
+        .envs(wrapped.env)
         .current_dir(dir)
         .env(DISTILLING_ENV, "1")
         .stdin(std::process::Stdio::piped())
