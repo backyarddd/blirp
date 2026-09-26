@@ -144,7 +144,7 @@ On Windows the entry runs `conhost.exe --headless blirp.exe daemon --detach`, so
 
 ### Windows Firewall
 
-A standalone daemon only listens on `127.0.0.1`, so Windows asks nothing. Windows Defender Firewall asks once, the first time `blirp.exe` listens on the network: when you enable the hub, pair with a hub, or turn on the LAN portal. Allow it on **Private networks**. The rule belongs to the path of `blirp.exe`; `blirp update` and the install script put the new version at the same path, so it keeps applying after updates. If you clicked Cancel, see [troubleshooting.md](troubleshooting.md#windows-firewall-blocks-sync-or-the-portal).
+A standalone daemon only listens on `127.0.0.1`, so Windows asks nothing. Windows Defender Firewall asks once, the first time `blirp.exe` listens on the network: when you enable the hub, pair with a hub, or turn on the LAN portal. Allow it on **Private networks**, and make sure your network is marked Private (Settings > Network & internet > your connection > Network profile type); Windows marks unknown networks Public, where this rule does not apply. The rule belongs to the path of `blirp.exe`; `blirp update` and the install script put the new version at the same path, so it keeps applying after updates. If you clicked Cancel, see [troubleshooting.md](troubleshooting.md#windows-firewall-blocks-sync-or-the-portal).
 
 ## Updating
 

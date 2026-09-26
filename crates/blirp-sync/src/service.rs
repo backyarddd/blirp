@@ -146,6 +146,7 @@ async fn bind(
 ) -> Result<(Endpoint, Option<MdnsAddressLookup>)> {
     let loopback = crate::loopback_only();
     let (relay, lan_discovery) = if loopback {
+        tracing::warn!("BLIRP_LOOPBACK_ONLY=1: sync is loopback-only (no relays, mDNS or LAN)");
         ("disabled", false)
     } else {
         (relay, lan_discovery)

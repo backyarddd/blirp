@@ -162,6 +162,8 @@ Get-NetFirewallApplicationFilter -Program $exe | Get-NetFirewallRule | Remove-Ne
 New-NetFirewallRule -DisplayName "blirp" -Direction Inbound -Program $exe -Profile Private -Action Allow
 ```
 
+The rule only applies on networks Windows marks Private. If your home network shows as Public, switch it in **Settings > Network & internet > your connection > Network profile type**, or in PowerShell as administrator: `Set-NetConnectionProfile -InterfaceAlias "<name from Get-NetConnectionProfile>" -NetworkCategory Private`.
+
 ## `error sending mDNS: No route to host` in the log (macOS)
 
 Hubs and nodes announce and find each other on the local network with mDNS (`sync.lan_discovery`, on by default). macOS allows that, and direct connections to other machines on the LAN, only for programs that have the Local Network permission; without it every send fails with "No route to host". The daemon logs the first failure, then one line every 10 minutes with the number of repeats, and `blirp doctor` reports it on its `LAN discovery` line while the running daemon keeps logging it (a failure line in the last 11 minutes).
