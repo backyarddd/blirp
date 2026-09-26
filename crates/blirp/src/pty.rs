@@ -30,6 +30,10 @@ pub const SNAPSHOT_FRAME_MAX: usize = 64 << 20;
 /// Output within this window means the agent is working (§7).
 pub const ACTIVE_WINDOW: Duration = Duration::from_secs(2);
 const KILL_GRACE: Duration = Duration::from_secs(3);
+/// Terminal queries attached clients have not answered after this long are
+/// answered by the daemon (a client that is gone but not yet disconnected,
+/// e.g. a laptop that went to sleep, must not leave a TUI waiting).
+pub const QUERY_GRACE: Duration = Duration::from_secs(2);
 /// Output still arriving this long after the group was killed is dropped
 /// and the reader thread ends (unix).
 #[cfg_attr(not(unix), allow(dead_code))]
@@ -120,6 +124,9 @@ struct ScreenState {
     parser: vt100::Parser<Callbacks>,
     last_output: Option<Instant>,
     exited: Option<ExitInfo>,
+    /// Replies to queries sent while clients were attached, and since when:
+    /// answered here after [`QUERY_GRACE`] unless a client answers first.
+    unanswered: Option<(Instant, Vec<u8>)>,
 }
 
 pub struct Terminal {
@@ -187,6 +194,7 @@ impl Terminal {
                 ),
                 last_output: None,
                 exited: None,
+                unanswered: None,
             }),
             tx,
             input,
@@ -303,9 +311,18 @@ impl Terminal {
         feed(&mut s.parser, bytes);
         s.last_output = Some(Instant::now());
         let replies = std::mem::take(&mut s.parser.callbacks_mut().replies);
-        // Attached clients (xterm.js) answer queries themselves.
-        if !replies.is_empty() && self.tx.receiver_count() == 0 {
-            self.write(replies);
+        // Attached clients (xterm.js) answer queries themselves; if none
+        // does, `answer_stale_queries` does.
+        if !replies.is_empty() {
+            if self.tx.receiver_count() == 0 {
+                self.write(replies);
+            } else {
+                let now = Instant::now();
+                s.unanswered
+                    .get_or_insert_with(|| (now, Vec::new()))
+                    .1
+                    .extend(replies);
+            }
         }
         let _ = self.tx.send(TermEvent::Data(Bytes::copy_from_slice(bytes)));
     }
@@ -316,6 +333,33 @@ impl Terminal {
         let mut s = lock(&self.screen);
         let snap = snapshot(&mut s.parser);
         (snap, self.tx.subscribe(), s.exited)
+    }
+
+    /// Input from an attached client. A terminal reply in it means clients
+    /// answer queries: pending ones are left to them.
+    pub fn client_input(&self, bytes: Vec<u8>) {
+        if is_query_reply(&bytes) {
+            lock(&self.screen).unanswered = None;
+        }
+        self.write(bytes);
+    }
+
+    /// Answer queries no attached client answered within [`QUERY_GRACE`]
+    /// (called from the status tick).
+    pub fn answer_stale_queries(&self, now: Instant) {
+        let stale = {
+            let mut s = lock(&self.screen);
+            match &s.unanswered {
+                Some((since, _)) if now.duration_since(*since) >= QUERY_GRACE => {
+                    s.unanswered.take()
+                }
+                _ => None,
+            }
+        };
+        if let Some((_, replies)) = stale {
+            tracing::debug!(session = %self.session_id, "answering terminal queries no client answered");
+            self.write(replies);
+        }
     }
 
     pub fn write(&self, bytes: Vec<u8>) {
@@ -472,6 +516,21 @@ fn clear_scrollback(parser: &mut vt100::Parser<Callbacks>) {
     let mut fresh = vt100::Parser::new_with_callbacks(rows, cols, SCROLLBACK, callbacks);
     fresh.process(&state);
     *parser = fresh;
+}
+
+/// A cursor position report, device status or device attributes reply
+/// (`ESC [ ... R`, `ESC [ ... n`, `ESC [ ? ... c`) as xterm.js sends them.
+fn is_query_reply(bytes: &[u8]) -> bool {
+    bytes.windows(2).enumerate().any(|(i, w)| {
+        w == b"[" && {
+            let rest = &bytes[i + 2..];
+            let params = rest
+                .iter()
+                .take_while(|b| b.is_ascii_digit() || matches!(b, b';' | b'?' | b'>'))
+                .count();
+            matches!(rest.get(params), Some(b'R' | b'n' | b'c')) && params > 0
+        }
+    })
 }
 
 /// Bytes that make a fresh terminal look like `parser`'s: reset, scrollback
@@ -873,6 +932,58 @@ mod tests {
         client.process(snap.data.as_bytes());
         assert!(client.screen().alternate_screen());
         assert_eq!(client.screen().contents(), p.screen().contents());
+    }
+
+    #[test]
+    fn query_replies_are_recognized() {
+        for reply in [&b"[12;40R"[..], b"[?1;2c", b"[0n", b"ab[>0;276;0c"] {
+            assert!(is_query_reply(reply), "{reply:?}");
+        }
+        for other in [&b"[A"[..], b"[c", b"hello", b"[2~", b"["] {
+            assert!(!is_query_reply(other), "{other:?}");
+        }
+    }
+
+    // A client that is attached but never answers (a laptop that went to
+    // sleep before its connection timed out) must not leave the agent
+    // waiting: the daemon answers after the grace period.
+    #[test]
+    fn queries_no_client_answers_are_answered_after_a_grace() {
+        let (program, args): (&str, &[&str]) = if cfg!(windows) {
+            ("cmd.exe", &["/d", "/q", "/k"])
+        } else {
+            ("/bin/sh", &["-i"])
+        };
+        let term = Terminal::spawn(
+            "t-query",
+            SpawnRequest {
+                program: program.into(),
+                args: args.iter().map(Into::into).collect(),
+                cwd: std::env::temp_dir(),
+                env: Vec::new(),
+                env_remove: Vec::new(),
+                cols: 80,
+                rows: 24,
+            },
+            |_, _| {},
+        )
+        .unwrap();
+        let (_snap, _rx, _) = term.attach();
+        term.on_output(b"[6n");
+        let since = lock(&term.screen).unanswered.as_ref().map(|u| u.0);
+        let since = since.expect("held for the attached client");
+        term.answer_stale_queries(since + Duration::from_millis(100));
+        assert!(
+            lock(&term.screen).unanswered.is_some(),
+            "answered too early"
+        );
+        term.answer_stale_queries(since + QUERY_GRACE);
+        assert!(lock(&term.screen).unanswered.is_none());
+        // A client that answers takes over.
+        term.on_output(b"[c");
+        term.client_input(b"[?1;2c".to_vec());
+        assert!(lock(&term.screen).unanswered.is_none());
+        term.kill();
     }
 
     #[test]

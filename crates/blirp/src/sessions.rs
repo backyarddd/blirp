@@ -786,6 +786,7 @@ pub fn refresh_statuses(state: &SharedState, last: &mut HashMap<String, SessionS
         if term.has_exited() {
             continue;
         }
+        term.answer_stale_queries(now);
         let status = term.activity_status(now);
         if last.get(&term.session_id) == Some(&status) {
             continue;
