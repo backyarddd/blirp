@@ -399,14 +399,15 @@ fn flush_own_in(tx: &Transaction<'_>, own: &str) -> Result<usize> {
 
 impl Store {
     /// Turn replication on (a hub or node) or off (standalone). Off: nothing
-    /// new is queued; entries already queued stay (unpushed ones, deletes
-    /// among them, are sent when the machine pairs again). Turning it on
-    /// backfills: every replicated row except events is queued in this
-    /// transaction, events that exist now follow in bounded, resumable
-    /// batches ([`Store::backfill_events`]). Returns how many rows were
-    /// queued.
+    /// is queued and the outbox is emptied; nothing unpushed is lost by that,
+    /// since pairing again queues the current state, including the
+    /// tombstones of deleted sessions and records, and newer versions win
+    /// wherever stale copies meet them. Turning it on backfills: every
+    /// replicated row except events is queued in this transaction, events
+    /// that exist now follow in bounded, resumable batches
+    /// ([`Store::backfill_events`]). Returns how many rows were queued.
     pub fn set_replication(&self, on: bool) -> Result<usize> {
-        self.write(|tx| {
+        let queued = self.write(|tx| {
             let off = outbox_off(tx)?;
             match (on, off) {
                 (true, true) => {
@@ -433,13 +434,24 @@ impl Store {
                         params![OUTBOX_OFF_KEY],
                     )?;
                     tx.execute("DELETE FROM settings WHERE key = ?1", params![BACKFILL_KEY])?;
-                    // Pairing again queues every session row as it is then.
                     tx.execute("DELETE FROM outbox_deferred", [])?;
                     Ok(0)
                 }
                 _ => Ok(0),
             }
-        })
+        })?;
+        if !on {
+            // Emptied in chunks so a large outbox never holds the writer long.
+            while self.write(|tx| {
+                Ok(tx.execute(
+                    "DELETE FROM outbox WHERE origin_seq IN
+                       (SELECT origin_seq FROM outbox ORDER BY origin_seq LIMIT 20000)",
+                    [],
+                )?)
+            })? > 0
+            {}
+        }
+        Ok(queued)
     }
 
     /// Queue up to `limit` more of this machine's events after turning
@@ -1062,8 +1074,8 @@ mod tests {
 
     // A machine that leaves and pairs again queues its (stale) copy of
     // everything; newer versions written meanwhile stay newest, deleted
-    // records stay deleted, and deletes it made while paired but did not
-    // push yet are sent then.
+    // records stay deleted, and a delete it had not pushed when it left
+    // still reaches the others (its tombstone is queued again).
     #[test]
     fn rejoining_with_stale_copies_keeps_newer_versions() {
         use crate::model::{Record, RecordKind, RecordStatus};
@@ -1250,9 +1262,9 @@ mod tests {
         assert_eq!(outbox_len(&a), 1);
     }
 
-    // A standalone machine queues nothing (what was queued before stays);
-    // pairing queues what exists: everything but events at once, the
-    // events that exist then in resumable batches.
+    // A standalone machine queues nothing; pairing queues what exists:
+    // everything but events at once, the events that exist then in
+    // resumable batches.
     #[test]
     fn standalone_queues_nothing_and_pairing_backfills() {
         use crate::model::{Event, EventKind};
@@ -1261,7 +1273,7 @@ mod tests {
             .unwrap();
         s.apply(project("early", "x")).unwrap();
         s.set_replication(false).unwrap();
-        assert_eq!(outbox_len(&s), 1, "kept for the next pairing");
+        assert_eq!(outbox_len(&s), 0, "emptied");
         s.upsert_machine(&Machine {
             id: "A".into(),
             name: "a".into(),
@@ -1293,7 +1305,7 @@ mod tests {
         }
         s.put_brief("p", "one", "user").unwrap();
         s.put_brief("p", "two", "user").unwrap();
-        assert_eq!(outbox_len(&s), 1, "standalone queues nothing");
+        assert_eq!(outbox_len(&s), 0, "standalone queues nothing");
 
         let n = s.set_replication(true).unwrap();
         let kinds = |s: &Store| -> Vec<(String, String)> {
@@ -1304,7 +1316,7 @@ mod tests {
                 .collect()
         };
         let q = kinds(&s);
-        assert_eq!(q.len(), n + 1);
+        assert_eq!(q.len(), n);
         for want in [
             ("machines", "A"),
             ("projects", "early"),

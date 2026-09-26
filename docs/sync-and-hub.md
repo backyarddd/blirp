@@ -149,7 +149,7 @@ With sync, the new-session dialog has a **Machine** picker. A session started fo
 
 - **Revoke a machine** (on the hub): **Settings > Machines & Sync > Machines > Revoke**, or `blirp devices revoke <device-id>` (ids from `blirp devices list`). Its live connections close at once and reconnects are refused. The machine row is marked revoked on every machine. Data it already synced stays.
 - **Revoke a browser device** (on the hub): **Devices > Revoke**, or `blirp devices revoke <id>`; it is signed out immediately.
-- **Leave the hub** (on a node): **Settings > Machines & Sync > Leave hub** (API: `DELETE /api/machines/<hub id>` on the node). The node returns to `standalone` and keeps its local copy of the data, and changes it had not sent yet stay queued: pairing again sends them, together with everything it has, and newer edits made elsewhere meanwhile stay newest.
+- **Leave the hub** (on a node): **Settings > Machines & Sync > Leave hub** (API: `DELETE /api/machines/<hub id>` on the node). The node returns to `standalone` and keeps its local copy of the data. Pairing again sends everything it has, including what it had not sent yet and what it deleted; newer edits made elsewhere meanwhile stay newest.
 - **Stop being a hub:** **Disable hub** in the same place, or `blirp hub disable`. Sync and the portal stop and the role returns to `standalone`; paired machines stay known, so `blirp hub enable` later resumes without re-pairing. A node cannot become a hub while paired (`paired_node`); leave first.
 
 ## Backups and moving the hub
