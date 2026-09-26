@@ -13,7 +13,8 @@ Read [ARCHITECTURE.md](ARCHITECTURE.md) first: it is the design contract, and a 
 | `web/` | Svelte 5 + Vite + TypeScript SPA (desktop UI and portal), built to `web/dist` and embedded into `blirp`; `web/e2e/` Playwright suite |
 | `app/` | Tauri 2 desktop shell (`src-tauri/`); `app/src` is only the loading/error page |
 | `scripts/` | `build-sidecar.{sh,ps1}` (stage `blirp` and ConPTY as the Tauri sidecar), `render-packaging.sh` |
-| `packaging/` | Homebrew formula and cask, winget manifest templates |
+| `install.sh`, `install.ps1` | the one-line installers ([install.md](install.md)); `crates/blirp/src/update/` is the matching `blirp update` / `uninstall` side |
+| `packaging/` | Homebrew formula and cask, winget manifest templates, `minisign.pub` (release signing public key, built into `blirp update`) |
 | `.github/workflows/` | `ci.yml` (every push and PR), `release.yml` (tags `v*`) |
 | `docs/` | user and developer docs; `ARCHITECTURE.md`; `agent-formats.md` (survey of agents' on-disk transcript formats) |
 
@@ -81,10 +82,10 @@ Debug builds of the app run `target/<profile>/blirp`; release builds need the si
 
 ```sh
 scripts/build-sidecar.sh
-pnpm -C app tauri build --config '{"bundle":{"createUpdaterArtifacts":false}}'   # unsigned local build
+pnpm -C app tauri build                   # unsigned local build (--bundles app: only blirp.app)
 ```
 
-A plain `tauri build` signs updater artifacts and needs `TAURI_SIGNING_PRIVATE_KEY`. The daemon's origin gets no Tauri IPC; only the bundled loading page may call the app's commands (`app/src-tauri/capabilities/main.json`). Treat any new native capability as a security change.
+The app has no updater; `blirp update` updates it. The daemon's origin gets no Tauri IPC; only the bundled loading page may call the app's commands (`app/src-tauri/capabilities/main.json`). Treat any new native capability as a security change.
 
 ## End-to-end tests
 
@@ -113,9 +114,16 @@ A new agent touches these places. Look at an existing agent with the same shape 
 
 1. Bump `version` in `[workspace.package]` of the root `Cargo.toml` (app, CLI and installers take it from there), run `cargo check` to update `Cargo.lock`, commit `chore(release): vX.Y.Z`.
 2. Tag and push: `git tag vX.Y.Z && git push origin vX.Y.Z`.
-3. `release.yml` creates a **draft** GitHub release with: standalone archives for Linux x64/arm64, macOS arm64/x64 and Windows x64 (each with a `.sha256`), desktop bundles (NSIS + MSI, DMG + app, AppImage + deb + rpm), updater signatures and `latest.json`, `SHA256SUMS.txt`, and rendered Homebrew/winget manifests.
-4. Check the draft (install on at least one OS), then publish it. The in-app updater only sees published releases.
+3. `release.yml` creates a **draft** GitHub release with:
+   - CLI archives `blirp-<ver>-<target>.tar.gz` (Linux x64/arm64, macOS arm64/x64) and `.zip` (Windows x64, with ConPTY), each with a `.sha256`;
+   - the desktop app as portable assets for the install scripts and `blirp update`: `blirp_<ver>_<aarch64|x64>.app.tar.gz`, `blirp_<ver>_<amd64|aarch64>.AppImage`, `blirp_<ver>_x64-portable.zip` (`blirp-desktop.exe`, `blirp.exe`, `conpty.dll`, `x64/OpenConsole.exe`);
+   - the classic installers (NSIS + MSI, DMG, deb + rpm) as extras;
+   - `SHA256SUMS.txt` over every asset and `SHA256SUMS.txt.sig`, its minisign signature (made with `tauri signer sign` and checked against `packaging/minisign.pub` in the job);
+   - rendered Homebrew/winget manifests.
+4. Check the draft, then publish it. The install scripts, `blirp update` and the daemon's update check use `releases/latest`, which only returns published, non-prerelease releases, so nothing reaches users before you publish. The API does not serve drafts even by tag; to try the draft's assets with the scripts first, download them and serve them locally (see "Testing the installers" below).
 5. Optional: copy `homebrew-formula-blirp.rb` / `homebrew-cask-blirp.rb` into a tap (`Formula/blirp.rb`, `Casks/blirp.rb`) and open a `microsoft/winget-pkgs` PR with the three `winget-*.yaml` files (`manifests/b/blirp/blirp/X.Y.Z/`, without the `winget-` prefix).
+
+Nothing is code signed by default, deliberately (see [faq.md](faq.md#why-is-blirp-not-code-signed)); the signing secrets below stay optional.
 
 ### Release secrets
 
@@ -123,11 +131,17 @@ Repository **Settings > Secrets and variables > Actions**:
 
 | Secret | Required | Purpose |
 |---|---|---|
-| `TAURI_SIGNING_PRIVATE_KEY` | yes | updater private key (minisign; `pnpm -C app tauri signer generate`). Its public key is `plugins.updater.pubkey` in `app/src-tauri/tauri.conf.json`. |
+| `TAURI_SIGNING_PRIVATE_KEY` | yes | release signing key (minisign format, made with `pnpm -C app tauri signer generate`; the name is historical, it used to sign Tauri updates). Signs `SHA256SUMS.txt`. Its public key is `packaging/minisign.pub`, built into every `blirp` for `blirp update`. |
 | `TAURI_SIGNING_PRIVATE_KEY_PASSWORD` | yes | its password |
-| `APPLE_CERTIFICATE`, `APPLE_CERTIFICATE_PASSWORD`, `APPLE_SIGNING_IDENTITY` | for signed macOS builds | base64 "Developer ID Application" `.p12`, its password, e.g. `Developer ID Application: Name (TEAMID)` |
-| `APPLE_ID`, `APPLE_PASSWORD`, `APPLE_TEAM_ID` | for notarization | Apple ID, app-specific password, team id |
-| `AZURE_TENANT_ID`, `AZURE_CLIENT_ID`, `AZURE_CLIENT_SECRET`, `AZURE_SIGNING_ENDPOINT`, `AZURE_SIGNING_ACCOUNT`, `AZURE_SIGNING_PROFILE` | for Windows signing via Azure Artifact Signing | service principal with the "Artifact Signing Certificate Profile Signer" role; endpoint (e.g. `https://eus.codesigning.azure.net`), account and certificate profile |
-| `WINDOWS_CERTIFICATE`, `WINDOWS_CERTIFICATE_PASSWORD` | alternative Windows signing | base64 `.pfx` and password, used when the Azure secrets are absent |
+| `APPLE_CERTIFICATE`, `APPLE_CERTIFICATE_PASSWORD`, `APPLE_SIGNING_IDENTITY` | optional, signed macOS builds | base64 "Developer ID Application" `.p12`, its password, e.g. `Developer ID Application: Name (TEAMID)` |
+| `APPLE_ID`, `APPLE_PASSWORD`, `APPLE_TEAM_ID` | optional, notarization | Apple ID, app-specific password, team id |
+| `AZURE_TENANT_ID`, `AZURE_CLIENT_ID`, `AZURE_CLIENT_SECRET`, `AZURE_SIGNING_ENDPOINT`, `AZURE_SIGNING_ACCOUNT`, `AZURE_SIGNING_PROFILE` | optional, Windows signing via Azure Artifact Signing | service principal with the "Artifact Signing Certificate Profile Signer" role; endpoint (e.g. `https://eus.codesigning.azure.net`), account and certificate profile |
+| `WINDOWS_CERTIFICATE`, `WINDOWS_CERTIFICATE_PASSWORD` | optional, alternative Windows signing | base64 `.pfx` and password, used when the Azure secrets are absent |
 
-Signing steps are skipped with a warning when their secrets are missing. The updater key is mandatory: shipped apps accept only updates signed with the key whose public half they contain. Never rotate it casually; a new key needs a release signed with the old key that ships the new public key.
+Code-signing steps are skipped with a warning when their secrets are missing. The release key is mandatory: installed copies of blirp accept only releases whose `SHA256SUMS.txt` is signed with the key built into them. Never rotate it casually; a new key needs a release signed with the old key that ships the new `packaging/minisign.pub`, and users must update through that release.
+
+### Testing the installers
+
+- Lint: `shellcheck install.sh`, `Invoke-ScriptAnalyzer install.ps1` (or at least `[scriptblock]::Create((Get-Content install.ps1 -Raw))` in both PowerShell editions), `actionlint`.
+- Private repository: `GITHUB_TOKEN=<token with read access> sh install.sh` (PowerShell: `$env:GITHUB_TOKEN`); the scripts and `blirp update` then download through the API.
+- Local fake release: serve a directory with `releases/latest` and `releases/tags/v<ver>` (GitHub release JSON whose asset URLs point at the same server) plus the assets, `SHA256SUMS.txt` and a `SHA256SUMS.txt.sig` made with a throwaway key (`tauri signer generate`, then `tauri signer sign` and `base64 -d` the `.sig`), and set `BLIRP_RELEASE_BASE_URL=http://127.0.0.1:<port>/releases` for the scripts and `blirp`. Build the `blirp` under test with `BLIRP_UPDATE_PUBKEY=<throwaway public key line>` in the environment so `blirp update` trusts that key (compile time only; release builds never set it). Use `BLIRP_INSTALL_DIR`, `BLIRP_HOME` and (macOS/Linux) `HOME` pointing at scratch folders to keep the test away from your own install.

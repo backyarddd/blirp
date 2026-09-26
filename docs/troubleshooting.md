@@ -9,6 +9,33 @@ blirp status      # daemon pid, URL, version, role
 
 Run them in the same environment the daemon runs in: agent detection and hooks depend on `PATH` and `BLIRP_HOME`.
 
+## Installing and updating
+
+### `blirp: command not found` after installing
+
+The CLI folder is not on your `PATH` yet.
+
+- macOS/Linux: `install.sh` prints the line to add unless `~/.local/bin` (or `BLIRP_INSTALL_DIR`) is already on `PATH`. Add it to your shell startup file (`echo 'export PATH="$HOME/.local/bin:$PATH"' >> ~/.zshrc`, or `~/.bashrc` / `~/.bash_profile`), or re-run the installer with `--modify-path`, then open a new terminal. Meanwhile run `~/.local/bin/blirp` directly.
+- Windows: `install.ps1` adds `%LOCALAPPDATA%\Programs\blirp` to your user `Path`. Terminals that were already open keep the old `Path`; open a new one (in some setups sign out and in, so Explorer picks it up). Check with `[Environment]::GetEnvironmentVariable('Path', 'User')`.
+
+### Antivirus or Defender flags blirp
+
+blirp is not code signed, and new unsigned programs that download files and start processes are sometimes flagged by heuristics (false positives). Verify the file first: its SHA-256 must match the release's `SHA256SUMS.txt` (the install scripts and `blirp update` already did this, and `SHA256SUMS.txt.sig` proves the sums come from the blirp release key, see [install.md](install.md#manual-download)). Then restore the file from quarantine or add an exclusion for the install folder, and please report the false positive to the vendor (Microsoft: [submit a file](https://www.microsoft.com/en-us/wdsi/filesubmission)) and in an issue. Windows Defender may also block `blirp.exe` while an update replaces it; run `blirp update` again.
+
+### "blirp is damaged" or "Windows protected your PC"
+
+These appear only for files downloaded with a browser: macOS quarantines them and Windows marks them as coming from the internet, and then refuses or warns about unsigned programs. Files fetched by the install scripts (`curl`, `irm`) carry no such mark, so use the scripts, or:
+
+- macOS, after checking the checksum: `xattr -dr com.apple.quarantine ~/Applications/blirp.app` (or wherever you put the app or the `blirp` binary). "Damaged" here does not mean corrupted; it is Gatekeeper's message for a quarantined unsigned app.
+- Windows: **More info > Run anyway**, or remove the mark first: `Unblock-File .\blirp_<version>_x64-setup.exe`.
+
+### `blirp update` fails
+
+- **"was not installed by the blirp install script"**: that `blirp` came from a source build, a package or a classic installer (no install receipt next to it). Update it the same way you installed it, or install with the script.
+- **"is not signed by the blirp release key"** or **"checksum mismatch"**: the download does not match what the release was signed with; nothing was changed. Try again; if it persists, report it (and do not install that file by hand).
+- **"no published release found"** or **403 rate limit**: GitHub's anonymous API limit is 60 requests per hour per IP; set `GITHUB_TOKEN`. For a private repository `GITHUB_TOKEN` is required.
+- After an update the daemon is started again automatically. If it is not (`blirp status`), start it with `blirp` or `blirp daemon --detach` and look at `blirp logs`.
+
 ## Logs
 
 | File | What |

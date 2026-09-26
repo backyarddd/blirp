@@ -56,6 +56,7 @@ CSRF protection: a mutating request or WebSocket upgrade that carries an `Origin
 | Method and path | Description |
 |---|---|
 | `GET /api/health` | `{version, machine: Machine, role}` |
+| `GET /api/update` | `UpdateStatus {current, latest, available, notes_url, enabled}`: whether a newer published release exists. `latest` is null when `[update] check` is off (`enabled: false`) or GitHub could not be reached. The daemon asks GitHub at most once a day (hourly after a failure). |
 | `GET /api/machines` | `Machine[]`: `{id, name, os, role, last_seen, revoked}` of this and paired machines |
 | `DELETE /api/machines/:id` | admin. On the hub: revoke that machine (204). On a node, with the hub's id: leave the hub. |
 | `GET /api/search?q=&project=&kind=&limit=` | full-text search; `kind` = `record` or `event`; `limit` default 50. `{hits: SearchHit[]}` with `kind, project_id, session_id, seq, record_id, title, agent, snippet, ts, score` |

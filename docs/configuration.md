@@ -41,6 +41,9 @@ relay = "default"
 [portal]
 lan = false
 lan_port = 47771
+
+[update]
+check = true
 ```
 
 ### `[daemon]`
@@ -105,6 +108,12 @@ Normally managed by `blirp hub enable|disable`, `blirp pair` and **Settings > Ma
 | `lan` | bool | `false` | On a hub, serve the UI over HTTPS on all interfaces. Ignored unless `role = "hub"`. |
 | `lan_port` | integer 1-65535 | `47771` | Port of the LAN portal. The UI accepts 1024-65535. |
 
+### `[update]`
+
+| Key | Type | Default | Description |
+|---|---|---|---|
+| `check` | bool | `true` | Let the daemon ask GitHub once a day (hourly after a failure, only when **Settings > About** asks) whether a newer release exists; About then shows it with the command to run (`blirp update`). `false`: no requests. Updating is always `blirp update` ([install.md](install.md#updating)). |
+
 ## Environment variables
 
 | Variable | Used by | Effect |
@@ -115,6 +124,9 @@ Normally managed by `blirp hub enable|disable`, `blirp pair` and **Settings > Ma
 | `CLAUDE_CONFIG_DIR`, `CODEX_HOME`, `XDG_DATA_HOME`, `XDG_CONFIG_HOME`, `GEMINI_CLI_HOME`, `CURSOR_CONFIG_DIR`, `AMP_DATA_DIR`, `PI_CODING_AGENT_DIR`, `DSH_HOME`, `APPDATA` | ingest, global hooks | Where agents keep transcripts and config; blirp follows the same overrides as the agents. |
 | `VISUAL`, `EDITOR` | **Open in editor** | Editor used for a session folder, else `code` on PATH, else the OS default. |
 | `SHELL` | Shell sessions (macOS/Linux) | The shell to start. |
+| `GITHUB_TOKEN` | install scripts, `blirp update`, daemon update check | Bearer token for the GitHub API; downloads then go through the API (private repository, rate limits). |
+| `BLIRP_RELEASE_BASE_URL` | install scripts, `blirp update`, daemon update check | Releases API to use instead of `https://api.github.com/repos/backyarddd/blirp/releases` (mirror, local test server). |
+| `BLIRP_INSTALL_DIR`, `BLIRP_VERSION`, `BLIRP_NO_APP`, `BLIRP_SERVICE`, `BLIRP_MODIFY_PATH`, `BLIRP_NO_MODIFY_PATH` | install scripts | See [install.md](install.md#options). |
 | `BLIRP_E2E_CHANNEL`, `BLIRP_E2E_KEEP` | web e2e tests | See [development.md](development.md#end-to-end-tests). |
 
 Set by blirp for the processes it starts (do not set them yourself): `BLIRP_SESSION_ID`, `BLIRP_PROJECT_ID`, `BLIRP_MEMORY_FILE` (agent sessions and their MCP server), `BLIRP_DISTILLING=1` (summarizer runs; blirp hooks exit immediately when it is set).
@@ -150,7 +162,19 @@ Installing, upgrading or removing blirp never touches this directory.
 | Linux | `~/.config/systemd/user/blirp.service` (`Restart=on-failure`, enabled with `--now`) |
 | Windows | registry value `blirp` under `HKCU\Software\Microsoft\Windows\CurrentVersion\Run`: `conhost.exe --headless "<blirp.exe>" daemon --detach` |
 
-### Desktop app
+### Installed files
+
+Install scripts (`install.sh`, `install.ps1`; removed again by `blirp uninstall`):
+
+| OS | Location |
+|---|---|
+| macOS | CLI `~/.local/bin/blirp` (or `BLIRP_INSTALL_DIR`), app `~/Applications/blirp.app`, receipt `~/.local/share/blirp/install.json` |
+| Linux | CLI `~/.local/bin/blirp`, app `~/.local/share/blirp/blirp.AppImage`, menu entry `~/.local/share/applications/blirp.desktop` (plus `blirp-desktop-handler.desktop`, the app's `blirp://` handler), receipt `~/.local/share/blirp/install.json` (`XDG_DATA_HOME` moves `~/.local/share`) |
+| Windows | `%LOCALAPPDATA%\Programs\blirp\` (or `BLIRP_INSTALL_DIR`): `blirp.exe`, `conpty.dll`, `x64\OpenConsole.exe`, `blirp-desktop.exe` (+ its `blirp-desktop.exe.WebView2` data folder), `install.json`; Start Menu `blirp.lnk`; user `Path` entry; `HKCU\Software\Classes\blirp` (`blirp://` links) |
+
+With `--modify-path`, `install.sh` appends one line marked `# added by the blirp installer` to your shell startup file.
+
+Classic installers:
 
 | OS | Location |
 |---|---|
@@ -161,4 +185,4 @@ Installing, upgrading or removing blirp never touches this directory.
 
 ### Files outside the data directory that blirp may change
 
-Only `blirp hooks install|uninstall` (agent user configs, listed in [memory.md](memory.md#global-hooks), with `.blirp-backup` copies) and `blirp service install|uninstall` (above). Sessions with **Run in a new git worktree** add a worktree and a `blirp/<name>` branch to your repository's git metadata.
+Only `blirp hooks install|uninstall` (agent user configs, listed in [memory.md](memory.md#global-hooks), with `.blirp-backup` copies), `blirp service install|uninstall` and the install scripts, `blirp update` and `blirp uninstall` (above). Sessions with **Run in a new git worktree** add a worktree and a `blirp/<name>` branch to your repository's git metadata.

@@ -45,20 +45,25 @@ Not supported: IDE-embedded agents (Copilot Chat in VS Code, the Cursor editor's
 
 ## Install
 
-Downloads are on [GitHub Releases](https://github.com/backyarddd/blirp/releases). Full instructions, checksums, upgrades and uninstalling: [docs/install.md](docs/install.md).
+macOS / Linux:
 
-| | Desktop app | Standalone CLI / daemon |
-|---|---|---|
-| Windows 10 1809+ (x64) | `blirp_<version>_x64-setup.exe` (per user) or `.msi` | `blirp-<version>-x86_64-pc-windows-msvc.zip` |
-| macOS 11+ (Apple silicon, Intel) | `blirp_<version>_aarch64.dmg` / `_x64.dmg` | `blirp-<version>-<arch>-apple-darwin.tar.gz` |
-| Linux x64 / arm64 (glibc 2.35+) | `.AppImage`, `.deb` or `.rpm` | `blirp-<version>-<arch>-unknown-linux-gnu.tar.gz` |
+```sh
+curl -fsSL https://raw.githubusercontent.com/backyarddd/blirp/main/install.sh | sh
+```
 
-The desktop app bundles the `blirp` binary, starts it as a background daemon, and updates itself (signed updates, it asks first). The standalone binary is the same daemon, CLI, hook handler and MCP server in one file, for servers, hubs or browser-only use.
+Windows (PowerShell):
+
+```powershell
+irm https://raw.githubusercontent.com/backyarddd/blirp/main/install.ps1 | iex
+```
+
+This installs the `blirp` CLI (`~/.local/bin`, Windows `%LOCALAPPDATA%\Programs\blirp`) and the desktop app (macOS `~/Applications/blirp.app`, Linux an AppImage with a menu entry, Windows a Start Menu entry), after checking every download against the release's `SHA256SUMS.txt`. No admin rights, no code-signing prompts. Then run `blirp`. Update with `blirp update`, remove with `blirp uninstall`. Options (`--no-app`, `--service`, `--version X`, `--modify-path`), manual downloads with checksum verification, and every platform detail: [docs/install.md](docs/install.md).
+
+The desktop app is a window around the daemon's UI; the CLI is the same daemon, hook handler and MCP server in one file, for servers, hubs or browser-only use. To build from source, see [Building from source](#building-from-source).
 
 ## Quick start (5 minutes)
 
-1. Install and open the desktop app. It starts the daemon and shows the UI.
-   CLI only: `blirp daemon --detach`, then `blirp open` (opens the UI in your browser, logged in).
+1. Run `blirp`. It starts the daemon and opens the desktop app (or, without the app, the UI in your browser, logged in).
 2. Click the orange **+** (Ctrl+T, Cmd+T on macOS). Choose **Folder path**, enter any absolute folder path, pick an agent. Only agents found on your `PATH` can be selected; `shell` always works. Optionally type a first prompt.
 3. Work as usual in the terminal tab. When the session has been idle for 5 minutes, or ends, blirp summarizes it.
 4. Start a second session in the same folder. It begins with a `# blirp memory: <project>` block: the project brief, open threads, recent decisions, gotchas and the last sessions. Open the **Memory** panel in the session toolbar to see exactly what was injected, and edit the brief or threads there.
@@ -134,7 +139,7 @@ pnpm -C web install && pnpm -C web build     # the UI, embedded into the binary
 cargo build --release -p blirp               # target/release/blirp
 ```
 
-Running from source, tests, the desktop app and the release process: [docs/development.md](docs/development.md) and [CONTRIBUTING.md](CONTRIBUTING.md).
+A source build is not touched by `blirp update` or `blirp uninstall` (update it with `git pull` and a rebuild). Running from source, tests, the desktop app and the release process: [docs/development.md](docs/development.md) and [CONTRIBUTING.md](CONTRIBUTING.md).
 
 ## License
 

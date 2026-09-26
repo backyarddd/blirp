@@ -3,16 +3,19 @@
 `blirp` is one binary: daemon, CLI, hook handler and MCP server. Every command honors `BLIRP_HOME`. Commands that talk to the daemon read `~/.blirp/runtime.json` for its port and token and fail with "blirp daemon is not running; start it with `blirp daemon --detach`" when it is down. Errors are printed as `error: <message>` with exit code 1.
 
 ```
-blirp [-h|--help] [-V|--version] <command>
+blirp [-h|--help] [-V|--version] [<command>]
 ```
+
+Without a command, `blirp` does what [`blirp app`](#blirp-app) does.
 
 | Command | Needs daemon | Purpose |
 |---|---|---|
+| [`app`](#blirp-app) (or no command) | starts it | start the daemon, open the desktop app or the browser UI |
 | [`daemon`](#blirp-daemon) | - | run the daemon |
 | [`status`](#blirp-status) | - | is the daemon running |
 | [`open`](#blirp-open) | yes | open the UI in the browser, logged in |
 | [`sessions`](#blirp-sessions) | yes | list recent sessions |
-| [`stop`](#blirp-stop) | yes | stop a running session |
+| [`stop`](#blirp-stop) | - | stop the daemon |
 | [`logs`](#blirp-logs) | no | show the daemon log |
 | [`doctor`](#blirp-doctor) | no | check the installation |
 | [`mem`](#blirp-mem) | no | search and show project memory |
@@ -21,7 +24,18 @@ blirp [-h|--help] [-V|--version] <command>
 | [`hub`](#blirp-hub) | yes | hub role, invites, sync status |
 | [`devices`](#blirp-devices) | yes | paired machines and browser devices |
 | [`service`](#blirp-service) | no | autostart at login |
+| [`update`](#blirp-update) | no | update blirp and the desktop app |
+| [`uninstall`](#blirp-uninstall) | no | remove blirp (and with `--purge` its data) |
 | [`hook`](#blirp-hook), [`mcp`](#blirp-mcp) | - | entry points spawned by agents |
+
+## blirp app
+
+```
+blirp
+blirp app
+```
+
+Starts the daemon in the background if it is not running (like `blirp daemon --detach`), then opens the desktop app when it is installed (macOS `~/Applications/blirp.app` or `/Applications/blirp.app`, Linux `~/.local/share/blirp/blirp.AppImage` or `blirp-desktop` next to `blirp`, Windows `blirp-desktop.exe` next to `blirp.exe`), else the UI in your default browser, logged in. In an SSH session (`SSH_CONNECTION` / `SSH_TTY`), or on Linux without `DISPLAY` / `WAYLAND_DISPLAY`, it opens nothing: it prints the daemon URL, a login link to use through an SSH port forward, and the hub / LAN portal alternative ([portal.md](portal.md)).
 
 ## blirp daemon
 
@@ -52,11 +66,7 @@ Recent sessions (default 20), newest first: id, status, agent, title or folder.
 
 ## blirp stop
 
-```
-blirp stop <SESSION_ID>
-```
-
-Stops a session that blirp launched on this machine, like **Stop** in the UI: the agent's whole process tree is ended and the session becomes Completed with `stopped_by_user` set. Sessions running on another paired machine are forwarded to that machine through the hub. External sessions (started outside blirp) cannot be stopped.
+Stops the daemon gracefully (`POST /api/daemon/shutdown`; running sessions end as Detached). If it still runs after 15 seconds, or does not answer, its process is killed. Prints "not running" and exits 0 when no daemon runs.
 
 ## blirp logs
 
@@ -137,6 +147,28 @@ blirp service uninstall   # remove the autostart entry; a running daemon keeps r
 
 Per-user autostart, never a system service: macOS LaunchAgent `dev.blirp.daemon`, Linux `systemd --user` unit `blirp.service`, Windows `HKCU\...\Run` value `blirp`. Records the absolute path of the binary you ran it with and, on macOS/Linux, your current `PATH` and `BLIRP_HOME`; re-run after moving the binary or changing where agents are installed. Refuses to install from a temporary location (an AppImage mount or `/tmp`). Idempotent.
 
+## blirp update
+
+```
+blirp update [--check] [--version <X.Y.Z>]
+```
+
+Updates an installation made by the install scripts to the latest published release, or to `--version` (the only way to go to an older release). It verifies the minisign signature of the release's `SHA256SUMS.txt` with the key built into blirp and the SHA-256 of every download, then stops the daemon, replaces `blirp` (Windows: plus `conpty.dll`, `x64\OpenConsole.exe`) and the desktop app if the script installed it, updates the install receipt and starts the daemon again if it was running (through the autostart service when one manages it). Nothing is changed when a check fails. A `blirp` the scripts did not install (source build, package) is not replaced; the command says so.
+
+- `--check`: only report. Prints one line; exit code `0` when up to date, `10` when an update is available.
+- `GITHUB_TOKEN` and `BLIRP_RELEASE_BASE_URL` work as for the install scripts ([install.md](install.md#private-repository-mirrors-and-testing)).
+
+## blirp uninstall
+
+```
+blirp uninstall [--purge] [--yes]
+```
+
+Stops the daemon, removes the autostart entry (`blirp service uninstall`) and blirp's global hooks and MCP entries for every agent (`blirp hooks uninstall`; entries of other tools stay), then removes what the install script installed: the CLI files, the desktop app with its menu entry or Start Menu shortcut and `blirp://` registration, the PATH change the script made, and the install receipt. Only known file names in the recorded locations are deleted; a `blirp` the scripts did not install is left in place. On Windows the running `blirp.exe` is deleted right after the command exits.
+
+- `--purge`: also delete the data directory (`BLIRP_HOME`, default `~/.blirp`: memory, sessions, settings). Asks for confirmation; refuses a directory that does not look like blirp's.
+- `--yes`: do not ask.
+
 ## blirp hook
 
 ```
@@ -151,4 +183,4 @@ MCP server over stdio for agents ([memory.md](memory.md#mcp-tools)). Uses `BLIRP
 
 ## Exit codes
 
-`0` success; `1` error (message on stderr), `blirp status` with no daemon, `blirp doctor` with a failed check, `blirp hooks` with a failed agent; `2` invalid arguments. `blirp hook` always exits 0.
+`0` success; `1` error (message on stderr), `blirp status` with no daemon, `blirp doctor` with a failed check, `blirp hooks` with a failed agent, `blirp uninstall` when something could not be removed; `2` invalid arguments; `10` `blirp update --check` with an update available. `blirp hook` always exits 0.

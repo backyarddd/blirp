@@ -8,7 +8,7 @@ Include what you found, how to reproduce it, the blirp version (`blirp --version
 
 ## Supported versions
 
-Only the latest release receives security fixes. The desktop app updates itself; standalone installs should upgrade to the latest release.
+Only the latest release receives security fixes. Upgrade with `blirp update` (it verifies the release signature and checksums; see docs/install.md).
 
 ## Scope
 

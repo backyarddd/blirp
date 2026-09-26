@@ -28,7 +28,13 @@ You do not write or maintain anything, it works across different agents, it cove
 They keep running in the daemon. Reopen from the tray. **Quit blirp** in the tray (or stopping the daemon) ends them; they show as Detached and can be resumed.
 
 **Can I use blirp without the desktop app?**
-Yes: `blirp daemon --detach` and `blirp open` give the same UI in your browser. That is also how a headless hub runs.
+Yes: install with `--no-app` and run `blirp` (or `blirp daemon --detach` and `blirp open`) for the same UI in your browser. That is also how a headless hub runs.
+
+**Why is blirp not code signed?**
+Signing costs a yearly fee on both platforms (an Apple Developer ID, a Windows code-signing certificate or Artifact Signing subscription) for a free project, so blirp ships unsigned and is installed from the command line instead. Operating systems only ask about unsigned programs that carry a "downloaded from the internet" mark, which browsers add and `curl` / `irm` do not, so `install.sh` and `install.ps1` install without prompts. What protects you instead: downloads come over HTTPS from GitHub Releases, every file is checked against the release's `SHA256SUMS.txt`, and `blirp update` additionally verifies that file's minisign signature with the release key built into blirp (`packaging/minisign.pub`), so a tampered or swapped download is refused. You can check the same yourself ([install.md](install.md#manual-download)). If you download with a browser, see [troubleshooting.md](troubleshooting.md#blirp-is-damaged-or-windows-protected-your-pc).
+
+**How do I update?**
+`blirp update` (`--check` only reports). **Settings > About** tells you when a new release is out. See [install.md](install.md#updating).
 
 **Can two machines work on the same project?**
 Yes, with a hub. Git projects are matched by remote automatically; for non-git folders merge the two projects once. Each machine's sessions feed the shared memory.
@@ -46,7 +52,7 @@ It grows with transcript history (redacted text, tool results cut to 4 KiB). His
 Edit, resolve or delete records and edit or revert the brief in the Memory tab. Transcripts and sessions cannot be deleted from the UI yet.
 
 **How do I uninstall completely?**
-`blirp hooks uninstall`, `blirp service uninstall`, quit blirp, remove the app or binary, then delete `~/.blirp` if you want your data gone. See [install.md](install.md#uninstalling).
+`blirp uninstall --purge`: stops the daemon, removes autostart, blirp's agent hooks, the app and the CLI, and deletes `~/.blirp` (it asks first). Without `--purge` your data stays. See [install.md](install.md#uninstalling).
 
 **Which agent should I use for summaries?**
 Whichever you have: `auto` picks `claude`, then `codex`, then Ollama. Summaries are short and structured, so a small model is enough.
