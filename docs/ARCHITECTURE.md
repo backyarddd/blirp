@@ -40,7 +40,8 @@ Data dir `BLIRP_HOME`, default `~/.blirp` on every OS (Windows: `%USERPROFILE%\.
   blirp.db           SQLite (WAL) - all state
   runtime.json       {pid, port, token, version, started_at}; written by daemon, mode 0600
   identity.key       iroh secret key (0600)
-  logs/blirpd.log    rolling logs (tracing-appender, daily, keep 7)
+  daemon.lock        single-instance lock (OS file lock held by the daemon)
+  logs/blirpd.<date>.log   rolling logs (tracing-appender, daily, keep 7)
   worktrees/<project-id>/<name>/   optional per-session git worktrees
   launch/<session-id>/             per-launch generated files (claude settings.json, mcp.json, memory.md)
 ```
@@ -139,13 +140,20 @@ All writes to replicated entities (`projects`, `project_paths`, `sessions`, `eve
 
 Worktree sessions resolve to the parent repo's project (git common dir).
 
+Implementation notes: a subfolder of an unregistered repo registers the repo top level (step 2). The Home project is named `Home (<machine name>)`, has no `project_paths` rows (so it never captures subfolders by prefix) and its id is kept in the local `settings` key `home_project_id`. git runs as the `git` CLI with a timeout; when git is missing every folder is treated as non-git.
+
 ## 6. PTY supervisor (`blirp::pty`)
 
 - `portable-pty` (vendored if needed for fixes). Windows: ConPTY. Ship `conpty.dll` + `OpenConsole.exe` next to the binary when available; fall back to the system ConPTY.
 - Each live terminal: child process, master reader task, writer, `vt100::Parser` holding screen state (scrollback 10 000 lines), subscriber broadcast channel.
 - Attach protocol (WS `/api/terminals/:id/ws`): server first sends a `snapshot` frame (formatted screen contents reproducing the current screen, including alt-screen state, cursor position and title), then streams raw output bytes. Client sends `input` (bytes), `resize {cols, rows}`. Multiple clients may attach; last resize wins.
-- The daemon answers terminal queries itself when no client is attached (e.g. DSR cursor position `ESC[6n`) so ConPTY and TUIs never block at startup.
-- Kill = terminate the whole process tree (Windows job object + ClosePseudoConsole; Unix process group SIGHUP then SIGKILL after 3 s).
+- Framing (types `TerminalServerMessage` / `TerminalClientMessage` in `types.gen.ts`):
+  - server -> client **text** frames are JSON: `{"type":"snapshot","cols","rows","data"}` (reset the terminal, then write `data`; it starts with `ESC c`, replays scrollback lines on the normal screen, redraws the screen and restores input modes, cursor and title; sent first and again whenever the client fell behind), `{"type":"resize","cols","rows"}` (another client resized), `{"type":"exit","status","exit_code"}` (process ended; the socket closes).
+  - server -> client **binary** frames are raw PTY output bytes (may split UTF-8 sequences; feed them to the terminal as bytes).
+  - client -> server **binary** frames are raw input bytes; **text** frames are JSON `{"type":"input","data":"..."}` or `{"type":"resize","cols":N,"rows":N}` (1-1000 each). Frames are capped at 1 MiB.
+  - A live terminal that has exited is gone: attaching returns 404 `terminal_not_found`; use the session's status and events instead.
+- The daemon answers terminal queries itself when no client is attached (DSR cursor position `ESC[6n`, DSR status `ESC[5n`, primary DA `ESC[c`) so ConPTY and TUIs never block at startup. Attached clients (xterm.js) answer them instead.
+- Kill = terminate the whole process tree (Windows job object + ClosePseudoConsole; Unix process group SIGHUP then SIGKILL after 3 s). The Windows job has `KILL_ON_JOB_CLOSE`, so sessions also end if the daemon dies; after a normal exit the rest of the tree is reaped the same way (like a terminal hangup).
 - Activity tracking: `last_output_at`; status heuristics in §7.
 
 ## 7. Sessions and agents (`blirp::agents`)
@@ -160,13 +168,17 @@ Launch (`POST /api/sessions`): body `{project_id | cwd, agent, prompt?, worktree
    - claude: `claude --session-id <new uuid> --settings <launch/settings.json> --mcp-config <launch/mcp.json>` (settings contains blirp hooks for SessionStart, UserPromptSubmit, Stop, Notification, SessionEnd, PreCompact). Store the uuid as `agent_session_id` immediately.
    - codex: `codex -c mcp_servers.blirp.command=... -c mcp_servers.blirp.args=[...]` plus the best available context mechanism for the installed version (SessionStart hook for >= 0.155.1, else developer instructions / experimental instructions file override via `-c`); verify against `codex --help` of the installed version at runtime and degrade gracefully.
    - opencode, pi, gemini, cursor, amp, aider, dsh: per §9 table.
-   - Env always: `BLIRP_SESSION_ID`, `BLIRP_PROJECT_ID`, `BLIRP_HOME`, `BLIRP_MEMORY_FILE`.
-5. Spawn PTY; if `prompt` given, type it after the agent is ready (first output idle for 1.5 s) followed by Enter.
+   - Env always: `BLIRP_SESSION_ID`, `BLIRP_PROJECT_ID`, `BLIRP_HOME`, `BLIRP_MEMORY_FILE`, plus `TERM=xterm-256color`, `COLORTERM=truecolor`. Parent-agent markers (`CLAUDECODE`, `CLAUDE_CODE_ENTRYPOINT`, `CODEX_SANDBOX`) are removed so a daemon started from inside an agent does not leak them.
+   - shell: `$SHELL` (unix, else `/bin/sh`); Windows `pwsh`, else `powershell`, else `%ComSpec%`.
+   - Binaries resolve on PATH; on Windows only `.exe/.com/.cmd/.bat/.ps1` count (npm's extensionless shims are skipped), `.cmd/.bat` run via `cmd /d /c`, `.ps1` via PowerShell `-File`.
+   - Resume (`POST /api/sessions/:id/resume`, same session row) with `agent_session_id`: claude `--resume <id>`, codex `resume <id>`, opencode `--session <id>`, gemini `--resume <id>`, cursor `--resume <id>`, amp `threads continue <id>`; pi, aider, dsh, shell and custom agents (or no known id) relaunch fresh in the session folder.
+5. Spawn PTY; if `prompt` given, type it after the agent is ready (first output idle for 1.5 s, at most 60 s) followed by Enter. The prompt is sent as a bracketed paste when the application enabled bracketed paste mode.
 
 Status:
 - From hooks when available (claude: UserPromptSubmit -> working, Stop -> idle, Notification(permission/idle prompt) -> waiting, SessionEnd -> completed).
 - Else heuristics: output within the last 2 s -> working; otherwise idle.
-- Process exit: code 0 -> completed, else failed.
+- Process exit: code 0 -> completed, else failed. A user Stop -> completed regardless of exit code. Daemon shutdown ends running sessions as `detached`.
+- Heuristics never overwrite `waiting` (hook-owned) or a final status.
 - On daemon restart, sessions whose process is gone become `detached`; UI offers Resume (agent resume flag with `agent_session_id`).
 
 Continue in / fork: `continue_from` builds a handoff pack (§9) from the source session and passes it as the initial context of a new session with any agent; `parent_session_id` records lineage.
@@ -296,7 +308,7 @@ Auth: local clients send `Authorization: Bearer <runtime token>` or the `blirp_s
 ```
 GET  /api/health                         {version, machine, role}
 GET  /api/machines                       list; DELETE /api/machines/:id (revoke)
-GET  /api/projects                       list with path(s), git flag, session counts, last activity
+GET  /api/projects                       list with path(s), git flag, session counts, last activity; GET /api/projects/:id one
 POST /api/projects                       {path, name?} register folder
 PATCH/DELETE /api/projects/:id           rename / soft delete; POST /api/projects/:id/merge {into}
 GET  /api/projects/:id/memory            brief, records, recent sessions
@@ -305,8 +317,10 @@ CRUD /api/projects/:id/records[/:rid]
 CRUD /api/projects/:id/wiki[/:slug]
 CRUD /api/projects/:id/resources[/:id]
 GET  /api/projects/:id/suggestions       POST /api/suggestions/:id/{accept|reject|dismiss}
-GET  /api/projects/:id/git               {is_git, branch, status[], ahead/behind} ; GET .../git/diff?path=
+GET  /api/projects/:id/git               {is_git, branch, status[], ahead/behind}; 404 `not_git` when the folder is not a repo ; GET .../git/diff?path=
 GET  /api/projects/:id/files?path=       directory listing (read-only) ; GET .../files/content?path= (text, <= 1 MiB)
+                                         files and git take optional `root=` (one of the project's folders here);
+                                         paths are relative, `..`/absolute paths and symlinks escaping the root are rejected
 GET  /api/sessions?project=&status=&agent=&machine=&q=&cursor=
 POST /api/sessions                       launch (§7)
 GET  /api/sessions/:id                   detail incl. summary; GET .../events?after=&limit=
@@ -317,13 +331,16 @@ GET  /api/search?q=&project=&kind=       FTS over events + records
 GET  /api/agents                         detected agents + versions + integration status
 POST /api/hooks/:agent/:event            hook ingress (from `blirp hook`)
 GET  /api/inject?session=&cwd=&agent=    rendered injection
-GET  /api/settings ; PATCH /api/settings
+GET  /api/settings ; PATCH /api/settings  {config: Config, values: {key: json}}; PATCH {config?: full Config
+                                         (validated, written to config.toml), values?: {key: json|null}}
 POST /api/sync/hub/enable ; POST /api/sync/invite ; POST /api/sync/join {invite, code} ; GET /api/sync/status
 POST /api/devices/browser-invite         one-time QR login for phone/browser (hub)
 GET  /api/events/ws                      server push: session status changes, new sessions, memory updates
 GET  /mcp                                MCP Streamable HTTP
 GET  /*                                  embedded SPA
 ```
+
+Request/response DTOs are defined in `blirp-core::model` and exported to `web/src/lib/api/types.gen.ts` (`cargo test -p blirp-core export_bindings`). Endpoints owned by later phases (`/api/hooks/*`, `/api/inject`, `/api/sync/*`, `/api/devices/*`, `DELETE /api/machines/:id`, `POST /api/sessions/:id/distill`, `/mcp`, and `continue_from`/`machine` on launch) answer 501 `not_implemented` until implemented. `/api/events/ws` pushes JSON `ServerEvent` frames: `session_created`, `session_updated`, `project_updated`, `memory_updated {project_id, part}`, and `resync` when the client fell behind and must refetch.
 
 ## 12. Config (`~/.blirp/config.toml`, validated at startup; unknown keys are an error with a clear message)
 
