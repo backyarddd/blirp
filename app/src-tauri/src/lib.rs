@@ -1,7 +1,8 @@
 //! blirp desktop shell (§15): a thin Tauri window around the web UI served by
 //! the daemon. It starts the daemon (bundled `blirp` sidecar) when needed,
 //! logs the window in via `/auth?token=`, forwards `blirp://join/...` deep
-//! links, keeps a tray icon, and installs signed updates.
+//! links and keeps a tray icon. Updates are `blirp update` (the web UI's
+//! Settings > About says when one is available); the app has no updater.
 //!
 //! The remote UI gets no Tauri IPC: only the bundled loading page may call
 //! the three commands below (see `capabilities/main.json`).
@@ -19,7 +20,6 @@ use tauri::{AppHandle, Manager, State, Url, WebviewWindow, WebviewWindowBuilder,
 use tauri_plugin_deep_link::DeepLinkExt as _;
 use tauri_plugin_dialog::{DialogExt as _, MessageDialogButtons, MessageDialogKind};
 use tauri_plugin_opener::OpenerExt as _;
-use tauri_plugin_updater::UpdaterExt as _;
 
 const MAIN: &str = "main";
 
@@ -287,58 +287,6 @@ fn confirm_quit(app: &AppHandle) {
         });
 }
 
-// ----------------------------------------------------------------- updates
-
-async fn check_for_update(app: AppHandle) -> anyhow::Result<()> {
-    let Some(update) = app.updater()?.check().await? else {
-        return Ok(());
-    };
-    tracing::info!(version = %update.version, "update available");
-    let (tx, rx) = tokio::sync::oneshot::channel();
-    app.dialog()
-        .message(format!(
-            "blirp {} is available (you have {}).\n\nInstalling stops the daemon and ends \
-             running agent sessions; blirp restarts afterwards.",
-            update.version, update.current_version
-        ))
-        .title("Update available")
-        .buttons(MessageDialogButtons::OkCancelCustom(
-            "Install and restart".into(),
-            "Later".into(),
-        ))
-        .show(move |ok| {
-            let _ = tx.send(ok);
-        });
-    if !rx.await.unwrap_or(false) {
-        return Ok(());
-    }
-    // The user asked for it: failures from here on are shown, not just logged.
-    if let Err(e) = install_update(&app, update).await {
-        tracing::error!(error = format!("{e:#}"), "update install failed");
-        // The daemon may already be stopped; bring the UI back either way.
-        start(app.clone());
-        app.dialog()
-            .message(format!("The update could not be installed: {e:#}"))
-            .title("blirp")
-            .kind(MessageDialogKind::Error)
-            .show(|_| {});
-    }
-    Ok(())
-}
-
-async fn install_update(
-    app: &AppHandle,
-    update: tauri_plugin_updater::Update,
-) -> anyhow::Result<()> {
-    let bytes = update.download(|_, _| {}, || {}).await?;
-    // The installer replaces the sidecar, which a running daemon keeps locked
-    // on Windows; stop it first everywhere so the new version starts cleanly.
-    let shell = app.state::<Arc<Shell>>().inner().clone();
-    daemon::stop(&shell.paths).await?;
-    update.install(bytes)?;
-    app.restart();
-}
-
 // -------------------------------------------------------------------- tray
 
 fn build_tray(app: &AppHandle, shell: &Shell) -> tauri::Result<()> {
@@ -454,7 +402,6 @@ pub fn run() -> anyhow::Result<()> {
         )
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_opener::init())
-        .plugin(tauri_plugin_updater::Builder::new().build())
         .manage(shell.clone())
         .invoke_handler(tauri::generate_handler![startup_state, retry, open_logs])
         .setup(move |app| {
@@ -494,9 +441,10 @@ pub fn run() -> anyhow::Result<()> {
 
             build_tray(&handle, &shell)?;
 
-            // Installers register blirp:// on Windows and macOS; AppImages and
-            // Windows dev builds have to do it at runtime.
-            #[cfg(any(target_os = "linux", all(windows, debug_assertions)))]
+            // macOS registers blirp:// from Info.plist. Linux (AppImage) and
+            // Windows (the install script's portable app has no installer to
+            // do it) register at runtime, pointing at this executable.
+            #[cfg(any(target_os = "linux", windows))]
             if let Err(e) = app.deep_link().register_all() {
                 tracing::warn!(error = %e, "register blirp:// links");
             }
@@ -511,15 +459,6 @@ pub fn run() -> anyhow::Result<()> {
             }
 
             start(handle.clone());
-
-            if !cfg!(debug_assertions) {
-                let up = handle.clone();
-                tauri::async_runtime::spawn(async move {
-                    if let Err(e) = check_for_update(up).await {
-                        tracing::warn!(error = format!("{e:#}"), "update check failed");
-                    }
-                });
-            }
             Ok(())
         })
         .on_window_event(|window, event| {

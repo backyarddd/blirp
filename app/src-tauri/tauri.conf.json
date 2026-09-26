@@ -30,7 +30,6 @@
     "active": true,
     "targets": "all",
     "externalBin": ["binaries/blirp"],
-    "createUpdaterArtifacts": true,
     "icon": [
       "icons/32x32.png",
       "icons/128x128.png",
@@ -60,15 +59,6 @@
     "deep-link": {
       "desktop": {
         "schemes": ["blirp"]
-      }
-    },
-    "updater": {
-      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IDlFNzdCMUQ4QjEwQjE4MTQKUldRVUdBdXgyTEYzbnNJaGd6WnNaTDZPZmhWNk8zbXBOMWpVeUFwb3loMDRsblNWTHNvWjJOWDUK",
-      "endpoints": [
-        "https://github.com/backyarddd/blirp/releases/latest/download/latest.json"
-      ],
-      "windows": {
-        "installMode": "passive"
       }
     }
   }

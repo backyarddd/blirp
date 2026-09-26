@@ -23,7 +23,12 @@ tauri-build = { version = "2", features = [] }
 [dependencies]
 anyhow.workspace = true
 blirp-core.workspace = true
-reqwest.workspace = true
+# native-tls: with workspace feature unification (`cargo build/test
+# --workspace`) iroh turns on reqwest's `rustls-no-provider`, and this crate
+# installs no rustls provider, so a rustls-only reqwest client would panic in
+# `build()`. reqwest picks native-tls whenever it is compiled in. The daemon
+# is loopback HTTP only; the blirp sidecar is built alone and installs ring.
+reqwest = { workspace = true, features = ["native-tls"] }
 serde.workspace = true
 serde_json.workspace = true
 tauri = { version = "2", features = ["tray-icon", "image-png"] }
@@ -31,13 +36,6 @@ tauri-plugin-deep-link = "2"
 tauri-plugin-dialog = "2"
 tauri-plugin-opener = "2"
 tauri-plugin-single-instance = { version = "2", features = ["deep-link"] }
-# native-tls, not rustls: the updater's rustls feature turns on reqwest's
-# `rustls-no-provider`, and this crate installs no rustls provider, so every
-# reqwest client here would panic in `build()`. reqwest picks native-tls
-# whenever it is compiled in, so workspace feature unification with blirp
-# (iroh's `rustls-no-provider`) cannot make a client here panic either; the
-# blirp sidecar is built alone (`-p blirp`) and installs ring itself.
-tauri-plugin-updater = { version = "2", default-features = false, features = ["native-tls", "zip"] }
 tauri-plugin-window-state = "2"
 tokio.workspace = true
 tracing.workspace = true
