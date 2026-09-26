@@ -284,6 +284,8 @@ param(
     $appPath = Join-Path $installDir $DesktopExe
     $shortcut = Join-Path $env:APPDATA 'Microsoft\Windows\Start Menu\Programs\blirp.lnk'
     if (Test-Path -LiteralPath $appPath) {
+      # Profiles created by some provisioning tools lack the Programs folder.
+      $null = New-Item -ItemType Directory -Force -Path (Split-Path -Parent $shortcut)
       $shell = New-Object -ComObject WScript.Shell
       $lnk = $shell.CreateShortcut($shortcut)
       $lnk.TargetPath = $appPath
