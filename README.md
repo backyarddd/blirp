@@ -110,6 +110,8 @@ Terminal output is never scraped for memory; it is only used for the live view a
 
 Run blirp on an always-on machine, enable the hub role (`blirp hub enable` or **Settings > Machines & Sync**), and pair each other machine with `blirp pair <invite> <code>` (or just `blirp pair <code>` on the same LAN). After that projects, sessions, transcripts, briefs, records, wiki pages and resources replicate through the hub, you can start sessions on any paired machine, and the hub can serve the UI to phones over HTTPS on your LAN. Connections are QUIC (iroh) with NAT traversal, so the hub needs no port forwarding; the public relay fallback can be disabled or replaced. Guide: [docs/sync-and-hub.md](docs/sync-and-hub.md).
 
+**Cloud sessions:** start a session on the hub from your PC (**Run on > Cloud**), close the laptop, and pick it up the next day with its full scrollback; the hub stays awake while sessions run. Guide: [docs/cloud-sessions.md](docs/cloud-sessions.md).
+
 ## Privacy
 
 - All state is in `~/.blirp` (`%USERPROFILE%\.blirp` on Windows) on your machines: one SQLite database plus config, keys and logs. No accounts, no telemetry, no blirp servers.
@@ -123,7 +125,7 @@ Details and threat model: [docs/security.md](docs/security.md). Report vulnerabi
 
 - [Getting started](docs/getting-started.md), [Install](docs/install.md)
 - [Projects and sessions](docs/projects-and-sessions.md), [Memory](docs/memory.md), [Agents](docs/agents.md)
-- [Sync and hub](docs/sync-and-hub.md), [Web portal](docs/portal.md)
+- [Sync and hub](docs/sync-and-hub.md), [Cloud sessions](docs/cloud-sessions.md), [Web portal](docs/portal.md)
 - [Configuration](docs/configuration.md), [CLI](docs/cli.md), [HTTP API](docs/api.md)
 - [Security](docs/security.md), [Troubleshooting](docs/troubleshooting.md), [FAQ](docs/faq.md)
 - [Development](docs/development.md), [Architecture](docs/ARCHITECTURE.md) (the design contract)

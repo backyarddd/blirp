@@ -23,6 +23,7 @@ args = ["--fast"]
 
 [sessions]
 worktree_default = false
+# keep_awake = true            # default: true on the hub, false elsewhere
 
 [memory]
 summarizer = "auto"
@@ -79,6 +80,7 @@ check = true
 | Key | Type | Default | Description |
 |---|---|---|---|
 | `worktree_default` | bool | `false` | Pre-tick **Run in a new git worktree** for git projects. Ignored for non-git folders. |
+| `keep_awake` | bool | unset: `true` when `sync.role = "hub"`, else `false` | While any session runs on this machine, prevent idle sleep (macOS `caffeinate -i -w <daemon pid>`, Windows `SetThreadExecutionState`, Linux `systemd-inhibit --what=sleep` when installed); released when the last session ends. Takes effect within a second, also when saved from Settings. See [cloud-sessions.md](cloud-sessions.md#keep-awake). |
 
 ### `[memory]`
 

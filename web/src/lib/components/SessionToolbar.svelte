@@ -17,6 +17,7 @@
   import { formatElapsed } from '../time';
   import Menu, { type MenuItem } from './Menu.svelte';
   import Modal from './Modal.svelte';
+  import MachineBadge from './MachineBadge.svelte';
 
   let { session }: { session: Session } = $props();
 
@@ -138,6 +139,7 @@
 </script>
 
 <div class="toolbar" role="toolbar" aria-label="Session actions">
+  <MachineBadge machineId={session.machine_id} />
   {#if app.control}
     <Menu items={continueItems} label="Agent: {agentLabel(session.agent)}. Continue in another agent" heading="Continue in…" triggerClass="btn sm agent">
       <span class="agent-dot" aria-hidden="true"></span>{agentLabel(session.agent)}<ChevronDown size={14} aria-hidden="true" />

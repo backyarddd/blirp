@@ -22,9 +22,18 @@ use std::time::{Duration, Instant};
 use tokio::sync::broadcast;
 
 pub const SCROLLBACK: usize = 10_000;
+/// Scrollback bytes replayed in one attach snapshot at most (oldest lines
+/// are left out beyond it); relayed terminals accept frames of
+/// [`SNAPSHOT_FRAME_MAX`], which leaves room for JSON escaping.
+const SNAPSHOT_SCROLLBACK_BYTES: usize = 16 << 20;
+pub const SNAPSHOT_FRAME_MAX: usize = 64 << 20;
 /// Output within this window means the agent is working (§7).
 pub const ACTIVE_WINDOW: Duration = Duration::from_secs(2);
 const KILL_GRACE: Duration = Duration::from_secs(3);
+/// Terminal queries attached clients have not answered after this long are
+/// answered by the daemon (a client that is gone but not yet disconnected,
+/// e.g. a laptop that went to sleep, must not leave a TUI waiting).
+pub const QUERY_GRACE: Duration = Duration::from_secs(2);
 /// Output still arriving this long after the group was killed is dropped
 /// and the reader thread ends (unix).
 #[cfg_attr(not(unix), allow(dead_code))]
@@ -115,6 +124,9 @@ struct ScreenState {
     parser: vt100::Parser<Callbacks>,
     last_output: Option<Instant>,
     exited: Option<ExitInfo>,
+    /// Replies to queries sent while clients were attached, and since when:
+    /// answered here after [`QUERY_GRACE`] unless a client answers first.
+    unanswered: Option<(Instant, Vec<u8>)>,
 }
 
 pub struct Terminal {
@@ -182,6 +194,7 @@ impl Terminal {
                 ),
                 last_output: None,
                 exited: None,
+                unanswered: None,
             }),
             tx,
             input,
@@ -295,12 +308,21 @@ impl Terminal {
 
     fn on_output(&self, bytes: &[u8]) {
         let mut s = lock(&self.screen);
-        s.parser.process(bytes);
+        feed(&mut s.parser, bytes);
         s.last_output = Some(Instant::now());
         let replies = std::mem::take(&mut s.parser.callbacks_mut().replies);
-        // Attached clients (xterm.js) answer queries themselves.
-        if !replies.is_empty() && self.tx.receiver_count() == 0 {
-            self.write(replies);
+        // Attached clients (xterm.js) answer queries themselves; if none
+        // does, `answer_stale_queries` does.
+        if !replies.is_empty() {
+            if self.tx.receiver_count() == 0 {
+                self.write(replies);
+            } else {
+                let now = Instant::now();
+                s.unanswered
+                    .get_or_insert_with(|| (now, Vec::new()))
+                    .1
+                    .extend(replies);
+            }
         }
         let _ = self.tx.send(TermEvent::Data(Bytes::copy_from_slice(bytes)));
     }
@@ -311,6 +333,33 @@ impl Terminal {
         let mut s = lock(&self.screen);
         let snap = snapshot(&mut s.parser);
         (snap, self.tx.subscribe(), s.exited)
+    }
+
+    /// Input from an attached client. A terminal reply in it means clients
+    /// answer queries: pending ones are left to them.
+    pub fn client_input(&self, bytes: Vec<u8>) {
+        if is_query_reply(&bytes) {
+            lock(&self.screen).unanswered = None;
+        }
+        self.write(bytes);
+    }
+
+    /// Answer queries no attached client answered within [`QUERY_GRACE`]
+    /// (called from the status tick).
+    pub fn answer_stale_queries(&self, now: Instant) {
+        let stale = {
+            let mut s = lock(&self.screen);
+            match &s.unanswered {
+                Some((since, _)) if now.duration_since(*since) >= QUERY_GRACE => {
+                    s.unanswered.take()
+                }
+                _ => None,
+            }
+        };
+        if let Some((_, replies)) = stale {
+            tracing::debug!(session = %self.session_id, "answering terminal queries no client answered");
+            self.write(replies);
+        }
     }
 
     pub fn write(&self, bytes: Vec<u8>) {
@@ -436,10 +485,63 @@ impl Terminal {
     }
 }
 
+/// Feed PTY output to the screen state. vt100 ignores `CSI 3 J` (erase
+/// saved lines), which TUIs such as Claude Code send before redrawing their
+/// whole history; xterm.js does clear its scrollback then, so without this a
+/// reattach would show the history twice. The screen is rebuilt without
+/// scrollback at that point. A sequence split across two reads is missed
+/// (the history then shows twice, nothing is lost).
+fn feed(parser: &mut vt100::Parser<Callbacks>, bytes: &[u8]) {
+    const ED3: &[u8] = b"\x1b[3J";
+    let mut rest = bytes;
+    while let Some(i) = rest.windows(ED3.len()).position(|w| w == ED3) {
+        let (head, tail) = rest.split_at(i + ED3.len());
+        parser.process(head);
+        clear_scrollback(parser);
+        rest = tail;
+    }
+    parser.process(rest);
+}
+
+fn clear_scrollback(parser: &mut vt100::Parser<Callbacks>) {
+    // The scrollback belongs to the normal screen, hidden behind the
+    // alternate one: an alternate-screen app has none to clear.
+    if parser.screen().alternate_screen() {
+        return;
+    }
+    let (rows, cols) = parser.screen().size();
+    let mut state = parser.screen().state_formatted();
+    state.extend(parser.screen().attributes_formatted());
+    let callbacks = std::mem::take(parser.callbacks_mut());
+    let mut fresh = vt100::Parser::new_with_callbacks(rows, cols, SCROLLBACK, callbacks);
+    fresh.process(&state);
+    *parser = fresh;
+}
+
+/// A cursor position report, device status or device attributes reply
+/// (`ESC [ ... R`, `ESC [ ... n`, `ESC [ ? ... c`) as xterm.js sends them.
+fn is_query_reply(bytes: &[u8]) -> bool {
+    bytes.windows(2).enumerate().any(|(i, w)| {
+        w == b"[" && {
+            let rest = &bytes[i + 2..];
+            let params = rest
+                .iter()
+                .take_while(|b| b.is_ascii_digit() || matches!(b, b';' | b'?' | b'>'))
+                .count();
+            matches!(rest.get(params), Some(b'R' | b'n' | b'c')) && params > 0
+        }
+    })
+}
+
 /// Bytes that make a fresh terminal look like `parser`'s: reset, scrollback
 /// lines (normal screen only), the visible screen with attributes and
 /// cursor, input modes and title.
 fn snapshot(parser: &mut vt100::Parser<Callbacks>) -> Snapshot {
+    snapshot_within(parser, SNAPSHOT_SCROLLBACK_BYTES)
+}
+
+/// [`snapshot`] replaying at most `budget` bytes of scrollback (newest lines).
+fn snapshot_within(parser: &mut vt100::Parser<Callbacks>, budget: usize) -> Snapshot {
     let (rows, cols) = parser.screen().size();
     let mut out: Vec<u8> = b"\x1bc".to_vec();
     if parser.screen().alternate_screen() {
@@ -457,6 +559,14 @@ fn snapshot(parser: &mut vt100::Parser<Callbacks>) -> Snapshot {
             offset -= take;
         }
         parser.screen_mut().set_scrollback(0);
+        // Beyond the budget the oldest lines go (a snapshot is one frame).
+        let mut size: usize = lines.iter().map(|l| l.len() + 5).sum();
+        let mut skip = 0;
+        while size > budget && skip < lines.len() {
+            size -= lines[skip].len() + 5;
+            skip += 1;
+        }
+        lines.drain(..skip);
         if !lines.is_empty() {
             lines.extend(parser.screen().rows_formatted(0, cols));
             for (i, line) in lines.iter().enumerate() {
@@ -713,6 +823,106 @@ mod tests {
         }
     }
 
+    /// Every line a terminal holds, oldest first: scrollback then screen.
+    fn history<C: vt100::Callbacks>(p: &mut vt100::Parser<C>) -> Vec<String> {
+        let (rows, cols) = p.screen().size();
+        p.screen_mut().set_scrollback(usize::MAX);
+        let mut offset = p.screen().scrollback();
+        let mut out = Vec::new();
+        while offset > 0 {
+            p.screen_mut().set_scrollback(offset);
+            let take = offset.min(usize::from(rows));
+            out.extend(p.screen().rows(0, cols).take(take));
+            offset -= take;
+        }
+        p.screen_mut().set_scrollback(0);
+        out.extend(p.screen().rows(0, cols));
+        out
+    }
+
+    fn client_of(snap: &Snapshot) -> vt100::Parser {
+        let mut client = vt100::Parser::new(snap.rows, snap.cols, SCROLLBACK);
+        client.process(snap.data.as_bytes());
+        client
+    }
+
+    // A client attaching (e.g. the next morning) gets the full 10 000 lines
+    // of scrollback, not just the screen, so scrolling up shows everything
+    // the terminal still holds.
+    #[test]
+    fn reattach_restores_the_whole_scrollback() {
+        let mut p = vt100::Parser::new_with_callbacks(24, 80, SCROLLBACK, Callbacks::default());
+        for i in 0..12_000 {
+            feed(
+                &mut p,
+                format!("\x1b[3{}mline {i}\x1b[m\r\n", i % 7).as_bytes(),
+            );
+        }
+        feed(&mut p, b"$ ");
+        let want = history(&mut p);
+        assert_eq!(want.len(), SCROLLBACK + 24);
+        assert_eq!(want[0], "line 1977");
+        let snap = snapshot(&mut p);
+        let mut client = client_of(&snap);
+        assert_eq!(history(&mut client), want);
+        assert_eq!(
+            client.screen().cursor_position(),
+            p.screen().cursor_position()
+        );
+        // Colors survive too.
+        client.screen_mut().set_scrollback(SCROLLBACK);
+        assert_eq!(
+            client.screen().cell(0, 0).unwrap().fgcolor(),
+            vt100::Color::Idx((1977 % 7) as u8)
+        );
+    }
+
+    // Beyond the byte budget the oldest lines are left out; the screen is
+    // still exact.
+    #[test]
+    fn snapshot_budget_keeps_the_newest_lines() {
+        let mut p = vt100::Parser::new_with_callbacks(4, 20, SCROLLBACK, Callbacks::default());
+        for i in 0..100 {
+            feed(&mut p, format!("line {i}\r\n").as_bytes());
+        }
+        let snap = snapshot_within(&mut p, 200);
+        let mut client = client_of(&snap);
+        let got = history(&mut client);
+        assert!(got.len() < 40, "{}", got.len());
+        assert_eq!(client.screen().contents(), p.screen().contents());
+        assert!(got.contains(&"line 95".to_string()));
+        assert!(!got.contains(&"line 10".to_string()));
+    }
+
+    // `CSI 3 J` clears the scrollback like xterm.js does, so a TUI that
+    // redraws its history (Claude Code) does not show it twice on reattach.
+    #[test]
+    fn erase_saved_lines_clears_the_scrollback() {
+        let mut p = vt100::Parser::new_with_callbacks(4, 20, SCROLLBACK, Callbacks::default());
+        for i in 0..10 {
+            feed(&mut p, format!("old {i}\r\n").as_bytes());
+        }
+        feed(
+            &mut p,
+            b"\x1b]0;t\x07\x1b[2J\x1b[3J\x1b[H\x1b[1mnew 0\r\nnew 1\r\nnew 2\r\nnew 3\r\nnew 4",
+        );
+        let lines = history(&mut p);
+        assert!(!lines.iter().any(|l| l.starts_with("old")), "{lines:?}");
+        assert_eq!(lines[0], "new 0");
+        assert!(p.screen().bold(), "attributes survive the rebuild");
+        assert_eq!(p.callbacks().title.as_deref(), Some("t"));
+        let mut client = client_of(&snapshot(&mut p));
+        assert_eq!(history(&mut client), lines);
+
+        // Inside the alternate screen it touches nothing.
+        let mut p = vt100::Parser::new_with_callbacks(4, 20, SCROLLBACK, Callbacks::default());
+        for i in 0..10 {
+            feed(&mut p, format!("old {i}\r\n").as_bytes());
+        }
+        feed(&mut p, b"\x1b[?1049h\x1b[3Jtui\x1b[?1049l");
+        assert!(history(&mut p).iter().any(|l| l == "old 0"));
+    }
+
     #[test]
     fn alternate_screen_snapshot() {
         let mut p = vt100::Parser::new_with_callbacks(4, 20, SCROLLBACK, Callbacks::default());
@@ -722,6 +932,58 @@ mod tests {
         client.process(snap.data.as_bytes());
         assert!(client.screen().alternate_screen());
         assert_eq!(client.screen().contents(), p.screen().contents());
+    }
+
+    #[test]
+    fn query_replies_are_recognized() {
+        for reply in [&b"[12;40R"[..], b"[?1;2c", b"[0n", b"ab[>0;276;0c"] {
+            assert!(is_query_reply(reply), "{reply:?}");
+        }
+        for other in [&b"[A"[..], b"[c", b"hello", b"[2~", b"["] {
+            assert!(!is_query_reply(other), "{other:?}");
+        }
+    }
+
+    // A client that is attached but never answers (a laptop that went to
+    // sleep before its connection timed out) must not leave the agent
+    // waiting: the daemon answers after the grace period.
+    #[test]
+    fn queries_no_client_answers_are_answered_after_a_grace() {
+        let (program, args): (&str, &[&str]) = if cfg!(windows) {
+            ("cmd.exe", &["/d", "/q", "/k"])
+        } else {
+            ("/bin/sh", &["-i"])
+        };
+        let term = Terminal::spawn(
+            "t-query",
+            SpawnRequest {
+                program: program.into(),
+                args: args.iter().map(Into::into).collect(),
+                cwd: std::env::temp_dir(),
+                env: Vec::new(),
+                env_remove: Vec::new(),
+                cols: 80,
+                rows: 24,
+            },
+            |_, _| {},
+        )
+        .unwrap();
+        let (_snap, _rx, _) = term.attach();
+        term.on_output(b"[6n");
+        let since = lock(&term.screen).unanswered.as_ref().map(|u| u.0);
+        let since = since.expect("held for the attached client");
+        term.answer_stale_queries(since + Duration::from_millis(100));
+        assert!(
+            lock(&term.screen).unanswered.is_some(),
+            "answered too early"
+        );
+        term.answer_stale_queries(since + QUERY_GRACE);
+        assert!(lock(&term.screen).unanswered.is_none());
+        // A client that answers takes over.
+        term.on_output(b"[c");
+        term.client_input(b"[?1;2c".to_vec());
+        assert!(lock(&term.screen).unanswered.is_none());
+        term.kill();
     }
 
     #[test]

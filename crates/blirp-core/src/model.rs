@@ -400,6 +400,10 @@ pub struct Health {
     // Default: older daemons do not send it.
     #[serde(default)]
     pub capabilities: Capabilities,
+    /// This machine is holding a sleep-prevention assertion because sessions
+    /// are live (`sessions.keep_awake`).
+    #[serde(default)]
+    pub keep_awake: bool,
 }
 
 /// `GET /api/update`: whether a newer release than the daemon exists.
@@ -646,6 +650,79 @@ pub struct FileContent {
     pub content: String,
 }
 
+/// `GET /api/machines/:id/dirs`: folders on a machine, for picking where a
+/// session runs. Only directories are listed, never file names or contents,
+/// and only inside that machine's user home.
+#[derive(Debug, Clone, Serialize, Deserialize, TS)]
+pub struct MachineDirs {
+    pub machine_id: String,
+    /// Absolute home folder the listing is confined to.
+    pub home: String,
+    /// Absolute path of the listed folder.
+    pub path: String,
+    /// Absolute parent folder, null at the home folder.
+    pub parent: Option<String>,
+    pub entries: Vec<MachineDir>,
+    /// More folders exist than were returned.
+    pub truncated: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, TS)]
+pub struct MachineDir {
+    pub name: String,
+    /// Absolute path on that machine.
+    pub path: String,
+    /// Contains a `.git` entry.
+    pub is_git: bool,
+}
+
+/// `POST /api/machines/:id/clone`: clone a git repository on a machine.
+/// Give `url`, or `project_id` to use the remote of that project's git folder
+/// on the machine receiving the request (credentials in it are removed).
+#[derive(Debug, Clone, Serialize, Deserialize, TS)]
+#[serde(deny_unknown_fields)]
+pub struct CloneRepo {
+    #[serde(default)]
+    #[ts(optional)]
+    pub url: Option<String>,
+    #[serde(default)]
+    #[ts(optional)]
+    pub project_id: Option<String>,
+    /// Absolute folder inside the target's home to clone into; default `~/blirp`.
+    #[serde(default)]
+    #[ts(optional)]
+    pub parent: Option<String>,
+    /// Folder name; default the repository name.
+    #[serde(default)]
+    #[ts(optional)]
+    pub name: Option<String>,
+}
+
+str_enum!(CloneState {
+    Running = "running",
+    Done = "done",
+    Failed = "failed",
+});
+
+/// A clone started by `POST /api/machines/:id/clone`; poll
+/// `GET /api/machines/:id/clone/:job` until it is no longer `running`.
+#[derive(Debug, Clone, Serialize, Deserialize, TS)]
+pub struct CloneJob {
+    pub id: String,
+    pub machine_id: String,
+    /// The URL cloned, without credentials.
+    pub url: String,
+    /// Absolute destination folder on that machine.
+    pub dest: String,
+    pub state: CloneState,
+    /// Last progress line from git.
+    pub progress: Option<String>,
+    /// git's error output when it failed.
+    pub error: Option<String>,
+    pub started_at: i64,
+    pub finished_at: Option<i64>,
+}
+
 /// `GET /api/sessions/:id`: the session plus how many subagent sessions
 /// ingest recorded under it (origin `external` with `parent_session_id`
 /// set to it, §8); list them with `GET /api/sessions?parent=<id>`.
@@ -778,6 +855,22 @@ pub struct AgentInfo {
     /// Resume by the agent's own session id is supported.
     pub can_resume: bool,
     pub integration: AgentIntegration,
+    /// Whether the agent is logged in for this machine's daemon, where that
+    /// can be checked without a model call (claude: `claude auth status`);
+    /// null when unknown.
+    // Default: older daemons do not send it.
+    #[serde(default)]
+    pub auth: Option<AgentAuth>,
+}
+
+/// Login state of an agent CLI as seen by the daemon's own process (on
+/// macOS a daemon started over SSH cannot read the login keychain, so it
+/// may differ from a terminal on the same machine).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+pub struct AgentAuth {
+    pub logged_in: bool,
+    /// How it is logged in, as the agent reports it (e.g. `claude.ai`, `api_key`).
+    pub method: Option<String>,
 }
 
 /// How blirp memory reaches an agent (§9).
@@ -1071,7 +1164,7 @@ mod tests {
             JsonValue,
             MachineRole, SessionStatus, SessionOrigin, EventKind, RecordKind, RecordStatus,
             SuggestionTarget, SuggestionStatus, ResourceKind, DeviceKind, FileKind, SearchHitKind,
-            MemoryPart, IntegrationState, InjectMode,
+            MemoryPart, IntegrationState, InjectMode, CloneState,
             Machine, Project, ProjectPath, Session, Event, Record, Brief, WikiPage, Suggestion,
             BriefProposal, RecordProposal, WikiProposal, Resource, Device,
             ErrorBody, ErrorDetail, Health, UpdateStatus, ProjectPathInfo, ProjectSummary, CreateProject,
@@ -1079,7 +1172,7 @@ mod tests {
             PatchRecord, CreateWikiPage, PutWikiPage, CreateResource, PatchResource,
             GitStatusEntry, GitStatus, GitDiff, FileEntry, DirListing, FileContent, SessionsPage, SessionDetail,
             LaunchSession, PatchSession, RemoveWorktree, OpenTarget, OpenSession, EventsPage, SearchHit, SearchResults, AgentInfo,
-            AgentIntegration, Injection, SummaryItem, DistillFailure, SessionSummary,
+            AgentIntegration, AgentAuth, MachineDirs, MachineDir, CloneRepo, CloneJob, Injection, SummaryItem, DistillFailure, SessionSummary,
             SettingsView, SettingsPatch, Capabilities, DistillStatus, DistillPause, SyncStatus, SyncInvite, JoinHub, JoinPreviewRequest, JoinPreview, WsTicketRequest, WsTicket, BrowserInvite, PatchDevice,
             ServerEvent, TerminalServerMessage, TerminalClientMessage,
             Config, DaemonConfig, MachineConfig, AgentsConfig, CustomAgent, SessionsConfig,

@@ -186,9 +186,9 @@ async fn stream(
             }
             msg = socket.recv() => match msg {
                 Some(Ok(Message::Binary(_) | Message::Text(_))) if !control => {}
-                Some(Ok(Message::Binary(b))) => term.write(b.to_vec()),
+                Some(Ok(Message::Binary(b))) => term.client_input(b.to_vec()),
                 Some(Ok(Message::Text(t))) => match serde_json::from_str::<TerminalClientMessage>(&t) {
-                    Ok(TerminalClientMessage::Input { data }) => term.write(data.into_bytes()),
+                    Ok(TerminalClientMessage::Input { data }) => term.client_input(data.into_bytes()),
                     Ok(TerminalClientMessage::Resize { cols, rows }) => {
                         // ResizePseudoConsole can wait for the PTY reader:
                         // never on an async worker.

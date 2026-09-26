@@ -2,6 +2,7 @@
 
 mod files;
 mod integration;
+mod machines;
 mod memory;
 mod misc;
 mod open;
@@ -346,6 +347,7 @@ fn build(state: SharedState, listener: Listener) -> Router {
         .merge(open::routes())
         .merge(integration::routes())
         .merge(crate::sync::routes())
+        .merge(machines::routes())
         .merge(update::routes())
         .route("/api/terminals/{id}/ws", get(terminal::attach));
     if listener == Listener::Local {

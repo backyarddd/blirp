@@ -41,7 +41,7 @@ async fn shutdown(State(s): State<SharedState>, _: Admin) -> ApiResult<StatusCod
     Ok(StatusCode::ACCEPTED)
 }
 
-async fn health(State(s): State<SharedState>, principal: Principal) -> Json<Health> {
+pub(super) async fn health(State(s): State<SharedState>, principal: Principal) -> Json<Health> {
     // The role changes at runtime (hub enable, pairing); the config is current.
     let role = s.config().sync.role;
     Json(Health {
@@ -52,6 +52,7 @@ async fn health(State(s): State<SharedState>, principal: Principal) -> Json<Heal
             ..s.machine.clone()
         },
         capabilities: principal.capabilities(),
+        keep_awake: s.keep_awake.held(),
     })
 }
 
@@ -139,7 +140,7 @@ async fn patch_settings(
 
 const AGENTS_TTL: Duration = Duration::from_secs(60);
 
-async fn agents(State(s): State<SharedState>) -> ApiResult<Json<Vec<AgentInfo>>> {
+pub(super) async fn agents(State(s): State<SharedState>) -> ApiResult<Json<Vec<AgentInfo>>> {
     {
         let cache = s
             .agents_cache

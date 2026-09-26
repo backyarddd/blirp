@@ -4,6 +4,7 @@
   import Command from '@lucide/svelte/icons/command';
   import Settings from '@lucide/svelte/icons/settings';
   import Search from '@lucide/svelte/icons/search';
+  import Coffee from '@lucide/svelte/icons/coffee';
   import { app } from '../app.svelte';
   import { nav } from '../router.svelte';
   import { href } from '../router';
@@ -18,6 +19,13 @@
         : null,
   );
   const inGrid = $derived(nav.route.name === 'grid');
+
+  // Machines holding a sleep-prevention assertion while their sessions run (sessions.keep_awake).
+  const awake = $derived(
+    Object.entries(app.awake)
+      .filter(([, on]) => on)
+      .map(([id]) => app.machineName(id)),
+  );
 
   const connLabel = $derived.by(() => {
     const where = app.health ? `${app.health.machine.name} (${app.health.role})` : 'daemon';
@@ -67,6 +75,12 @@
   >
     <LayoutGrid size={18} />
   </a>
+  {#if awake.length > 0}
+    {@const text = `Keeping ${awake.join(' and ')} awake`}
+    <span class="awake" role="status" aria-label={text} title="{text} while sessions run" data-testid="keep-awake">
+      <Coffee size={14} aria-hidden="true" /><span class="hide-sm" aria-hidden="true">{text}</span>
+    </span>
+  {/if}
   <span class="conn {app.conn}" role="img" aria-label={connLabel} title={connLabel}>
     <span class="dot" aria-hidden="true"></span>
     <span class="conn-text hide-sm">{app.health?.machine.name ?? ''}</span>
@@ -90,6 +104,19 @@
 </header>
 
 <style>
+  .awake {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    height: 26px;
+    padding: 0 10px;
+    border-radius: 999px;
+    font-size: 12px;
+    font-weight: 600;
+    color: var(--accent);
+    background: var(--accent-soft);
+    white-space: nowrap;
+  }
   .topbar {
     height: var(--topbar-h);
     display: flex;

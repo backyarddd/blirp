@@ -173,6 +173,15 @@ test('types into the terminal and sees the output', async () => {
   await runInTerminal(sessionId, isWindows ? "Write-Output ('e2e-' + (6*7))" : 'echo e2e-$((6*7))', 'e2e-42');
 });
 
+test('reopening the app restores the open session, reattached, and shows keep-awake', async () => {
+  await page.goto(`${env.url}/`);
+  await expect(page).toHaveURL(`${env.url}/sessions/${sessionId}`);
+  await expect(page.getByTestId('keep-awake')).toBeVisible();
+  // The snapshot of the reattached pane still holds the earlier output.
+  expect((await snapshot(sessionId)).data).toContain('e2e-42');
+  await runInTerminal(sessionId, isWindows ? "Write-Output ('back-' + (6*7))" : 'echo back-$((6*7))', 'back-42');
+});
+
 test('resizing the pane resizes the PTY', async () => {
   const before = await snapshot(sessionId);
   // Narrow enough that the sidebar becomes a drawer and the terminal loses width and height.
@@ -218,6 +227,10 @@ test('stops the session and shows the exit state in the pane', async () => {
   // A reload lands on the detail view directly, since the terminal is gone.
   await page.reload();
   await expect(page.getByRole('heading', { name: 'Transcript' })).toBeVisible();
+  // No live session left: the machine may sleep again (the daemon lets go within a tick).
+  await expect.poll(async () => (await apiCall<{ keep_awake: boolean }>('GET', '/api/health')).keep_awake).toBe(false);
+  await page.reload();
+  await expect(page.getByTestId('keep-awake')).toHaveCount(0);
 });
 
 test('records CRUD', async () => {
@@ -665,6 +678,31 @@ test('memory injection toggle and per-agent opt-out persist; summarizer state sh
   await shellBox().check();
   await page.getByRole('button', { name: 'Save' }).click();
   await expect.poll(memoryConfig).toEqual(expect.objectContaining({ inject: true, inject_disabled_agents: [] }));
+});
+
+test('new session folder picker lists folders only, hidden ones on request', async () => {
+  await page.goto(`${env.url}/sessions`);
+  await page.getByRole('button', { name: 'New session' }).first().click();
+  const dialog = page.getByRole('dialog', { name: 'New session' });
+  await dialog.getByRole('radio', { name: 'Folder path' }).click();
+  await dialog.getByRole('button', { name: 'Browse…' }).click();
+  const list = dialog.getByRole('list', { name: /^Folders on / });
+  await expect(list.getByRole('button', { name: 'code' })).toBeVisible();
+  await expect(list.getByRole('button', { name: '.claude' })).toHaveCount(0);
+  await dialog.getByRole('checkbox', { name: 'Hidden' }).check();
+  await expect(list.getByRole('button', { name: '.claude' })).toBeVisible();
+  await list.getByRole('button', { name: 'code' }).click();
+  await expect(list.getByRole('button', { name: 'demo-repo' })).toBeVisible();
+  await list.getByRole('button', { name: 'demo-repo' }).click();
+  await dialog.getByRole('button', { name: 'Use this folder' }).click();
+  await expect(dialog.getByLabel('Folder', { exact: true })).toHaveValue(/demo-repo$/);
+  // Outside the home folder nothing is listed.
+  const me = await apiCall<{ machine: { id: string } }>('GET', '/api/health');
+  const outside = await page.request.get(`${env.url}/api/machines/${me.machine.id}/dirs?path=${encodeURIComponent(env.root)}`, {
+    headers: AUTH,
+  });
+  expect(outside.status()).toBe(403);
+  await dialog.getByRole('button', { name: 'Cancel' }).click();
 });
 
 test('no CSP violations or unexpected console errors', async () => {

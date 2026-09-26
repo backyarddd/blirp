@@ -6,6 +6,7 @@
   import StatusChip from '../lib/components/StatusChip.svelte';
   import Loadable from '../lib/components/Loadable.svelte';
   import Terminal from '../lib/terminal/Terminal.svelte';
+  import MachineBadge from '../lib/components/MachineBadge.svelte';
 
   // Browsers cap live WebGL contexts (~16); beyond a handful of tiles use the DOM renderer.
   const WEBGL_TILE_LIMIT = 6;
@@ -30,6 +31,7 @@
             <a class="name ellipsis" href={href.sessions(s.id)}>{sessionTitle(s)}</a>
             <span class="faint small ellipsis hide-sm">{app.projectById.get(s.project_id)?.name ?? ''} · {agentLabel(s.agent)}</span>
             <span class="spacer"></span>
+            <MachineBadge machineId={s.machine_id} />
             <StatusChip session={s} />
             <a class="icon-btn sm" href={href.sessions(s.id)} aria-label="Open {sessionTitle(s)}" title="Open session"><Maximize size={14} /></a>
           </header>

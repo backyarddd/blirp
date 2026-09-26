@@ -33,6 +33,8 @@ export type IntegrationState = "installed" | "not_installed" | "unsupported";
 
 export type InjectMode = "hook" | "instructions" | "flag" | "none";
 
+export type CloneState = "running" | "done" | "failed";
+
 export type Machine = { id: string, name: string, os: string, role: MachineRole, last_seen: number, revoked: boolean, };
 
 export type Project = { id: string, name: string, created_at: number, updated_at: number, deleted: boolean, };
@@ -132,7 +134,12 @@ export type Health = { version: string, machine: Machine, role: MachineRole,
 /**
  * What the calling client may do here.
  */
-capabilities: Capabilities, };
+capabilities: Capabilities, 
+/**
+ * This machine is holding a sleep-prevention assertion because sessions
+ * are live (`sessions.keep_awake`).
+ */
+keep_awake: boolean, };
 
 /**
  * `GET /api/update`: whether a newer release than the daemon exists.
@@ -397,7 +404,13 @@ version: string | null,
 /**
  * Resume by the agent's own session id is supported.
  */
-can_resume: boolean, integration: AgentIntegration, };
+can_resume: boolean, integration: AgentIntegration, 
+/**
+ * Whether the agent is logged in for this machine's daemon, where that
+ * can be checked without a model call (claude: `claude auth status`);
+ * null when unknown.
+ */
+auth: AgentAuth | null, };
 
 /**
  * How blirp memory reaches an agent (§9).
@@ -419,6 +432,87 @@ inject: InjectMode,
  * Extra information, e.g. a manual step the agent requires.
  */
 detail: string | null, };
+
+/**
+ * Login state of an agent CLI as seen by the daemon's own process (on
+ * macOS a daemon started over SSH cannot read the login keychain, so it
+ * may differ from a terminal on the same machine).
+ */
+export type AgentAuth = { logged_in: boolean, 
+/**
+ * How it is logged in, as the agent reports it (e.g. `claude.ai`, `api_key`).
+ */
+method: string | null, };
+
+/**
+ * `GET /api/machines/:id/dirs`: folders on a machine, for picking where a
+ * session runs. Only directories are listed, never file names or contents,
+ * and only inside that machine's user home.
+ */
+export type MachineDirs = { machine_id: string, 
+/**
+ * Absolute home folder the listing is confined to.
+ */
+home: string, 
+/**
+ * Absolute path of the listed folder.
+ */
+path: string, 
+/**
+ * Absolute parent folder, null at the home folder.
+ */
+parent: string | null, entries: Array<MachineDir>, 
+/**
+ * More folders exist than were returned.
+ */
+truncated: boolean, };
+
+export type MachineDir = { name: string, 
+/**
+ * Absolute path on that machine.
+ */
+path: string, 
+/**
+ * Contains a `.git` entry.
+ */
+is_git: boolean, };
+
+/**
+ * `POST /api/machines/:id/clone`: clone a git repository on a machine.
+ * Give `url`, or `project_id` to use the remote of that project's git folder
+ * on the machine receiving the request (credentials in it are removed).
+ */
+export type CloneRepo = { url?: string, project_id?: string, 
+/**
+ * Absolute folder inside the target's home to clone into; default `~/blirp`.
+ */
+parent?: string, 
+/**
+ * Folder name; default the repository name.
+ */
+name?: string, };
+
+/**
+ * A clone started by `POST /api/machines/:id/clone`; poll
+ * `GET /api/machines/:id/clone/:job` until it is no longer `running`.
+ */
+export type CloneJob = { id: string, machine_id: string, 
+/**
+ * The URL cloned, without credentials.
+ */
+url: string, 
+/**
+ * Absolute destination folder on that machine.
+ */
+dest: string, state: CloneState, 
+/**
+ * Last progress line from git.
+ */
+progress: string | null, 
+/**
+ * git's error output when it failed.
+ */
+error: string | null, started_at: number, finished_at: number | null, };
 
 /**
  * `GET /api/inject`: the rendered memory injection.
@@ -673,7 +767,12 @@ default: string, custom: Array<CustomAgent>, };
 
 export type CustomAgent = { name: string, command: string, args: Array<string>, };
 
-export type SessionsConfig = { worktree_default: boolean, };
+export type SessionsConfig = { worktree_default: boolean, 
+/**
+ * Keep this machine from sleeping while any session it runs is live.
+ * Unset: on for the hub role (cloud sessions), off otherwise.
+ */
+keep_awake?: boolean, };
 
 export type Summarizer = "auto" | "claude" | "codex" | "ollama" | "none";
 

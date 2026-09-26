@@ -6,6 +6,7 @@
   import { agentLabel, basename, sessionTitle } from '../status';
   import { formatRelative } from '../time';
   import StatusChip from './StatusChip.svelte';
+  import MachineBadge from './MachineBadge.svelte';
 
   let { session }: { session: Session } = $props();
 </script>
@@ -20,6 +21,7 @@
       </span>
       <span>{formatRelative(session.started_at)}</span>
       {#if session.origin === 'external'}<span class="badge">external</span>{/if}
+      <MachineBadge machineId={session.machine_id} />
     </span>
   </span>
   <StatusChip {session} />

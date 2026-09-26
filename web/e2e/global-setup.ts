@@ -48,7 +48,13 @@ export default async function globalSetup(): Promise<() => Promise<void>> {
   mkdirSync(join(userHome, '.claude', 'projects'), { recursive: true });
   // No summarizer (manual distill records a clear failure) and no relay traffic when the
   // suite turns this machine into a hub.
-  writeFileSync(join(home, 'config.toml'), '[memory]\nsummarizer = "none"\n\n[sync]\nrelay = "disabled"\n');
+  // keep_awake: live sessions hold a sleep-prevention assertion, shown in the top bar.
+  writeFileSync(
+    join(home, 'config.toml'),
+    '[sessions]\nkeep_awake = true\n\n[memory]\nsummarizer = "none"\n\n[sync]\nrelay = "disabled"\n',
+  );
+  // Folders the new-session folder picker lists in the (temp) user home.
+  mkdirSync(join(userHome, 'code', 'demo-repo', '.git'), { recursive: true });
   mkdirSync(join(plain, 'sub'), { recursive: true });
   writeFileSync(join(plain, 'notes.txt'), 'hello from a plain folder\nsecond line\n');
   writeFileSync(join(plain, 'sub', 'inner.txt'), 'nested\n');

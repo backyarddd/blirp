@@ -57,14 +57,18 @@ CSRF protection: a mutating request or WebSocket upgrade that carries an `Origin
 
 | Method and path | Description |
 |---|---|
-| `GET /api/health` | `{version, machine: Machine, role}` |
+| `GET /api/health` | `{version, machine: Machine, role, capabilities, keep_awake}`; `keep_awake`: this machine holds a sleep assertion because sessions run (`sessions.keep_awake`) |
 | `GET /api/update` | `UpdateStatus {current, latest, available, notes_url, enabled}`: whether a newer published release exists. `latest` is null when `[update] check` is off (`enabled: false`) or GitHub could not be reached. The daemon asks GitHub at most once a day (hourly after a failure). |
 | `GET /api/machines` | `Machine[]`: `{id, name, os, role, last_seen, revoked}` of this and paired machines |
 | `DELETE /api/machines/:id` | admin. On the hub: revoke that machine (204). On a node, with the hub's id: leave the hub. |
+| `GET /api/machines/:id/health`, `GET /api/machines/:id/agents` | that machine's `/api/health` and `/api/agents`: answered here for this machine's id, else relayed through the hub (`machine_unreachable` when it is offline) |
+| `GET /api/machines/:id/dirs?path=&hidden=` | control. `MachineDirs {machine_id, home, path, parent, entries: [{name, path, is_git}], truncated}`: the folders (never files) in `path` (absolute, default the home folder) on that machine, relayed like above. Only inside that machine's user home (403 `path_outside_home`; symlinked folders are not listed); hidden folders only with `hidden=true`; at most 2 000 entries. |
+| `POST /api/machines/:id/clone` | control. `{url?, project_id?, parent?, name?}`: `git clone` on that machine into `<parent or ~/blirp>/<name or repo name>` (parent must be inside its home; 409 `already_exists`). `project_id` is resolved on the machine receiving the request to the remote URL of that project's git folder there (400 `no_git_remote`). URLs must be `https`, `http`, `ssh`, `git` or `user@host:path`; credentials in them are removed before the URL is forwarded or used. The clone runs in the background with the target user's git credentials, never prompting (`GIT_TERMINAL_PROMPT=0`, ssh `BatchMode`); 202 `CloneJob {id, machine_id, url, dest, state (running\|done\|failed), progress, error, started_at, finished_at}` |
+| `GET /api/machines/:id/clone/:job` | the `CloneJob`, relayed like above; poll until `state` is not `running` |
 | `GET /api/search?q=&project=&kind=&limit=` | full-text search; `kind` = `record` or `event`; `limit` default 50. `{hits: SearchHit[]}` with `kind, project_id, session_id, seq, record_id, title, agent, snippet, ts, score` |
 | `GET /api/settings` | `{config: Config, values: {key: json}}`: `config.toml` plus local settings values |
 | `PATCH /api/settings` | `{config?: Config, values?: {key: json \| null}}`. A full `Config` is validated (400 with the message) and written to `config.toml`; `null` deletes a value. Returns the new `SettingsView`. |
-| `GET /api/agents` | `AgentInfo[]`: `{id, display_name, builtin, installed, path, version, can_resume, integration: {global_hooks, mcp, inject, detail}}`; `global_hooks`/`mcp` are `installed`, `not_installed` or `unsupported`, `inject` is `hook`, `instructions`, `flag` or `none`. Cached 60 s. |
+| `GET /api/agents` | `AgentInfo[]`: `{id, display_name, builtin, installed, path, version, can_resume, integration: {global_hooks, mcp, inject, detail}, auth}`; `auth` is `{logged_in, method}` for Claude Code (from `claude auth status`, run by the daemon, no model call) and null otherwise; `global_hooks`/`mcp` are `installed`, `not_installed` or `unsupported`, `inject` is `hook`, `instructions`, `flag` or `none`. Cached 60 s. |
 | `POST /api/agents/:id/hooks/install`, `.../uninstall` | admin. Global integration for that agent; returns its `AgentInfo`; 422 when the agent is unsupported or a config file cannot be edited. |
 | `POST /api/daemon/shutdown` | admin, local listener only (404 on the portal and proxy). Graceful stop; 202. |
 
@@ -157,7 +161,7 @@ Attach to a live terminal (`:id` is the session id). Browsers authenticate the u
 Server to client:
 
 - **Text** frames, JSON:
-  - `{"type":"snapshot","cols":N,"rows":N,"data":"..."}`: reset your terminal and write `data`. It starts with `ESC c`, replays scrollback, redraws the screen and restores modes, cursor and title. Sent first, and again whenever the client fell behind.
+  - `{"type":"snapshot","cols":N,"rows":N,"data":"..."}`: reset your terminal and write `data`. It starts with `ESC c`, replays the scrollback (up to 10 000 lines, the newest 16 MiB of it), redraws the screen and restores modes, cursor and title. Sent first, and again whenever the client fell behind. Relayed snapshots can be large; accept text frames up to 64 MiB.
   - `{"type":"resize","cols":N,"rows":N}`: another client resized the terminal (last resize wins).
   - `{"type":"exit","status":"completed","exit_code":0}`: the process ended; the socket closes.
 - **Binary** frames: raw PTY output bytes. A frame can end in the middle of a UTF-8 sequence; feed bytes to the terminal, do not decode per frame.

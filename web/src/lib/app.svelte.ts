@@ -4,6 +4,7 @@ import type {
   AgentInfo,
   Health,
   LaunchSession,
+  Machine,
   ProjectSummary,
   ServerEvent,
   Session,
@@ -17,6 +18,7 @@ import { readPref, writePref } from './prefs';
 import { NONE_DENIED, denyFor, rightsFrom, type Denied } from './capabilities';
 import { nav, navigate } from './router.svelte';
 import { href } from './router';
+import { readOpenSessions, remoteMachine, sessionToRestore, type RemoteMachine } from './machines';
 
 export type AuthState = 'checking' | 'ok' | 'unauthorized' | 'offline';
 export type ConnState = 'connecting' | 'open' | 'reconnecting';
@@ -28,6 +30,8 @@ export interface Toast {
 }
 
 const SIDEBAR_LIMIT = 200;
+/** How often machines are asked whether they keep themselves awake for live sessions. */
+const AWAKE_POLL_MS = 30_000;
 const MEMORY_PANEL_PREF = readPref('blirp.memoryPanel', ['open', 'closed', 'unset'], 'unset');
 
 const byStartedDesc = (a: Session, b: Session): number => b.started_at - a.started_at;
@@ -71,6 +75,11 @@ class AppState {
 
   /** Pushed by `sync_updated`; null until loaded. */
   sync: SyncStatus | null = $state.raw(null);
+  /** Paired machines (replicated); empty when this machine is standalone. */
+  machines: Machine[] = $state.raw([]);
+  machineById: Map<string, Machine> = $derived(new Map(this.machines.map((m) => [m.id, m])));
+  /** Machines currently holding a sleep-prevention assertion for live sessions, by id. */
+  awake: Record<string, boolean> = $state({});
   /** Bumped on every sync status change so views refetch machines and devices. */
   syncTick = $state(0);
   /** 403s seen since capabilities were last read (fallback for stale capabilities). */
@@ -111,6 +120,8 @@ class AppState {
   /** Bumped by stopStream so a connect still waiting for its ticket gives up. */
   #gen = 0;
   #toastId = 0;
+  #awakeTimer: ReturnType<typeof setInterval> | undefined;
+  #awakeSoonTimer: ReturnType<typeof setTimeout> | undefined;
 
   async boot(): Promise<void> {
     onUnauthorized(() => {
@@ -130,6 +141,71 @@ class AppState {
     this.auth = 'ok';
     this.startStream();
     await Promise.all([this.refreshProjects(), this.refreshSessions(), this.refreshAgents(), this.refreshSync()]);
+    this.#restoreOpenSession();
+    void this.refreshAwake();
+    clearInterval(this.#awakeTimer);
+    this.#awakeTimer = setInterval(() => void this.refreshAwake(), AWAKE_POLL_MS);
+  }
+
+  /** Opening the app without a session in the URL shows the one this client had open last. */
+  #restoreOpenSession(): void {
+    if (nav.route.name !== 'sessions' || nav.route.sessionId !== null) return;
+    const id = sessionToRestore(readOpenSessions(), this.sessionById);
+    if (id) navigate(href.sessions(id), { replace: true });
+  }
+
+  get selfId(): string | null {
+    return this.health?.machine.id ?? null;
+  }
+
+  /** The hub's id when this machine is a node paired with it (cloud sessions run there). */
+  get cloudId(): string | null {
+    const hub = this.sync?.role === 'node' ? this.sync.hub : null;
+    return hub && hub !== this.selfId ? hub : null;
+  }
+
+  /** Badge data for the machine a session runs on; null for this machine. */
+  remote(machineId: string): RemoteMachine | null {
+    return remoteMachine(machineId, this.selfId, this.machineById, this.sync?.hub ?? null);
+  }
+
+  machineName(id: string): string {
+    return id === this.selfId ? (this.health?.machine.name ?? 'this machine') : (this.remote(id)?.name ?? id);
+  }
+
+  async refreshMachines(): Promise<void> {
+    if ((this.sync?.role ?? this.health?.role ?? 'standalone') === 'standalone') {
+      this.machines = [];
+      return;
+    }
+    try {
+      this.machines = (await api.machines.list()).filter((m) => !m.revoked);
+    } catch (e) {
+      console.warn('blirp: machines unavailable', e);
+    }
+  }
+
+  #awakeSoon(): void {
+    clearTimeout(this.#awakeSoonTimer);
+    this.#awakeSoonTimer = setTimeout(() => void this.refreshAwake(), 1500);
+  }
+
+  /** Keep-awake state of this machine and, on a node, of the hub (relayed; it may be offline). */
+  async refreshAwake(): Promise<void> {
+    if (this.auth !== 'ok') return;
+    const ids = [this.selfId, this.cloudId].filter((x): x is string => x !== null);
+    const next: Record<string, boolean> = {};
+    await Promise.all(
+      ids.map(async (id) => {
+        try {
+          const h = id === this.selfId ? await api.health() : await api.machines.health(id);
+          next[id] = h.keep_awake;
+        } catch {
+          next[id] = false; // offline or unreachable: nothing to show
+        }
+      }),
+    );
+    this.awake = next;
   }
 
   async refreshSync(): Promise<void> {
@@ -143,6 +219,7 @@ class AppState {
   setSync(status: SyncStatus): void {
     this.sync = status;
     this.syncTick++;
+    void this.refreshMachines();
     // Health carries the role shown in the top bar and used by the machine picker.
     if (this.health && this.health.role !== status.role) void this.refreshHealth();
   }
@@ -193,6 +270,8 @@ class AppState {
 
   upsertSession(s: Session): void {
     const prev = this.sessionById.get(s.id);
+    // A session started or ended somewhere: keep-awake follows within a status tick.
+    if (!prev || hasTerminal(prev) !== hasTerminal(s)) this.#awakeSoon();
     this.sessions = prev
       ? this.sessions.map((x) => (x.id === s.id ? s : x))
       : [s, ...this.sessions].sort(byStartedDesc);
@@ -372,6 +451,7 @@ class AppState {
   }
 
   stopStream(): void {
+    clearInterval(this.#awakeTimer);
     this.#stopped = true;
     this.#gen++;
     clearTimeout(this.#timer);
