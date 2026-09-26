@@ -57,12 +57,13 @@ fn read_token() -> anyhow::Result<String> {
     let stdin = std::io::stdin();
     let mut input = String::new();
     if stdin.is_terminal() {
-        eprint!(
-            "Paste the token printed by `claude setup-token` (input is hidden), then press Enter: "
-        );
-        std::io::stderr().flush()?;
         {
+            // Echo goes off before the prompt, so nothing pasted early is shown.
             let _hidden = HiddenInput::start().context("turning off terminal echo")?;
+            eprint!(
+                "Paste the token printed by `claude setup-token` (input is hidden), then press Enter: "
+            );
+            std::io::stderr().flush()?;
             stdin.lock().read_line(&mut input)?;
         }
         eprintln!();
