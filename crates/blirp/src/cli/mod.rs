@@ -455,6 +455,10 @@ async fn doctor(paths: &Paths) -> anyhow::Result<ExitCode> {
     );
 
     let config = cfg.unwrap_or_default();
+    println!(
+        "[info] LAN discovery: {}",
+        lan_discovery_line(&config, paths)
+    );
     let agents = tokio::task::spawn_blocking(move || crate::agents::detect_all(&config)).await?;
     let found: Vec<String> = agents
         .iter()
@@ -499,6 +503,29 @@ async fn doctor(paths: &Paths) -> anyhow::Result<ExitCode> {
     } else {
         ExitCode::SUCCESS
     })
+}
+
+/// LAN discovery (mDNS) state for `blirp doctor`, with what the running
+/// daemon's log says about sending it.
+fn lan_discovery_line(config: &blirp_core::config::Config, paths: &Paths) -> String {
+    use blirp_core::model::MachineRole;
+    if !config.sync.lan_discovery {
+        return "off (sync.lan_discovery = false); pairing needs the hub's invite".into();
+    }
+    let mut line = match config.sync.role {
+        MachineRole::Standalone => "on; used once this machine is a hub or paired".to_string(),
+        _ => "on".to_string(),
+    };
+    if let Some(failure) = lifecycle::mdns_send_failure(paths) {
+        line.push_str(&format!("; the daemon cannot send mDNS ({failure})"));
+    }
+    if cfg!(target_os = "macos") {
+        line.push_str(
+            "; macOS: needs the Local Network permission (System Settings > Privacy & Security > \
+             Local Network), see docs/troubleshooting.md",
+        );
+    }
+    line
 }
 
 /// `root <path>, <n> sources, last ingest <time>` for `blirp doctor`.

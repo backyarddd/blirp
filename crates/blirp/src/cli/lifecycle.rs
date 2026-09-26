@@ -1,4 +1,4 @@
-//! `blirp stop` and `blirp logs` (§4).
+//! `blirp stop`, `blirp logs` (§4) and what `blirp doctor` reads from the log.
 
 use anyhow::{Context as _, bail};
 use blirp_core::paths::{Paths, RuntimeInfo};
@@ -179,6 +179,23 @@ fn tail(path: &Path, n: usize) -> anyhow::Result<(String, u64)> {
     Ok((out, start + buf.len() as u64))
 }
 
+/// The first mDNS send failure the daemon logged since it last started, from
+/// the end of the current log (`swarm_discovery`: "error sending mDNS...").
+/// macOS reports "No route to host" there when blirp lacks the Local Network
+/// permission.
+pub(super) fn mdns_send_failure(paths: &Paths) -> Option<String> {
+    let (text, _) = tail(&current_log(&paths.logs_dir())?, 20_000).ok()?;
+    mdns_failure_since_start(&text).map(str::to_string)
+}
+
+fn mdns_failure_since_start(log: &str) -> Option<&str> {
+    const START: &str = "blirp daemon listening";
+    const FAILURE: &str = "error sending mDNS";
+    let run = log.rfind(START).map_or(log, |i| &log[i..]);
+    run.lines()
+        .find_map(|l| l.find(FAILURE).map(|i| l[i..].trim_end()))
+}
+
 /// `blirp logs [-n N] [-f]`: the end of the current daemon log; `-f`
 /// keeps printing new lines and follows the daily rotation.
 pub fn logs(paths: &Paths, lines: usize, follow: bool) -> anyhow::Result<ExitCode> {
@@ -245,6 +262,25 @@ mod tests {
         let (text, end) = tail(&today, 2).unwrap();
         assert_eq!(text, "b\nc\n");
         assert_eq!(end, 6);
+    }
+
+    #[test]
+    fn finds_mdns_failures_of_the_current_run_only() {
+        let old = "T  WARN swarm_discovery::socket: error sending mDNS: No route to host\n";
+        let start = "T  INFO blirp::daemon: blirp daemon listening on 127.0.0.1 port=47770\n";
+        let fail = "T ERROR swarm_discovery::socket: error sending mDNS on interface 192.0.2.14: \
+                    No route to host (os error 65)\n";
+        assert_eq!(mdns_failure_since_start(""), None);
+        assert_eq!(mdns_failure_since_start(&format!("{old}{start}")), None);
+        assert_eq!(
+            mdns_failure_since_start(&format!("{old}{start}{fail}")),
+            Some("error sending mDNS on interface 192.0.2.14: No route to host (os error 65)")
+        );
+        // A log cut before the daemon's start line still counts.
+        assert_eq!(
+            mdns_failure_since_start(old),
+            Some("error sending mDNS: No route to host")
+        );
     }
 
     #[test]

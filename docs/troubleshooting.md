@@ -140,6 +140,13 @@ The daemon, not your shell, looks the agent up on its own `PATH`.
 - If `~/.blirp/identity.key` was deleted or replaced, the machine has a new identity: the hub no longer knows it. Leave and pair again.
 - Keep hub and nodes on the same blirp version (`unsupported_version` in the log otherwise).
 
+## `error sending mDNS: No route to host` in the log (macOS)
+
+Hubs and nodes announce and find each other on the local network with mDNS (`sync.lan_discovery`, on by default). macOS allows that, and direct connections to other machines on the LAN, only for programs that have the Local Network permission; without it every send fails with "No route to host". The daemon logs the first failure, then one line every 10 minutes with the number of repeats, and `blirp doctor` reports it on its `LAN discovery` line.
+
+- **Allow it:** System Settings > Privacy & Security > Local Network, turn blirp on (a daemon started from a terminal is listed as that terminal app), then restart the daemon. macOS asks the first time a program uses the local network; if blirp is not listed, start the daemon from a session at the Mac (`blirp`, or `blirp service install` in Terminal) instead of over SSH so the question can appear.
+- **Or turn discovery off:** `[sync] lan_discovery = false` in `config.toml`, or uncheck **Find machines on the local network** in **Settings > Machines & Sync**. Sync and cloud sessions keep working; traffic between machines takes the relay, and `blirp pair` needs the invite. Keep `sync.relay` on `default` or your own relay then: without the permission a Mac cannot connect directly to machines on its LAN.
+
 ## Portal certificate warnings
 
 The LAN portal uses a self-signed certificate, so every browser warns once per device. Compare the SHA-256 fingerprint in the browser's certificate details with **Settings > Portal** (or `blirp hub status`); if they match, proceed. If the hub's LAN IP changed since the certificate was made, delete `~/.blirp/tls/` and restart the daemon. To avoid warnings, use `tailscale serve` ([portal.md](portal.md#tailscale)).

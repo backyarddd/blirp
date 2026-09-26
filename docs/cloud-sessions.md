@@ -94,4 +94,4 @@ Check `pmset -g assertions` while a session runs: a "caffeinate command-line too
 
 ### `error sending mDNS: No route to host` in the log (macOS)
 
-macOS has not granted blirp Local Network access (System Settings > Privacy & Security > Local Network). Sync and cloud sessions still work over direct addresses and the relay; only `blirp pair <code>` without an invite needs local discovery.
+macOS has not granted blirp Local Network access (System Settings > Privacy & Security > Local Network). Sync and cloud sessions still work over the relay; only `blirp pair <code>` without an invite needs local discovery. Allow the access, or set `[sync] lan_discovery = false`; see [troubleshooting.md](troubleshooting.md#error-sending-mdns-no-route-to-host-in-the-log-macos).
