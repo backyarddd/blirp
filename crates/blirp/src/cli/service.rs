@@ -270,9 +270,15 @@ fn uninstall_message(r: Removed) -> &'static str {
     }
 }
 
-fn uninstall() -> anyhow::Result<ExitCode> {
+pub(crate) fn uninstall() -> anyhow::Result<ExitCode> {
     println!("{}", uninstall_message(platform::uninstall()?));
     Ok(ExitCode::SUCCESS)
+}
+
+/// Start the daemon through the autostart service, if one is installed
+/// (`blirp update` restarting a stopped daemon). False when there is none.
+pub(crate) fn start_managed() -> anyhow::Result<bool> {
+    platform::start_managed()
 }
 
 async fn status(paths: &Paths) -> anyhow::Result<ExitCode> {
@@ -376,6 +382,17 @@ mod platform {
         })
     }
 
+    pub fn start_managed() -> anyhow::Result<bool> {
+        if !loaded()? {
+            return Ok(false);
+        }
+        must(
+            "launchctl",
+            &["kickstart", &format!("{}/{LAUNCHD_LABEL}", domain())],
+        )?;
+        Ok(true)
+    }
+
     pub fn status() -> anyhow::Result<Option<String>> {
         let plist = plist_path()?;
         if !plist.exists() {
@@ -464,6 +481,22 @@ mod platform {
         Ok(Removed::DaemonKept)
     }
 
+    pub fn start_managed() -> anyhow::Result<bool> {
+        if !unit_path()?.exists() {
+            return Ok(false);
+        }
+        let enabled = tool(
+            "systemctl",
+            &["--user", "is-enabled", "--quiet", SYSTEMD_UNIT],
+        )
+        .is_ok_and(|(ok, _)| ok);
+        if !enabled {
+            return Ok(false);
+        }
+        systemctl(&["start", SYSTEMD_UNIT])?;
+        Ok(true)
+    }
+
     pub fn status() -> anyhow::Result<Option<String>> {
         let unit = unit_path()?;
         if !unit.exists() {
@@ -541,6 +574,11 @@ mod platform {
         }
         must(&reg(), &["delete", RUN_KEY, "/v", RUN_VALUE, "/f"])?;
         Ok(Removed::DaemonKept)
+    }
+
+    /// The Run entry only acts at login; the caller starts the daemon.
+    pub fn start_managed() -> anyhow::Result<bool> {
+        Ok(false)
     }
 
     pub fn status() -> anyhow::Result<Option<String>> {

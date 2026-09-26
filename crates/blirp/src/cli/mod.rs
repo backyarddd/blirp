@@ -1,5 +1,6 @@
 //! Command line (§4).
 
+mod install;
 mod lifecycle;
 mod mem;
 pub mod service;
@@ -17,11 +18,13 @@ use std::time::Duration;
 #[command(
     name = "blirp",
     version,
-    about = "Workspace and memory for CLI coding agents"
+    about = "Workspace and memory for CLI coding agents",
+    long_about = "Workspace and memory for CLI coding agents.\n\nWithout a command, blirp \
+                  starts the daemon and opens the desktop app (or the browser UI)."
 )]
 struct Cli {
     #[command(subcommand)]
-    command: Command,
+    command: Option<Command>,
 }
 
 #[derive(Subcommand)]
@@ -103,6 +106,28 @@ enum Command {
         #[command(subcommand)]
         cmd: service::ServiceCommand,
     },
+    /// Start the daemon and open the desktop app, or the browser UI when the
+    /// app is not installed (same as `blirp` without a command).
+    App,
+    /// Update blirp (and the desktop app installed with it) to the latest release.
+    Update {
+        /// Only check: exit 0 when up to date, 10 when an update is available.
+        #[arg(long)]
+        check: bool,
+        /// Install this version instead of the latest (allows downgrades).
+        #[arg(long, value_name = "X.Y.Z")]
+        version: Option<String>,
+    },
+    /// Remove blirp: stops the daemon, removes autostart, agent hooks and the
+    /// installed files. Your data in ~/.blirp stays unless --purge.
+    Uninstall {
+        /// Also delete the data folder (memory, sessions, settings).
+        #[arg(long)]
+        purge: bool,
+        /// Do not ask for confirmation.
+        #[arg(long)]
+        yes: bool,
+    },
 }
 
 pub fn main() -> ExitCode {
@@ -110,15 +135,21 @@ pub fn main() -> ExitCode {
     let cli = Cli::parse();
     // Hooks must stay fast and always succeed: no runtime, no logging, no
     // failure exit even without a home directory.
-    if let Command::Hook {
+    if let Some(Command::Hook {
         agent,
         event,
         global,
-    } = &cli.command
+    }) = &cli.command
     {
         crate::hooks::main(agent, event, *global);
         return ExitCode::SUCCESS;
     }
+    // Executables an update renamed aside because they were running.
+    #[cfg(windows)]
+    if let Some(dir) = crate::memory::blirp_exe().parent() {
+        crate::update::install::cleanup_old(dir);
+    }
+    let command = cli.command.unwrap_or(Command::App);
     let paths = match Paths::resolve() {
         Ok(p) => p,
         Err(e) => {
@@ -126,7 +157,7 @@ pub fn main() -> ExitCode {
             return ExitCode::FAILURE;
         }
     };
-    match cli.command {
+    match command {
         Command::Mem(cmd) => report(mem::run_mem(&paths, cmd)),
         Command::Logs { lines, follow } => report(lifecycle::logs(&paths, lines, follow)),
         Command::Worktrees(worktrees::WorktreesCommand::List) => report(worktrees::list(&paths)),
@@ -202,6 +233,9 @@ async fn run(cmd: Command, paths: Paths) -> anyhow::Result<ExitCode> {
         Command::Devices { action } => sync::devices(&Client::connect(&paths).await?, action).await,
         Command::Service { cmd } => service::run(&cmd, &paths).await,
         Command::Worktrees(worktrees::WorktreesCommand::Prune) => worktrees::prune(&paths).await,
+        Command::App => install::launch(&paths).await,
+        Command::Update { check, version } => install::update(&paths, check, version).await,
+        Command::Uninstall { purge, yes } => install::uninstall(&paths, purge, yes).await,
         // Dispatched synchronously in `main` before the runtime starts.
         Command::Hook { .. }
         | Command::Mem(_)
