@@ -1,12 +1,32 @@
 // Terminal attach framing (ARCHITECTURE §6), isolated here so a framing change is one file.
-// Server -> client: first a JSON text frame {"type":"snapshot","data":"..."}, then binary
-// frames of raw PTY output. Client -> server: binary frames of input bytes and JSON text
-// {"type":"resize","cols":N,"rows":N}.
+// Server -> client: JSON text frames `TerminalServerMessage` (`snapshot` first and again
+// whenever this client fell behind, `resize` when any client resized, `exit` right before the
+// socket closes) and binary frames of raw PTY output. Client -> server: binary frames of raw
+// input bytes and JSON text `{"type":"resize","cols":N,"rows":N}` (1-1000 each).
+//
+// Close codes: the daemon never sends a custom close code. It closes without a status (1005)
+// after `exit` or on daemon shutdown, and a refused upgrade (404 `terminal_not_found`, 401)
+// surfaces as 1006. So the `exit` frame, not the close code, says the process ended.
+import type { SessionStatus, TerminalClientMessage, TerminalServerMessage } from '../api/types.gen';
 
 export type ServerFrame =
-  | { type: 'snapshot'; data: string }
+  | TerminalServerMessage
   | { type: 'output'; data: Uint8Array }
   | { type: 'ignored'; reason: string };
+
+const STATUSES: ReadonlySet<string> = new Set<SessionStatus>([
+  'starting',
+  'working',
+  'idle',
+  'waiting',
+  'completed',
+  'failed',
+  'detached',
+]);
+
+const isSize = (n: unknown): n is number => typeof n === 'number' && Number.isInteger(n) && n >= 1 && n <= 1000;
+const isStatus = (s: unknown): s is SessionStatus => typeof s === 'string' && STATUSES.has(s);
+const isExitCode = (c: unknown): c is number | null => c === null || (typeof c === 'number' && Number.isInteger(c));
 
 export function decodeServerFrame(raw: string | ArrayBuffer | Uint8Array): ServerFrame {
   if (raw instanceof ArrayBuffer) return { type: 'output', data: new Uint8Array(raw) };
@@ -18,13 +38,25 @@ export function decodeServerFrame(raw: string | ArrayBuffer | Uint8Array): Serve
     return { type: 'ignored', reason: 'invalid JSON text frame' };
   }
   if (typeof parsed !== 'object' || parsed === null) return { type: 'ignored', reason: 'non-object frame' };
-  const { type, data } = parsed as { type?: unknown; data?: unknown };
-  if (type === 'snapshot' && typeof data === 'string') return { type: 'snapshot', data };
-  return { type: 'ignored', reason: `unknown frame type ${String(type)}` };
+  const f = parsed as { type?: unknown; cols?: unknown; rows?: unknown; data?: unknown; status?: unknown; exit_code?: unknown };
+  switch (f.type) {
+    case 'snapshot':
+      if (isSize(f.cols) && isSize(f.rows) && typeof f.data === 'string')
+        return { type: 'snapshot', cols: f.cols, rows: f.rows, data: f.data };
+      break;
+    case 'resize':
+      if (isSize(f.cols) && isSize(f.rows)) return { type: 'resize', cols: f.cols, rows: f.rows };
+      break;
+    case 'exit':
+      if (isStatus(f.status) && isExitCode(f.exit_code)) return { type: 'exit', status: f.status, exit_code: f.exit_code };
+      break;
+  }
+  return { type: 'ignored', reason: `malformed or unknown frame type ${String(f.type)}` };
 }
 
 const encoder = new TextEncoder();
 
+/** Keyboard/paste input, sent as a binary frame of UTF-8 bytes. */
 export function encodeInput(data: string): Uint8Array<ArrayBuffer> {
   return encoder.encode(data);
 }
@@ -37,23 +69,9 @@ export function encodeBinaryInput(data: string): Uint8Array<ArrayBuffer> {
 }
 
 export function encodeResize(cols: number, rows: number): string {
-  if (!Number.isInteger(cols) || !Number.isInteger(rows) || cols < 1 || rows < 1) {
-    throw new RangeError(`invalid terminal size ${cols}x${rows}`);
-  }
-  return JSON.stringify({ type: 'resize', cols, rows });
-}
-
-/**
- * Close codes after which reconnecting is pointless. 1000: the terminal ended normally.
- * 1008/4401/4403: not authorized (or no terminal control). 4404: no such terminal.
- */
-export type CloseKind = 'ended' | 'forbidden' | 'not_found' | 'retry';
-
-export function classifyClose(code: number): CloseKind {
-  if (code === 1000) return 'ended';
-  if (code === 1008 || code === 4401 || code === 4403) return 'forbidden';
-  if (code === 4404) return 'not_found';
-  return 'retry';
+  if (!isSize(cols) || !isSize(rows)) throw new RangeError(`invalid terminal size ${cols}x${rows}`);
+  const msg: TerminalClientMessage = { type: 'resize', cols, rows };
+  return JSON.stringify(msg);
 }
 
 /** Exponential backoff with equal jitter: a delay in [c/2, c] where c = min(max, base * 2^attempt). */

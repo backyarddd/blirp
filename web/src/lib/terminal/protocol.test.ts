@@ -1,9 +1,23 @@
 import { describe, expect, it } from 'vitest';
-import { backoffDelay, classifyClose, decodeServerFrame, encodeBinaryInput, encodeInput, encodeResize } from './protocol';
+import { backoffDelay, decodeServerFrame, encodeBinaryInput, encodeInput, encodeResize } from './protocol';
 
 describe('decodeServerFrame', () => {
-  it('decodes the snapshot text frame', () => {
-    expect(decodeServerFrame('{"type":"snapshot","data":"\\u001b[2J$ "}')).toEqual({ type: 'snapshot', data: '\u001b[2J$ ' });
+  it('decodes the snapshot text frame with its size', () => {
+    expect(decodeServerFrame('{"type":"snapshot","cols":120,"rows":40,"data":"\\u001bc$ "}')).toEqual({
+      type: 'snapshot',
+      cols: 120,
+      rows: 40,
+      data: '\u001bc$ ',
+    });
+  });
+  it('decodes resize and exit', () => {
+    expect(decodeServerFrame('{"type":"resize","cols":80,"rows":24}')).toEqual({ type: 'resize', cols: 80, rows: 24 });
+    expect(decodeServerFrame('{"type":"exit","status":"completed","exit_code":0}')).toEqual({
+      type: 'exit',
+      status: 'completed',
+      exit_code: 0,
+    });
+    expect(decodeServerFrame('{"type":"exit","status":"failed","exit_code":null}')).toMatchObject({ exit_code: null });
   });
   it('treats binary frames as output', () => {
     const buf = new Uint8Array([104, 105]).buffer;
@@ -12,10 +26,18 @@ describe('decodeServerFrame', () => {
     expect(f.type === 'output' && Array.from(f.data)).toEqual([104, 105]);
   });
   it('ignores malformed or unknown text frames', () => {
-    expect(decodeServerFrame('not json').type).toBe('ignored');
-    expect(decodeServerFrame('42').type).toBe('ignored');
-    expect(decodeServerFrame('{"type":"snapshot","data":5}').type).toBe('ignored');
-    expect(decodeServerFrame('{"type":"exit"}').type).toBe('ignored');
+    for (const bad of [
+      'not json',
+      '42',
+      '{"type":"snapshot","data":"x"}',
+      '{"type":"snapshot","cols":0,"rows":1,"data":"x"}',
+      '{"type":"resize","cols":"80","rows":24}',
+      '{"type":"exit","status":"gone","exit_code":0}',
+      '{"type":"exit","status":"failed","exit_code":1.5}',
+      '{"type":"output"}',
+    ]) {
+      expect(decodeServerFrame(bad).type, bad).toBe('ignored');
+    }
   });
 });
 
@@ -26,20 +48,15 @@ describe('encoders', () => {
   it('encodes binary input byte-for-byte', () => {
     expect(Array.from(encodeBinaryInput('ÿ\u0000A'))).toEqual([255, 0, 65]);
   });
-  it('encodes resize and rejects bad sizes', () => {
+  it('encodes resize within the daemon limits', () => {
     expect(JSON.parse(encodeResize(120, 40))).toEqual({ type: 'resize', cols: 120, rows: 40 });
     expect(() => encodeResize(0, 10)).toThrow(RangeError);
     expect(() => encodeResize(10.5, 10)).toThrow(RangeError);
+    expect(() => encodeResize(1001, 10)).toThrow(RangeError);
   });
 });
 
-describe('reconnect policy', () => {
-  it('classifies close codes', () => {
-    expect(classifyClose(1000)).toBe('ended');
-    expect(classifyClose(4403)).toBe('forbidden');
-    expect(classifyClose(4404)).toBe('not_found');
-    expect(classifyClose(1006)).toBe('retry');
-  });
+describe('reconnect backoff', () => {
   it('backs off exponentially within bounds', () => {
     expect(backoffDelay(0, 500, 15000, () => 0)).toBe(250);
     expect(backoffDelay(0, 500, 15000, () => 1)).toBe(500);
