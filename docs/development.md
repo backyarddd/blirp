@@ -14,7 +14,7 @@ Read [ARCHITECTURE.md](ARCHITECTURE.md) first: it is the design contract, and a 
 | `app/` | Tauri 2 desktop shell (`src-tauri/`); `app/src` is only the loading/error page |
 | `scripts/` | `build-sidecar.{sh,ps1}` (stage `blirp` and ConPTY as the Tauri sidecar), `render-packaging.sh`, `third-party-notices.sh` (`THIRD_PARTY_NOTICES` from `about.toml` + `packaging/about.hbs`, npm licenses and `packaging/licenses/`) |
 | `install.sh`, `install.ps1` | the one-line installers ([install.md](install.md)); `crates/blirp/src/update/` is the matching `blirp update` / `uninstall` side |
-| `packaging/` | Homebrew formula and cask, winget manifest templates, `minisign.pub` (release signing public key, built into `blirp update`) |
+| `packaging/` | Homebrew formula (CLI) and winget manifest templates, `minisign.pub` (release signing public key, built into `blirp update`) |
 | `.github/workflows/` | `ci.yml` (every push and PR), `release.yml` (tags `v*`) |
 | `docs/` | user and developer docs; `ARCHITECTURE.md`; `agent-formats.md` (survey of agents' on-disk transcript formats) |
 
@@ -127,7 +127,7 @@ A new agent touches these places. Look at an existing agent with the same shape 
    - `SHA256SUMS.txt` over the expected assets (an explicit list in the `checksums` job; a missing or unexpected asset fails the run, so add new asset names there) and `SHA256SUMS.txt.sig`, its minisign signature (made by the `sign` job, which alone sees the key: no checkout, no token, no package installs, a minisign release binary pinned by SHA-256; the `packaging` job checks it against `packaging/minisign.pub` before uploading);
    - rendered Homebrew/winget manifests.
 4. Check the draft, then publish it. The install scripts, `blirp update` and the daemon's update check use `releases/latest`, which only returns published, non-prerelease releases, so nothing reaches users before you publish. The API does not serve drafts even by tag; to try the draft's assets with the scripts first, download them and serve them locally (see "Testing the installers" below).
-5. Optional: copy `homebrew-formula-blirp.rb` / `homebrew-cask-blirp.rb` into a tap (`Formula/blirp.rb`, `Casks/blirp.rb`) and open a `microsoft/winget-pkgs` PR with the three `winget-*.yaml` files (`manifests/b/blirp/blirp/X.Y.Z/`, without the `winget-` prefix).
+5. Optional: copy `homebrew-formula-blirp.rb` into a tap (`Formula/blirp.rb`) and open a `microsoft/winget-pkgs` PR with the three `winget-*.yaml` files (`manifests/b/blirp/blirp/X.Y.Z/`, without the `winget-` prefix).
 
 Nothing is code signed by default, deliberately (see [faq.md](faq.md#why-is-blirp-not-code-signed)); the signing secrets below stay optional.
 

@@ -29,8 +29,6 @@ class Blirp < Formula
     end
   end
 
-  conflicts_with cask: "blirp", because: "the blirp app also links a `blirp` binary"
-
   def install
     bin.install "blirp"
   end

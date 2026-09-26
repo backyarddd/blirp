@@ -1,5 +1,5 @@
 #!/usr/bin/env sh
-# Fill the packaging/ templates (Homebrew formula + cask, winget manifests)
+# Fill the packaging/ templates (Homebrew formula, winget manifests)
 # with a release's version and asset checksums.
 #
 #   scripts/render-packaging.sh <version> <dir with the release assets> <out dir>
@@ -36,8 +36,6 @@ cli_mac_arm=$(sha "blirp-$v-aarch64-apple-darwin.tar.gz")
 cli_mac_x64=$(sha "blirp-$v-x86_64-apple-darwin.tar.gz")
 cli_linux_arm=$(sha "blirp-$v-aarch64-unknown-linux-gnu.tar.gz")
 cli_linux_x64=$(sha "blirp-$v-x86_64-unknown-linux-gnu.tar.gz")
-dmg_arm=$(sha "blirp_${v}_aarch64.dmg")
-dmg_x64=$(sha "blirp_${v}_x64.dmg")
 nsis_x64=$(sha "blirp_${v}_x64-setup.exe")
 
 render() {
@@ -46,8 +44,6 @@ render() {
     -e "s/{{SHA256_CLI_MACOS_X64}}/$cli_mac_x64/g" \
     -e "s/{{SHA256_CLI_LINUX_ARM64}}/$cli_linux_arm/g" \
     -e "s/{{SHA256_CLI_LINUX_X64}}/$cli_linux_x64/g" \
-    -e "s/{{SHA256_DMG_ARM64}}/$dmg_arm/g" \
-    -e "s/{{SHA256_DMG_X64}}/$dmg_x64/g" \
     -e "s/{{SHA256_NSIS_X64}}/$nsis_x64/g" \
     "$1" > "$2"
   if grep -n '{{' "$2" >&2; then
@@ -58,7 +54,6 @@ render() {
 
 mkdir -p "$out"
 render "$root/packaging/homebrew/blirp.rb" "$out/homebrew-formula-blirp.rb"
-render "$root/packaging/homebrew/blirp-cask.rb" "$out/homebrew-cask-blirp.rb"
 for f in "$root"/packaging/winget/*.yaml; do
   render "$f" "$out/winget-$(basename "$f")"
 done

@@ -105,7 +105,7 @@ The release public key is [`packaging/minisign.pub`](../packaging/minisign.pub) 
 
 Files downloaded with a browser are quarantined (macOS) or marked as from the internet (Windows), so the OS warns about unsigned programs: "blirp is damaged" or "cannot be opened" on macOS, "Windows protected your PC" on Windows. After checking the checksum, see [troubleshooting.md](troubleshooting.md#blirp-is-damaged-or-windows-protected-your-pc), or use the install scripts, which avoid this.
 
-Other packaging: every release attaches a rendered Homebrew formula and cask and winget manifests; they are not published in a tap or `winget-pkgs` yet.
+Other packaging: every release attaches a rendered Homebrew formula (the CLI only) and winget manifests; they are not published in a tap or `winget-pkgs` yet. There is no Homebrew cask for the desktop app: since 2026-09-01 Homebrew no longer supports casks that fail Gatekeeper, as an app that is not signed and notarized does, and `brew` can no longer skip the quarantine. On macOS, install the app with `install.sh`.
 
 Classic installers and packages write no install receipt, so `blirp update` does not replace them: update by running the newer installer or through the package manager (`brew upgrade`, `apt`, `dnf`, `winget upgrade`).
 
