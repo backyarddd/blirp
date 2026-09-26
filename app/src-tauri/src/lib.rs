@@ -162,10 +162,12 @@ fn sign_in(app: &AppHandle, shell: &Shell, info: &RuntimeInfo) {
         .and_then(|w| w.url().ok())
         .filter(|u| shell.is_daemon_url(u));
     let url = login_url(info, route.as_ref());
+    // The origin first: navigation to it is only allowed once it is known.
     *lock(&shell.origin) = Some(info.base_url());
-    *lock(&shell.token) = Some(info.token.clone());
     shell.set_phase(Phase::Ready);
-    navigate(app, &url);
+    // The token only once the window is on its way there, so a failed
+    // navigation is retried by the next check instead of looking done.
+    *lock(&shell.token) = navigate(app, &url).then(|| info.token.clone());
 }
 
 /// Sign the window in again when the daemon restarted since it was signed in
@@ -215,17 +217,20 @@ async fn refresh_sign_in(app: &AppHandle, shell: &Shell) {
     }
 }
 
-fn navigate(app: &AppHandle, url: &str) {
+/// Returns whether the main window started loading `url`.
+fn navigate(app: &AppHandle, url: &str) -> bool {
     let Some(win) = app.get_webview_window(MAIN) else {
-        return;
+        return false;
     };
     match Url::parse(url) {
-        Ok(u) => {
-            if let Err(e) = win.navigate(u) {
-                tracing::error!(error = %e, "navigate main window");
-            }
+        Ok(u) => win
+            .navigate(u)
+            .inspect_err(|e| tracing::error!(error = %e, "navigate main window"))
+            .is_ok(),
+        Err(e) => {
+            tracing::error!(error = %e, "invalid navigation url");
+            false
         }
-        Err(e) => tracing::error!(error = %e, "invalid navigation url"),
     }
 }
 
@@ -314,7 +319,10 @@ fn handle_deep_links(app: &AppHandle, urls: Vec<Url>) {
             .is_some_and(|u| shell.is_daemon_url(&u));
         match origin {
             // Already logged in: the UI holds the token, go straight there.
-            Some(o) if on_ui => navigate(app, &format!("{o}{route}")),
+            // A failure is logged; the join form is only a prefill.
+            Some(o) if on_ui => {
+                navigate(app, &format!("{o}{route}"));
+            }
             _ => *lock(&shell.pending_route) = Some(route),
         }
     }

@@ -27,28 +27,35 @@ function browserStorage(): Storage | null {
 
 const browserEnv = (): TokenEnv => ({ location, history, storage: browserStorage });
 
+/** Where a token from the fragment went: storage (survives a reload), or only this page's memory. */
+export type TokenTaken = 'stored' | 'memory';
+
 /**
  * Takes `token` out of the URL fragment (other fragment parameters stay), stores it and replaces
  * the history entry so the token does not stay in the address bar or the back button. Call before
- * the first request, and again when the fragment changes. Returns whether a token was taken.
+ * the first request, and again when the fragment changes. Returns where a token went, or null when
+ * the fragment had no valid one.
  */
-export function bootstrapToken(env: TokenEnv = browserEnv()): boolean {
+export function bootstrapToken(env: TokenEnv = browserEnv()): TokenTaken | null {
   const { hash, pathname, search } = env.location;
-  if (!hash.startsWith('#')) return false;
+  if (!hash.startsWith('#')) return null;
   const params = new URLSearchParams(hash.slice(1));
   const token = params.get('token');
-  if (token === null) return false;
+  if (token === null) return null;
   params.delete('token');
   const rest = params.toString();
   env.history.replaceState(env.history.state, '', `${pathname}${search}${rest ? `#${rest}` : ''}`);
-  if (!TOKEN.test(token)) return false;
+  if (!TOKEN.test(token)) return null;
   memory = token;
   try {
-    env.storage()?.setItem(KEY, token);
+    const storage = env.storage();
+    if (storage === null) return 'memory';
+    storage.setItem(KEY, token);
+    return 'stored';
   } catch {
-    // Quota or blocked storage: the in-memory copy serves this page.
+    // Quota or blocked storage: the in-memory copy serves this page (a reload would lose it).
+    return 'memory';
   }
-  return true;
 }
 
 /** The runtime token of this origin, or null (portal pages, not signed in). */
