@@ -10,6 +10,14 @@ so every tag needs one.
 
 ## [Unreleased]
 
+### Added
+
+- Paste images and files into a terminal pane, or drop files onto it: they
+  are saved on the machine running the session (also through the hub) and
+  their paths typed into the terminal, so Claude Code and Codex attach
+  pasted screenshots. `POST /api/sessions/:id/uploads` (terminal control,
+  25 MB per file); uploads are removed with the session and after 7 days.
+
 ### Fixed
 
 - The web UI header, sign-in screen and favicon show the same "b" logo as

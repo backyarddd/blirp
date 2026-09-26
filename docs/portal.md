@@ -45,7 +45,7 @@ The device appears under **Settings > Machines & Sync > Devices** named after it
 | Browse project files (read-only) and git status/diffs | yes | yes |
 | Edit memory (brief, records, wiki, resources, suggestions), rename and register projects | yes | yes |
 | Change settings (`PATCH /api/settings`) and create new device login links | yes | yes |
-| Start, stop, resume sessions; distill a session; type into terminals and resize them | no (403 `control_not_allowed`; terminals are view-only) | yes, also for sessions on other paired machines (relayed by the hub) |
+| Start, stop, resume sessions; distill a session; type into terminals, paste or drop files into them, and resize them | no (403 `control_not_allowed`; terminals are view-only) | yes, also for sessions on other paired machines (relayed by the hub) |
 | Pair machines, enable/disable the hub, invite, revoke or change devices | no (403 `admin_only`) | no |
 | Install global hooks, open folders/editors on the hub, stop the daemon, use `/mcp` | no | no |
 

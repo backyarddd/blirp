@@ -29,6 +29,7 @@ blirp runs as your user account and starts coding agents that can already read a
 | Browser device tokens, portal login links | database / daemon memory | stored as SHA-256 hashes only |
 | Launch files (memory, handoff, generated agent settings) | `~/.blirp/launch/<session>/` | contain rendered (redacted) memory, no credentials |
 | Logs | `~/.blirp/logs/` | never contain transcript text or secrets |
+| Files pasted or dropped into a terminal | `~/.blirp/uploads/<session>/` on the machine running the session | `0600` in `0700` folders (Windows: profile ACL); not redacted; not in the database, so never synced, and never ingested; deleted with the session and after 7 days; at most 25 MB each; saved only inside that folder under a sanitized name (the client's path is never used) |
 | Claude login token (only if you store one: `blirp agents set-token claude`) | `~/.blirp/secrets/claude_oauth_token` | `0600` in a `0700` folder (Windows: profile ACL); not in the database, so never synced; never logged or returned by the API; passed only to claude processes as `CLAUDE_CODE_OAUTH_TOKEN` ([agents.md](agents.md#headless-login-for-a-hub)) |
 | Other agent credentials | the agents' own config | never read or stored by blirp |
 
