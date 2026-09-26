@@ -21,6 +21,10 @@ name: Release
 #   Windows: Azure Artifact Signing: AZURE_TENANT_ID, AZURE_CLIENT_ID, AZURE_CLIENT_SECRET,
 #            AZURE_SIGNING_ENDPOINT, AZURE_SIGNING_ACCOUNT, AZURE_SIGNING_PROFILE
 #            or a certificate: WINDOWS_CERTIFICATE (base64 .pfx), WINDOWS_CERTIFICATE_PASSWORD
+#
+# Supply chain: every action is pinned to a commit (Dependabot proposes
+# bumps), tools are installed at fixed versions, the Rust toolchain comes
+# from rust-toolchain.toml, and no build cache is restored into these jobs.
 
 on:
   push:
@@ -37,7 +41,7 @@ permissions:
 env:
   CARGO_TERM_COLOR: always
   CARGO_INCREMENTAL: 0
-  RUST_TOOLCHAIN: "1.94.0"
+  PNPM_VERSION: "12.7.0"
   # The release signer: minisign's own release, checked against this hash
   # (its minisign signature by the author was verified when it was pinned).
   MINISIGN_URL: https://github.com/jedisct1/minisign/releases/download/0.12/minisign-0.12-linux.tar.gz
@@ -53,7 +57,7 @@ jobs:
       release_id: ${{ steps.release.outputs.id }}
       version: ${{ steps.version.outputs.version }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
 
       - name: Tag matches the workspace version
         id: version
@@ -97,22 +101,19 @@ jobs:
       VERSION: ${{ needs.draft.outputs.version }}
       TARGET: ${{ matrix.target }}
     steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@master
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      # No caches (cargo or pnpm) here: release assets are built from a clean tree.
+      - name: Rust toolchain from rust-toolchain.toml
+        shell: bash
+        run: |
+          channel=$(sed -n 's/^channel = "\([^"]*\)".*/\1/p' rust-toolchain.toml)
+          rustup toolchain install "$channel" --profile minimal --target "$TARGET"
+      - uses: pnpm/action-setup@fc06bc1257f339d1d5d8b3a19a8cae5388b55320 # v4.4.0
         with:
-          toolchain: ${{ env.RUST_TOOLCHAIN }}
-          targets: ${{ matrix.target }}
-      - uses: Swatinem/rust-cache@v2
-        with:
-          key: ${{ matrix.target }}
-      - uses: pnpm/action-setup@v4
-        with:
-          version: 12
-      - uses: actions/setup-node@v4
+          version: ${{ env.PNPM_VERSION }}
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with:
           node-version: 22
-          cache: pnpm
-          cache-dependency-path: web/pnpm-lock.yaml
       - name: Build web UI
         run: |
           pnpm -C web install --frozen-lockfile --ignore-scripts
@@ -176,7 +177,7 @@ jobs:
           $ErrorActionPreference = 'Stop'
           $bin = "app/src-tauri/binaries/blirp-$env:TARGET.exe"
           if ($env:AZURE_CLIENT_SECRET) {
-            cargo install trusted-signing-cli --locked
+            cargo install trusted-signing-cli --locked --version 0.11.0
             trusted-signing-cli -e $env:AZURE_SIGNING_ENDPOINT -a $env:AZURE_SIGNING_ACCOUNT -c $env:AZURE_SIGNING_PROFILE -d blirp $bin
             if ($LASTEXITCODE -ne 0) { throw 'Azure Artifact Signing failed' }
           } elseif ($env:WINDOWS_CERTIFICATE) {
@@ -244,7 +245,7 @@ jobs:
       VERSION: ${{ needs.draft.outputs.version }}
       TARGET: ${{ matrix.target }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
 
       - name: Install Linux build dependencies
         if: runner.os == 'Linux'
@@ -254,23 +255,18 @@ jobs:
             libwebkit2gtk-4.1-dev libayatana-appindicator3-dev librsvg2-dev \
             libxdo-dev libssl-dev pkg-config build-essential file patchelf xdg-utils
 
-      - uses: dtolnay/rust-toolchain@master
+      # No caches (cargo or pnpm) here: release assets are built from a clean tree.
+      - name: Rust toolchain from rust-toolchain.toml
+        shell: bash
+        run: |
+          channel=$(sed -n 's/^channel = "\([^"]*\)".*/\1/p' rust-toolchain.toml)
+          rustup toolchain install "$channel" --profile minimal --target "$TARGET"
+      - uses: pnpm/action-setup@fc06bc1257f339d1d5d8b3a19a8cae5388b55320 # v4.4.0
         with:
-          toolchain: ${{ env.RUST_TOOLCHAIN }}
-          targets: ${{ matrix.target }}
-      - uses: Swatinem/rust-cache@v2
-        with:
-          key: ${{ matrix.target }}
-      - uses: pnpm/action-setup@v4
-        with:
-          version: 12
-      - uses: actions/setup-node@v4
+          version: ${{ env.PNPM_VERSION }}
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with:
           node-version: 22
-          cache: pnpm
-          cache-dependency-path: |
-            web/pnpm-lock.yaml
-            app/pnpm-lock.yaml
       - name: Build web UI
         run: |
           pnpm -C web install --frozen-lockfile --ignore-scripts
@@ -322,7 +318,7 @@ jobs:
           $ErrorActionPreference = 'Stop'
           $overlay = Join-Path $env:RUNNER_TEMP 'tauri.sign.json'
           if ($env:AZURE_CLIENT_SECRET) {
-            cargo install trusted-signing-cli --locked
+            cargo install trusted-signing-cli --locked --version 0.11.0
             $cmd = "trusted-signing-cli -e $env:AZURE_SIGNING_ENDPOINT -a $env:AZURE_SIGNING_ACCOUNT -c $env:AZURE_SIGNING_PROFILE -d blirp %1"
             @{ bundle = @{ windows = @{ signCommand = $cmd } } } | ConvertTo-Json -Depth 5 | Set-Content $overlay
           } elseif ($env:WINDOWS_CERTIFICATE) {
@@ -446,7 +442,7 @@ jobs:
           [ -z "$bad" ] || exit 1
           xargs sha256sum < ../expected.txt > ../SHA256SUMS.txt
           cat ../SHA256SUMS.txt
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: sha256sums
           path: SHA256SUMS.txt
@@ -460,7 +456,7 @@ jobs:
     # run next to the key are the shell, coreutils and the pinned minisign.
     permissions: {}
     steps:
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
           name: sha256sums
       - name: Fetch the pinned minisign
@@ -487,7 +483,7 @@ jobs:
           printf '%s' "$TAURI_SIGNING_PRIVATE_KEY" | base64 -d > "$key"
           printf '%s\n' "$TAURI_SIGNING_PRIVATE_KEY_PASSWORD" |
             "$RUNNER_TEMP/minisign-linux/x86_64/minisign" -S -s "$key" -m SHA256SUMS.txt -x SHA256SUMS.txt.sig
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: sha256sums-sig
           path: SHA256SUMS.txt.sig
@@ -503,8 +499,8 @@ jobs:
       VERSION: ${{ needs.draft.outputs.version }}
       GH_TOKEN: ${{ github.token }}
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/download-artifact@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
           pattern: sha256sums*
           merge-multiple: true
