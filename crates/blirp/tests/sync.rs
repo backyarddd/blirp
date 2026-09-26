@@ -532,6 +532,34 @@ async fn pair_replicate_proxy_revoke_and_portal() {
     assert_eq!(r.status(), 202);
     drop(ws);
 
+    // ---- the node has not opted in to hub control: the hub may read it
+    // but not launch or change anything on it.
+    let b_dir = tmp.path().join("work-b2");
+    std::fs::create_dir_all(&b_dir).unwrap();
+    let r = a
+        .req(
+            Method::POST,
+            "/api/sessions",
+            Some(json!({"cwd": b_dir, "agent": "shell", "machine": b.id()})),
+        )
+        .await;
+    assert_eq!(r.status(), 403);
+    assert_eq!(
+        r.json::<ErrorBody>().await.unwrap().error.code,
+        "control_not_allowed"
+    );
+    let resp = blirp::sync::forward(
+        &a.daemon.state,
+        &b.id(),
+        &Principal::local(),
+        Method::GET,
+        "/api/health",
+        None,
+    )
+    .await
+    .unwrap();
+    assert_eq!(resp.status(), 200);
+
     // ---- LAN portal: one-time invite -> device cookie over TLS, with the
     // certificate pinned to the fingerprint the API reports.
     let st: SyncStatus = a.get("/api/sync/status").await;

@@ -608,6 +608,12 @@ hub?: string,
 /**
  * `"default"`, `"disabled"` or a relay URL.
  */
-relay: string, };
+relay: string, 
+/**
+ * Node: let requests relayed by the hub control this machine (launch,
+ * resume, stop, terminal input and other changes). Off by default:
+ * the hub and other paired machines can only read.
+ */
+allow_hub_control: boolean, };
 
 export type PortalConfig = { lan: boolean, lan_port: number, };

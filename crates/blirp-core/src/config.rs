@@ -162,6 +162,10 @@ pub struct SyncConfig {
     pub hub: Option<String>,
     /// `"default"`, `"disabled"` or a relay URL.
     pub relay: String,
+    /// Node: let requests relayed by the hub control this machine (launch,
+    /// resume, stop, terminal input and other changes). Off by default:
+    /// the hub and other paired machines can only read.
+    pub allow_hub_control: bool,
 }
 
 impl Default for SyncConfig {
@@ -170,6 +174,7 @@ impl Default for SyncConfig {
             role: MachineRole::Standalone,
             hub: None,
             relay: "default".into(),
+            allow_hub_control: false,
         }
     }
 }
