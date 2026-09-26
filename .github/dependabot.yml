@@ -21,6 +21,10 @@ updates:
       npm:
         patterns: ["*"]
         update-types: [minor, patch]
+    # @types/node follows the Node.js major the project runs on (22).
+    ignore:
+      - dependency-name: "@types/node"
+        update-types: ["version-update:semver-major"]
 
   # The workflows pin actions to commit SHAs; Dependabot moves the SHA and
   # its version comment together.
