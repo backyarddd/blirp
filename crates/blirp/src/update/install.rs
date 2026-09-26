@@ -164,9 +164,14 @@ fn runs_from_app(exe: &Path, app: &Path, appimage: Option<&Path>) -> bool {
 /// The CLI the install script put on this machine, whichever binary runs
 /// (e.g. the desktop app's AppImage). None without a (readable) receipt.
 pub fn installed_cli() -> Option<PathBuf> {
+    installed_cli_version().map(|(cli, _)| cli)
+}
+
+/// `installed_cli` with the version its receipt records.
+pub fn installed_cli_version() -> Option<(PathBuf, String)> {
     let exe = crate::memory::blirp_exe();
     match read_receipt(exe.parent()?) {
-        Ok(r) => r.map(|(r, _)| r.install_dir.join(CLI_FILES[0])),
+        Ok(r) => r.map(|(r, _)| (r.install_dir.join(CLI_FILES[0]), r.version)),
         Err(e) => {
             tracing::warn!(error = %format!("{e:#}"), "ignoring the install receipt");
             None

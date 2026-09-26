@@ -45,21 +45,29 @@ pub fn persistent_exe(exe: PathBuf) -> anyhow::Result<PathBuf> {
 }
 
 /// The binary a background daemon runs from. Started from an AppImage (the
-/// desktop app's sidecar), the installed CLI when there is one: a daemon
-/// outlives the app, and everything it writes or runs from its own path
-/// (per-session hooks and MCP entries, `blirp update`) must outlive the
-/// mount too. Without an installed CLI, `exe` as before.
+/// desktop app's sidecar), the installed CLI when its receipt names this
+/// version: a daemon outlives the app, and everything it writes or runs from
+/// its own path (per-session hooks and MCP entries, `blirp update`) must
+/// outlive the mount too. Only the same version: the daemon serves the UI and
+/// owns the database schema. Else `exe` as before.
 pub fn daemon_exe(exe: PathBuf) -> PathBuf {
     let (appimage, roots) = temp_roots();
     let roots: Vec<&Path> = roots.iter().map(PathBuf::as_path).collect();
-    daemon_exe_from(exe, appimage, &roots, || installed_candidates(&roots))
+    daemon_exe_from(
+        exe,
+        appimage,
+        &roots,
+        crate::update::install::installed_cli_version,
+    )
 }
 
 /// Whether this runs from an AppImage, and the folders that are gone once
 /// the app exits (`/tmp`, the AppImage mount).
 fn temp_roots() -> (bool, Vec<PathBuf>) {
     let var = |k: &str| std::env::var_os(k).filter(|v| !v.is_empty());
-    let appimage = var("APPIMAGE").is_some() || var("APPDIR").is_some();
+    // APPDIR is a generic name elsewhere; AppImages are Linux only.
+    let appimage =
+        cfg!(target_os = "linux") && (var("APPIMAGE").is_some() || var("APPDIR").is_some());
     let mut roots = vec![PathBuf::from("/tmp")];
     roots.extend(var("APPDIR").map(PathBuf::from));
     (appimage, roots)
@@ -80,18 +88,24 @@ fn installed_candidates(roots: &[&Path]) -> impl Iterator<Item = PathBuf> {
         .chain(blirp_core::process::which_in("blirp", dirs))
 }
 
-fn daemon_exe_from<I: IntoIterator<Item = PathBuf>>(
+/// `receipt_cli`: the install receipt's CLI and version. PATH is not
+/// searched: a `blirp` there has no known version.
+fn daemon_exe_from(
     exe: PathBuf,
     appimage: bool,
     temp_roots: &[&Path],
-    candidates: impl FnOnce() -> I,
+    receipt_cli: impl FnOnce() -> Option<(PathBuf, String)>,
 ) -> PathBuf {
     // Only the AppImage case: a binary someone runs from /tmp themselves
     // keeps running as itself.
     if !appimage {
         return exe;
     }
-    persistent_exe_from(exe.clone(), true, temp_roots, candidates).unwrap_or(exe)
+    let current = crate::update::parse_version(crate::update::CURRENT).ok();
+    let cli = receipt_cli()
+        .filter(|(_, v)| current.is_some() && crate::update::parse_version(v).ok() == current)
+        .map(|(cli, _)| cli);
+    persistent_exe_from(exe.clone(), true, temp_roots, || cli).unwrap_or(exe)
 }
 
 /// `p` is inside one of `roots` (as given or canonical).
@@ -195,14 +209,25 @@ mod tests {
         ));
         assert!(!under(Path::new("/usr/bin"), &[Path::new("/tmp")]));
 
-        // The daemon: the installed CLI from an AppImage, else the running
-        // binary (no CLI installed, or not an AppImage at all).
-        let daemon = daemon_exe_from(inside.clone(), true, &roots, || vec![installed.clone()]);
+        // The daemon: the receipt's CLI from an AppImage when it is this
+        // version, else the running binary.
+        let same = crate::update::CURRENT.to_string();
+        let daemon = daemon_exe_from(inside.clone(), true, &roots, || {
+            Some((installed.clone(), format!("v{same}")))
+        });
         assert_eq!(daemon, dunce::canonicalize(&installed).unwrap());
-        let daemon = daemon_exe_from(inside.clone(), true, &roots, Vec::new);
+        let daemon = daemon_exe_from(inside.clone(), true, &roots, || {
+            Some((installed.clone(), "0.0.1".to_string()))
+        });
+        assert_eq!(daemon, inside, "another version: run from the mount");
+        let daemon = daemon_exe_from(inside.clone(), true, &roots, || {
+            Some((installed.clone(), "garbage".to_string()))
+        });
+        assert_eq!(daemon, inside, "unreadable version: run from the mount");
+        let daemon = daemon_exe_from(inside.clone(), true, &roots, || None);
         assert_eq!(daemon, inside, "no installed CLI: run from the mount");
         let own = dir.path().join("blirp");
-        let daemon = daemon_exe_from(own.clone(), false, &roots, || -> Vec<PathBuf> {
+        let daemon = daemon_exe_from(own.clone(), false, &roots, || {
             panic!("no lookup outside an AppImage")
         });
         assert_eq!(daemon, own);
