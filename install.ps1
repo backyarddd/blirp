@@ -54,7 +54,7 @@ param(
 
   $ReleasesApi = 'https://api.github.com/repos/backyarddd/blirp/releases'
   # The release signing key, packaging/minisign.pub.
-  $ReleasePubkey = 'RWQUGAux2LF3nsIhgzZsZL6OfhV6O3mpN1jUyApoyh04lnSVLsoZ2NX5'
+  $ReleasePubkey = 'RWR6n63Gj9buu2zM3R/x2t2GdHNFgEy1em/gM8aKhteWB+zielbybJVW'
   $Triple = 'x86_64-pc-windows-msvc'
   $CliFiles = @('blirp.exe', 'conpty.dll', 'x64\OpenConsole.exe')
   $DesktopExe = 'blirp-desktop.exe'

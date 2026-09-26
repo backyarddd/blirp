@@ -15,7 +15,7 @@ set -eu
 
 RELEASES_API=https://api.github.com/repos/backyarddd/blirp/releases
 # The release signing key, packaging/minisign.pub.
-RELEASE_PUBKEY=RWQUGAux2LF3nsIhgzZsZL6OfhV6O3mpN1jUyApoyh04lnSVLsoZ2NX5
+RELEASE_PUBKEY=RWR6n63Gj9buu2zM3R/x2t2GdHNFgEy1em/gM8aKhteWB+zielbybJVW
 MARKER="# added by the blirp installer"
 
 say() { printf 'blirp: %s\n' "$*"; }

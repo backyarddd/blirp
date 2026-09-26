@@ -99,7 +99,7 @@ minisign -Vm SHA256SUMS.txt -p minisign.pub            # optional: the signature
 (Get-FileHash blirp-<version>-x86_64-pc-windows-msvc.zip -Algorithm SHA256).Hash   # compare with SHA256SUMS.txt
 ```
 
-The release public key is [`packaging/minisign.pub`](../packaging/minisign.pub) (`RWQUGAux2LF3nsIhgzZsZL6OfhV6O3mpN1jUyApoyh04lnSVLsoZ2NX5`). `blirp update` checks this signature before it trusts any checksum.
+The release public key is [`packaging/minisign.pub`](../packaging/minisign.pub) (`RWR6n63Gj9buu2zM3R/x2t2GdHNFgEy1em/gM8aKhteWB+zielbybJVW`). `blirp update` checks this signature before it trusts any checksum.
 
 Files downloaded with a browser are quarantined (macOS) or marked as from the internet (Windows), so the OS warns about unsigned programs: "blirp is damaged" or "cannot be opened" on macOS, "Windows protected your PC" on Windows. After checking the checksum, see [troubleshooting.md](troubleshooting.md#blirp-is-damaged-or-windows-protected-your-pc), or use the install scripts, which avoid this.
 

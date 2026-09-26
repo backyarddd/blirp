@@ -427,7 +427,7 @@ U9d1YnP09dRsKTqDZBVlbrzr0GNVnDVjBx4vqKQqfwyTXTiIr3dIkL33LD0QhQ6UtqF3neyOI/DD6jVI
     fn release_key_is_the_shipped_key() {
         assert_eq!(
             key_line(RELEASE_KEY_FILE),
-            "RWQUGAux2LF3nsIhgzZsZL6OfhV6O3mpN1jUyApoyh04lnSVLsoZ2NX5"
+            "RWR6n63Gj9buu2zM3R/x2t2GdHNFgEy1em/gM8aKhteWB+zielbybJVW"
         );
         assert!(minisign_verify::PublicKey::from_base64(key_line(RELEASE_KEY_FILE)).is_ok());
     }
