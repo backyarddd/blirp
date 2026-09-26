@@ -1,0 +1,249 @@
+<#
+.SYNOPSIS
+  blirp installer for Windows (x64; Windows PowerShell 5.1 or PowerShell 7).
+
+.DESCRIPTION
+  Installs blirp.exe (with conpty.dll and x64\OpenConsole.exe) and the desktop
+  app into $env:BLIRP_INSTALL_DIR (default %LOCALAPPDATA%\Programs\blirp),
+  adds that folder to your user Path, and creates a Start Menu shortcut.
+  Every download is checked against the release's SHA256SUMS.txt. Running it
+  again upgrades in place. No administrator rights are needed.
+
+  Options can also be set with environment variables, which is the only way
+  when piping into iex: BLIRP_VERSION, BLIRP_NO_APP=1, BLIRP_SERVICE=1,
+  BLIRP_NO_MODIFY_PATH=1, BLIRP_INSTALL_DIR, GITHUB_TOKEN (private repository
+  or rate limits), BLIRP_RELEASE_BASE_URL (releases API of a mirror or test
+  server instead of GitHub).
+
+.EXAMPLE
+  irm https://raw.githubusercontent.com/backyarddd/blirp/main/install.ps1 | iex
+
+.EXAMPLE
+  & ([scriptblock]::Create((irm https://raw.githubusercontent.com/backyarddd/blirp/main/install.ps1))) -Service
+#>
+# Parameters are read in the child scope below; Write-Host is the installer's
+# progress output (return values of the helpers must stay clean).
+[Diagnostics.CodeAnalysis.SuppressMessageAttribute('PSReviewUnusedParameter', '')]
+[Diagnostics.CodeAnalysis.SuppressMessageAttribute('PSAvoidUsingWriteHost', '')]
+[CmdletBinding()]
+param(
+  # Install this release instead of the latest.
+  [string]$Version = $env:BLIRP_VERSION,
+  # CLI only, no desktop app.
+  [switch]$NoApp = ($env:BLIRP_NO_APP -eq '1'),
+  # Start the daemon at login (`blirp service install`).
+  [switch]$Service = ($env:BLIRP_SERVICE -eq '1'),
+  # Accepted for parity with install.sh; adding to the user Path is the default here.
+  [switch]$ModifyPath,
+  # Leave the user Path alone.
+  [switch]$NoModifyPath = ($env:BLIRP_NO_MODIFY_PATH -eq '1')
+)
+
+# A child scope: with `irm | iex` this runs in the caller's session, so keep
+# preferences and helpers out of it. Errors are thrown, never `exit`, which
+# would close that session.
+& {
+  $ErrorActionPreference = 'Stop'
+  # Windows PowerShell's progress bar slows downloads down a lot.
+  $ProgressPreference = 'SilentlyContinue'
+  # Windows PowerShell 5.1 may default to TLS 1.0; GitHub needs 1.2.
+  [Net.ServicePointManager]::SecurityProtocol = [Net.ServicePointManager]::SecurityProtocol -bor [Net.SecurityProtocolType]::Tls12
+
+  $ReleasesApi = 'https://api.github.com/repos/backyarddd/blirp/releases'
+  $Triple = 'x86_64-pc-windows-msvc'
+  $CliFiles = @('blirp.exe', 'conpty.dll', 'x64\OpenConsole.exe')
+  $DesktopExe = 'blirp-desktop.exe'
+
+  function Say([string]$msg) { Write-Host "blirp: $msg" }
+
+  if (-not [Environment]::Is64BitOperatingSystem) { throw 'blirp needs 64-bit Windows.' }
+  if ($env:PROCESSOR_ARCHITECTURE -eq 'ARM64') { Say 'ARM64 Windows: installing the x64 build (runs under emulation)' }
+
+  $installDir = $env:BLIRP_INSTALL_DIR
+  if (-not $installDir) { $installDir = Join-Path $env:LOCALAPPDATA 'Programs\blirp' }
+  $installDir = [IO.Path]::GetFullPath($installDir).TrimEnd('\')
+  $token = $env:GITHUB_TOKEN
+  $base = $env:BLIRP_RELEASE_BASE_URL
+  if (-not $base) { $base = $ReleasesApi }
+  $base = $base.TrimEnd('/')
+
+  function Get-Url([string]$url, [string]$outFile, [string]$accept) {
+    $headers = @{}
+    if ($accept) { $headers['Accept'] = $accept }
+    # Both PowerShell editions drop Authorization on the redirect to the download host.
+    if ($token) { $headers['Authorization'] = "Bearer $token" }
+    Invoke-WebRequest -Uri $url -OutFile $outFile -Headers $headers -UseBasicParsing
+  }
+
+  $tmp = Join-Path ([IO.Path]::GetTempPath()) ('blirp-install-' + [guid]::NewGuid().ToString('N'))
+  New-Item -ItemType Directory -Path $tmp | Out-Null
+  try {
+    # ------------------------------------------------------------ release
+    $v = if ($Version) { $Version.Trim().TrimStart('v') } else { '' }
+    $releaseUrl = if ($v) { "$base/tags/v$v" } else { "$base/latest" }
+    $releaseFile = Join-Path $tmp 'release.json'
+    try {
+      Get-Url $releaseUrl $releaseFile 'application/vnd.github+json'
+    } catch {
+      $what = if ($v) { "release v$v not found" } else { 'no published release found' }
+      $hint = if ($token) { '' } else { ' (private repository? set $env:GITHUB_TOKEN)' }
+      throw "$what at $base$hint`: $($_.Exception.Message)"
+    }
+    $release = [IO.File]::ReadAllText($releaseFile) | ConvertFrom-Json
+    $ver = ([string]$release.tag_name).TrimStart('v')
+    if (-not $ver) { throw "unexpected release data from $releaseUrl" }
+
+    function Test-Asset([string]$name) { [bool]($release.assets | Where-Object { $_.name -eq $name }) }
+    function Save-Asset([string]$name) {
+      $asset = $release.assets | Where-Object { $_.name -eq $name } | Select-Object -First 1
+      if (-not $asset) { throw "release $($release.tag_name) has no asset $name" }
+      $out = Join-Path $tmp $name
+      if ($token) { Get-Url $asset.url $out 'application/octet-stream' } else { Get-Url $asset.browser_download_url $out '' }
+      $out
+    }
+    $sumsFile = Save-Asset 'SHA256SUMS.txt'
+    $sums = @{}
+    foreach ($line in [IO.File]::ReadAllLines($sumsFile)) {
+      if ($line -match '^([0-9a-fA-F]{64})\s+\*?(.+?)\s*$') { $sums[$Matches[2]] = $Matches[1].ToLowerInvariant() }
+    }
+    # Download an asset, check it against SHA256SUMS.txt, return its path.
+    function Get-Verified([string]$name) {
+      $file = Save-Asset $name
+      if (-not $sums.ContainsKey($name)) { throw "$name is not listed in SHA256SUMS.txt" }
+      $got = (Get-FileHash -LiteralPath $file -Algorithm SHA256).Hash.ToLowerInvariant()
+      if ($got -ne $sums[$name]) { throw "checksum mismatch for $name (expected $($sums[$name]), got $got)" }
+      $file
+    }
+
+    Say "installing blirp $ver ($Triple)"
+    $cliName = "blirp-$ver-$Triple"
+    if (-not (Test-Asset "$cliName.zip")) { throw "release $($release.tag_name) has no build for $Triple" }
+    $cliZip = Get-Verified "$cliName.zip"
+    Expand-Archive -LiteralPath $cliZip -DestinationPath (Join-Path $tmp 'cli') -Force
+    $cliRoot = Join-Path $tmp "cli\$cliName"
+    $sources = [ordered]@{}
+    foreach ($f in $CliFiles) {
+      $src = Join-Path $cliRoot $f
+      if (-not (Test-Path -LiteralPath $src -PathType Leaf)) { throw "$cliName.zip does not contain $cliName\$f" }
+      $sources[$f] = $src
+    }
+    $appName = "blirp_${ver}_x64-portable"
+    if (-not $NoApp) {
+      if (Test-Asset "$appName.zip") {
+        $appZip = Get-Verified "$appName.zip"
+        Expand-Archive -LiteralPath $appZip -DestinationPath (Join-Path $tmp 'app') -Force
+        $src = Join-Path $tmp "app\$appName\$DesktopExe"
+        if (-not (Test-Path -LiteralPath $src -PathType Leaf)) { throw "$appName.zip does not contain $appName\$DesktopExe" }
+        $sources[$DesktopExe] = $src
+      } else {
+        Say "warning: release $($release.tag_name) has no desktop app ($appName.zip); installing the CLI only"
+      }
+    }
+
+    # ------------------------------------------------------------ install
+    $exe = Join-Path $installDir 'blirp.exe'
+    $wasRunning = $false
+    if (Test-Path -LiteralPath $exe) {
+      & $exe status *> $null
+      if ($LASTEXITCODE -eq 0) {
+        $wasRunning = $true
+        Say 'stopping the running daemon for the upgrade'
+        & $exe stop | Out-Null
+        if ($LASTEXITCODE -ne 0) { throw 'could not stop the running daemon (blirp stop)' }
+      }
+    }
+
+    # A running exe cannot be overwritten or deleted but can be renamed: move
+    # the old file aside, then the new one in. blirp removes leftover *.old
+    # files the next time it starts.
+    function Install-File([string]$src, [string]$dst) {
+      $dir = Split-Path -Parent $dst
+      New-Item -ItemType Directory -Force -Path $dir | Out-Null
+      $staged = "$dst.new"
+      Copy-Item -LiteralPath $src -Destination $staged -Force
+      if (Test-Path -LiteralPath $dst) {
+        $aside = "$dst.old"
+        if (Test-Path -LiteralPath $aside) { Remove-Item -LiteralPath $aside -Force -ErrorAction SilentlyContinue }
+        if (Test-Path -LiteralPath $aside) { $aside = "$dst.$([DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds()).old" }
+        Move-Item -LiteralPath $dst -Destination $aside
+        try {
+          Move-Item -LiteralPath $staged -Destination $dst
+        } catch {
+          Move-Item -LiteralPath $aside -Destination $dst
+          throw
+        }
+        Remove-Item -LiteralPath $aside -Force -ErrorAction SilentlyContinue
+      } else {
+        Move-Item -LiteralPath $staged -Destination $dst
+      }
+      Unblock-File -LiteralPath $dst -ErrorAction SilentlyContinue
+    }
+    foreach ($f in $sources.Keys) { Install-File $sources[$f] (Join-Path $installDir $f) }
+    Say "installed $exe"
+
+    $appPath = Join-Path $installDir $DesktopExe
+    $shortcut = Join-Path $env:APPDATA 'Microsoft\Windows\Start Menu\Programs\blirp.lnk'
+    if (Test-Path -LiteralPath $appPath) {
+      $shell = New-Object -ComObject WScript.Shell
+      $lnk = $shell.CreateShortcut($shortcut)
+      $lnk.TargetPath = $appPath
+      $lnk.WorkingDirectory = $installDir
+      $lnk.Description = 'Workspace and memory for CLI coding agents'
+      $lnk.Save()
+      if ($sources.Contains($DesktopExe)) { Say "installed the desktop app: $appPath (Start Menu: blirp)" }
+    } else {
+      $appPath = ''
+    }
+
+    # --------------------------------------------------------------- PATH
+    $receiptFile = Join-Path $installDir 'install.json'
+    $previousEntry = ''
+    if (Test-Path -LiteralPath $receiptFile) {
+      try { $previousEntry = [string](([IO.File]::ReadAllText($receiptFile) | ConvertFrom-Json).path_entry) } catch { $previousEntry = '' }
+    }
+    $envKey = [Microsoft.Win32.Registry]::CurrentUser.OpenSubKey('Environment', $true)
+    $userPath = [string]$envKey.GetValue('Path', '', 'DoNotExpandEnvironmentNames')
+    $onPath = @($userPath -split ';' | Where-Object { $_ -and ($_.TrimEnd('\') -eq $installDir) }).Count -gt 0
+    $pathEntry = if ($onPath) { $previousEntry } else { '' }
+    if (-not $onPath -and -not $NoModifyPath) {
+      $newPath = if ($userPath) { "$($userPath.TrimEnd(';'));$installDir" } else { $installDir }
+      $envKey.SetValue('Path', $newPath, 'ExpandString')
+      # Setting any user variable through .NET broadcasts WM_SETTINGCHANGE,
+      # so Explorer and new terminals pick up the new Path.
+      [Environment]::SetEnvironmentVariable('BLIRP_PATH_CHANGED', '1', 'User')
+      [Environment]::SetEnvironmentVariable('BLIRP_PATH_CHANGED', $null, 'User')
+      $pathEntry = $installDir
+      Say "added $installDir to your user Path (new terminals see it)"
+    } elseif (-not $onPath) {
+      Say "$installDir is not on your Path; run it as `"$exe`" or add the folder yourself"
+    }
+    $envKey.Close()
+    if (@($env:Path -split ';' | Where-Object { $_.TrimEnd('\') -eq $installDir }).Count -eq 0 -and $pathEntry) {
+      $env:Path = "$installDir;$env:Path"
+    }
+
+    # ------------------------------------------------------------ receipt
+    $receipt = [ordered]@{
+      version     = $ver
+      install_dir = $installDir
+      app         = $appPath
+      path_entry  = $pathEntry
+    }
+    # UTF-8 without a byte order mark (Set-Content -Encoding UTF8 adds one on 5.1).
+    [IO.File]::WriteAllText($receiptFile, ($receipt | ConvertTo-Json) + "`n")
+
+    # ------------------------------------------------------------- daemon
+    if ($Service) {
+      & $exe service install
+      if ($LASTEXITCODE -ne 0) { throw 'blirp service install failed' }
+    } elseif ($wasRunning) {
+      & $exe daemon --detach | Out-Null
+      if ($LASTEXITCODE -eq 0) { Say 'restarted the daemon' } else { Say 'warning: the daemon did not restart; run `blirp daemon --detach`' }
+    }
+
+    Say "done: blirp $ver"
+    Say 'run `blirp` to open it, `blirp --help` for the CLI, `blirp update` to upgrade later'
+  } finally {
+    Remove-Item -LiteralPath $tmp -Recurse -Force -ErrorAction SilentlyContinue
+  }
+}
