@@ -81,6 +81,18 @@ describe('request', () => {
     expect((f.mock.calls[0]?.[1] as RequestInit).body).toBe('{"id":"b1"}');
   });
 
+  it("sets and clears claude's login token", async () => {
+    const f = mockFetch(async () => new Response('{}', { status: 200 }));
+    await api.agents.setToken('claude', 'tok');
+    const put = f.mock.calls[0]?.[1] as RequestInit;
+    expect(f.mock.calls[0]?.[0]).toBe('/api/agents/claude/token');
+    expect(put.method).toBe('PUT');
+    expect(put.body).toBe('{"token":"tok"}');
+    await api.agents.clearToken('claude');
+    expect(f.mock.calls[1]?.[0]).toBe('/api/agents/claude/token');
+    expect((f.mock.calls[1]?.[1] as RequestInit).method).toBe('DELETE');
+  });
+
   it('keeps the daemon error code for conflict handling', async () => {
     mockFetch(async () => new Response('{"error":{"code":"remote_session","message":"elsewhere"}}', { status: 409 }));
     const err = await api.sessions.distill('s').catch((e: unknown) => e);

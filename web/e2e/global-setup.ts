@@ -70,10 +70,12 @@ export default async function globalSetup(): Promise<() => Promise<void>> {
   writeFileSync(join(repo, 'new-file.txt'), 'untracked\n');
 
   const log = createWriteStream(join(root, 'daemon.log'));
+  // A login token in the developer's own environment would override the one the suite stores.
+  const { CLAUDE_CODE_OAUTH_TOKEN: _ownToken, ...parentEnv } = process.env;
   const daemon = spawn(bin, ['daemon', '--port', '0'], {
     cwd: repoRoot,
     env: {
-      ...process.env,
+      ...parentEnv,
       BLIRP_HOME: home,
       HOME: userHome,
       USERPROFILE: userHome,

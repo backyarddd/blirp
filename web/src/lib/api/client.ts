@@ -258,6 +258,9 @@ export const api = {
     list: () => request<AgentInfo[]>('GET', '/api/agents'),
     installHooks: (id: string) => request<AgentInfo>('POST', `/api/agents/${enc(id)}/hooks/install`),
     uninstallHooks: (id: string) => request<AgentInfo>('POST', `/api/agents/${enc(id)}/hooks/uninstall`),
+    /** Admin, claude only: store a `claude setup-token` token; the answer never carries it. */
+    setToken: (id: string, token: string) => request<AgentInfo>('PUT', `/api/agents/${enc(id)}/token`, { token }),
+    clearToken: (id: string) => request<AgentInfo>('DELETE', `/api/agents/${enc(id)}/token`),
   },
   inject: (session: string) => request<Injection>('GET', '/api/inject', undefined, { session }),
   settings: {

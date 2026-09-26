@@ -553,6 +553,27 @@ test('agents: integration rows, and install/uninstall round trip in the temp hom
   if (existsSync(settingsFile)) expect(readFileSync(settingsFile, 'utf8')).not.toContain('hook claude');
 });
 
+test('agents: a pasted claude login token is stored, never shown back, and removable', async () => {
+  const secret = 'e2e-login-token-not-real';
+  const file = join(env.root, 'home', 'secrets', 'claude_oauth_token');
+  await page.goto(`${env.url}/settings/agents`);
+  const claude = page.locator('li.agent[data-agent="claude"]');
+  await expect(claude.getByTestId('token-state')).toHaveText('none');
+  const input = claude.getByLabel('Claude login token');
+  await expect(input).toHaveAttribute('type', 'password');
+  await input.fill(secret);
+  await claude.getByRole('button', { name: 'Save token' }).click();
+  await expect(claude.getByTestId('token-state')).toHaveText('stored');
+  await expect(input).toHaveValue('');
+  expect(readFileSync(file, 'utf8')).toBe(secret);
+  await expect(page.locator('body')).not.toContainText(secret);
+
+  await confirmNextDialog();
+  await claude.getByRole('button', { name: 'Remove token' }).click();
+  await expect(claude.getByTestId('token-state')).toHaveText('none');
+  expect(existsSync(file)).toBe(false);
+});
+
 test('command palette jumps to a project', async () => {
   await page.goto(`${env.url}/sessions`);
   await page.keyboard.press('ControlOrMeta+k');

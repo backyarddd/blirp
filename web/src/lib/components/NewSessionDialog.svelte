@@ -395,9 +395,10 @@
       </select>
       {#if notLoggedIn}
         <span class="hint warn" role="alert" data-testid="agent-login-warning">
-          {chosen?.display_name || agentLabel(agent)} is not logged in on {targetName} (as seen by its blirp daemon). Log in
-          there (run <code>claude</code> in a terminal on {targetName} and sign in), and run blirp as a service
-          (<code>blirp service install</code>): on a Mac, a daemon started over SSH cannot read the login keychain.
+          {chosen?.display_name || agentLabel(agent)} is not logged in on {targetName} (as seen by its blirp daemon). A daemon
+          started over SSH or by a LaunchAgent on a locked Mac cannot read the login keychain. Run
+          <code>claude setup-token</code> on any machine with a browser, then on {targetName}
+          <code>blirp agents set-token claude</code> and paste the token (or paste it in that machine's Settings &gt; Agents).
         </span>
       {/if}
     </label>

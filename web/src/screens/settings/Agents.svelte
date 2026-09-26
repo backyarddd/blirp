@@ -1,7 +1,7 @@
 <script lang="ts">
   import RefreshCw from '@lucide/svelte/icons/refresh-cw';
   import { api } from '../../lib/api/client';
-  import type { AgentInfo, Config, InjectMode, IntegrationState, SettingsView } from '../../lib/api/types.gen';
+  import type { AgentInfo, AgentToken, Config, InjectMode, IntegrationState, SettingsView } from '../../lib/api/types.gen';
   import { app } from '../../lib/app.svelte';
   import { agentLabel } from '../../lib/status';
   import Modal from '../../lib/components/Modal.svelte';
@@ -11,6 +11,9 @@
   let refreshing = $state(false);
   let busyAgent: string | null = $state(null);
   let confirming: AgentInfo | null = $state.raw(null);
+  /** claude login token being pasted; never shown back (the daemon never returns it). */
+  let tokenInput = $state('');
+  let savingToken = $state(false);
 
   $effect(() => {
     void refresh();
@@ -57,7 +60,42 @@
       install ? `Global integration installed for ${nameOf(a)}` : `Global integration removed from ${nameOf(a)}`,
     );
     busyAgent = null;
-    if (updated) app.agents = app.agents.map((x) => (x.id === updated.id ? updated : x));
+    if (updated) replaceAgent(updated);
+  }
+
+  const replaceAgent = (updated: AgentInfo): void => {
+    app.agents = app.agents.map((x) => (x.id === updated.id ? updated : x));
+  };
+
+  function loginText(a: AgentInfo): string {
+    if (!a.auth) return 'unknown';
+    return a.auth.logged_in ? `logged in${a.auth.method ? ` (${a.auth.method})` : ''}` : 'not logged in';
+  }
+
+  function tokenText(t: AgentToken): string {
+    if (t.env) return 'CLAUDE_CODE_OAUTH_TOKEN from the daemon environment';
+    return t.stored ? 'stored' : 'none';
+  }
+
+  async function saveToken(e: SubmitEvent): Promise<void> {
+    e.preventDefault();
+    const token = tokenInput.trim();
+    if (token === '') return;
+    savingToken = true;
+    const updated = await app.act(() => api.agents.setToken('claude', token), 'Claude login token saved');
+    savingToken = false;
+    if (updated) {
+      tokenInput = '';
+      replaceAgent(updated);
+    }
+  }
+
+  async function clearToken(): Promise<void> {
+    if (!confirm('Remove the stored Claude login token? New claude sessions on this machine then use its normal login again.')) return;
+    savingToken = true;
+    const updated = await app.act(() => api.agents.clearToken('claude'), 'Claude login token removed');
+    savingToken = false;
+    if (updated) replaceAgent(updated);
   }
 
   function uninstall(a: AgentInfo): void {
@@ -113,8 +151,40 @@
               <dd class={a.integration.mcp} data-testid="mcp-state">{STATE[a.integration.mcp]}</dd>
               <dt>Memory at launch</dt>
               <dd>{INJECT[a.integration.inject]}</dd>
+              {#if a.token}
+                <dt>Login</dt>
+                <dd data-testid="login-state">{loginText(a)}</dd>
+                <dt>Login token</dt>
+                <dd data-testid="token-state">{tokenText(a.token)}</dd>
+              {/if}
             </dl>
             {#if a.integration.detail}<span class="small muted">{a.integration.detail}</span>{/if}
+            {#if a.token}
+              <p class="small muted token-help">
+                A hub without a desktop login (a LaunchAgent on a locked Mac, a daemon started over SSH) cannot reach the keychain,
+                so Claude Code hangs or reports it is logged out. Give it a long-lived login token instead: run
+                <code>claude setup-token</code> on any machine with a browser, then on this machine
+                <code>blirp agents set-token claude</code> and paste the token{app.admin ? ', or paste it below' : ''}. It applies to
+                this machine only and is never synced.
+              </p>
+              {#if app.admin}
+                <form class="row wrap" onsubmit={saveToken}>
+                  <input
+                    class="input mono grow"
+                    type="password"
+                    aria-label="Claude login token"
+                    placeholder={a.token.stored ? 'Paste a new token to replace the stored one' : 'Token from claude setup-token'}
+                    bind:value={tokenInput}
+                    autocomplete="off"
+                    spellcheck="false"
+                  />
+                  <button type="submit" class="btn sm primary" disabled={savingToken || tokenInput.trim() === ''}>Save token</button>
+                  {#if a.token.stored}
+                    <button type="button" class="btn sm" disabled={savingToken} onclick={clearToken}>Remove token</button>
+                  {/if}
+                </form>
+              {/if}
+            {/if}
           </div>
           {#if app.admin && supported(a)}
             <div class="acts">
@@ -229,6 +299,13 @@
     gap: 6px;
     flex-wrap: wrap;
     justify-content: flex-end;
+  }
+  .token-help {
+    margin: 6px 0 0;
+  }
+  .grow {
+    flex: 1;
+    min-width: 200px;
   }
   .files {
     margin: 8px 0;
