@@ -23,7 +23,7 @@ data-encoding = "2"
 dunce = "1"
 futures-util = { version = "0.3", default-features = false, features = ["sink", "std"] }
 gethostname = "1"
-getrandom = "0.3"
+getrandom = "0.4"
 hex = "0.4"
 hmac = "0.13"
 iroh = "1.2"
