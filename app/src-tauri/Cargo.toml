@@ -1,0 +1,45 @@
+[package]
+name = "blirp-desktop"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "blirp desktop shell (Tauri): starts the daemon and shows its web UI"
+publish = false
+
+[lib]
+name = "blirp_desktop"
+path = "src/lib.rs"
+
+[[bin]]
+name = "blirp-desktop"
+path = "src/main.rs"
+
+[build-dependencies]
+serde_json.workspace = true
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+anyhow.workspace = true
+blirp-core.workspace = true
+reqwest.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+tauri = { version = "2", features = ["tray-icon", "image-png"] }
+tauri-plugin-deep-link = "2"
+tauri-plugin-dialog = "2"
+tauri-plugin-opener = "2"
+tauri-plugin-single-instance = { version = "2", features = ["deep-link"] }
+# native-tls, not rustls: the updater's rustls feature turns on reqwest's
+# `rustls-no-provider`, which workspace feature unification would force onto
+# the blirp crate too, making every reqwest client there panic at build time.
+tauri-plugin-updater = { version = "2", default-features = false, features = ["native-tls", "zip"] }
+tauri-plugin-window-state = "2"
+tokio.workspace = true
+tracing.workspace = true
+tracing-appender.workspace = true
+tracing-subscriber.workspace = true
+
+[lints]
+workspace = true
