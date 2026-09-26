@@ -341,6 +341,14 @@ fn unit_exe(unit: &str) -> Option<PathBuf> {
     None
 }
 
+/// Stop the autostart service's daemon, if a service is installed for this
+/// data dir (`blirp stop`): stopping the unit also cancels a restart it has
+/// pending. False when there is none, or its platform needs nothing (a
+/// graceful stop exits 0, which launchd's KeepAlive does not restart).
+pub(crate) fn stop_managed(paths: &Paths) -> anyhow::Result<bool> {
+    platform::stop_managed(paths.home())
+}
+
 /// `~/.blirp`: the data dir of a service installed without `BLIRP_HOME`.
 #[cfg_attr(windows, allow(dead_code))]
 fn default_home() -> Option<PathBuf> {
@@ -465,6 +473,13 @@ mod platform {
         Ok(true)
     }
 
+    /// `KeepAlive.SuccessfulExit = false` never restarts a daemon that
+    /// exited 0 (a graceful stop, or a duplicate that found one running),
+    /// so the API stop sticks without unloading the LaunchAgent.
+    pub fn stop_managed(_home: &Path) -> anyhow::Result<bool> {
+        Ok(false)
+    }
+
     pub fn status() -> anyhow::Result<Option<String>> {
         let plist = plist_path()?;
         if !plist.exists() {
@@ -553,14 +568,28 @@ mod platform {
         Ok(Removed::DaemonKept)
     }
 
-    pub fn start_managed(home: &Path) -> anyhow::Result<bool> {
+    /// The installed unit runs the daemon for `home` (see `usable`).
+    fn unit_usable(home: &Path) -> anyhow::Result<bool> {
         let entry = format!(
             "Environment={}",
             systemd_quote(&format!("BLIRP_HOME={}", home.display()))
         );
-        let usable = std::fs::read_to_string(unit_path()?)
-            .is_ok_and(|u| usable(&u, unit_exe(&u), &entry, home));
-        if !usable {
+        Ok(std::fs::read_to_string(unit_path()?)
+            .is_ok_and(|u| usable(&u, unit_exe(&u), &entry, home)))
+    }
+
+    /// `systemctl --user stop` (SIGTERM, the daemon's graceful stop), also
+    /// when the unit is not active: that cancels a pending restart.
+    pub fn stop_managed(home: &Path) -> anyhow::Result<bool> {
+        if !unit_usable(home)? {
+            return Ok(false);
+        }
+        systemctl(&["stop", SYSTEMD_UNIT])?;
+        Ok(true)
+    }
+
+    pub fn start_managed(home: &Path) -> anyhow::Result<bool> {
+        if !unit_usable(home)? {
             return Ok(false);
         }
         let enabled = tool(
@@ -656,6 +685,11 @@ mod platform {
 
     /// The Run entry only acts at login; the caller starts the daemon.
     pub fn start_managed(_home: &Path) -> anyhow::Result<bool> {
+        Ok(false)
+    }
+
+    /// The Run entry never restarts anything.
+    pub fn stop_managed(_home: &Path) -> anyhow::Result<bool> {
         Ok(false)
     }
 

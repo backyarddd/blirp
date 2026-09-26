@@ -234,7 +234,18 @@ async fn run(cmd: Command, paths: Paths) -> anyhow::Result<ExitCode> {
             port,
         } => {
             let _guard = crate::daemon::init_logging(&paths)?;
-            if let Err(e) = crate::daemon::run_foreground(paths, port).await {
+            if let Err(e) = crate::daemon::run_foreground(paths.clone(), port).await {
+                // A healthy daemon already serves this data dir, so there is
+                // nothing to do. Exit 0: launchd (KeepAlive SuccessfulExit =
+                // false) and systemd (Restart=on-failure) then stop restarting
+                // this duplicate every few seconds.
+                if e.downcast_ref::<crate::daemon::AlreadyRunning>().is_some()
+                    && crate::daemon::running_daemon(&paths).await.is_some()
+                {
+                    tracing::info!(error = format!("{e:#}"), "not starting a second daemon");
+                    eprintln!("blirp: {e:#}");
+                    return Ok(ExitCode::SUCCESS);
+                }
                 // A detached daemon's stderr goes nowhere; the log is where
                 // `--detach` and the desktop app tell the user to look.
                 tracing::error!(error = format!("{e:#}"), "daemon failed");

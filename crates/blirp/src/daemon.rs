@@ -40,6 +40,34 @@ pub struct Daemon {
     _lock: File,
 }
 
+/// Another daemon holds `daemon.lock` for the same data dir.
+#[derive(Debug, thiserror::Error)]
+#[error("another blirp daemon is already running for {home}{hint}")]
+pub struct AlreadyRunning {
+    home: String,
+    hint: String,
+}
+
+/// Whether a daemon holds `daemon.lock`. The OS releases the lock when the
+/// process dies, so unlike a pid from runtime.json this can never point at
+/// an unrelated process that reused the pid.
+pub fn lock_held(paths: &Paths) -> anyhow::Result<bool> {
+    let path = paths.lock_file();
+    let file = match std::fs::OpenOptions::new().write(true).open(&path) {
+        Ok(f) => f,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+        Err(e) => return Err(e).with_context(|| format!("open {}", path.display())),
+    };
+    match file.try_lock() {
+        // Dropping the file releases the lock again.
+        Ok(()) => Ok(false),
+        Err(std::fs::TryLockError::WouldBlock) => Ok(true),
+        Err(std::fs::TryLockError::Error(e)) => {
+            Err(e).with_context(|| format!("lock {}", path.display()))
+        }
+    }
+}
+
 fn acquire_lock(paths: &Paths) -> anyhow::Result<File> {
     let path = paths.lock_file();
     let file = std::fs::OpenOptions::new()
@@ -55,10 +83,11 @@ fn acquire_lock(paths: &Paths) -> anyhow::Result<File> {
                 Ok(Some(r)) => format!(" (pid {}, port {})", r.pid, r.port),
                 _ => String::new(),
             };
-            bail!(
-                "another blirp daemon is already running for {}{hint}",
-                paths.home().display()
-            )
+            Err(AlreadyRunning {
+                home: paths.home().display().to_string(),
+                hint,
+            }
+            .into())
         }
         Err(std::fs::TryLockError::Error(e)) => {
             Err(e).with_context(|| format!("lock {}", path.display()))
@@ -450,10 +479,23 @@ pub async fn detach(paths: &Paths, port: Option<u16>) -> anyhow::Result<RuntimeI
                 // Lost a race with another starter; that daemon is fine.
                 return Ok(info);
             }
-            bail!(
-                "daemon exited during startup ({status}); see {}",
-                paths.logs_dir().display()
-            );
+            // Another starter's daemon holds the lock but does not answer
+            // yet (the autostart service's, slow to start): wait for it.
+            if !lock_held(paths)? {
+                bail!(
+                    "daemon exited during startup ({status}); see {}",
+                    paths.logs_dir().display()
+                );
+            }
+            if std::time::Instant::now() > deadline {
+                bail!(
+                    "another daemon holds {} but did not become healthy within 20s; see {}",
+                    paths.lock_file().display(),
+                    paths.logs_dir().display()
+                );
+            }
+            tokio::time::sleep(Duration::from_millis(150)).await;
+            continue;
         }
         if let Some(info) = running_daemon(paths).await
             && info.pid == pid

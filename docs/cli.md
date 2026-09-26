@@ -45,7 +45,7 @@ Starts the daemon in the background if it is not running (like `blirp start`), t
 blirp daemon [--detach] [--port <PORT>]
 ```
 
-Runs the daemon in the foreground: local API and UI on `127.0.0.1`, terminals, transcript ingest, memory jobs, sync and (hub) the LAN portal. Logs go to stderr and `~/.blirp/logs/blirpd.<date>.log`. Stops on Ctrl+C / SIGTERM (or `POST /api/daemon/shutdown`); running sessions end and become Detached. Only one daemon runs per `BLIRP_HOME`; a second one exits with "another blirp daemon is already running".
+Runs the daemon in the foreground: local API and UI on `127.0.0.1`, terminals, transcript ingest, memory jobs, sync and (hub) the LAN portal. Logs go to stderr and `~/.blirp/logs/blirpd.<date>.log`. Stops on Ctrl+C / SIGTERM (or `POST /api/daemon/shutdown`); running sessions end and become Detached. Only one daemon runs per `BLIRP_HOME`; a second one prints "another blirp daemon is already running" and exits 0 when that daemon answers (so launchd or systemd stop restarting it), 1 while it is still starting.
 
 - `--detach`: start the daemon in the background (new session / no console window) and return once it answers health checks (up to 20 s). If a daemon is already running, prints its pid and port and exits 0.
 - `--port <PORT>`: listen on this port instead of `daemon.port`; `0` picks a free port.
@@ -72,7 +72,7 @@ Recent sessions (default 20), newest first: id, status, agent, title or folder.
 
 ## blirp stop
 
-Stops the daemon gracefully (`POST /api/daemon/shutdown`; running sessions end as Detached). If it still runs after 15 seconds, or does not answer, its process is killed. Prints "not running" and exits 0 when no daemon runs.
+Stops the daemon gracefully (`POST /api/daemon/shutdown`; running sessions end as Detached). If it still runs after 15 seconds, or does not answer, its process is killed. On Linux with a `systemd --user` unit installed for this data directory it runs `systemctl --user stop blirp` first, which also cancels a restart systemd has pending, so the stop sticks. Prints "not running" and exits 0 when no daemon runs.
 
 ## blirp logs
 

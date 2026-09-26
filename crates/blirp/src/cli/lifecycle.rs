@@ -1,6 +1,7 @@
 //! `blirp start`, `blirp stop`, `blirp logs` (§4) and what `blirp doctor`
 //! reads from the log.
 
+use crate::daemon::lock_held;
 use anyhow::{Context as _, bail};
 use blirp_core::paths::{Paths, RuntimeInfo};
 use std::io::{Read as _, Seek as _, SeekFrom, Write as _};
@@ -14,26 +15,6 @@ const GRACEFUL: Duration = Duration::from_secs(15);
 const AFTER_KILL: Duration = Duration::from_secs(5);
 /// Like `daemon --detach`: how long a starting daemon may take to answer.
 const STARTUP: Duration = Duration::from_secs(20);
-
-/// Whether a daemon holds `daemon.lock`. The OS releases the lock when the
-/// process dies, so unlike a pid from runtime.json this can never point at
-/// an unrelated process that reused the pid.
-fn lock_held(paths: &Paths) -> anyhow::Result<bool> {
-    let path = paths.lock_file();
-    let file = match std::fs::OpenOptions::new().write(true).open(&path) {
-        Ok(f) => f,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(false),
-        Err(e) => return Err(e).with_context(|| format!("open {}", path.display())),
-    };
-    match file.try_lock() {
-        // Dropping the file releases the lock again.
-        Ok(()) => Ok(false),
-        Err(std::fs::TryLockError::WouldBlock) => Ok(true),
-        Err(std::fs::TryLockError::Error(e)) => {
-            Err(e).with_context(|| format!("lock {}", path.display()))
-        }
-    }
-}
 
 async fn wait_released(paths: &Paths, within: Duration) -> anyhow::Result<bool> {
     let deadline = Instant::now() + within;
@@ -79,12 +60,31 @@ async fn request_shutdown(info: &RuntimeInfo) -> bool {
 /// still holds its lock after the grace period.
 pub async fn stop(paths: &Paths) -> anyhow::Result<ExitCode> {
     let info = RuntimeInfo::read(paths)?;
+    let was_running = lock_held(paths)?;
+    // Through the autostart service first, when it has one for this data
+    // dir: stopping the unit also cancels a restart it has pending, so the
+    // stop sticks. Otherwise (or if that fails) over the API below.
+    let by_service = match super::service::stop_managed(paths) {
+        Ok(stopped) => stopped,
+        Err(e) => {
+            eprintln!(
+                "blirp: could not stop the autostart service ({e:#}); stopping the daemon directly"
+            );
+            false
+        }
+    };
     if !lock_held(paths)? {
         // A crashed daemon may have left runtime.json behind.
-        if let Some(i) = info {
+        if let Some(i) = &info {
             RuntimeInfo::remove_if_owned(paths, i.pid)?;
         }
-        println!("blirp daemon is not running ({})", paths.home().display());
+        match (&info, was_running && by_service) {
+            (Some(i), true) => println!(
+                "blirp daemon stopped (pid {}) with the autostart service",
+                i.pid
+            ),
+            _ => println!("blirp daemon is not running ({})", paths.home().display()),
+        }
         return Ok(ExitCode::SUCCESS);
     }
     let Some(info) = info else {

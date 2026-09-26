@@ -66,6 +66,15 @@ fn detach_logs_and_stop() {
     assert!(o.status.success(), "{}", text(&o));
     assert!(text(&o).contains("listening"), "{}", text(&o));
 
+    // A second daemon for the same data dir exits 0 (so a supervisor does
+    // not keep restarting it), and `start` leaves the running one alone.
+    let o = blirp(&home, &user, &["daemon", "--port", "0"]);
+    assert!(o.status.success(), "{}", text(&o));
+    assert!(text(&o).contains("already running"), "{}", text(&o));
+    let o = blirp(&home, &user, &["start"]);
+    assert!(o.status.success(), "{}", text(&o));
+    assert!(text(&o).contains("already running"), "{}", text(&o));
+
     let o = blirp(&home, &user, &["stop"]);
     assert!(o.status.success(), "{}", text(&o));
     assert!(text(&o).contains("stopped"), "{}", text(&o));
