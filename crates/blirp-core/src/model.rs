@@ -240,6 +240,10 @@ pub struct Session {
     pub tokens_out: i64,
     pub cost_usd: f64,
     pub parent_session_id: Option<String>,
+    /// Ended by a user Stop: `status` is `completed` and `exit_code` null.
+    // Default: rows replicated from older versions do not carry it.
+    #[serde(default)]
+    pub stopped_by_user: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]

@@ -28,6 +28,7 @@ pub(super) fn session_row(r: &Row<'_>) -> rusqlite::Result<Session> {
         tokens_out: r.get("tokens_out")?,
         cost_usd: r.get("cost_usd")?,
         parent_session_id: r.get("parent_session_id")?,
+        stopped_by_user: r.get("stopped_by_user")?,
     })
 }
 
@@ -330,6 +331,7 @@ mod tests {
             tokens_out: 0,
             cost_usd: 0.0,
             parent_session_id: None,
+            stopped_by_user: false,
         }
     }
 

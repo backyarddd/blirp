@@ -89,6 +89,7 @@ sessions(id TEXT PK, project_id TEXT, machine_id TEXT,
          distilled_through_seq INT DEFAULT 0,
          tokens_in INT DEFAULT 0, tokens_out INT DEFAULT 0, cost_usd REAL DEFAULT 0,
          parent_session_id TEXT NULL, -- fork / continue-in lineage; parent of an ingested subagent
+         stopped_by_user INT DEFAULT 0, -- ended by a user Stop (migration 3)
          UNIQUE(agent, agent_session_id))
 
 events(session_id TEXT, seq INT, ts INT,
@@ -186,7 +187,7 @@ ode.exe"` form) are unwrapped to `node <script>` so arguments never pass through
 Status:
 - From hooks when available (claude: UserPromptSubmit -> working, Stop -> idle, Notification(permission/idle prompt) -> waiting, SessionEnd -> completed).
 - Else heuristics: output within the last 2 s -> working; otherwise idle.
-- Process exit: code 0 -> completed, else failed. A user Stop -> completed regardless of exit code. Daemon shutdown ends running sessions as `detached`.
+- Process exit: code 0 -> completed, else failed. A user Stop is recorded as intent: `completed` with `exit_code` null and `stopped_by_user = true` (the kill's own code, e.g. 1 from TerminateJobObject, is dropped), so the UI shows "Stopped"; the terminal `exit` frame has `exit_code: null` too. Resume clears the flag. Daemon shutdown ends running sessions as `detached`.
 - Heuristics never overwrite `waiting` (hook-owned) or a final status.
 - On daemon restart, blirp-launched sessions whose process is gone become `detached` (ingested external sessions keep their status); UI offers Resume (agent resume flag with `agent_session_id`).
 

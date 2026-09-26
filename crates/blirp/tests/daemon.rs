@@ -213,9 +213,12 @@ async fn shell_session_over_websocket() {
             _ => continue,
         }
     };
-    assert_eq!(exit.0, SessionStatus::Completed);
+    // A Stop is recorded as intent, not as the kill's exit code.
+    assert_eq!(exit, (SessionStatus::Completed, None));
     let done = wait_status(&h, &session.id, SessionStatus::Completed).await;
-    assert!(done.ended_at.is_some() && done.exit_code.is_some());
+    assert!(done.ended_at.is_some());
+    assert_eq!(done.exit_code, None);
+    assert!(done.stopped_by_user);
 
     // Stopping again is a conflict; resuming relaunches in the same row.
     let r = h
@@ -237,6 +240,7 @@ async fn shell_session_over_websocket() {
     let resumed: Session = r.json().await.unwrap();
     assert_eq!(resumed.status, SessionStatus::Starting);
     assert!(resumed.ended_at.is_none());
+    assert!(!resumed.stopped_by_user);
 
     // An initial prompt is typed once output settles, then submitted.
     let r = h

@@ -49,8 +49,12 @@ pub struct SpawnRequest {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ExitInfo {
-    pub code: i32,
+    /// The process's exit code; `None` when the user stopped the session
+    /// (the code then only says how it was killed).
+    pub code: Option<i32>,
     pub status: SessionStatus,
+    /// Ended by a user Stop (§7), reported as `completed`.
+    pub stopped_by_user: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -246,14 +250,31 @@ impl Terminal {
                 // terminal hangup; unix escalates to SIGKILL after the grace.
                 t.tree.terminate();
                 t.reap_in_background();
-                let status = if t.detach_on_exit.load(Ordering::SeqCst) {
-                    SessionStatus::Detached
-                } else if code == 0 || t.stop_requested.load(Ordering::SeqCst) {
-                    SessionStatus::Completed
+                let info = if t.detach_on_exit.load(Ordering::SeqCst) {
+                    ExitInfo {
+                        code: Some(code),
+                        status: SessionStatus::Detached,
+                        stopped_by_user: false,
+                    }
+                } else if t.stop_requested.load(Ordering::SeqCst) {
+                    // The code only says how the tree was killed (on Windows
+                    // TerminateJobObject's 1); the user's intent is the result.
+                    ExitInfo {
+                        code: None,
+                        status: SessionStatus::Completed,
+                        stopped_by_user: true,
+                    }
                 } else {
-                    SessionStatus::Failed
+                    ExitInfo {
+                        code: Some(code),
+                        status: if code == 0 {
+                            SessionStatus::Completed
+                        } else {
+                            SessionStatus::Failed
+                        },
+                        stopped_by_user: false,
+                    }
                 };
-                let info = ExitInfo { code, status };
                 {
                     let mut s = lock(&t.screen);
                     s.exited = Some(info);

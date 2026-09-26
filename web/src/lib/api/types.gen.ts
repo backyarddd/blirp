@@ -55,7 +55,11 @@ agent_session_id: string | null, origin: SessionOrigin, cwd: string, title: stri
 /**
  * Distill output (§9), null until the session is distilled.
  */
-summary: JsonValue | null, distilled_through_seq: number, tokens_in: number, tokens_out: number, cost_usd: number, parent_session_id: string | null, };
+summary: JsonValue | null, distilled_through_seq: number, tokens_in: number, tokens_out: number, cost_usd: number, parent_session_id: string | null, 
+/**
+ * Ended by a user Stop: `status` is `completed` and `exit_code` null.
+ */
+stopped_by_user: boolean, };
 
 export type Event = { session_id: string, seq: number, ts: number, kind: EventKind, 
 /**

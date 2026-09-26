@@ -723,6 +723,7 @@ mod tests {
             tokens_out: 0,
             cost_usd: 0.0,
             parent_session_id: None,
+            stopped_by_user: false,
         };
         store.insert_session(&s).unwrap();
         store.rebind_machine("old", "new").unwrap();

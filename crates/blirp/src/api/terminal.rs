@@ -74,7 +74,7 @@ async fn send(socket: &mut WebSocket, msg: Option<Message>) -> bool {
 fn exit_msg(info: ExitInfo) -> Option<Message> {
     text(&TerminalServerMessage::Exit {
         status: info.status,
-        exit_code: Some(info.code),
+        exit_code: info.code,
     })
 }
 

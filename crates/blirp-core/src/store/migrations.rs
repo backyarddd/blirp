@@ -4,7 +4,7 @@
 use rusqlite::Connection;
 
 /// Index `i` holds the migration that moves the schema from version `i` to `i + 1`.
-pub(crate) const MIGRATIONS: &[&str] = &[V1, V2];
+pub(crate) const MIGRATIONS: &[&str] = &[V1, V2, V3];
 
 /// Schema of §5. Note on the FTS tables: they are external-content tables keyed
 /// by the implicit rowid of `events`/`records`. blirp never runs `VACUUM`
@@ -230,6 +230,11 @@ CREATE TABLE hub_log(
 const V2: &str = r#"
 CREATE INDEX outbox_entity_key ON outbox(entity, key, origin_seq);
 CREATE INDEX hub_log_origin ON hub_log(origin_machine, hub_seq);
+"#;
+
+/// A user Stop is recorded as intent (§7): `completed`, no exit code.
+const V3: &str = r#"
+ALTER TABLE sessions ADD COLUMN stopped_by_user INTEGER NOT NULL DEFAULT 0;
 "#;
 
 #[derive(Debug, thiserror::Error)]

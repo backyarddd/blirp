@@ -288,6 +288,7 @@ pub async fn launch(state: &SharedState, req: LaunchSession) -> ApiResult<Sessio
         tokens_out: 0,
         cost_usd: 0.0,
         parent_session_id: source.as_ref().map(|s| s.id.clone()),
+        stopped_by_user: false,
     };
     let store = state.store.clone();
     let row = session.clone();
@@ -457,6 +458,7 @@ async fn start(
                 s.status = SessionStatus::Starting;
                 s.ended_at = None;
                 s.exit_code = None;
+                s.stopped_by_user = false;
                 s.last_activity_at = now_ms();
             })?)
         })
@@ -620,7 +622,8 @@ fn record_exit(state: &SharedState, session_id: &str, info: ExitInfo) {
     let now = now_ms();
     match state.store.modify_session(session_id, |s| {
         s.status = info.status;
-        s.exit_code = Some(info.code);
+        s.exit_code = info.code;
+        s.stopped_by_user = info.stopped_by_user;
         s.ended_at = Some(now);
         s.last_activity_at = now;
     }) {
