@@ -110,18 +110,34 @@ pub async fn update(
     if was_running {
         super::lifecycle::stop(paths).await?;
     }
-    for f in install::CLI_FILES {
-        install::replace_path(&cli_root.join(f), &inst.dir.join(f))?;
-    }
+    let mut moves: Vec<(PathBuf, PathBuf)> = install::CLI_FILES
+        .iter()
+        .map(|f| (cli_root.join(f), inst.dir.join(f)))
+        .collect();
     if let Some((_dir, staged, dst)) = &app_stage {
-        install::replace_path(staged, dst)?;
+        moves.push((staged.clone(), dst.clone()));
     }
-    inst.receipt.version = target.to_string();
-    inst.save()?;
+    // All files and then the receipt, or (on any failure) none of them.
+    let installed = install::replace_all(&moves, || {
+        inst.receipt.version = target.to_string();
+        inst.save()
+    });
+    // The daemon comes back either way: the new version, or the old one.
+    let restarted = if was_running {
+        restart_daemon(paths, &inst.dir.join(install::CLI_FILES[0])).await
+    } else {
+        Ok(())
+    };
+    if let Err(e) = installed {
+        if let Err(r) = restarted {
+            eprintln!("blirp: the daemon did not start again: {r:#}");
+        }
+        return Err(e.context(format!(
+            "updating to {target} failed; blirp {current} is still installed"
+        )));
+    }
     println!("Updated blirp {current} -> {target}");
-    if was_running {
-        restart_daemon(paths, &inst.dir.join(install::CLI_FILES[0])).await?;
-    }
+    restarted?;
     Ok(ExitCode::SUCCESS)
 }
 

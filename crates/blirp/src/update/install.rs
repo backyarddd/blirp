@@ -87,8 +87,11 @@ pub struct Installed {
 
 impl Installed {
     pub fn save(&self) -> anyhow::Result<()> {
+        // Temp file + rename: a failed write leaves the old receipt intact.
         let text = serde_json::to_string_pretty(&self.receipt)?;
-        std::fs::write(&self.receipt_path, text + "\n")
+        let tmp = self.receipt_path.with_extension("json.tmp");
+        std::fs::write(&tmp, text + "\n")
+            .and_then(|()| std::fs::rename(&tmp, &self.receipt_path))
             .with_context(|| format!("write {}", self.receipt_path.display()))
     }
 }
@@ -186,12 +189,11 @@ fn aside_path(dst: &Path) -> anyhow::Result<PathBuf> {
     Ok(dst.with_file_name(format!("{name}.{ms}.old")))
 }
 
-/// Move `new` (same filesystem) to `dst`. An existing `dst` is renamed aside
-/// first: Windows cannot overwrite or delete a running executable but can
-/// rename it, and a directory (`blirp.app`) cannot be renamed over. The
-/// aside copy is deleted when possible, else by [`cleanup_old`] on a later
-/// start. On failure the old file is put back.
-pub fn replace_path(new: &Path, dst: &Path) -> anyhow::Result<()> {
+/// Move `new` (same filesystem) to `dst`; returns where an existing `dst`
+/// went. It is renamed aside first: Windows cannot overwrite or delete a
+/// running executable but can rename it, and a directory (`blirp.app`)
+/// cannot be renamed over. On failure the old file is put back.
+fn move_in(new: &Path, dst: &Path) -> anyhow::Result<Option<PathBuf>> {
     if let Some(dir) = dst.parent() {
         std::fs::create_dir_all(dir).with_context(|| format!("create {}", dir.display()))?;
     }
@@ -204,18 +206,64 @@ pub fn replace_path(new: &Path, dst: &Path) -> anyhow::Result<()> {
         Err(_) => None,
     };
     if let Err(e) = std::fs::rename(new, dst) {
-        if let Some(a) = &aside
-            && let Err(back) = std::fs::rename(a, dst)
-        {
-            tracing::error!(error = %back, path = %dst.display(), "restore after failed replace");
+        if let Some(a) = &aside {
+            restore(dst, a);
         }
         return Err(e).with_context(|| format!("move {} to {}", new.display(), dst.display()));
     }
-    if let Some(a) = aside {
-        // Fails for a running Windows executable; cleanup_old gets it later.
-        let _ = remove_any(&a);
+    Ok(aside)
+}
+
+/// Put the old `aside` copy back at `dst`. Failures are logged: there is
+/// nothing better to do with them while already handling an error.
+fn restore(dst: &Path, aside: &Path) {
+    if let Err(e) = std::fs::rename(aside, dst) {
+        tracing::error!(error = %e, path = %dst.display(), "restoring the previous version failed");
+        eprintln!(
+            "blirp: could not restore {} from {}: {e}",
+            dst.display(),
+            aside.display()
+        );
     }
-    Ok(())
+}
+
+/// Move every `(new, dst)` into place, then run `finish` (writing the
+/// receipt); all or nothing: when a move or `finish` fails, every path
+/// replaced so far is restored (newest first) and the error returned. On
+/// success the old copies are deleted when possible, else by
+/// [`cleanup_old`] on a later start.
+pub fn replace_all(
+    moves: &[(PathBuf, PathBuf)],
+    finish: impl FnOnce() -> anyhow::Result<()>,
+) -> anyhow::Result<()> {
+    let mut done: Vec<(&Path, Option<PathBuf>)> = Vec::new();
+    let result = moves
+        .iter()
+        .try_for_each(|(new, dst)| {
+            done.push((dst, move_in(new, dst)?));
+            Ok(())
+        })
+        .and_then(|()| finish());
+    match result {
+        Ok(()) => {
+            for aside in done.into_iter().filter_map(|(_, a)| a) {
+                // Fails for a running Windows executable; cleanup_old gets it later.
+                let _ = remove_any(&aside);
+            }
+            Ok(())
+        }
+        Err(e) => {
+            for (dst, aside) in done.into_iter().rev() {
+                if let Err(err) = remove_any(dst) {
+                    tracing::error!(error = %err, path = %dst.display(), "removing a new file after a failed update");
+                }
+                if let Some(aside) = aside {
+                    restore(dst, &aside);
+                }
+            }
+            Err(e)
+        }
+    }
 }
 
 /// Delete `<known name>[.<n>].old` leftovers of earlier updates in `dir`
@@ -521,7 +569,7 @@ mod tests {
         std::fs::write(&dst, "old").unwrap();
         let new = dir.join("staged");
         std::fs::write(&new, "new").unwrap();
-        replace_path(&new, &dst).unwrap();
+        replace_all(&[(new.clone(), dst.clone())], || Ok(())).unwrap();
         assert_eq!(std::fs::read_to_string(&dst).unwrap(), "new");
         assert!(!new.exists());
         // A directory is replaced as a whole.
@@ -529,7 +577,7 @@ mod tests {
         std::fs::create_dir_all(app.join("Contents")).unwrap();
         let staged = dir.join("stage/blirp.app");
         std::fs::create_dir_all(staged.join("New")).unwrap();
-        replace_path(&staged, &app).unwrap();
+        replace_all(&[(staged, app.clone())], || Ok(())).unwrap();
         assert!(app.join("New").is_dir() && !app.join("Contents").exists());
         // Leftovers of known names go, other files stay.
         std::fs::write(dir.join("blirp.exe.old"), "").unwrap();
@@ -540,6 +588,52 @@ mod tests {
         assert!(!dir.join("blirp.exe.old").exists());
         assert!(!dir.join("x64/OpenConsole.exe.123.old").exists());
         assert!(dir.join("notes.old").exists());
+    }
+
+    // An update replaces everything or nothing: a failed move, or a failed
+    // receipt write after the moves, puts every old file back.
+    #[test]
+    fn failed_update_restores_every_file() {
+        let root = tempfile::tempdir().unwrap();
+        let dir = root.path();
+        let stage = dir.join("stage");
+        std::fs::create_dir_all(stage.join("x64")).unwrap();
+        let files = ["blirp.exe", "conpty.dll", "x64/OpenConsole.exe"];
+        let mut moves = Vec::new();
+        for f in files {
+            std::fs::create_dir_all(dir.join(f).parent().unwrap()).unwrap();
+            std::fs::write(dir.join(f), "old").unwrap();
+            std::fs::write(stage.join(f), "new").unwrap();
+            moves.push((stage.join(f), dir.join(f)));
+        }
+        let unchanged = |what: &str| {
+            for f in files {
+                assert_eq!(
+                    std::fs::read_to_string(dir.join(f)).unwrap(),
+                    "old",
+                    "{what}: {f}"
+                );
+                assert!(!dir.join(format!("{f}.old")).exists(), "{what}: {f}.old");
+            }
+        };
+        // The receipt cannot be written after every file moved.
+        let err = replace_all(&moves, || anyhow::bail!("disk full")).unwrap_err();
+        assert!(err.to_string().contains("disk full"));
+        unchanged("failed finish");
+        // The last file cannot be moved (its staged copy is missing) after
+        // the others were.
+        std::fs::write(stage.join(files[0]), "new").unwrap();
+        std::fs::write(stage.join(files[1]), "new").unwrap();
+        let mut ran = false;
+        assert!(
+            replace_all(&moves, || {
+                ran = true;
+                Ok(())
+            })
+            .is_err()
+        );
+        assert!(!ran, "the receipt is written only after every file moved");
+        unchanged("failed move");
     }
 
     /// The Windows case this module exists for: replacing an executable
@@ -560,14 +654,14 @@ mod tests {
         assert!(std::fs::remove_file(&exe).is_err());
         let new = root.path().join("new.exe");
         std::fs::write(&new, "new").unwrap();
-        replace_path(&new, &exe).unwrap();
+        replace_all(&[(new, exe.clone())], || Ok(())).unwrap();
         assert_eq!(std::fs::read_to_string(&exe).unwrap(), "new");
         let old = root.path().join("blirp.exe.old");
         assert!(old.exists(), "the running copy stays aside");
         // A second update while the first old copy still runs.
         let newer = root.path().join("newer.exe");
         std::fs::write(&newer, "newer").unwrap();
-        replace_path(&newer, &exe).unwrap();
+        replace_all(&[(newer, exe.clone())], || Ok(())).unwrap();
         assert_eq!(std::fs::read_to_string(&exe).unwrap(), "newer");
         child.kill().unwrap();
         child.wait().unwrap();
