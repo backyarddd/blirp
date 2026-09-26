@@ -324,7 +324,10 @@ pub async fn detach(paths: &Paths, port: Option<u16>) -> anyhow::Result<RuntimeI
     }
     let exe = std::env::current_exe().context("locate blirp executable")?;
     let mut cmd = std::process::Command::new(exe);
+    // Never inherit the caller's folder: the daemon would keep it in use
+    // (on Windows it could not be deleted or renamed) for its lifetime.
     cmd.arg("daemon")
+        .current_dir(paths.home())
         .env(blirp_core::paths::HOME_ENV, paths.home())
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::null())

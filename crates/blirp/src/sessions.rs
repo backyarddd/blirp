@@ -241,6 +241,14 @@ pub async fn launch(state: &SharedState, req: LaunchSession) -> ApiResult<Sessio
         }
         None => None,
     };
+    // A relative folder would resolve against the daemon's own directory.
+    if req
+        .cwd
+        .as_ref()
+        .is_some_and(|c| !Path::new(c).is_absolute())
+    {
+        return Err(ApiError::bad_request("cwd must be an absolute path"));
+    }
     if req.prompt.as_ref().is_some_and(|p| p.len() > MAX_PROMPT) {
         return Err(ApiError::bad_request("prompt exceeds 64 KiB"));
     }

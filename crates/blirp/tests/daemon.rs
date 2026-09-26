@@ -307,6 +307,20 @@ async fn api_auth_projects_memory_files() {
     let r = h.http.get(h.url("/auth?token=wrong")).send().await.unwrap();
     assert_eq!(r.status(), 401);
 
+    // Folders must be absolute: relative ones would resolve against the
+    // daemon's working directory (`src` exists relative to this test's).
+    for (path, body) in [
+        ("/api/projects", json!({"path": "src"})),
+        ("/api/sessions", json!({"cwd": "src", "agent": "shell"})),
+    ] {
+        let r = h.send(reqwest::Method::POST, path, body).await;
+        assert_eq!(r.status(), 400, "{path}");
+        assert_eq!(
+            r.json::<ErrorBody>().await.unwrap().error.code,
+            "invalid_request"
+        );
+    }
+
     // Register a folder; files API stays inside it.
     let proj = h._home.path().join("proj");
     std::fs::create_dir_all(proj.join("src")).unwrap();

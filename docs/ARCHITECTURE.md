@@ -53,7 +53,7 @@ Data dir `BLIRP_HOME`, default `~/.blirp` on every OS (Windows: `%USERPROFILE%\.
 
 ## 4. Processes
 
-- `blirp daemon` - long-running per-user process. Owns PTYs, ingest watchers, memory jobs, SQLite writer, local HTTP/WS API, and (optionally) the iroh sync endpoint and LAN portal (hub). Single instance enforced by a lock file.
+- `blirp daemon` - long-running per-user process. Owns PTYs, ingest watchers, memory jobs, SQLite writer, local HTTP/WS API, and (optionally) the iroh sync endpoint and LAN portal (hub). Single instance enforced by a lock file. `--detach` starts it in the background with `BLIRP_HOME` as its working directory (never the caller's folder, which it would otherwise keep in use).
 - `blirp hook <agent> <event>` - short-lived; reads hook JSON from stdin, POSTs to daemon, prints injection output where the agent supports it. Always exits 0.
 - `blirp mcp` - stdio MCP server spawned by agents. Reads the local SQLite directly in read-only mode for queries; writes (e.g. `mem_record`) go through the daemon API.
 - `blirp <cli>` - `status`, `open` (opens UI/portal in browser with a login link), `mem search|brief|show`, `sessions`, `pair`, `hub enable|disable|invite|status`, `devices list|revoke`, `service install|uninstall|status`, `hooks install|uninstall|status`, `doctor`.
@@ -166,7 +166,7 @@ Implementation notes: a subfolder of an unregistered repo registers the repo top
 
 An `AgentSpec` describes each agent: binary name(s), how to detect it on PATH, launch args, resume args, env injection, hook/MCP integration, transcript adapter. Custom agents are any command line from config (no memory ingest, but still tracked with status and injection via `BLIRP_MEMORY_FILE` env and AGENTS.md if the user enables it).
 
-Launch (`POST /api/sessions`): body `{project_id | cwd, agent, prompt?, worktree?: bool, continue_from?: session_id, machine?: id}`:
+Launch (`POST /api/sessions`): body `{project_id | cwd, agent, prompt?, worktree?: bool, continue_from?: session_id, machine?: id}` (`cwd` must be absolute, else 400):
 1. Resolve project + cwd. If `worktree` and project is git: `git worktree add ~/.blirp/worktrees/<project>/<name> -b blirp/<name>`; name is `adjective-animal-xxxx`.
 2. Create session row (`starting`, origin `blirp`).
 3. Render memory injection (§9) to `~/.blirp/launch/<id>/memory.md`.
@@ -360,7 +360,7 @@ Auth: local clients send `Authorization: Bearer <runtime token>` or the `blirp_s
 GET  /api/health                         {version, machine, role}
 GET  /api/machines                       list; DELETE /api/machines/:id (revoke)
 GET  /api/projects                       list with path(s), git flag, session counts, last activity; GET /api/projects/:id one
-POST /api/projects                       {path, name?} register folder
+POST /api/projects                       {path, name?} register folder (absolute path, else 400)
 PATCH/DELETE /api/projects/:id           rename / soft delete; POST /api/projects/:id/merge {into}
 GET  /api/projects/:id/memory            brief, records, recent sessions
 PUT  /api/projects/:id/brief             {body_md}; GET .../brief/history; POST .../brief/revert {version}

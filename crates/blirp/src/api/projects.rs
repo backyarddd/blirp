@@ -1,6 +1,6 @@
 //! Projects: list, register, rename, delete, merge, memory view.
 
-use super::{ApiJson, ApiResult, blocking};
+use super::{ApiError, ApiJson, ApiResult, blocking};
 use crate::state::SharedState;
 use axum::extract::{Path, State};
 use axum::http::StatusCode;
@@ -44,6 +44,10 @@ async fn create(
     State(s): State<SharedState>,
     ApiJson(body): ApiJson<CreateProject>,
 ) -> ApiResult<(StatusCode, Json<ProjectSummary>)> {
+    // A relative folder would resolve against the daemon's own directory.
+    if !std::path::Path::new(&body.path).is_absolute() {
+        return Err(ApiError::bad_request("path must be an absolute path"));
+    }
     let (store, machine) = (s.store.clone(), s.machine.id.clone());
     let summary = blocking(move || {
         let p = store.register_project(
