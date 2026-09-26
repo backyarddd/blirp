@@ -228,6 +228,22 @@ mkdir -p "$tmp/cli"
 tar -xzf "$tmp/cli.tar.gz" -C "$tmp/cli"
 [ -f "$tmp/cli/$cli_name/blirp" ] || die "$cli_name.tar.gz does not contain $cli_name/blirp"
 
+if [ "$os" = Darwin ]; then
+  app_asset=blirp_${ver}_$app_arch.app.tar.gz
+else
+  app_asset=blirp_${ver}_$app_arch.AppImage
+fi
+# Everything is downloaded and verified before anything is installed.
+app_ready=
+if [ -z "$no_app" ]; then
+  if has_asset "$app_asset"; then
+    verified "$app_asset" "$tmp/app.download"
+    app_ready=1
+  else
+    say "warning: release $tag has no desktop app for this platform ($app_asset); installing the CLI only"
+  fi
+fi
+
 # ------------------------------------------------------------------- install
 
 bin=$install_dir/blirp
@@ -250,14 +266,7 @@ desktop_quote() {
   printf '"%s"' "$(printf '%s' "$1" | sed 's/[\\"`$]/\\&/g')"
 }
 
-if [ "$os" = Darwin ]; then
-  app_asset=blirp_${ver}_$app_arch.app.tar.gz
-else
-  app_asset=blirp_${ver}_$app_arch.AppImage
-fi
-
 install_app() {
-  verified "$app_asset" "$tmp/app.download"
   if [ "$os" = Darwin ]; then
     mkdir -p "$HOME/Applications"
     stage=$HOME/Applications/.blirp-install.$$
@@ -291,13 +300,7 @@ EOF
   say "installed the desktop app: $app_path"
 }
 
-if [ -z "$no_app" ]; then
-  if has_asset "$app_asset"; then
-    install_app
-  else
-    say "warning: release $tag has no desktop app for this platform ($app_asset); installed the CLI only"
-  fi
-fi
+if [ -n "$app_ready" ]; then install_app; fi
 app_recorded=
 if [ -e "$app_path" ]; then app_recorded=$app_path; fi
 
