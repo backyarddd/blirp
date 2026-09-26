@@ -472,9 +472,13 @@ pub fn refresh_statuses(state: &SharedState, last: &mut HashMap<String, SessionS
 }
 
 /// On startup: sessions that claim a live process from a previous daemon run
-/// have lost it.
+/// have lost it. External sessions (ingested, §8) never had one.
 pub fn mark_detached(state: &SharedState) -> anyhow::Result<()> {
-    for s in state.store.live_sessions_on(&state.machine.id)? {
+    let live = state.store.live_sessions_on(&state.machine.id)?;
+    for s in live
+        .into_iter()
+        .filter(|s| s.origin == SessionOrigin::Blirp)
+    {
         state.store.modify_session(&s.id, |s| {
             s.status = SessionStatus::Detached;
         })?;
