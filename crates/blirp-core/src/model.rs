@@ -166,6 +166,23 @@ str_enum!(SearchHitKind {
     Record = "record",
 });
 
+str_enum!(IntegrationState {
+    Installed = "installed",
+    NotInstalled = "not_installed",
+    Unsupported = "unsupported",
+});
+
+// `hook`: a SessionStart-style hook returns the memory as additional context;
+// `instructions`: the memory is added to the agent's instructions via a config
+// override; `flag`: a command-line flag passes the memory file (aider `--read`);
+// `none`: only the `BLIRP_MEMORY_FILE` env var is set.
+str_enum!(InjectMode {
+    Hook = "hook",
+    Instructions = "instructions",
+    Flag = "flag",
+    None = "none",
+});
+
 // ---------------------------------------------------------------- rows
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
@@ -600,6 +617,8 @@ pub struct LaunchSession {
     #[serde(default)]
     #[ts(optional)]
     pub worktree: Option<bool>,
+    /// Start with a handoff pack of this session (continue in / fork, §9).
+    /// Defaults the folder to the source session's folder.
     #[serde(default)]
     #[ts(optional)]
     pub continue_from: Option<String>,
@@ -681,6 +700,62 @@ pub struct AgentInfo {
     pub version: Option<String>,
     /// Resume by the agent's own session id is supported.
     pub can_resume: bool,
+    pub integration: AgentIntegration,
+}
+
+/// How blirp memory reaches an agent (§9).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
+pub struct AgentIntegration {
+    /// Opt-in global hooks in the agent's user config (sessions started outside blirp).
+    pub global_hooks: IntegrationState,
+    /// blirp MCP server registered in the agent's user config.
+    pub mcp: IntegrationState,
+    /// Session-start injection used when the session is launched from blirp.
+    pub inject: InjectMode,
+    /// Extra information, e.g. a manual step the agent requires.
+    pub detail: Option<String>,
+}
+
+/// `GET /api/inject`: the rendered memory injection.
+#[derive(Debug, Clone, Serialize, Deserialize, TS)]
+pub struct Injection {
+    pub markdown: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
+pub struct SummaryItem {
+    pub title: String,
+    pub body: String,
+}
+
+/// Last failed distill attempt of a session.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
+pub struct DistillFailure {
+    pub message: String,
+    pub at: i64,
+    /// Highest event seq the failed attempt covered; retried only after newer events.
+    pub through_seq: i64,
+}
+
+/// Shape of `Session.summary` (the `summary_json` column, §9 distill output).
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize, TS)]
+#[serde(default)]
+pub struct SessionSummary {
+    pub title: Option<String>,
+    /// 3-6 sentences; null until a distill succeeded.
+    pub summary: Option<String>,
+    pub decisions: Vec<SummaryItem>,
+    pub open_threads: Vec<SummaryItem>,
+    pub gotchas: Vec<SummaryItem>,
+    pub resolved_record_ids: Vec<String>,
+    /// Files touched, relative to the session folder.
+    pub files: Vec<String>,
+    /// Summarizer backend that produced it (`claude`, `codex`, `ollama`).
+    pub backend: Option<String>,
+    pub distilled_at: Option<i64>,
+    pub through_seq: i64,
+    /// Set when the last distill attempt failed.
+    pub error: Option<DistillFailure>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, TS)]
@@ -785,7 +860,7 @@ mod tests {
             JsonValue,
             MachineRole, SessionStatus, SessionOrigin, EventKind, RecordKind, RecordStatus,
             SuggestionTarget, SuggestionStatus, ResourceKind, DeviceKind, FileKind, SearchHitKind,
-            MemoryPart,
+            MemoryPart, IntegrationState, InjectMode,
             Machine, Project, ProjectPath, Session, Event, Record, Brief, WikiPage, Suggestion,
             BriefProposal, RecordProposal, WikiProposal, Resource, Device,
             ErrorBody, ErrorDetail, Health, ProjectPathInfo, ProjectSummary, CreateProject,
@@ -793,6 +868,7 @@ mod tests {
             PatchRecord, CreateWikiPage, PutWikiPage, CreateResource, PatchResource,
             GitStatusEntry, GitStatus, GitDiff, FileEntry, DirListing, FileContent, SessionsPage,
             LaunchSession, PatchSession, OpenTarget, OpenSession, EventsPage, SearchHit, SearchResults, AgentInfo,
+            AgentIntegration, Injection, SummaryItem, DistillFailure, SessionSummary,
             SettingsView, SettingsPatch, ServerEvent, TerminalServerMessage, TerminalClientMessage,
             Config, DaemonConfig, MachineConfig, AgentsConfig, CustomAgent, SessionsConfig,
             Summarizer, BriefMode, MemoryConfig, SyncConfig, PortalConfig,

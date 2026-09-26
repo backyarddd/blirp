@@ -1,6 +1,7 @@
 //! HTTP/WS API (§11): router, auth, origin check, security headers, errors.
 
 mod files;
+mod integration;
 mod memory;
 mod misc;
 mod open;
@@ -13,7 +14,7 @@ use axum::extract::{FromRequest, FromRequestParts, Query, Request, State};
 use axum::http::{HeaderMap, HeaderValue, Method, StatusCode, header};
 use axum::middleware::{self, Next};
 use axum::response::{IntoResponse, Redirect, Response};
-use axum::routing::{any, get, post};
+use axum::routing::{any, get};
 use axum::{Json, Router};
 use blirp_core::model::{ErrorBody, ErrorDetail};
 use blirp_core::store::StoreError;
@@ -134,6 +135,7 @@ pub fn router(state: SharedState) -> Router {
         .merge(files::routes())
         .merge(sessions::routes())
         .merge(open::routes())
+        .merge(integration::routes(&state))
         .route("/api/terminals/{id}/ws", get(terminal::attach))
         .merge(later_phase_routes())
         .route("/api/{*rest}", any(api_not_found))
@@ -149,19 +151,15 @@ pub fn router(state: SharedState) -> Router {
         .with_state(state)
 }
 
-/// Endpoints owned by later phases (hooks, injection, sync, devices, MCP).
+/// Endpoints owned by later phases (sync, devices).
 fn later_phase_routes() -> Router<SharedState> {
     async fn later() -> ApiError {
         ApiError::not_implemented("this endpoint is not available in this version of blirp")
     }
     Router::new()
-        .route("/api/hooks/{agent}/{event}", post(later))
-        .route("/api/inject", get(later))
         .route("/api/sync/{*rest}", any(later))
         .route("/api/devices/{*rest}", any(later))
-        .route("/api/sessions/{id}/distill", post(later))
         .route("/api/machines/{id}", axum::routing::delete(later))
-        .route("/mcp", any(later))
 }
 
 async fn api_not_found() -> ApiError {

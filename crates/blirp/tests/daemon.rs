@@ -392,7 +392,7 @@ async fn api_auth_projects_memory_files() {
 
     // Later-phase endpoints answer 501 with the standard error shape.
     let r = h
-        .send(reqwest::Method::POST, "/api/hooks/claude/Stop", json!({}))
+        .send(reqwest::Method::POST, "/api/sync/hub/enable", json!({}))
         .await;
     assert_eq!(r.status(), 501);
     assert_eq!(

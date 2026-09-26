@@ -1,6 +1,7 @@
 //! Command line (§4).
 
 mod later;
+mod mem;
 
 use anyhow::{Context as _, bail};
 use blirp_core::model::{Health, SessionsPage};
@@ -45,12 +46,39 @@ enum Command {
     },
     /// Check the installation.
     Doctor,
+    /// Search and show project memory.
+    #[command(subcommand)]
+    Mem(mem::MemCommand),
+    /// Hook entry point used by agents (always exits 0 within 2 s).
+    Hook {
+        agent: String,
+        event: String,
+        /// Entry installed by `blirp hooks install` (not a per-launch config).
+        #[arg(long)]
+        global: bool,
+    },
+    /// MCP server over stdio (spawned by agents).
+    Mcp,
+    /// Install or remove global agent hooks and MCP registration.
+    #[command(subcommand)]
+    Hooks(mem::HooksCommand),
     #[command(flatten)]
     Later(later::LaterCommand),
 }
 
 pub fn main() -> ExitCode {
     let cli = Cli::parse();
+    // Hooks must stay fast and always succeed: no runtime, no logging, no
+    // failure exit even without a home directory.
+    if let Command::Hook {
+        agent,
+        event,
+        global,
+    } = &cli.command
+    {
+        crate::hooks::main(agent, event, *global);
+        return ExitCode::SUCCESS;
+    }
     let paths = match Paths::resolve() {
         Ok(p) => p,
         Err(e) => {
@@ -58,9 +86,22 @@ pub fn main() -> ExitCode {
             return ExitCode::FAILURE;
         }
     };
-    if let Command::Later(cmd) = &cli.command {
-        return later::run(cmd);
+    match cli.command {
+        Command::Later(cmd) => later::run(&cmd),
+        Command::Mem(cmd) => report(mem::run_mem(&paths, cmd)),
+        Command::Hooks(cmd) => report(mem::run_hooks(cmd)),
+        command => run_async(command, paths),
     }
+}
+
+fn report(r: anyhow::Result<ExitCode>) -> ExitCode {
+    r.unwrap_or_else(|e| {
+        eprintln!("error: {e:#}");
+        ExitCode::FAILURE
+    })
+}
+
+fn run_async(command: Command, paths: Paths) -> ExitCode {
     let rt = match tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()
@@ -71,7 +112,7 @@ pub fn main() -> ExitCode {
             return ExitCode::FAILURE;
         }
     };
-    let result = rt.block_on(run(cli.command, paths));
+    let result = rt.block_on(run(command, paths));
     match result {
         Ok(code) => code,
         Err(e) => {
@@ -103,7 +144,13 @@ async fn run(cmd: Command, paths: Paths) -> anyhow::Result<ExitCode> {
         Command::Open => open(&paths).await,
         Command::Sessions { project, limit } => sessions(&paths, project, limit).await,
         Command::Doctor => doctor(&paths).await,
-        Command::Later(_) => Ok(ExitCode::from(2)),
+        Command::Mcp => {
+            crate::mcp::serve_stdio(paths).await?;
+            Ok(ExitCode::SUCCESS)
+        }
+        Command::Later(_) | Command::Hook { .. } | Command::Mem(_) | Command::Hooks(_) => {
+            Ok(ExitCode::from(2))
+        }
     }
 }
 

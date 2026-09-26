@@ -31,7 +31,7 @@ pub(super) fn session_row(r: &Row<'_>) -> rusqlite::Result<Session> {
     })
 }
 
-fn event_row(r: &Row<'_>) -> rusqlite::Result<Event> {
+pub(super) fn event_row(r: &Row<'_>) -> rusqlite::Result<Event> {
     Ok(Event {
         session_id: r.get("session_id")?,
         seq: r.get("seq")?,

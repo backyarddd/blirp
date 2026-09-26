@@ -29,6 +29,10 @@ export type SearchHitKind = "event" | "record";
 
 export type MemoryPart = "brief" | "records" | "wiki" | "resources" | "suggestions";
 
+export type IntegrationState = "installed" | "not_installed" | "unsupported";
+
+export type InjectMode = "hook" | "instructions" | "flag" | "none";
+
 export type Machine = { id: string, name: string, os: string, role: MachineRole, last_seen: number, revoked: boolean, };
 
 export type Project = { id: string, name: string, created_at: number, updated_at: number, deleted: boolean, };
@@ -240,7 +244,12 @@ prompt?: string,
 /**
  * Create a git worktree for the session (git projects only).
  */
-worktree?: boolean, continue_from?: string, 
+worktree?: boolean, 
+/**
+ * Start with a handoff pack of this session (continue in / fork, §9).
+ * Defaults the folder to the source session's folder.
+ */
+continue_from?: string, 
 /**
  * Target machine id; defaults to this machine.
  */
@@ -298,7 +307,65 @@ version: string | null,
 /**
  * Resume by the agent's own session id is supported.
  */
-can_resume: boolean, };
+can_resume: boolean, integration: AgentIntegration, };
+
+/**
+ * How blirp memory reaches an agent (§9).
+ */
+export type AgentIntegration = { 
+/**
+ * Opt-in global hooks in the agent's user config (sessions started outside blirp).
+ */
+global_hooks: IntegrationState, 
+/**
+ * blirp MCP server registered in the agent's user config.
+ */
+mcp: IntegrationState, 
+/**
+ * Session-start injection used when the session is launched from blirp.
+ */
+inject: InjectMode, 
+/**
+ * Extra information, e.g. a manual step the agent requires.
+ */
+detail: string | null, };
+
+/**
+ * `GET /api/inject`: the rendered memory injection.
+ */
+export type Injection = { markdown: string, };
+
+export type SummaryItem = { title: string, body: string, };
+
+/**
+ * Last failed distill attempt of a session.
+ */
+export type DistillFailure = { message: string, at: number, 
+/**
+ * Highest event seq the failed attempt covered; retried only after newer events.
+ */
+through_seq: number, };
+
+/**
+ * Shape of `Session.summary` (the `summary_json` column, §9 distill output).
+ */
+export type SessionSummary = { title: string | null, 
+/**
+ * 3-6 sentences; null until a distill succeeded.
+ */
+summary: string | null, decisions: Array<SummaryItem>, open_threads: Array<SummaryItem>, gotchas: Array<SummaryItem>, resolved_record_ids: Array<string>, 
+/**
+ * Files touched, relative to the session folder.
+ */
+files: Array<string>, 
+/**
+ * Summarizer backend that produced it (`claude`, `codex`, `ollama`).
+ */
+backend: string | null, distilled_at: number | null, through_seq: number, 
+/**
+ * Set when the last distill attempt failed.
+ */
+error: DistillFailure | null, };
 
 export type SettingsView = { config: Config, 
 /**

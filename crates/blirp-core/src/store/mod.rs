@@ -5,12 +5,14 @@
 //! [`Store::apply_all`], which write the row and append to `outbox` in the
 //! same transaction. Typed helpers for non-replicated tables write directly.
 
+mod engine;
 mod memory;
 mod migrations;
 mod misc;
 mod projects;
 mod sessions;
 
+pub use engine::{BY_DISTILLER, BriefApply, DistillOutcome, DistillPlan, MACHINE_ID_KEY};
 pub use memory::RecordFilter;
 pub use migrations::MigrationError;
 pub use projects::ResolvedProject;

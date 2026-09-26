@@ -2,6 +2,8 @@
 
 use crate::agents::{Agent, AgentError, LaunchContext};
 use crate::api::{ApiError, ApiResult};
+use crate::memory::launch::{HANDOFF_FILE, LaunchInput, LaunchIntegration, continue_prompt};
+use crate::memory::render::render_injection;
 use crate::pty::{ExitInfo, SpawnRequest, Terminal};
 use crate::state::SharedState;
 use axum::http::StatusCode;
@@ -19,10 +21,40 @@ const PROMPT_SETTLE: Duration = Duration::from_millis(1500);
 /// Give up waiting for quiet output and type the prompt anyway.
 const PROMPT_MAX_WAIT: Duration = Duration::from_secs(60);
 const MAX_PROMPT: usize = 64 * 1024;
+/// How long the initial prompt waits for the user to answer a startup dialog.
+const PROMPT_GATE_MAX_WAIT: Duration = Duration::from_secs(600);
+
+/// Startup dialogs (folder trust) that must be answered by the user before
+/// the initial prompt can be typed: claude, codex, gemini/cursor wording.
+fn is_gate(screen: &str) -> bool {
+    let s = screen.to_lowercase();
+    [
+        "trust this folder",
+        "trust the files in this folder",
+        "trust the contents of this directory",
+        "do you trust",
+    ]
+    .iter()
+    .any(|g| s.contains(g))
+}
 
 /// Env vars of a parent agent session that must not leak into sessions
 /// blirp starts (they make nested CLIs think they run inside another agent).
-const ENV_REMOVE: &[&str] = &["CLAUDECODE", "CLAUDE_CODE_ENTRYPOINT", "CODEX_SANDBOX"];
+/// A child-session marker makes Claude Code stop saving its transcript, which
+/// would starve ingest.
+pub const ENV_REMOVE: &[&str] = &[
+    "CLAUDECODE",
+    "CLAUDE_CODE_ENTRYPOINT",
+    "CLAUDE_CODE_CHILD_SESSION",
+    "CLAUDE_CODE_SESSION_ID",
+    "CLAUDE_CODE_SESSION_ATTENDED",
+    "CLAUDE_CODE_EXECPATH",
+    "CLAUDE_CODE_MESSAGING_SOCKET",
+    "CLAUDE_CODE_MESSAGING_TOKEN",
+    "CLAUDE_PID",
+    "CLAUDE_EFFORT",
+    "CODEX_SANDBOX",
+];
 
 fn agent_error(e: AgentError) -> ApiError {
     match e {
@@ -186,11 +218,27 @@ pub async fn launch(state: &SharedState, req: LaunchSession) -> ApiResult<Sessio
             "launching on another machine requires sync, which is not available in this version",
         ));
     }
-    if req.continue_from.is_some() {
-        return Err(ApiError::not_implemented(
-            "continue_from (handoff) is not available in this version",
-        ));
-    }
+    let mut req = req;
+    let source = match req.continue_from.clone() {
+        Some(src) => {
+            let store = state.store.clone();
+            let source = crate::api::blocking(move || {
+                store
+                    .get_session(&src)?
+                    .ok_or_else(|| ApiError::not_found("continue_from session"))
+            })
+            .await?;
+            if req.project_id.is_none() && req.cwd.is_none() {
+                if source.machine_id == state.machine.id && Path::new(&source.cwd).is_dir() {
+                    req.cwd = Some(source.cwd.clone());
+                } else {
+                    req.project_id = Some(source.project_id.clone());
+                }
+            }
+            Some(source)
+        }
+        None => None,
+    };
     if req.prompt.as_ref().is_some_and(|p| p.len() > MAX_PROMPT) {
         return Err(ApiError::bad_request("prompt exceeds 64 KiB"));
     }
@@ -227,16 +275,33 @@ pub async fn launch(state: &SharedState, req: LaunchSession) -> ApiResult<Sessio
         tokens_in: 0,
         tokens_out: 0,
         cost_usd: 0.0,
-        parent_session_id: None,
+        parent_session_id: source.as_ref().map(|s| s.id.clone()),
     };
     let store = state.store.clone();
     let row = session.clone();
-    crate::api::blocking(move || Ok(store.insert_session(&row)?)).await?;
+    let src = source.clone();
+    let handoff = crate::api::blocking(move || {
+        store.insert_session(&row)?;
+        Ok(match src {
+            Some(s) => Some(crate::memory::render::render_handoff(&store, &s)?),
+            None => None,
+        })
+    })
+    .await?;
     state.emit(ServerEvent::SessionCreated {
         session: session.clone(),
     });
     start(
-        state, session, &agent, false, req.cols, req.rows, req.prompt,
+        state,
+        session,
+        &agent,
+        StartOptions {
+            resume: false,
+            cols: req.cols,
+            rows: req.rows,
+            prompt: req.prompt,
+            handoff,
+        },
     )
     .await
 }
@@ -269,7 +334,74 @@ pub async fn resume(state: &SharedState, id: &str) -> ApiResult<Session> {
         )));
     }
     let agent = Agent::resolve(&session.agent, &state.config()).map_err(agent_error)?;
-    start(state, session, &agent, true, None, None, None).await
+    start(
+        state,
+        session,
+        &agent,
+        StartOptions {
+            resume: true,
+            cols: None,
+            rows: None,
+            prompt: None,
+            handoff: None,
+        },
+    )
+    .await
+}
+
+struct StartOptions {
+    resume: bool,
+    cols: Option<u16>,
+    rows: Option<u16>,
+    prompt: Option<String>,
+    /// Handoff pack of the `continue_from` session.
+    handoff: Option<String>,
+}
+
+/// §7 step 3: render memory to the launch dir and build the agent's
+/// integration. Failures degrade to "no memory", never to a failed launch.
+fn integrate(
+    state: &SharedState,
+    session: &Session,
+    agent: &Agent,
+    handoff: Option<&str>,
+) -> LaunchIntegration {
+    let launch_dir = state.paths.launch_dir(&session.id);
+    let max = state.config().memory.inject_max_chars as usize;
+    let memory = match render_injection(&state.store, &session.project_id, Some(&session.id), max) {
+        Ok(m) => m,
+        Err(e) => {
+            tracing::warn!(session = %session.id, error = %e, "rendering memory failed; launching without it");
+            String::new()
+        }
+    };
+    let memory = match handoff {
+        Some(h) => format!("{memory}\n{h}"),
+        None => memory,
+    };
+    let exe = crate::memory::blirp_exe();
+    let lookup = |k: &str| std::env::var(k).ok();
+    let home = blirp_core::paths::user_home();
+    let input = LaunchInput {
+        launch_dir: &launch_dir,
+        blirp_home: state.paths.home(),
+        exe: &exe,
+        session,
+        memory: &memory,
+        handoff,
+        env_lookup: &lookup,
+        user_home: home.as_deref(),
+    };
+    match crate::memory::launch::prepare(&agent.id, &input) {
+        Ok(i) => i,
+        Err(e) => {
+            tracing::warn!(session = %session.id, error = %format!("{e:#}"), "preparing memory integration failed; launching without it");
+            LaunchIntegration {
+                memory_file: launch_dir.join(crate::memory::launch::MEMORY_FILE),
+                ..Default::default()
+            }
+        }
+    }
 }
 
 /// §7 steps 4-5: build argv/env, spawn the PTY, schedule the prompt.
@@ -277,11 +409,15 @@ async fn start(
     state: &SharedState,
     session: Session,
     agent: &Agent,
-    resume: bool,
-    cols: Option<u16>,
-    rows: Option<u16>,
-    prompt: Option<String>,
+    opts: StartOptions,
 ) -> ApiResult<Session> {
+    let StartOptions {
+        resume,
+        cols,
+        rows,
+        prompt,
+        handoff,
+    } = opts;
     // Resumed rows go back to `starting` before the process exists, so a
     // fast exit can never be overwritten by this update.
     let session = if resume {
@@ -301,26 +437,38 @@ async fn start(
     } else {
         session
     };
-    let launch_dir = state.paths.launch_dir(&session.id);
+    let st = state.clone();
+    let (s2, a2, h2) = (session.clone(), agent.clone(), handoff.clone());
+    let integ = crate::api::blocking(move || Ok(integrate(&st, &s2, &a2, h2.as_deref()))).await?;
     let (program, args) = agent
         .command(&LaunchContext {
             agent_session_id: session.agent_session_id.as_deref(),
             resume,
-            launch_dir: &launch_dir,
+            args_before: &integ.args_before,
+            args_after: &integ.args_after,
         })
         .map_err(agent_error)?;
+    let prompt = match (prompt, &handoff) {
+        (Some(p), _) => Some(p),
+        (None, Some(_)) if agent.id != "shell" => Some(continue_prompt(
+            integ.inject,
+            &state.paths.launch_dir(&session.id).join(HANDOFF_FILE),
+        )),
+        _ => None,
+    };
     let home = state.paths.home().display().to_string();
-    let env = vec![
+    let mut env = vec![
         ("BLIRP_SESSION_ID".to_string(), session.id.clone()),
         ("BLIRP_PROJECT_ID".to_string(), session.project_id.clone()),
         ("BLIRP_HOME".to_string(), home),
         (
             "BLIRP_MEMORY_FILE".to_string(),
-            launch_dir.join("memory.md").display().to_string(),
+            integ.memory_file.display().to_string(),
         ),
         ("TERM".to_string(), "xterm-256color".to_string()),
         ("COLORTERM".to_string(), "truecolor".to_string()),
     ];
+    env.extend(integ.env);
     let spawn = SpawnRequest {
         program,
         args,
@@ -386,7 +534,13 @@ async fn type_prompt(term: Arc<Terminal>, prompt: String) {
         let settled = term
             .last_output()
             .is_some_and(|t| t.elapsed() >= PROMPT_SETTLE);
-        if settled || begin.elapsed() >= PROMPT_MAX_WAIT {
+        if settled && is_gate(&term.screen_text()) {
+            // A trust dialog is waiting for the user; typing now would answer it.
+            if begin.elapsed() >= PROMPT_GATE_MAX_WAIT {
+                tracing::info!(session = %term.session_id, "initial prompt dropped: a dialog stayed open");
+                return;
+            }
+        } else if settled || begin.elapsed() >= PROMPT_MAX_WAIT {
             break;
         }
         tokio::time::sleep(Duration::from_millis(100)).await;
@@ -416,7 +570,11 @@ fn on_exit(state: &SharedState, session_id: &str, info: ExitInfo) {
         s.ended_at = Some(now);
         s.last_activity_at = now;
     }) {
-        Ok(s) => state.emit(ServerEvent::SessionUpdated { session: s }),
+        Ok(s) => {
+            state.emit(ServerEvent::SessionUpdated { session: s });
+            // Ended sessions are distilled right away (§9 trigger).
+            state.distiller.enqueue(session_id, false);
+        }
         Err(e) => {
             tracing::error!(session = %session_id, error = %e, "recording session exit failed")
         }
@@ -485,6 +643,14 @@ pub fn mark_detached(state: &SharedState) -> anyhow::Result<()> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn startup_gates() {
+        assert!(super::is_gate(
+            "Quick safety check: Is this a project you created or one you trust?\n❯ 1. Yes, I trust this folder"
+        ));
+        assert!(!super::is_gate("> type your prompt\n? for shortcuts"));
+    }
+
     #[test]
     fn worktree_names() {
         let n = super::worktree_name().unwrap();

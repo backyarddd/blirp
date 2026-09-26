@@ -6,7 +6,7 @@ use anyhow::{Context as _, bail};
 use blirp_core::config::Config;
 use blirp_core::model::{Machine, SessionStatus};
 use blirp_core::paths::{Paths, RuntimeInfo};
-use blirp_core::store::Store;
+use blirp_core::store::{MACHINE_ID_KEY, Store};
 use std::collections::HashMap;
 use std::fs::File;
 use std::net::{Ipv4Addr, SocketAddr};
@@ -16,7 +16,6 @@ use tokio::net::TcpListener;
 use tokio::sync::watch;
 use tokio::task::JoinHandle;
 
-const MACHINE_ID_KEY: &str = "machine_id";
 const STATUS_TICK: Duration = Duration::from_millis(500);
 const SHUTDOWN_GRACE: Duration = Duration::from_secs(5);
 
@@ -122,6 +121,7 @@ impl Daemon {
             shutdown_rx.clone(),
         ));
         crate::sessions::mark_detached(&state)?;
+        crate::memory::distill::Distiller::start(state.clone());
 
         let app = crate::api::router(state.clone());
         let mut server_shutdown = shutdown_rx.clone();
