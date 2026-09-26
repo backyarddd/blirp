@@ -1,0 +1,9 @@
+target/
+node_modules/
+web/dist/
+app/src-tauri/target/
+app/src-tauri/binaries/
+*.log
+.env
+.env.*
+.DS_Store
