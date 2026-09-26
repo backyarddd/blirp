@@ -1,6 +1,6 @@
 [workspace]
 resolver = "3"
-members = ["crates/blirp-core", "crates/blirp-sync"]
+members = ["crates/blirp-core", "crates/blirp-sync", "crates/blirp"]
 
 [workspace.package]
 version = "0.1.0"
