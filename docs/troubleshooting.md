@@ -159,7 +159,7 @@ Hubs and nodes announce and find each other on the local network with mDNS (`syn
 
 ## Portal certificate warnings
 
-The LAN portal uses a self-signed certificate, so every browser warns once per device. Compare the SHA-256 fingerprint in the browser's certificate details with **Settings > Portal** (or `blirp hub status`); if they match, proceed. If the hub's LAN IP changed since the certificate was made, delete `~/.blirp/tls/` and restart the daemon. To avoid warnings, use `tailscale serve` ([portal.md](portal.md#tailscale)).
+The LAN portal uses a self-signed certificate, so every browser warns once per device. Compare the SHA-256 fingerprint in the browser's certificate details with **Settings > Portal** (or `blirp hub status`); if they match, proceed. When the hub's LAN IP changes, the portal gets a new certificate the next time it starts (restart the daemon to trigger it); its fingerprint is new, so every browser warns once more. To avoid warnings, use `tailscale serve` ([portal.md](portal.md#tailscale)).
 
 The portal does not start although it is enabled: it runs only on a hub, and a changed `portal.lan` setting applies after a daemon restart. `POST /api/devices/browser-invite` answers `portal_disabled` while it is not running.
 

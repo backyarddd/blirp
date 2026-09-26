@@ -80,29 +80,91 @@ fn lan_ip() -> IpAddr {
         .unwrap_or(IpAddr::V4(Ipv4Addr::LOCALHOST))
 }
 
-/// Load `tls/cert.pem` + `tls/key.pem`, generating them on first use.
+/// Load `tls/cert.pem` + `tls/key.pem`, generating them on first use, when
+/// they are unreadable or do not belong together, and when the LAN address
+/// moved out of the certificate's names (a new fingerprint: browsers ask to
+/// trust it again).
 fn load_or_create_cert(
     dir: &Path,
     ip: IpAddr,
 ) -> anyhow::Result<(CertificateDer<'static>, PrivateKeyDer<'static>)> {
     let cert_path = dir.join("cert.pem");
     let key_path = dir.join("key.pem");
-    if !cert_path.exists() || !key_path.exists() {
-        std::fs::create_dir_all(dir).with_context(|| format!("create {}", dir.display()))?;
-        let mut names = vec!["localhost".to_string(), "127.0.0.1".to_string()];
-        if !ip.is_loopback() {
-            names.push(ip.to_string());
+    if cert_path.exists() && key_path.exists() {
+        match read_cert(&cert_path, &key_path) {
+            Ok((cert, _)) if !names_ip(&cert, ip) => {
+                tracing::info!(%ip, "LAN address changed; new portal certificate");
+            }
+            Ok((cert, key)) => match tls_config(cert.clone(), key.clone_key()) {
+                Ok(_) => return Ok((cert, key)),
+                Err(e) => {
+                    tracing::warn!(error = %format!("{e:#}"), "portal certificate unusable; making a new one")
+                }
+            },
+            Err(e) => {
+                tracing::warn!(error = %format!("{e:#}"), "portal certificate unreadable; making a new one")
+            }
         }
-        let ck = rcgen::generate_simple_self_signed(names).context("generate certificate")?;
-        blirp_core::paths::write_private(&key_path, ck.signing_key.serialize_pem().as_bytes())?;
-        std::fs::write(&cert_path, ck.cert.pem())
-            .with_context(|| format!("write {}", cert_path.display()))?;
     }
-    let cert = CertificateDer::from_pem_file(&cert_path)
+    std::fs::create_dir_all(dir).with_context(|| format!("create {}", dir.display()))?;
+    let mut names = vec!["localhost".to_string(), "127.0.0.1".to_string()];
+    if !ip.is_loopback() {
+        names.push(ip.to_string());
+    }
+    let ck = rcgen::generate_simple_self_signed(names).context("generate certificate")?;
+    // Complete files renamed into place; a crash between the two renames
+    // leaves a pair that does not match, which the next start replaces.
+    let key_tmp = dir.join("key.pem.tmp");
+    let cert_tmp = dir.join("cert.pem.tmp");
+    blirp_core::paths::write_private(&key_tmp, ck.signing_key.serialize_pem().as_bytes())?;
+    std::fs::write(&cert_tmp, ck.cert.pem())
+        .with_context(|| format!("write {}", cert_tmp.display()))?;
+    for (from, to) in [(&key_tmp, &key_path), (&cert_tmp, &cert_path)] {
+        std::fs::rename(from, to).with_context(|| format!("replace {}", to.display()))?;
+    }
+    read_cert(&cert_path, &key_path)
+}
+
+/// Server TLS settings for the portal; fails when key and certificate do
+/// not belong together.
+fn tls_config(
+    cert: CertificateDer<'static>,
+    key: PrivateKeyDer<'static>,
+) -> anyhow::Result<rustls::ServerConfig> {
+    let mut tls = rustls::ServerConfig::builder_with_provider(Arc::new(
+        rustls::crypto::ring::default_provider(),
+    ))
+    .with_safe_default_protocol_versions()
+    .context("TLS protocol versions")?
+    .with_no_client_auth()
+    .with_single_cert(vec![cert], key)
+    .context("TLS certificate")?;
+    // HTTP/1.1 only: terminal WebSockets need the HTTP/1.1 upgrade.
+    tls.alpn_protocols = vec![b"http/1.1".to_vec()];
+    Ok(tls)
+}
+
+fn read_cert(
+    cert_path: &Path,
+    key_path: &Path,
+) -> anyhow::Result<(CertificateDer<'static>, PrivateKeyDer<'static>)> {
+    let cert = CertificateDer::from_pem_file(cert_path)
         .with_context(|| format!("read {}", cert_path.display()))?;
-    let key = PrivateKeyDer::from_pem_file(&key_path)
+    let key = PrivateKeyDer::from_pem_file(key_path)
         .with_context(|| format!("read {}", key_path.display()))?;
     Ok((cert, key))
+}
+
+/// The certificate is valid for `ip` (loopback is always among its names).
+fn names_ip(cert: &CertificateDer<'_>, ip: IpAddr) -> bool {
+    ip.is_loopback()
+        || rustls::server::ParsedCertificate::try_from(cert).is_ok_and(|c| {
+            rustls::client::verify_server_name(
+                &c,
+                &rustls::pki_types::ServerName::IpAddress(ip.into()),
+            )
+            .is_ok()
+        })
 }
 
 /// Start, stop or restart the portal to match the config (hub +
@@ -132,16 +194,7 @@ async fn start(state: &SharedState) -> anyhow::Result<()> {
     let dir = state.paths.home().join("tls");
     let (cert, key) = tokio::task::spawn_blocking(move || load_or_create_cert(&dir, ip)).await??;
     let fp = fingerprint(&cert);
-    let mut tls = rustls::ServerConfig::builder_with_provider(Arc::new(
-        rustls::crypto::ring::default_provider(),
-    ))
-    .with_safe_default_protocol_versions()
-    .context("TLS protocol versions")?
-    .with_no_client_auth()
-    .with_single_cert(vec![cert], key)
-    .context("TLS certificate")?;
-    // HTTP/1.1 only: terminal WebSockets need the HTTP/1.1 upgrade.
-    tls.alpn_protocols = vec![b"http/1.1".to_vec()];
+    let tls = tls_config(cert, key)?;
     let listener = crate::bind_exclusive(SocketAddr::from((Ipv4Addr::UNSPECIFIED, port)))
         .with_context(|| format!("bind 0.0.0.0:{port} for the LAN portal"))?;
     let server = axum_server::from_tcp_rustls(
@@ -365,5 +418,39 @@ mod tests {
         let fp = fingerprint(b"x");
         assert_eq!(fp.len(), 32 * 3 - 1);
         assert!(fp.starts_with("2D:71:16"));
+    }
+
+    #[test]
+    fn certificate_follows_the_lan_address() {
+        let dir = tempfile::tempdir().unwrap();
+        let a: IpAddr = "192.0.2.20".parse().unwrap();
+        let b: IpAddr = "198.51.100.7".parse().unwrap();
+        let (first, _) = load_or_create_cert(dir.path(), a).unwrap();
+        assert!(names_ip(&first, a) && !names_ip(&first, b));
+        let (same, _) = load_or_create_cert(dir.path(), a).unwrap();
+        assert_eq!(
+            fingerprint(&same),
+            fingerprint(&first),
+            "kept while the address stays"
+        );
+        // Loopback only (no network): the existing certificate still serves.
+        let (kept, _) = load_or_create_cert(dir.path(), IpAddr::V4(Ipv4Addr::LOCALHOST)).unwrap();
+        assert_eq!(fingerprint(&kept), fingerprint(&first));
+        let (moved, _) = load_or_create_cert(dir.path(), b).unwrap();
+        assert!(names_ip(&moved, b));
+        assert_ne!(fingerprint(&moved), fingerprint(&first));
+
+        // A key that does not belong to the certificate (a crash between the
+        // two renames) is replaced too, not a permanent start failure.
+        let other = rcgen::generate_simple_self_signed(vec!["x".to_string()]).unwrap();
+        std::fs::write(
+            dir.path().join("key.pem"),
+            other.signing_key.serialize_pem(),
+        )
+        .unwrap();
+        let (fixed, key) = load_or_create_cert(dir.path(), b).unwrap();
+        assert_ne!(fingerprint(&fixed), fingerprint(&moved));
+        tls_config(fixed, key).unwrap();
+        assert!(!dir.path().join("key.pem.tmp").exists());
     }
 }

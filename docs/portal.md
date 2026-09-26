@@ -21,7 +21,9 @@ The portal runs when the machine is the hub **and** `portal.lan = true`:
 
 ### Certificate
 
-The portal uses a self-signed certificate generated on first start and stored in `~/.blirp/tls/` (`cert.pem`, `key.pem` with mode 0600), valid for `localhost`, `127.0.0.1` and the LAN IP the hub had at that time. Browsers warn about it. Before accepting it, compare the SHA-256 fingerprint your browser shows (certificate details) with the one in **Settings > Portal**; if they match, you are talking to your hub. If the hub's LAN IP changed, delete `~/.blirp/tls/` and restart to get a certificate for the new address (the fingerprint changes; browsers will warn again).
+The portal uses a self-signed certificate stored in `~/.blirp/tls/` (`cert.pem`, `key.pem` with mode 0600), valid for `localhost`, `127.0.0.1` and the hub's LAN IP. Browsers warn about it. Before accepting it, compare the SHA-256 fingerprint your browser shows (certificate details) with the one in **Settings > Portal**; if they match, you are talking to your hub.
+
+When the portal starts (daemon start, **Enable hub**, a changed port) on a LAN IP the certificate does not name, blirp makes a new certificate for the new address. Its fingerprint is different: phones and browsers that accepted the old one warn again and have to accept the new one after you compare the fingerprint in **Settings > Portal** again. Browsers keep their device cookie per address, so a device that signed in at the old address signs in again with a new login QR.
 
 TLS 1.2 and 1.3 only, HTTP/1.1 (needed for the terminal WebSockets).
 
