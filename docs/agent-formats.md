@@ -1,4 +1,4 @@
-# Coding-agent on-disk transcript formats (Windows, `C:\Users\me`)
+# Coding-agent on-disk transcript formats (Windows, `C:\Users\alice`)
 
 Investigation date: 2026-09-25. Read-only survey of every installed agent's local
 session store, for designing a Rust ingester. All example lines below are
@@ -268,7 +268,7 @@ install for an MCP helper — the real data dir is
   settings.yaml, .credentials.yaml, .anonymous-user-id
 ```
 - cwd is encoded the same family of way as Claude Code but with a **double
-  dash separator and leading/trailing `--`**, e.g. cwd `C:\Users\me` →
+  dash separator and leading/trailing `--`**, e.g. cwd `C:\Users\alice` →
   `--C-Users-alice--`.
 - `session.v3.jsonl.zstd` — verified real Zstandard frames (magic bytes
   `28 B5 2F FD`); no `zstd`/`7z` binary or Python `zstandard` module is
