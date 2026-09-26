@@ -156,6 +156,11 @@ impl Store {
         self.read(|c| Ok(c.query_row("PRAGMA user_version", [], |r| r.get(0))?))
     }
 
+    /// `PRAGMA quick_check`: "ok" when the database is healthy.
+    pub fn quick_check(&self) -> Result<String> {
+        self.read(|c| Ok(c.query_row("PRAGMA quick_check", [], |r| r.get(0))?))
+    }
+
     /// Run `f` on a pooled read-only connection.
     pub(crate) fn read<T>(&self, f: impl FnOnce(&Connection) -> Result<T>) -> Result<T> {
         let pooled = lock(&self.readers).pop();

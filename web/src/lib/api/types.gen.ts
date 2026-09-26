@@ -313,7 +313,7 @@ values?: { [key in string]: JsonValue | null }, };
 /**
  * Frames pushed on `/api/events/ws`.
  */
-export type ServerEvent = { "type": "session_created", session: Session, } | { "type": "session_updated", session: Session, } | { "type": "project_updated", project_id: string, } | { "type": "memory_updated", project_id: string, part: MemoryPart, };
+export type ServerEvent = { "type": "session_created", session: Session, } | { "type": "session_updated", session: Session, } | { "type": "project_updated", project_id: string, } | { "type": "memory_updated", project_id: string, part: MemoryPart, } | { "type": "resync" };
 
 /**
  * Text frames sent by the server on `/api/terminals/:id/ws` (§6). Raw

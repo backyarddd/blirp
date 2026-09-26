@@ -36,7 +36,7 @@ macro_rules! str_enum {
 
         impl std::fmt::Display for $name {
             fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-                f.write_str(self.as_str())
+                f.pad(self.as_str())
             }
         }
 
@@ -713,6 +713,8 @@ pub enum ServerEvent {
         project_id: String,
         part: MemoryPart,
     },
+    /// Events were dropped because the client fell behind; refetch state.
+    Resync,
 }
 
 /// Text frames sent by the server on `/api/terminals/:id/ws` (§6). Raw
