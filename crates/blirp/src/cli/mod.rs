@@ -1,5 +1,6 @@
 //! Command line (§4).
 
+mod agents;
 mod install;
 mod lifecycle;
 mod mem;
@@ -8,7 +9,7 @@ mod sync;
 mod worktrees;
 
 use anyhow::{Context as _, bail};
-use blirp_core::model::{Health, SessionsPage};
+use blirp_core::model::{AgentAuth, AgentInfo, Health, SessionsPage};
 use blirp_core::paths::{Paths, RuntimeInfo};
 use clap::{Parser, Subcommand};
 use std::process::ExitCode;
@@ -80,6 +81,10 @@ enum Command {
     /// Install or remove global agent hooks and MCP registration.
     #[command(subcommand)]
     Hooks(mem::HooksCommand),
+    /// Headless agent login: a `claude setup-token` token for the claude
+    /// sessions and summarizer the daemon starts.
+    #[command(subcommand)]
+    Agents(agents::AgentsCommand),
     /// Pair this machine with a hub: `blirp pair <invite> <code>`, or just
     /// `blirp pair <code>` to find the hub on the local network.
     Pair {
@@ -162,6 +167,7 @@ pub fn main() -> ExitCode {
         Command::Logs { lines, follow } => report(lifecycle::logs(&paths, lines, follow)),
         Command::Worktrees(worktrees::WorktreesCommand::List) => report(worktrees::list(&paths)),
         Command::Hooks(cmd) => report(mem::run_hooks(cmd)),
+        Command::Agents(cmd) => report(agents::run(&paths, cmd)),
         command => run_async(command, paths),
     }
 }
@@ -240,6 +246,7 @@ async fn run(cmd: Command, paths: Paths) -> anyhow::Result<ExitCode> {
         Command::Hook { .. }
         | Command::Mem(_)
         | Command::Hooks(_)
+        | Command::Agents(_)
         | Command::Logs { .. }
         | Command::Worktrees(worktrees::WorktreesCommand::List) => Ok(ExitCode::from(2)),
     }
@@ -459,7 +466,9 @@ async fn doctor(paths: &Paths) -> anyhow::Result<ExitCode> {
         "[info] LAN discovery: {}",
         lan_discovery_line(&config, paths, daemon.is_some())
     );
-    let agents = tokio::task::spawn_blocking(move || crate::agents::detect_all(&config)).await?;
+    let p = paths.clone();
+    let agents =
+        tokio::task::spawn_blocking(move || crate::agents::detect_all(&config, &p)).await?;
     let found: Vec<String> = agents
         .iter()
         .filter(|a| a.installed && a.id != "shell")
@@ -477,6 +486,30 @@ async fn doctor(paths: &Paths) -> anyhow::Result<ExitCode> {
             found.join(", ")
         }
     );
+
+    // What matters is the daemon's view (its environment, its keychain
+    // access); this shell's is the fallback when it is not running.
+    let from_daemon = match &daemon {
+        Some(_) => match Client::connect(paths).await {
+            Ok(c) => c.get::<Vec<AgentInfo>>("/api/agents").await.ok(),
+            Err(_) => None,
+        },
+        None => None,
+    };
+    let claude = match from_daemon {
+        Some(list) => list
+            .into_iter()
+            .find(|a| a.id == "claude")
+            .map(|a| (a, "the daemon")),
+        None => agents
+            .iter()
+            .find(|a| a.id == "claude")
+            .cloned()
+            .map(|a| (a, "this shell")),
+    };
+    if let Some((a, seen_by)) = claude.filter(|(a, _)| a.installed) {
+        println!("[info] claude auth: {}", claude_auth_line(&a, seen_by));
+    }
 
     match crate::ingest::IngestEnv::from_process(paths.home()) {
         Some(env) => {
@@ -533,6 +566,35 @@ fn lan_discovery_line(
         );
     }
     line
+}
+
+/// How claude sessions started by the daemon log in, for `blirp doctor`.
+fn claude_auth_line(a: &AgentInfo, seen_by: &str) -> String {
+    let token = a.token.as_ref();
+    let source = if token.is_some_and(|t| t.env) {
+        "CLAUDE_CODE_OAUTH_TOKEN from the environment"
+    } else if token.is_some_and(|t| t.stored) {
+        "stored login token (`blirp agents set-token claude`)"
+    } else {
+        "keychain or credentials file (no login token stored)"
+    };
+    let state = match &a.auth {
+        Some(AgentAuth {
+            logged_in: true,
+            method,
+        }) => format!(
+            "logged in ({})",
+            method.as_deref().unwrap_or("unknown method")
+        ),
+        Some(_) => "not logged in".to_string(),
+        None => "login state unknown".to_string(),
+    };
+    let hint = if token.is_some_and(|t| t.env || t.stored) {
+        ""
+    } else {
+        "; for a headless hub run `claude setup-token`, then `blirp agents set-token claude`"
+    };
+    format!("{source}, {state} as seen by {seen_by}{hint}")
 }
 
 /// `root <path>, <n> sources, last ingest <time>` for `blirp doctor`.

@@ -2,7 +2,8 @@
 
 use blirp_core::config::Config;
 use blirp_core::model::{AgentAuth, AgentInfo, AgentIntegration, InjectMode, IntegrationState};
-use blirp_core::process;
+use blirp_core::paths::Paths;
+use blirp_core::{claude_token, process};
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
@@ -459,11 +460,15 @@ pub fn probe_version(path: &Path) -> Option<String> {
 /// `claude auth status` (JSON by default, local only: no model call, no
 /// tokens). It runs in the daemon's own context, which is what matters: on
 /// macOS a daemon started over SSH cannot read the login keychain and
-/// reports "not logged in" even when a terminal on the Mac is. `None` when
-/// the CLI has no such command (older versions) or its output is not JSON.
-pub fn probe_claude_auth(path: &Path) -> Option<AgentAuth> {
+/// reports "not logged in" even when a terminal on the Mac is. It gets the
+/// stored login token like sessions do (`token_env`), so it reports what
+/// they will see. `None` when the CLI has no such command (older versions)
+/// or its output is not JSON.
+pub fn probe_claude_auth(path: &Path, token_env: Option<(String, String)>) -> Option<AgentAuth> {
     let cmd = wrap_for_platform(path, vec!["auth".into(), "status".into()]).ok()?;
-    match process::run(cmd.std_command(), Duration::from_secs(10), 64 * 1024) {
+    let mut command = cmd.std_command();
+    command.envs(token_env);
+    match process::run(command, Duration::from_secs(10), 64 * 1024) {
         // Exits 1 when logged out; the JSON says which.
         Ok(out) => parse_claude_auth(&out.stdout),
         Err(e) => {
@@ -507,8 +512,14 @@ pub fn integration(agent: &str) -> AgentIntegration {
     }
 }
 
-/// Detect every agent with its version, probing in parallel.
-pub fn detect_all(config: &Config) -> Vec<AgentInfo> {
+/// Headless login token state; claude is the only agent that has one.
+fn token_status(agent: &str, paths: &Paths) -> Option<blirp_core::model::AgentToken> {
+    (agent == "claude").then(|| claude_token::status(paths))
+}
+
+/// Detect every agent with its version, probing in parallel. `paths`
+/// locates claude's stored login token.
+pub fn detect_all(config: &Config, paths: &Paths) -> Vec<AgentInfo> {
     let agents = Agent::all(config);
     std::thread::scope(|s| {
         let handles: Vec<_> = agents
@@ -521,7 +532,9 @@ pub fn detect_all(config: &Config) -> Vec<AgentInfo> {
                         _ => None,
                     };
                     let auth = match &a.path {
-                        Some(p) if a.id == "claude" => probe_claude_auth(p),
+                        Some(p) if a.id == "claude" => {
+                            probe_claude_auth(p, claude_token::launch_env(paths))
+                        }
                         _ => None,
                     };
                     AgentInfo {
@@ -534,6 +547,7 @@ pub fn detect_all(config: &Config) -> Vec<AgentInfo> {
                         can_resume: a.can_resume(),
                         integration: integration(&a.id),
                         auth,
+                        token: token_status(&a.id, paths),
                     }
                 })
             })
@@ -552,6 +566,7 @@ pub fn detect_all(config: &Config) -> Vec<AgentInfo> {
                     can_resume: a.can_resume(),
                     integration: integration(&a.id),
                     auth: None,
+                    token: token_status(&a.id, paths),
                 })
             })
             .collect()

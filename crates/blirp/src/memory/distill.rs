@@ -9,6 +9,7 @@ use blirp_core::model::{
     DistillPause, DistillStatus, Event, EventKind, MemoryPart, Record, RecordKind, RecordStatus,
     ServerEvent, Session, SessionOrigin, SessionSummary, SummaryItem,
 };
+use blirp_core::paths::Paths;
 use blirp_core::process;
 use blirp_core::store::{
     BriefApply, DistillEvents, DistillOutcome, DistillPlan, RecordFilter, Store, StoreError,
@@ -307,10 +308,12 @@ pub trait Summarize: Send + Sync {
     fn complete(&self, prompt: String) -> impl Future<Output = Result<String, String>> + Send;
 }
 
-/// `scratch` is the root for per-run working dirs (`BLIRP_HOME/distill`).
+/// `scratch` is the root for per-run working dirs (`BLIRP_HOME/distill`);
+/// claude's is `paths.distill_dir()`, and `paths` also locates its stored
+/// login token.
 #[derive(Debug, Clone)]
 pub enum Backend {
-    Claude { exe: PathBuf, scratch: PathBuf },
+    Claude { exe: PathBuf, paths: Paths },
     Codex { exe: PathBuf, scratch: PathBuf },
     Ollama { base: String, model: String },
 }
@@ -397,8 +400,10 @@ fn codex_args(last: &Path) -> Vec<OsString> {
 }
 
 /// Resolve `memory.summarizer` to a runnable backend (see [`pick_auto`]).
-/// `Ok(None)` for `none`. CLI summarizers run in a fresh dir under `scratch`.
-pub async fn select_backend(cfg: &MemoryConfig, scratch: &Path) -> Result<Option<Backend>, String> {
+/// `Ok(None)` for `none`. CLI summarizers run in a fresh dir under
+/// `paths.distill_dir()`.
+pub async fn select_backend(cfg: &MemoryConfig, paths: &Paths) -> Result<Option<Backend>, String> {
+    let scratch = paths.distill_dir();
     // PATH scans touch the filesystem: off the async runtime.
     let (claude_exe, codex_exe) =
         tokio::task::spawn_blocking(|| (process::which("claude"), process::which("codex")))
@@ -407,13 +412,13 @@ pub async fn select_backend(cfg: &MemoryConfig, scratch: &Path) -> Result<Option
     let claude = || {
         claude_exe.clone().map(|exe| Backend::Claude {
             exe,
-            scratch: scratch.to_path_buf(),
+            paths: paths.clone(),
         })
     };
     let codex = || {
         codex_exe.clone().map(|exe| Backend::Codex {
             exe,
-            scratch: scratch.to_path_buf(),
+            scratch: scratch.clone(),
         })
     };
     let base = ollama_base();
@@ -455,11 +460,12 @@ struct ProcOut {
     stderr: String,
 }
 
-/// Run a summarizer process in `dir` with the prompt on stdin, killing its
-/// whole process tree on timeout.
+/// Run a summarizer process in `dir` with the prompt on stdin and `env`
+/// added, killing its whole process tree on timeout.
 async fn run_process(
     program: &Path,
     args: Vec<OsString>,
+    env: Option<(String, String)>,
     stdin: String,
     dir: &Path,
     timeout: Duration,
@@ -473,6 +479,7 @@ async fn run_process(
     let mut cmd = tokio::process::Command::from(process::command(&wrapped.program));
     cmd.args(&wrapped.args)
         .envs(wrapped.env)
+        .envs(env)
         .current_dir(dir)
         .env(DISTILLING_ENV, "1")
         .stdin(std::process::Stdio::piped())
@@ -565,8 +572,14 @@ fn scratch_dir(root: &Path) -> Result<tempfile::TempDir, String> {
 impl Backend {
     async fn run(&self, prompt: String, timeout: Duration) -> Result<String, String> {
         match self {
-            Backend::Claude { exe: path, scratch } => {
-                let dir = scratch_dir(scratch)?;
+            Backend::Claude { exe: path, paths } => {
+                let dir = scratch_dir(&paths.distill_dir())?;
+                // Read at every run: a token stored while the daemon runs is used.
+                let p = paths.clone();
+                let login =
+                    tokio::task::spawn_blocking(move || blirp_core::claude_token::launch_env(&p))
+                        .await
+                        .map_err(|e| format!("reading the claude login token: {e}"))?;
                 let args: Vec<OsString> = [
                     "-p",
                     "--model",
@@ -582,7 +595,7 @@ impl Backend {
                 .iter()
                 .map(OsString::from)
                 .collect();
-                let out = run_process(path, args, prompt, dir.path(), timeout).await?;
+                let out = run_process(path, args, login, prompt, dir.path(), timeout).await?;
                 parse_claude_json(&out.stdout).map_err(|e| {
                     format!("{e} (exit {:?}; stderr: {})", out.code, tail(&out.stderr))
                 })
@@ -590,7 +603,8 @@ impl Backend {
             Backend::Codex { exe: path, scratch } => {
                 let dir = scratch_dir(scratch)?;
                 let last = dir.path().join("last-message.txt");
-                let out = run_process(path, codex_args(&last), prompt, dir.path(), timeout).await?;
+                let out =
+                    run_process(path, codex_args(&last), None, prompt, dir.path(), timeout).await?;
                 match std::fs::read_to_string(&last) {
                     Ok(t) if !t.trim().is_empty() => Ok(t),
                     _ => parse_codex_jsonl(&out.stdout).map_err(|e| {
@@ -1240,7 +1254,7 @@ async fn process(state: &SharedState, job: &Job) {
             return;
         }
     }
-    let result = match select_backend(&cfg, &state.paths.distill_dir()).await {
+    let result = match select_backend(&cfg, &state.paths).await {
         Ok(Some(b)) => run_distill(state.store.clone(), &job.session_id, &b, &cfg).await,
         Ok(None) => Err(DistillError::NoBackend(
             "memory.summarizer = \"none\"".into(),
@@ -1416,7 +1430,7 @@ mod tests {
     fn codex_is_opt_in_and_runs_without_tools() {
         let claude = Backend::Claude {
             exe: "claude".into(),
-            scratch: "s".into(),
+            paths: Paths::at("s"),
         };
         let ollama = Backend::Ollama {
             base: "b".into(),
@@ -1925,12 +1939,82 @@ mod tests {
         let script = fake_script(d.path(), "fake-claude", &json_path, false);
         let backend = Backend::Claude {
             exe: script,
-            scratch: d.path().join("distill"),
+            paths: Paths::at(d.path()),
         };
         run_distill(store.clone(), "s", &backend, &cfg(BriefMode::Auto))
             .await
             .unwrap();
         assert_eq!(store.get_brief(&pid).unwrap().unwrap().body_md, "new brief");
+    }
+
+    /// The claude summarizer logs in with the stored token, read at run time.
+    #[tokio::test]
+    async fn claude_summarizer_gets_the_login_token() {
+        use blirp_core::claude_token;
+        if std::env::var_os(claude_token::ENV).is_some_and(|v| !v.is_empty()) {
+            // This process's own token is inherited instead (tested in claude_token).
+            return;
+        }
+        let d = tempfile::tempdir().unwrap();
+        let paths = Paths::at(d.path());
+        let seen = d.path().join("seen.txt");
+        let canned = serde_json::json!({"type": "result", "is_error": false, "result": "ok"});
+        let json_path = d.path().join("canned.json");
+        std::fs::write(&json_path, canned.to_string()).unwrap();
+        let script = if cfg!(windows) {
+            let p = d.path().join("claude-env.cmd");
+            let body = format!(
+                "@echo off
+more >nul
+>\"{}\" echo(%{}%
+type \"{}\"
+",
+                seen.display(),
+                claude_token::ENV,
+                json_path.display()
+            );
+            std::fs::write(&p, body).unwrap();
+            p
+        } else {
+            let p = d.path().join("claude-env");
+            let body = format!(
+                "#!/bin/sh
+cat >/dev/null
+printf '%s\n' \"${}\" > '{}'
+cat '{}'
+",
+                claude_token::ENV,
+                seen.display(),
+                json_path.display()
+            );
+            std::fs::write(&p, body).unwrap();
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o755)).unwrap();
+            }
+            p
+        };
+        let backend = Backend::Claude {
+            exe: script,
+            paths: paths.clone(),
+        };
+        claude_token::store(&paths, "tok-123").unwrap();
+        assert_eq!(
+            backend
+                .run("p".into(), Duration::from_secs(30))
+                .await
+                .unwrap(),
+            "ok"
+        );
+        assert_eq!(std::fs::read_to_string(&seen).unwrap().trim(), "tok-123");
+        claude_token::clear(&paths).unwrap();
+        backend
+            .run("p".into(), Duration::from_secs(30))
+            .await
+            .unwrap();
+        let without = std::fs::read_to_string(&seen).unwrap();
+        assert!(!without.contains("tok-123"), "{without}");
     }
 
     #[tokio::test]
@@ -1940,7 +2024,7 @@ mod tests {
         let begin = std::time::Instant::now();
         let err = Backend::Claude {
             exe: script,
-            scratch: d.path().join("distill"),
+            paths: Paths::at(d.path()),
         }
         .run("prompt".into(), Duration::from_secs(1))
         .await

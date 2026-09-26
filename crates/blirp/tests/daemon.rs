@@ -655,6 +655,96 @@ async fn subagent_children_are_filtered_and_counted() {
     h.daemon.shutdown().await.unwrap();
 }
 
+/// claude's headless login token: stored and cleared by a local admin,
+/// reported as a flag, never sent back.
+#[tokio::test]
+async fn claude_login_token_is_stored_but_never_returned() {
+    use blirp_core::model::AgentInfo;
+    const SECRET: &str = "sk-ant-oat01-test-only-not-a-real-token";
+    let h = Harness::start().await;
+    let paths = h.daemon.state.paths.clone();
+    let claude = |list: Vec<AgentInfo>| list.into_iter().find(|a| a.id == "claude").unwrap();
+
+    let before = claude(h.get("/api/agents").await);
+    assert_eq!(before.token.as_ref().map(|t| t.stored), Some(false));
+    // Only claude has one; other agents report nothing.
+    let list: Vec<AgentInfo> = h.get("/api/agents").await;
+    assert!(
+        list.iter()
+            .filter(|a| a.id != "claude")
+            .all(|a| a.token.is_none())
+    );
+
+    for (body, code) in [
+        (json!({"token": "  "}), "invalid_request"),
+        (json!({"token": "two words"}), "invalid_request"),
+        (json!({"token": SECRET, "extra": 1}), "invalid_request"),
+    ] {
+        let r = h
+            .send(reqwest::Method::PUT, "/api/agents/claude/token", body)
+            .await;
+        assert_eq!(r.status(), 400);
+        let e: ErrorBody = r.json().await.unwrap();
+        assert_eq!(e.error.code, code);
+    }
+    let r = h
+        .send(
+            reqwest::Method::PUT,
+            "/api/agents/codex/token",
+            json!({"token": SECRET}),
+        )
+        .await;
+    assert_eq!(r.status(), 422);
+    assert!(!paths.claude_token_file().exists());
+
+    let r = h
+        .send(
+            reqwest::Method::PUT,
+            "/api/agents/claude/token",
+            json!({"token": format!("{SECRET}
+")}),
+        )
+        .await;
+    assert_eq!(r.status(), 200);
+    let text = r.text().await.unwrap();
+    assert!(!text.contains(SECRET), "{text}");
+    let info: AgentInfo = serde_json::from_str(&text).unwrap();
+    assert_eq!(info.token.map(|t| t.stored), Some(true));
+    assert_eq!(
+        blirp_core::claude_token::read(&paths).unwrap().as_deref(),
+        Some(SECRET)
+    );
+    for path in ["/api/agents", "/api/settings", "/api/health"] {
+        let text = h
+            .http
+            .get(h.url(path))
+            .bearer_auth(&h.token)
+            .send()
+            .await
+            .unwrap()
+            .text()
+            .await
+            .unwrap();
+        assert!(!text.contains(SECRET), "{path}: {text}");
+    }
+
+    let r = h
+        .send(
+            reqwest::Method::DELETE,
+            "/api/agents/claude/token",
+            json!({}),
+        )
+        .await;
+    assert_eq!(r.status(), 200);
+    assert!(!paths.claude_token_file().exists());
+    // `blirp agents set-token` writes the file directly; the next listing
+    // sees it without waiting for the cached one to expire.
+    blirp_core::claude_token::store(&paths, SECRET).unwrap();
+    let after = claude(h.get("/api/agents").await);
+    assert_eq!(after.token.map(|t| t.stored), Some(true));
+    h.daemon.shutdown().await.unwrap();
+}
+
 /// Every mutating route with the right it needs (§11). A route missing
 /// here is a route nobody checked.
 const MUTATING_ROUTES: &[(&str, &str, Need)] = &[
@@ -671,6 +761,8 @@ const MUTATING_ROUTES: &[(&str, &str, Need)] = &[
     ("POST", "/api/machines/m1/clone", Need::Control),
     ("POST", "/api/agents/claude/hooks/install", Need::Admin),
     ("POST", "/api/agents/claude/hooks/uninstall", Need::Admin),
+    ("PUT", "/api/agents/claude/token", Need::Admin),
+    ("DELETE", "/api/agents/claude/token", Need::Admin),
     ("POST", "/api/hooks/claude/Stop", Need::Admin),
     ("POST", "/api/sessions/s1/open", Need::Admin),
     ("POST", "/api/sessions", Need::Control),

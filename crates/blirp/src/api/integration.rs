@@ -1,5 +1,6 @@
 //! Memory-engine endpoints (§11): hook ingress, rendered injection, manual
-//! distill, global integration install/uninstall and MCP over HTTP.
+//! distill, global integration install/uninstall, claude's headless login
+//! token and MCP over HTTP.
 
 use super::{Admin, ApiError, ApiJson, ApiPath, ApiQuery, ApiResult, Control, blocking};
 use crate::hooks::{HookIngress, HookReply};
@@ -8,9 +9,9 @@ use crate::memory::render::render_injection;
 use crate::state::SharedState;
 use axum::extract::State;
 use axum::http::StatusCode;
-use axum::routing::{get, post};
+use axum::routing::{get, post, put};
 use axum::{Json, Router};
-use blirp_core::model::{AgentInfo, Injection};
+use blirp_core::model::{AgentInfo, Injection, SetAgentToken};
 use serde::Deserialize;
 
 pub fn routes() -> Router<SharedState> {
@@ -19,6 +20,10 @@ pub fn routes() -> Router<SharedState> {
         .route("/api/inject", get(inject))
         .route("/api/sessions/{id}/distill", post(distill))
         .route("/api/agents/{id}/hooks/{action}", post(agent_hooks))
+        .route(
+            "/api/agents/{id}/token",
+            put(set_agent_token).delete(clear_agent_token),
+        )
 }
 
 /// `/mcp`, mounted on the loopback listener only (see `api::build`).
@@ -144,6 +149,7 @@ async fn agent_hooks(
         ));
     }
     let config = s.config();
+    let paths = s.paths.clone();
     let agent_id = id.clone();
     let info = blocking(move || {
         let homes = crate::hooks::install::Homes::from_env()
@@ -160,7 +166,7 @@ async fn agent_hooks(
                 format!("{e:#}"),
             )
         })?;
-        crate::agents::detect_all(&config)
+        crate::agents::detect_all(&config, &paths)
             .into_iter()
             .find(|a| a.id == agent_id)
             .ok_or_else(|| ApiError::not_found("agent"))
@@ -168,4 +174,77 @@ async fn agent_hooks(
     .await?;
     s.invalidate_agents();
     Ok(Json(info))
+}
+
+/// Only claude has a headless login token (§7).
+fn token_agent(id: &str) -> ApiResult<()> {
+    if id == "claude" {
+        Ok(())
+    } else {
+        Err(ApiError::new(
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "unsupported",
+            format!("{id} has no login token setting"),
+        ))
+    }
+}
+
+/// `PUT /api/agents/claude/token {token}` (admin): store a `claude
+/// setup-token` token for sessions and the summarizer on this machine.
+/// Answers claude's AgentInfo, which says whether a token is stored, never
+/// the token.
+async fn set_agent_token(
+    State(s): State<SharedState>,
+    _: Admin,
+    ApiPath(id): ApiPath<String>,
+    ApiJson(body): ApiJson<SetAgentToken>,
+) -> ApiResult<Json<AgentInfo>> {
+    token_agent(&id)?;
+    let paths = s.paths.clone();
+    blocking(move || {
+        blirp_core::claude_token::store(&paths, &body.token).map_err(|e| match e {
+            blirp_core::claude_token::TokenError::Paths(_)
+            | blirp_core::claude_token::TokenError::Io { .. } => {
+                ApiError::internal("storing the claude login token", e)
+            }
+            invalid => ApiError::bad_request(invalid.to_string()),
+        })
+    })
+    .await?;
+    tracing::info!("claude login token stored");
+    claude_info(&s).await
+}
+
+/// `DELETE /api/agents/claude/token` (admin).
+async fn clear_agent_token(
+    State(s): State<SharedState>,
+    _: Admin,
+    ApiPath(id): ApiPath<String>,
+) -> ApiResult<Json<AgentInfo>> {
+    token_agent(&id)?;
+    let paths = s.paths.clone();
+    let removed = blocking(move || {
+        blirp_core::claude_token::clear(&paths)
+            .map_err(|e| ApiError::internal("removing the claude login token", e))
+    })
+    .await?;
+    if removed {
+        tracing::info!("claude login token removed");
+    }
+    claude_info(&s).await
+}
+
+/// claude's AgentInfo, detected again (its login state just changed).
+async fn claude_info(s: &SharedState) -> ApiResult<Json<AgentInfo>> {
+    s.invalidate_agents();
+    let config = s.config();
+    let paths = s.paths.clone();
+    blocking(move || {
+        crate::agents::detect_all(&config, &paths)
+            .into_iter()
+            .find(|a| a.id == "claude")
+            .ok_or_else(|| ApiError::not_found("agent"))
+    })
+    .await
+    .map(Json)
 }

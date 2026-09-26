@@ -460,6 +460,25 @@ async fn pair_replicate_proxy_revoke_and_portal() {
     .await
     .unwrap();
     assert_eq!(resp.status(), 404);
+    // Admin routes stay admin-only through the proxy: a relayed request is
+    // never admin, so no machine sets another's claude login token.
+    let resp = blirp::sync::forward(
+        &b.daemon.state,
+        &a.id(),
+        &Principal::local(),
+        Method::PUT,
+        "/api/agents/claude/token",
+        Some(br#"{"token":"relayed-token"}"#.to_vec()),
+    )
+    .await
+    .unwrap();
+    assert_eq!(resp.status(), 403);
+    let body = axum::body::to_bytes(resp.into_body(), 1 << 20)
+        .await
+        .unwrap();
+    let err: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(err["error"]["code"], "admin_only");
+    assert!(!a.daemon.state.paths.claude_token_file().exists());
 
     // ---- remote launch on A from B, then attach its terminal from B.
     let a_dir = tmp.path().join("work-a");

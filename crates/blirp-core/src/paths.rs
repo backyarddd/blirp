@@ -90,6 +90,15 @@ impl Paths {
     pub fn distill_dir(&self) -> PathBuf {
         self.home.join("distill")
     }
+    /// Credentials blirp keeps for agents (§3): owner-only, never in the
+    /// database, so never replicated.
+    pub fn secrets_dir(&self) -> PathBuf {
+        self.home.join("secrets")
+    }
+    /// Claude Code login token from `claude setup-token` (see `claude_token`).
+    pub fn claude_token_file(&self) -> PathBuf {
+        self.secrets_dir().join("claude_oauth_token")
+    }
     /// `launch/<session_id>/`. Ids that are not a single safe path
     /// component are refused, so no id can reach outside `launch/`.
     pub fn launch_dir(&self, session_id: &str) -> Result<PathBuf, PathsError> {
@@ -104,24 +113,7 @@ impl Paths {
     /// existing one is looser; everything inside is shielded by it. On Windows
     /// it inherits the user profile ACL.
     pub fn ensure_dirs(&self) -> Result<(), PathsError> {
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::{DirBuilderExt, PermissionsExt};
-            let home = &self.home;
-            std::fs::DirBuilder::new()
-                .recursive(true)
-                .mode(0o700)
-                .create(home)
-                .map_err(io("create", home))?;
-            let mode = std::fs::metadata(home)
-                .map_err(io("stat", home))?
-                .permissions()
-                .mode();
-            if mode & 0o077 != 0 {
-                std::fs::set_permissions(home, std::fs::Permissions::from_mode(mode & 0o700))
-                    .map_err(io("chmod", home))?;
-            }
-        }
+        create_private_dir(&self.home)?;
         for dir in [
             self.home.clone(),
             self.logs_dir(),
@@ -182,6 +174,31 @@ impl RuntimeInfo {
         }
         Ok(())
     }
+}
+
+/// Create `dir` (and its parents) owner-only: 0700 on unix, tightened if an
+/// existing one is looser. On Windows it inherits the user profile ACL.
+pub fn create_private_dir(dir: &Path) -> Result<(), PathsError> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::{DirBuilderExt, PermissionsExt};
+        std::fs::DirBuilder::new()
+            .recursive(true)
+            .mode(0o700)
+            .create(dir)
+            .map_err(io("create", dir))?;
+        let mode = std::fs::metadata(dir)
+            .map_err(io("stat", dir))?
+            .permissions()
+            .mode();
+        if mode & 0o077 != 0 {
+            std::fs::set_permissions(dir, std::fs::Permissions::from_mode(mode & 0o700))
+                .map_err(io("chmod", dir))?;
+        }
+    }
+    #[cfg(not(unix))]
+    std::fs::create_dir_all(dir).map_err(io("create", dir))?;
+    Ok(())
 }
 
 /// Write a file readable only by the current user (0600 on unix).

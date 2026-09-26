@@ -45,15 +45,31 @@ fn lock<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
     m.lock().unwrap_or_else(PoisonError::into_inner)
 }
 
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct SpawnRequest {
     pub program: OsString,
     pub args: Vec<OsString>,
     pub cwd: PathBuf,
+    /// May carry credentials (claude's login token): never logged.
     pub env: Vec<(String, String)>,
     pub env_remove: Vec<String>,
     pub cols: u16,
     pub rows: u16,
+}
+
+impl std::fmt::Debug for SpawnRequest {
+    // Env values stay out of any log; the names are enough to debug.
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("SpawnRequest")
+            .field("program", &self.program)
+            .field("args", &self.args)
+            .field("cwd", &self.cwd)
+            .field("env", &self.env.iter().map(|(k, _)| k).collect::<Vec<_>>())
+            .field("env_remove", &self.env_remove)
+            .field("cols", &self.cols)
+            .field("rows", &self.rows)
+            .finish()
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

@@ -410,7 +410,12 @@ can_resume: boolean, integration: AgentIntegration,
  * can be checked without a model call (claude: `claude auth status`);
  * null when unknown.
  */
-auth: AgentAuth | null, };
+auth: AgentAuth | null, 
+/**
+ * Headless login token (claude only, §7); null for other agents. The
+ * token itself is never sent.
+ */
+token: AgentToken | null, };
 
 /**
  * How blirp memory reaches an agent (§9).
@@ -443,6 +448,29 @@ export type AgentAuth = { logged_in: boolean,
  * How it is logged in, as the agent reports it (e.g. `claude.ai`, `api_key`).
  */
 method: string | null, };
+
+/**
+ * Whether claude sessions and the summarizer on this machine log in with a
+ * long-lived OAuth token (`claude setup-token`) instead of the keychain or
+ * `~/.claude/.credentials.json`, which a daemon started by launchd on a
+ * locked Mac or over SSH cannot use.
+ */
+export type AgentToken = { 
+/**
+ * A token is stored in `BLIRP_HOME/secrets/claude_oauth_token`
+ * (`blirp agents set-token claude`).
+ */
+stored: boolean, 
+/**
+ * The daemon's own environment already sets `CLAUDE_CODE_OAUTH_TOKEN`;
+ * sessions inherit it and a stored token is not used.
+ */
+env: boolean, };
+
+/**
+ * `PUT /api/agents/claude/token` (admin).
+ */
+export type SetAgentToken = { token: string, };
 
 /**
  * `GET /api/machines/:id/dirs`: folders on a machine, for picking where a

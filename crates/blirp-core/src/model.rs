@@ -861,6 +861,41 @@ pub struct AgentInfo {
     // Default: older daemons do not send it.
     #[serde(default)]
     pub auth: Option<AgentAuth>,
+    /// Headless login token (claude only, §7); null for other agents. The
+    /// token itself is never sent.
+    // Default: older daemons do not send it.
+    #[serde(default)]
+    pub token: Option<AgentToken>,
+}
+
+/// Whether claude sessions and the summarizer on this machine log in with a
+/// long-lived OAuth token (`claude setup-token`) instead of the keychain or
+/// `~/.claude/.credentials.json`, which a daemon started by launchd on a
+/// locked Mac or over SSH cannot use.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+pub struct AgentToken {
+    /// A token is stored in `BLIRP_HOME/secrets/claude_oauth_token`
+    /// (`blirp agents set-token claude`).
+    pub stored: bool,
+    /// The daemon's own environment already sets `CLAUDE_CODE_OAUTH_TOKEN`;
+    /// sessions inherit it and a stored token is not used.
+    pub env: bool,
+}
+
+/// `PUT /api/agents/claude/token` (admin).
+#[derive(Clone, Deserialize, TS)]
+#[serde(deny_unknown_fields)]
+pub struct SetAgentToken {
+    pub token: String,
+}
+
+impl std::fmt::Debug for SetAgentToken {
+    // The token must never reach a log.
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("SetAgentToken")
+            .field("token", &"[REDACTED]")
+            .finish()
+    }
 }
 
 /// Login state of an agent CLI as seen by the daemon's own process (on
@@ -1172,7 +1207,7 @@ mod tests {
             PatchRecord, CreateWikiPage, PutWikiPage, CreateResource, PatchResource,
             GitStatusEntry, GitStatus, GitDiff, FileEntry, DirListing, FileContent, SessionsPage, SessionDetail,
             LaunchSession, PatchSession, RemoveWorktree, OpenTarget, OpenSession, EventsPage, SearchHit, SearchResults, AgentInfo,
-            AgentIntegration, AgentAuth, MachineDirs, MachineDir, CloneRepo, CloneJob, Injection, SummaryItem, DistillFailure, SessionSummary,
+            AgentIntegration, AgentAuth, AgentToken, SetAgentToken, MachineDirs, MachineDir, CloneRepo, CloneJob, Injection, SummaryItem, DistillFailure, SessionSummary,
             SettingsView, SettingsPatch, Capabilities, DistillStatus, DistillPause, SyncStatus, SyncInvite, JoinHub, JoinPreviewRequest, JoinPreview, WsTicketRequest, WsTicket, BrowserInvite, PatchDevice,
             ServerEvent, TerminalServerMessage, TerminalClientMessage,
             Config, DaemonConfig, MachineConfig, AgentsConfig, CustomAgent, SessionsConfig,

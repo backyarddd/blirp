@@ -512,8 +512,8 @@ async fn start(
     };
     let st = state.clone();
     let (s2, a2, h2) = (session.clone(), agent.clone(), handoff.clone());
-    // Both touch the filesystem (launch files, shim parsing).
-    let (integ, command) = crate::api::blocking(move || {
+    // All touch the filesystem (launch files, shim parsing, the token file).
+    let (integ, command, login) = crate::api::blocking(move || {
         let integ = integrate(&st, &s2, &a2, h2.as_deref());
         let command = a2.command(&LaunchContext {
             agent_session_id: s2.agent_session_id.as_deref(),
@@ -521,7 +521,7 @@ async fn start(
             args_before: &integ.args_before,
             args_after: &integ.args_after,
         });
-        Ok((integ, command))
+        Ok((integ, command, login_env(&a2, &st.paths)))
     })
     .await?;
     let command = match command {
@@ -553,6 +553,7 @@ async fn start(
     ];
     env.extend(integ.env);
     env.extend(command.env);
+    env.extend(login);
     let spawn = SpawnRequest {
         program: command.program,
         args: command.args,
@@ -598,6 +599,17 @@ async fn start(
         tokio::spawn(type_prompt(term, prompt));
     }
     Ok(session)
+}
+
+/// Headless login for the agent's process: claude gets the stored
+/// `claude setup-token` token (read now, so a token set while the daemon
+/// runs is used), no other agent gets anything.
+fn login_env(agent: &Agent, paths: &blirp_core::paths::Paths) -> Option<(String, String)> {
+    if agent.id == "claude" {
+        blirp_core::claude_token::launch_env(paths)
+    } else {
+        None
+    }
 }
 
 /// A launch or resume that could not start its process: the row (already
@@ -851,6 +863,31 @@ mod tests {
         for input in ["claude-input.txt", "codex-input.txt", "shell-input.txt"] {
             assert!(!super::is_dialog(&screen(input)), "{input}");
         }
+    }
+
+    #[test]
+    fn only_claude_gets_the_login_token() {
+        use blirp_core::claude_token;
+        let dir = tempfile::tempdir().unwrap();
+        let paths = blirp_core::paths::Paths::at(dir.path());
+        claude_token::store(&paths, "tok").unwrap();
+        let mut cfg = blirp_core::config::Config::default();
+        cfg.agents.custom.push(blirp_core::config::CustomAgent {
+            name: "claude".into(),
+            command: "claude".into(),
+            args: Vec::new(),
+        });
+        for id in ["codex", "opencode", "gemini", "shell", "custom:claude"] {
+            let agent = crate::agents::Agent::resolve(id, &cfg).unwrap();
+            assert_eq!(super::login_env(&agent, &paths), None, "{id}");
+        }
+        let claude = crate::agents::Agent::resolve("claude", &cfg).unwrap();
+        // A daemon whose own environment sets the token passes that on instead.
+        let want = std::env::var_os(claude_token::ENV)
+            .filter(|v| !v.is_empty())
+            .is_none()
+            .then(|| (claude_token::ENV.to_string(), "tok".to_string()));
+        assert_eq!(super::login_env(&claude, &paths), want);
     }
 
     #[test]

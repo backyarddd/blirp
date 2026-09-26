@@ -232,3 +232,49 @@ async fn worktrees_list_and_prune() {
     let o = blirp(&home, &user, &["stop"]);
     assert!(o.status.success(), "{}", text(&o));
 }
+
+/// `blirp agents set-token claude` with the token piped in (no terminal):
+/// stored trimmed, never echoed; refused when empty; `clear-token` removes it.
+#[test]
+fn set_and_clear_claude_token() {
+    use std::io::Write as _;
+    let tmp = tempfile::tempdir().unwrap();
+    let home = tmp.path().join("blirp");
+    let user = tmp.path().join("user");
+    std::fs::create_dir_all(&user).unwrap();
+    let file = home.join("secrets").join("claude_oauth_token");
+    let set = |input: &str| {
+        let mut cmd = blirp_core::process::command(env!("CARGO_BIN_EXE_blirp"));
+        cmd.args(["agents", "set-token", "claude"])
+            .env("BLIRP_HOME", &home)
+            .env("HOME", &user)
+            .env("USERPROFILE", &user)
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped());
+        let mut child = cmd.spawn().unwrap();
+        child
+            .stdin
+            .take()
+            .unwrap()
+            .write_all(input.as_bytes())
+            .unwrap();
+        child.wait_with_output().unwrap()
+    };
+
+    let o = set("  \n");
+    assert!(!o.status.success(), "{}", text(&o));
+    assert!(!file.exists());
+
+    let o = set("tok-cli-test-123\n");
+    assert!(o.status.success(), "{}", text(&o));
+    assert!(!text(&o).contains("tok-cli-test-123"), "{}", text(&o));
+    assert_eq!(std::fs::read_to_string(&file).unwrap(), "tok-cli-test-123");
+
+    let o = blirp(&home, &user, &["agents", "set-token", "codex"]);
+    assert!(!o.status.success(), "only claude has a token");
+
+    let o = blirp(&home, &user, &["agents", "clear-token", "claude"]);
+    assert!(o.status.success(), "{}", text(&o));
+    assert!(!file.exists());
+}

@@ -148,6 +148,10 @@ async fn patch_settings(
 const AGENTS_TTL: Duration = Duration::from_secs(60);
 
 pub(super) async fn agents(State(s): State<SharedState>) -> ApiResult<Json<Vec<AgentInfo>>> {
+    // `blirp agents set-token` writes the token without telling the daemon:
+    // a cached list from before it changed is stale (claude's login too).
+    let paths = s.paths.clone();
+    let token = blocking(move || Ok(blirp_core::claude_token::status(&paths))).await?;
     {
         let cache = s
             .agents_cache
@@ -155,12 +159,16 @@ pub(super) async fn agents(State(s): State<SharedState>) -> ApiResult<Json<Vec<A
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         if let Some((at, list)) = cache.as_ref()
             && at.elapsed() < AGENTS_TTL
+            && list
+                .iter()
+                .all(|a| a.token.as_ref().is_none_or(|t| *t == token))
         {
             return Ok(Json(list.clone()));
         }
     }
     let config = s.config();
-    let list = blocking(move || Ok(crate::agents::detect_all(&config))).await?;
+    let paths = s.paths.clone();
+    let list = blocking(move || Ok(crate::agents::detect_all(&config, &paths))).await?;
     *s.agents_cache
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner) = Some((Instant::now(), list.clone()));

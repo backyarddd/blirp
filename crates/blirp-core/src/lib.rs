@@ -1,6 +1,7 @@
 //! blirp core: model types, config, paths, the SQLite store with migrations,
 //! git helpers and secret redaction. See `docs/ARCHITECTURE.md`.
 
+pub mod claude_token;
 pub mod config;
 pub mod git;
 pub mod model;
