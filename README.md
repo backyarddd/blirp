@@ -42,7 +42,7 @@ The agents already save full transcripts on disk. blirp reads them, keeps a proj
 - **Cloud sessions.** Start a session on the hub from your laptop, close the lid, and pick it up later with its full scrollback.
 - **Web portal.** A hub can serve the same UI over HTTPS on your LAN (or behind `tailscale serve`) for phones and other browsers, with per-device permissions.
 
-**No accounts, no telemetry, no blirp servers.** blirp never proxies model traffic and never stores agent credentials.
+**No accounts, no telemetry, no blirp servers.** blirp never proxies model traffic and never reads your agents' credentials; the only one it stores is an optional Claude Code login token you give it for a headless hub (`~/.blirp/secrets`, never synced).
 
 ## Screenshots
 
@@ -86,7 +86,7 @@ Options (`--no-app`, `--service`, `--version X`), manual downloads, system requi
 ## Quick start
 
 1. **Run `blirp`.** It starts the daemon and opens the desktop app (or, with only the CLI, the UI in your browser, already signed in).
-2. **Start a session.** Click the orange **+** (Ctrl+T, Cmd+T on macOS), pick a project or type any folder path, and choose an agent. Only agents found on your `PATH` can be selected; `Shell` always works.
+2. **Start a session.** Click the orange **+** (Ctrl+T, or Ctrl+Shift+T inside a terminal; Cmd+T on macOS), pick a project or type any folder path, and choose an agent. Only agents found on your `PATH` can be selected; `Shell` always works.
 3. **Work as usual.** When the session has been idle for 5 minutes, or ends, blirp summarizes it into the project's memory.
 4. **Start the next session** in the same folder, with the same or another agent. It begins with a `# blirp memory: <project>` block. Open **Memory** in the session toolbar to see exactly what it received.
 5. **Optional:** `blirp hooks install` gives sessions you start in your own terminal the same memory (Claude Code, Codex, Gemini CLI, Cursor; MCP only for opencode). It edits those agents' user config, reversibly.
@@ -157,8 +157,8 @@ Not supported: IDE-embedded agents (Copilot Chat in VS Code, the Cursor editor's
 
 - All state stays in `~/.blirp` (`%USERPROFILE%\.blirp` on Windows) on your own machines: one SQLite database plus config, keys and logs.
 - Transcript text is redacted (cloud keys, tokens, private keys, JWTs, connection strings, `.env` lines, ...) before it is stored, synced or summarized. Logs never contain transcript text.
-- What leaves the machine, and only if you use it: redacted excerpts go to the summarizer you picked (`none` sends nothing, Ollama stays local); sync traffic goes only to your paired machines, end to end encrypted; the desktop app checks GitHub Releases for updates.
-- The daemon listens on `127.0.0.1` only. The LAN portal is off by default and exists only on a hub.
+- What leaves the machine, and only if you use it: redacted excerpts go to the summarizer you picked (`none` sends nothing, Ollama stays local); sync is end to end encrypted to your paired machines, using public n0 relays for connection setup and fallback unless you set `sync.relay = "disabled"`; the daemon checks GitHub Releases for a new version at most daily unless `update.check = false`.
+- The local API listens on `127.0.0.1` only. A hub or node also opens a UDP (QUIC) endpoint for sync, plus mDNS unless `sync.lan_discovery = false`; a standalone machine opens neither. The LAN portal is off by default and exists only on a hub.
 
 Threat model and details: [docs/security.md](docs/security.md). Report vulnerabilities privately: [SECURITY.md](SECURITY.md).
 

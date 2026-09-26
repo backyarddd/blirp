@@ -2,7 +2,7 @@
 
 blirp runs agents as their own, unmodified CLIs. It never proxies model traffic and never reads their credentials; each agent keeps its own login and config. The one exception is opt-in: a Claude Code login token you give blirp for a headless hub ([below](#headless-login-for-a-hub)). For every agent this page lists what blirp does at launch, where it reads transcripts, how memory gets in and what has been verified.
 
-"Verified" means checked against the installed CLI (version shown) on the reference machine. "Docs" means implemented from the agent's official documentation or published format only; if it misbehaves with your version, please open an issue with `blirp doctor` output.
+"Verified" means checked against the installed CLI (version shown) on the reference machine. "Partial" means part of the integration (named per agent below) was checked against real data and the rest follows the agent's documentation. "Docs" means implemented from the agent's official documentation or published format only; if it misbehaves with your version, please open an issue with `blirp doctor` output.
 
 ## Common behavior
 
@@ -75,7 +75,7 @@ Claude Code ranks cloud provider credentials (`CLAUDE_CODE_USE_BEDROCK`, `CLAUDE
 
 ## Cursor CLI
 
-- Binary `cursor-agent`, else `agent`. Docs only.
+- Binary `cursor-agent`, else `agent`. Partial: the `agent-transcripts` ingest was checked against real data; launch, hooks and the `store.db` ingest follow documentation.
 - Launch: no per-launch config override exists, so nothing is added; `BLIRP_MEMORY_FILE` is set.
 - Memory and MCP: only with global integration installed (`sessionStart` hook returns `additional_context`; MCP from `~/.cursor/mcp.json`).
 - Status: global hooks if installed, else output heuristics.
@@ -107,7 +107,7 @@ Claude Code ranks cloud provider credentials (`CLAUDE_CODE_USE_BEDROCK`, `CLAUDE
 
 ## DeepSeek Harness (dsh)
 
-- Binary `dsh`.
+- Binary `dsh`. Partial: transcript ingest was checked against real (decoded) data; launch and status follow documentation.
 - Launch: no documented way to add context, so only `BLIRP_MEMORY_FILE` is set. No MCP.
 - Status: output heuristics. Resume: relaunches fresh.
 - Ingest: `~/.dsh/sessions/<folder>/session-<id>/session.v3.jsonl.zstd` (`$DSH_HOME`), verified on real (decoded) data; other log versions are skipped.
