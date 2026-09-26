@@ -211,6 +211,16 @@ impl Agent {
             args.push("-NoLogo".into());
         }
         let resuming = ctx.resume && self.can_resume();
+        // The id comes from transcripts and hooks; it lands in argv, so an
+        // id that could be read as an option (or anything else odd) is refused.
+        if let Some(id) = ctx.agent_session_id
+            && (resuming || self.assigns_session_id())
+            && !valid_agent_session_id(id)
+        {
+            return Err(AgentError::InvalidArgument(format!(
+                "agent session id {id:?}"
+            )));
+        }
         match (resuming, self.resume, ctx.agent_session_id) {
             (true, Resume::Args(prefix), Some(id)) => {
                 args.extend(prefix.iter().map(OsString::from));
@@ -226,6 +236,16 @@ impl Agent {
         args.extend(ctx.args_after.iter().cloned());
         wrap_for_platform(path, args)
     }
+}
+
+/// Agents' own session ids: uuids, `ses_...`, `T-...`, `<uuid>:agent-<id>`.
+/// Never empty, never starting with `-`, only `[A-Za-z0-9_.:-]`.
+fn valid_agent_session_id(id: &str) -> bool {
+    (1..=200).contains(&id.len())
+        && !id.starts_with('-')
+        && id
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b"_.:-".contains(&b))
 }
 
 fn is_powershell(p: &Path) -> bool {
@@ -536,6 +556,19 @@ mod tests {
         let codex = agent("codex", "/bin/codex");
         assert!(argv(&codex, false, None).is_empty());
         assert_eq!(argv(&codex, true, Some("r1")), ["resume", "r1"]);
+        // An id that would be read as an option (or carries anything but
+        // id characters) never reaches argv.
+        for bad in ["-cnotify=[\"calc\"]", "--help", "a b", "", "a;b"] {
+            for a in [&codex, &claude] {
+                let r = a.command(&LaunchContext {
+                    agent_session_id: Some(bad),
+                    resume: true,
+                    args_before: &[],
+                    args_after: &[],
+                });
+                assert!(matches!(r, Err(AgentError::InvalidArgument(_))), "{bad:?}");
+            }
+        }
         // Resume without a known id relaunches fresh.
         assert!(argv(&codex, true, None).is_empty());
         let aider = agent("aider", "/bin/aider");
