@@ -20,6 +20,7 @@ Without a command, `blirp` does what [`blirp app`](#blirp-app) does.
 | [`doctor`](#blirp-doctor) | no | check the installation |
 | [`mem`](#blirp-mem) | no | search and show project memory |
 | [`hooks`](#blirp-hooks) | no | install/remove global agent hooks and MCP |
+| [`agents`](#blirp-agents) | no | store or remove the Claude login token for a headless hub |
 | [`pair`](#blirp-pair) | yes | pair this machine with a hub |
 | [`hub`](#blirp-hub) | yes | hub role, invites, sync status |
 | [`devices`](#blirp-devices) | yes | paired machines and browser devices |
@@ -78,7 +79,7 @@ Shows the daemon log (`~/.blirp/logs/blirpd.<date>.log`). Run `blirp logs --help
 
 ## blirp doctor
 
-Checks, one line each, `[ ok ]` or `[FAIL]`: data directory writable, `config.toml` valid, database opens and passes `quick_check` (schema version shown), daemon reachable, `git` on PATH. Then `[info]` lines: LAN discovery (on or off, the running daemon's latest mDNS send failure when it logged one in the last 11 minutes, and on macOS a hint about the Local Network permission), detected agents with versions, and per transcript adapter the store it found, the number of sources and the time of the last ingest. Exit code 1 if any check failed. Works without the daemon; run it in the same environment the daemon runs in (PATH matters for agent detection).
+Checks, one line each, `[ ok ]` or `[FAIL]`: data directory writable, `config.toml` valid, database opens and passes `quick_check` (schema version shown), daemon reachable, `git` on PATH. Then `[info]` lines: LAN discovery (on or off, the running daemon's latest mDNS send failure when it logged one in the last 11 minutes, and on macOS a hint about the Local Network permission), detected agents with versions, how claude logs in (`claude auth`: a login token from the environment, a stored token or the keychain / credentials file, and whether `claude auth status` reports it logged in; asked from the running daemon, else from this shell), and per transcript adapter the store it found, the number of sources and the time of the last ingest. Exit code 1 if any check failed. Works without the daemon; run it in the same environment the daemon runs in (PATH matters for agent detection).
 
 ## blirp mem
 
@@ -106,6 +107,15 @@ blirp hooks status    [--agent <AGENT>]
 ```
 
 Global integration for sessions started outside blirp. Supported agents: `claude`, `codex`, `gemini`, `cursor`, `opencode`. Without `--agent`, `install` handles every supported agent found on PATH, `uninstall` and `status` all supported agents. Prints one line per agent: `hooks <installed|not_installed|unsupported>  mcp <...>`, plus a note after install (Codex: run `/hooks` once to trust them). Exit code 1 if any agent failed (e.g. a config file with comments). Does not need the daemon. Exactly what changes: [memory.md](memory.md#global-hooks).
+
+## blirp agents
+
+```
+blirp agents set-token claude
+blirp agents clear-token claude
+```
+
+`set-token` reads a token printed by `claude setup-token` from stdin (hidden when you type or paste it into a terminal; piped input works too, e.g. `blirp agents set-token claude < token.txt`), trims surrounding whitespace, and stores it in `~/.blirp/secrets/claude_oauth_token` (`0600`, folder `0700` on macOS and Linux). A token with spaces or line breaks inside is refused. The daemon passes it to claude sessions and the claude summarizer as `CLAUDE_CODE_OAUTH_TOKEN`, read each time it starts one, so no restart is needed. `clear-token` removes it. Does not need the daemon. Why and when: [agents.md](agents.md#headless-login-for-a-hub).
 
 ## blirp pair
 

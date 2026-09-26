@@ -1,13 +1,13 @@
 # Agents
 
-blirp runs agents as their own, unmodified CLIs. It never proxies model traffic and never reads or stores their credentials; each agent keeps its own login and config. For every agent this page lists what blirp does at launch, where it reads transcripts, how memory gets in and what has been verified.
+blirp runs agents as their own, unmodified CLIs. It never proxies model traffic and never reads their credentials; each agent keeps its own login and config. The one exception is opt-in: a Claude Code login token you give blirp for a headless hub ([below](#headless-login-for-a-hub)). For every agent this page lists what blirp does at launch, where it reads transcripts, how memory gets in and what has been verified.
 
 "Verified" means checked against the installed CLI (version shown) on the reference machine. "Docs" means implemented from the agent's official documentation or published format only; if it misbehaves with your version, please open an issue with `blirp doctor` output.
 
 ## Common behavior
 
 - **Detection.** An agent is available when its binary is on the daemon's `PATH`. On Windows only `.exe`, `.com`, `.cmd`, `.bat` and `.ps1` count; npm `.cmd` shims (`codex.cmd`, `gemini.cmd`, ...) are run as `node <script>` so arguments never pass through `cmd.exe` quoting, other `.cmd`/`.bat` run through `cmd /d /c`, `.ps1` through PowerShell `-File`. Versions come from `<binary> --version`. **Settings > Agents** and `blirp doctor` show what was found; the list is cached for 60 seconds.
-- **Environment.** Every session gets `BLIRP_SESSION_ID`, `BLIRP_PROJECT_ID`, `BLIRP_HOME`, `BLIRP_MEMORY_FILE` (path of the rendered memory), `TERM=xterm-256color` and `COLORTERM=truecolor`. Variables that would make an agent think it runs inside another agent (`CLAUDECODE`, `CLAUDE_CODE_*` session variables, `CLAUDE_PID`, `CLAUDE_EFFORT`, `CODEX_SANDBOX`) are removed.
+- **Environment.** Every session gets `BLIRP_SESSION_ID`, `BLIRP_PROJECT_ID`, `BLIRP_HOME`, `BLIRP_MEMORY_FILE` (path of the rendered memory), `TERM=xterm-256color` and `COLORTERM=truecolor`. Variables that would make an agent think it runs inside another agent (`CLAUDECODE`, `CLAUDE_CODE_*` session variables, `CLAUDE_PID`, `CLAUDE_EFFORT`, `CODEX_SANDBOX`) are removed. Claude sessions also get `CLAUDE_CODE_OAUTH_TOKEN` when a [login token](#headless-login-for-a-hub) is stored.
 - **Launch files.** Everything blirp generates for a launch lives in `~/.blirp/launch/<session-id>/` (`memory.md`, `handoff.md`, and per-agent settings). Your agent config files are never edited at launch.
 - **First prompt.** Typed into the agent once its output has been quiet for 1.5 s (at most 60 s), as a bracketed paste when the agent enabled that, followed by Enter. While a folder-trust dialog is on screen, blirp waits (up to 10 minutes) for you to answer it.
 - **Failures degrade.** If blirp cannot prepare the memory integration, the agent starts without memory.
@@ -23,6 +23,26 @@ Where the agents' own data directories are moved with environment variables, bli
 - Resume: `--resume <session id>`.
 - Ingest: `~/.claude/projects/*/*.jsonl` (verified on real data), including subagents in `<session>/subagents/agent-*.jsonl` (title from the `.meta.json` next to it) and tool output spilled to `tool-results/*.txt` (linked, 4 KiB preview). Cost from Claude's own `cost-state` lines.
 - Global hooks: `~/.claude/settings.json` and `~/.claude.json` ([details](memory.md#global-hooks)).
+- Login: **Settings > Agents**, the new-session dialog and `blirp doctor` show `claude auth status` as the daemon sees it (no model call).
+
+### Headless login for a hub
+
+Claude Code keeps its login in the macOS login keychain (`~/.claude/.credentials.json` on Linux and Windows). A daemon that cannot reach the keychain, because a LaunchAgent started it on a Mac that is locked or has nobody logged in, or because it was started over SSH, sees Claude as logged out: sessions hang before the prompt or report "not logged in", and the summarizer fails with an auth error.
+
+Give it a long-lived login token instead (valid one year; needs a Pro, Max, Team or Enterprise plan):
+
+1. On any machine with a browser run `claude setup-token`, approve access, and copy the token it prints. Claude does not save it anywhere.
+2. On the hub (over SSH is fine) run `blirp agents set-token claude` and paste the token; the input is hidden. Piping works too: `blirp agents set-token claude < token.txt`. Or, as a local admin of that machine (its desktop app, or `blirp open` through an SSH port forward), paste it in **Settings > Agents**.
+3. That is all: the daemon reads the token each time it starts claude, so no restart is needed. **Settings > Agents** and `blirp doctor` then show `logged in (oauth_token)`.
+
+What blirp does with it:
+
+- Stores it in `~/.blirp/secrets/claude_oauth_token` (folder `0700`, file `0600` on macOS and Linux; on Windows the user profile's permissions). It is not in the database, so it is never synced; it is never logged and never returned by the API, which reports only `token: {stored, env}`.
+- Passes it as `CLAUDE_CODE_OAUTH_TOKEN` to claude only: sessions, the claude summarizer and the `claude auth status` check. No other agent and no shell session gets it.
+- If the daemon's own environment already sets `CLAUDE_CODE_OAUTH_TOKEN`, sessions inherit that value and the stored token is not used.
+- `blirp agents clear-token claude` (or **Remove token**) deletes it. Running sessions keep the login they started with.
+
+Claude Code ranks `ANTHROPIC_AUTH_TOKEN`, `ANTHROPIC_API_KEY` and `apiKeyHelper` above this token, and the token can only make model requests, so Remote Control and claude.ai connectors do not work with it ([Claude Code authentication](https://code.claude.com/docs/en/authentication#generate-a-long-lived-token)). Run `claude setup-token` again before it expires.
 
 ## Codex
 

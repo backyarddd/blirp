@@ -94,6 +94,16 @@ The daemon, not your shell, looks the agent up on its own `PATH`.
 
 `blirp doctor` prints the agents it finds from your current shell.
 
+## Claude is not logged in for the daemon
+
+Symptoms: the new-session dialog says Claude Code is not logged in on a machine, claude sessions there hang before the prompt or report "not logged in", or distilling pauses with an auth error, while `claude` in your own terminal works. The daemon cannot read the login keychain: it was started over SSH, or a LaunchAgent runs it on a Mac that is locked or has nobody logged in.
+
+1. Run `claude setup-token` on any machine with a browser and copy the token.
+2. On the affected machine run `blirp agents set-token claude` and paste it (over SSH is fine).
+3. `blirp doctor` should now print `claude auth: stored login token ..., logged in (oauth_token) as seen by the daemon`. No restart is needed; sessions already running keep their old login.
+
+If `blirp doctor` says `CLAUDE_CODE_OAUTH_TOKEN from the environment`, the daemon's own environment sets the variable and that value wins over the stored token; fix or remove it where the daemon is started. `blirp agents clear-token claude` removes the stored token. Details: [agents.md](agents.md#headless-login-for-a-hub).
+
 ## Hooks are not firing / status stays Idle
 
 - `blirp hooks status` shows per agent whether hooks and MCP are installed.
@@ -115,7 +125,7 @@ The daemon, not your shell, looks the agent up on its own `PATH`.
 ## Memory is not updating (no summaries)
 
 - `summarizer = "none"`, or `auto` found nothing: install/log in to `claude` or `codex`, or run Ollama. **Settings > Memory** shows the setting.
-- The summarizer is not logged in or out of quota: the session page (and `blirp mem show <id>`) shows `last distill failed: ...`. Log in to the CLI in the account the daemon runs as.
+- The summarizer is not logged in or out of quota: the session page (and `blirp mem show <id>`) shows `last distill failed: ...`. Log in to the CLI in the account the daemon runs as. For `claude` on a daemon without keychain access (started over SSH, or a locked Mac), see [Claude is not logged in for the daemon](#claude-is-not-logged-in-for-the-daemon).
 - Daily budget used up (log: `daily distill budget used up`): raise `memory.daily_distill_limit` or wait for the next UTC day.
 - The session is still running and has not been idle for `distill_idle_secs`.
 - Only sessions active in the last 7 days are distilled automatically; use **Distill now** for older ones.

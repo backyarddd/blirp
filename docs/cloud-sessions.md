@@ -24,6 +24,7 @@ Do this at the Mac itself (or over Screen Sharing), logged in as the user the ag
    blirp service status
    ```
    Run this in Terminal on the Mac, not over SSH. A daemon started from an SSH session cannot read the login keychain, so `claude` would not be logged in there; blirp shows this in the new-session dialog.
+   A LaunchAgent on a Mac whose screen is locked (or after a reboot before anyone logs in) cannot read the keychain either. To make Claude independent of it, give the hub a login token: `claude setup-token` on any machine with a browser, then `blirp agents set-token claude` on the Mac ([agents.md](agents.md#headless-login-for-a-hub)). This works over SSH too.
 4. Keep the Mac up:
    - **System Settings > Users & Groups > Automatically log in as** your user, so the LaunchAgent starts after a reboot (not available with FileVault; then log in once after each reboot, for example over Screen Sharing).
    - **System Settings > Energy > Prevent automatic sleeping when the display is off** (or `sudo pmset -a sleep 0`). blirp also holds a sleep assertion while sessions run ([keep-awake](#keep-awake)); the Energy setting covers the time in between.
@@ -82,11 +83,11 @@ It is on by default for the hub and off for other machines ([configuration](conf
 
 ### Claude not logged in on the hub
 
-The dialog shows "Claude Code is not logged in on <hub>" when `claude auth status` (run by the hub's daemon, no model call) says so. Log in on the Mac (`claude` in Terminal), and make sure the daemon is the LaunchAgent started at login (`blirp service status`), not one started over SSH: SSH sessions have no access to the login keychain, so the same user is "not logged in" there.
+The dialog shows "Claude Code is not logged in on <hub>" when `claude auth status` (run by the hub's daemon, no model call) says so. The daemon cannot use the login keychain when it was started over SSH, or when the Mac is locked. The reliable fix is a login token: run `claude setup-token` on any machine with a browser, then on the Mac (SSH is fine) `blirp agents set-token claude` and paste the token ([agents.md](agents.md#headless-login-for-a-hub)); the next session uses it, no restart needed. Without a token, log in on the Mac (`claude` in Terminal) and make sure the daemon is the LaunchAgent started at login (`blirp service status`), not one started over SSH.
 
 ### Claude Code does not show its prompt
 
-`claude` started inside a launchd job that was loaded over SSH, while the Mac's screen is locked, can stop before drawing its prompt (with and without blirp). Load the service from a session at the Mac (`blirp service install` in Terminal), and check a first cloud session before relying on it.
+`claude` started inside a launchd job that was loaded over SSH, while the Mac's screen is locked, can stop before drawing its prompt (with and without blirp); it cannot reach the login keychain there. Store a [login token](agents.md#headless-login-for-a-hub) (`claude setup-token`, then `blirp agents set-token claude`) so claude does not need the keychain, and check a first cloud session before relying on it.
 
 ### The Mac still sleeps
 

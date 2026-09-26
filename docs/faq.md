@@ -4,7 +4,7 @@
 Free and open source (Apache-2.0). There is no blirp cloud, account or telemetry. The only server you may run is your own hub.
 
 **Does blirp see my API keys or proxy my model traffic?**
-No. Agents run as their own CLIs with their own logins; blirp only adds flags, environment variables and generated files under `~/.blirp/launch/`. It never reads agent credentials.
+No. Agents run as their own CLIs with their own logins; blirp only adds flags, environment variables and generated files under `~/.blirp/launch/`. It never reads agent credentials. The only credential it keeps is a Claude Code login token you store yourself for a headless hub ([agents.md](agents.md#headless-login-for-a-hub)).
 
 **Does my code or transcript leave my machine?**
 Only in two cases you control: the summarizer (`claude` or `codex` CLI) sends redacted transcript excerpts to that provider, and sync sends redacted data to your own paired machines. Use `memory.summarizer = "ollama"` or `"none"` to keep everything local. See [security.md](security.md).

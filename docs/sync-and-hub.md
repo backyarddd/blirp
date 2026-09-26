@@ -35,7 +35,7 @@ Run the hub under your normal user account, never as root or a system service: s
    tar -xzf blirp-<version>-aarch64-apple-darwin.tar.gz
    sudo install -m 0755 blirp-<version>-aarch64-apple-darwin/blirp /usr/local/bin/blirp
    ```
-2. Log in to the agent CLIs you want the hub to run or summarize with (`claude`, `codex`, ...) in the same user account.
+2. Log in to the agent CLIs you want the hub to run or summarize with (`claude`, `codex`, ...) in the same user account. For Claude Code on a Mac that is often locked or that you manage over SSH, store a login token instead of relying on the keychain: `claude setup-token` on any machine with a browser, then `blirp agents set-token claude` on the hub ([agents.md](agents.md#headless-login-for-a-hub)).
 3. Start the daemon now and at every login:
    ```sh
    blirp service install     # ~/Library/LaunchAgents/dev.blirp.daemon.plist
@@ -107,7 +107,7 @@ Replicated between all paired machines (every node ends up with a full copy):
 - sessions (metadata, status, summaries, tokens, cost) and all transcript events,
 - records, briefs (with version history), wiki pages, resources.
 
-Local to each machine, never synced: `config.toml`, the runtime token, `identity.key`, the TLS certificate, suggestions, local settings and ingest cursors, launch files, worktrees, terminal screen contents, and the device list (kept on the hub).
+Local to each machine, never synced: `config.toml`, the runtime token, `identity.key`, the TLS certificate, the Claude login token (`~/.blirp/secrets/`), suggestions, local settings and ingest cursors, launch files, worktrees, terminal screen contents, and the device list (kept on the hub).
 
 Everything replicated has been redacted before it was stored. Each machine distills and ingests only its own sessions; summaries of a session run on the laptop are produced on the laptop and arrive on the other machines by sync.
 

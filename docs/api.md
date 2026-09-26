@@ -29,7 +29,7 @@ Every request runs as a principal:
 | portal browser device | its **Terminal control** setting | no |
 | request relayed from another machine | that machine's terminal control (as set on the hub) | no |
 
-`control` is required to launch, stop or resume sessions, distill a session, and send terminal input (403 `control_not_allowed`). `admin` is required for hub, pairing and device management, hook ingress, global hooks install/uninstall, `POST /api/sessions/:id/open` and `POST /api/daemon/shutdown` (403 `admin_only`). Other endpoints need only authentication.
+`control` is required to launch, stop or resume sessions, distill a session, and send terminal input (403 `control_not_allowed`). `admin` is required for hub, pairing and device management, hook ingress, global hooks install/uninstall, claude's login token, `POST /api/sessions/:id/open` and `POST /api/daemon/shutdown` (403 `admin_only`). Other endpoints need only authentication.
 
 CSRF protection: a mutating request or WebSocket upgrade that carries an `Origin` header must have the same host as its `Host` header, else 403 `forbidden_origin`. Clients without `Origin` (CLI, curl) are not affected.
 
@@ -68,8 +68,10 @@ CSRF protection: a mutating request or WebSocket upgrade that carries an `Origin
 | `GET /api/search?q=&project=&kind=&limit=` | full-text search; `kind` = `record` or `event`; `limit` default 50. `{hits: SearchHit[]}` with `kind, project_id, session_id, seq, record_id, title, agent, snippet, ts, score` |
 | `GET /api/settings` | `{config: Config, values: {key: json}}`: `config.toml` plus local settings values |
 | `PATCH /api/settings` | `{config?: Config, values?: {key: json \| null}}`. A full `Config` is validated (400 with the message) and written to `config.toml`; `null` deletes a value. Returns the new `SettingsView`. |
-| `GET /api/agents` | `AgentInfo[]`: `{id, display_name, builtin, installed, path, version, can_resume, integration: {global_hooks, mcp, inject, detail}, auth}`; `auth` is `{logged_in, method}` for Claude Code (from `claude auth status`, run by the daemon, no model call) and null otherwise; `global_hooks`/`mcp` are `installed`, `not_installed` or `unsupported`, `inject` is `hook`, `instructions`, `flag` or `none`. Cached 60 s. |
+| `GET /api/agents` | `AgentInfo[]`: `{id, display_name, builtin, installed, path, version, can_resume, integration: {global_hooks, mcp, inject, detail}, auth, token}`; `auth` is `{logged_in, method}` for Claude Code (from `claude auth status`, run by the daemon with the stored login token, no model call; `method` is `oauth_token` when it logs in with one) and null otherwise; `token` is `{stored, env}` for Claude Code (a [login token](agents.md#headless-login-for-a-hub) is stored; the daemon's environment sets `CLAUDE_CODE_OAUTH_TOKEN`, which then wins) and null otherwise, never the token itself; `global_hooks`/`mcp` are `installed`, `not_installed` or `unsupported`, `inject` is `hook`, `instructions`, `flag` or `none`. Cached 60 s, and detected again when the stored token changed. |
 | `POST /api/agents/:id/hooks/install`, `.../uninstall` | admin. Global integration for that agent; returns its `AgentInfo`; 422 when the agent is unsupported or a config file cannot be edited. |
+| `PUT /api/agents/claude/token` | admin. `{token}`: store a `claude setup-token` token for claude sessions and the summarizer on this machine (surrounding whitespace is trimmed; 400 when it is empty, longer than 4096 characters or has spaces or control characters inside). Returns claude's `AgentInfo`, never the token. 422 `unsupported` for other agents. Relayed requests are never admin, so another machine cannot set it; run `blirp agents set-token claude` there. |
+| `DELETE /api/agents/claude/token` | admin. Remove the stored token; returns claude's `AgentInfo`. |
 | `POST /api/daemon/shutdown` | admin, local listener only (404 on the portal and proxy). Graceful stop; 202. |
 
 ### Projects
