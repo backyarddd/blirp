@@ -75,8 +75,21 @@ describe('token bootstrap', () => {
       throw new DOMException('full', 'QuotaExceededError');
     });
     expect(bootstrapToken(env(`#token=${TOKEN}`, () => failing))).toBe('memory');
-    expect(bootstrapToken(env(`#token=${TOKEN}`, () => null))).toBe('memory');
     expect(authToken({ storage: () => failing })).toBe(TOKEN);
+    expect(bootstrapToken(env(`#token=${TOKEN}`, () => null))).toBe('memory');
+  });
+
+  it('drops a stale stored token it cannot replace', () => {
+    const full = memoryStorage();
+    const stale = '12'.repeat(32);
+    full.setItem('blirp.token', stale);
+    full.setItem = vi.fn(() => {
+      throw new DOMException('full', 'QuotaExceededError');
+    });
+    const fresh = '34'.repeat(32);
+    expect(bootstrapToken(env(`#token=${fresh}`, () => full))).toBe('memory');
+    expect(full.getItem('blirp.token')).toBeNull();
+    expect(authToken({ storage: () => full })).toBe(fresh);
   });
 
   it('prefers a newer token another tab stored', () => {

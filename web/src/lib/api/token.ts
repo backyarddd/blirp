@@ -53,7 +53,13 @@ export function bootstrapToken(env: TokenEnv = browserEnv()): TokenTaken | null 
     storage.setItem(KEY, token);
     return 'stored';
   } catch {
-    // Quota or blocked storage: the in-memory copy serves this page (a reload would lose it).
+    // Quota or blocked storage: the in-memory copy serves this page (a reload would lose it). An
+    // older token may still be stored, and authToken() prefers storage: drop it.
+    try {
+      env.storage()?.removeItem(KEY);
+    } catch {
+      // Blocked storage holds nothing that authToken() could read.
+    }
     return 'memory';
   }
 }
