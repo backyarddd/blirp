@@ -116,13 +116,24 @@ else
 fi
 grep -F "$pubkey" "$script" >/dev/null || fail "could not swap the test key into $(basename "$script")"
 
-# Serve $www on a free port.
-(cd "$www" && exec "$python" -u -m http.server 0 --bind 127.0.0.1) >"$work/server.log" 2>&1 &
+# Serve $www on a free port. A plain TCPServer, not `python3 -m http.server`:
+# HTTPServer resolves its own name (getfqdn) before it announces the port,
+# which can take tens of seconds on macOS runners.
+(cd "$www" && exec "$python" -u -c '
+import http.server, socketserver
+class Handler(http.server.SimpleHTTPRequestHandler):
+    def log_message(self, *args):
+        pass
+socketserver.TCPServer.allow_reuse_address = True
+with socketserver.ThreadingTCPServer(("127.0.0.1", 0), Handler) as httpd:
+    print("port", httpd.server_address[1])
+    httpd.serve_forever()
+') >"$work/server.log" 2>&1 &
 server=$!
 port=
 i=0
-while [ $i -lt 100 ]; do
-  port=$(sed -n 's/.* port \([0-9][0-9]*\) .*/\1/p' "$work/server.log" | head -n 1)
+while [ $i -lt 300 ]; do
+  port=$(tr -d '\r' <"$work/server.log" | sed -n 's/^port \([0-9][0-9]*\)$/\1/p' | head -n 1)
   [ -n "$port" ] && break
   sleep 0.1
   i=$((i + 1))

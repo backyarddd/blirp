@@ -16,6 +16,11 @@ env:
   CARGO_TERM_COLOR: always
   CARGO_INCREMENTAL: 0
   RUST_BACKTRACE: short
+  # Line tables are enough for CI backtraces and cut target/ to a fraction:
+  # full debug info for clippy, tests and the extra binaries filled the Linux
+  # runner's disk (the linker died with a bus error).
+  CARGO_PROFILE_DEV_DEBUG: line-tables-only
+  CARGO_PROFILE_TEST_DEBUG: line-tables-only
   PNPM_VERSION: "12.7.0"
 
 jobs:
@@ -94,6 +99,14 @@ jobs:
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
 
+      # The runner image's Android SDK, .NET and Haskell toolchains take
+      # space the Tauri + workspace build needs.
+      - name: Free disk space (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          sudo rm -rf /usr/local/lib/android /usr/share/dotnet /opt/ghc /usr/local/.ghcup
+          df -h /
+
       - name: Install Linux build dependencies (Tauri)
         if: runner.os == 'Linux'
         run: |
@@ -168,6 +181,7 @@ jobs:
           bin=target/debug/blirp
           if [ "$RUNNER_OS" = Windows ]; then bin=$bin.exe; fi
           sh scripts/test-install.sh "$bin" "$dir/$exe"
+          if [ "$RUNNER_OS" = Linux ]; then df -h /; fi
 
   e2e:
     name: e2e (ubuntu-latest)
@@ -217,7 +231,7 @@ jobs:
           # Leaves the temp dir with daemon.log for the upload below.
           BLIRP_E2E_KEEP: "1"
         run: pnpm -C web e2e
-      - name: Keep the traces and the daemon log
+      - name: Keep the traces and the daemon logs
         if: failure()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
@@ -225,5 +239,6 @@ jobs:
           path: |
             web/test-results
             /tmp/blirp-e2e-*/daemon.log
+            /tmp/blirp-e2e-*/home/logs
           retention-days: 7
           if-no-files-found: ignore
