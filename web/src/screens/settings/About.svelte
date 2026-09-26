@@ -57,10 +57,19 @@
       <strong>blirp {update.latest} is available</strong> (this machine runs {update.current}).
       {#if update.notes_url}<a href={update.notes_url} target="_blank" rel="noreferrer">Release notes</a>{/if}
     </p>
-    <p class="hint">
-      Run <code>blirp update</code> in a terminal. It stops the daemon (running sessions end), replaces blirp and the desktop app, and starts
-      the daemon again.
-    </p>
+    {#if update.self_update}
+      <p class="hint">
+        Run <code>blirp update</code> in a terminal. It stops the daemon (running sessions end), replaces blirp and the desktop app, and starts
+        the daemon again.
+      </p>
+    {:else}
+      <p class="hint">
+        This blirp was not installed by the install script (it came from an installer, a package manager or a source build), so
+        <code>blirp update</code> does not replace it. Update it the way you installed it: for example <code>brew upgrade blirp</code>, your
+        Linux package manager, or the installer from the
+        {#if update.notes_url}<a href={update.notes_url} target="_blank" rel="noreferrer">release page</a>{:else}release page{/if}.
+      </p>
+    {/if}
   {:else if update.latest}
     <p class="hint">blirp {update.current} is up to date.</p>
   {:else}

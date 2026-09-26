@@ -418,6 +418,10 @@ pub struct UpdateStatus {
     pub notes_url: Option<String>,
     /// `[update] check` in config.toml.
     pub enabled: bool,
+    /// `blirp update` can replace this daemon's binary: the install script
+    /// installed it (its receipt matches). False for installers, package
+    /// managers and source builds, which update the way they were installed.
+    pub self_update: bool,
 }
 
 /// Rights of the calling client (§11), so a UI can hide what the daemon

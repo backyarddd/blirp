@@ -4,8 +4,9 @@
 ; it (manual upgrade or repair) or uninstalling would fail with "error opening
 ; file for writing". Before touching files, stop the daemon if it runs from
 ; this install directory: first gracefully over its API (sessions end as
-; "detached", like Quit in the tray), then force whatever is left. The in-app
-; updater already stops the daemon, so there this is a no-op.
+; "detached", like Quit in the tray), then force whatever is left. There is no
+; in-app updater, and `blirp update` only replaces script installs, so a newer
+; installer is how an installer install is upgraded.
 ;
 ; The PowerShell below is NSIS-escaped: $$ is a literal $; the NSIS string is
 ; delimited by backticks, the -Command argument by double quotes, so the

@@ -13,8 +13,8 @@ cask "blirp" do
   desc "Workspace and cross-session memory for CLI coding agents"
   homepage "https://github.com/backyarddd/blirp"
 
-  # The app updates itself (signed updater); brew should not fight it.
-  auto_updates true
+  # No auto_updates: the app has no updater, and `blirp update` only replaces
+  # script installs, so `brew upgrade` is how this cask is updated.
   depends_on macos: ">= :big_sur"
   conflicts_with formula: "blirp"
 

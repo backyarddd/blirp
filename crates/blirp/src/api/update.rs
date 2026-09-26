@@ -12,6 +12,22 @@ pub fn routes() -> Router<SharedState> {
 
 /// Asks GitHub at most once a day (`update::latest_cached`), and only while
 /// `[update] check` is on. Updating itself is `blirp update` in a terminal.
+/// Whether `blirp update` would replace this binary (it refuses anything the
+/// install script did not install).
+async fn self_update() -> bool {
+    match tokio::task::spawn_blocking(crate::update::install::installed).await {
+        Ok(Ok(installed)) => installed.is_some(),
+        Ok(Err(e)) => {
+            tracing::warn!(error = format!("{e:#}"), "read the install receipt");
+            false
+        }
+        Err(e) => {
+            tracing::warn!(error = %e, "read the install receipt");
+            false
+        }
+    }
+}
+
 async fn status(State(s): State<SharedState>) -> Json<UpdateStatus> {
     let current = crate::update::CURRENT.to_string();
     let enabled = s.config().update.check;
@@ -29,5 +45,6 @@ async fn status(State(s): State<SharedState>) -> Json<UpdateStatus> {
         available,
         notes_url: latest.map(|l| l.notes_url.clone()),
         enabled,
+        self_update: self_update().await,
     })
 }

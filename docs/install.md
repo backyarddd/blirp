@@ -105,6 +105,8 @@ Files downloaded with a browser are quarantined (macOS) or marked as from the in
 
 Other packaging: every release attaches a rendered Homebrew formula and cask and winget manifests; they are not published in a tap or `winget-pkgs` yet.
 
+Classic installers and packages write no install receipt, so `blirp update` does not replace them: update by running the newer installer or through the package manager (`brew upgrade`, `apt`, `dnf`, `winget upgrade`).
+
 ## Build from source
 
 Requirements: Rust 1.89+ (CI pins 1.94.0), Node.js 22, pnpm 12, and for the desktop app the [Tauri 2 prerequisites](https://v2.tauri.app/start/prerequisites/).
@@ -150,7 +152,7 @@ blirp update --version 0.3.1   # a specific release, also older ones
 
 `blirp update` downloads `SHA256SUMS.txt`, verifies its signature with the release key built into blirp, downloads the CLI archive (and the desktop app, if the install script installed it), and checks both against the sums. Only then does it stop the daemon (running sessions end as Detached and can be resumed), replace the files and start the daemon again (through the autostart service when one is installed). If replacing any file fails, the files already replaced are put back and the old version starts again. On Windows the running `blirp.exe` is renamed to `blirp.exe.old` and removed the next time blirp starts. It never downgrades unless you pass `--version`, and it only updates installs made by the install scripts; otherwise it tells you how that copy was installed.
 
-**Settings > About** shows when a newer release exists, with the command to run; the daemon asks GitHub for it at most once a day. Turn that off with `[update] check = false` ([configuration.md](configuration.md#update)). The desktop app has no updater of its own.
+**Settings > About** shows when a newer release exists, with `blirp update` for script installs, else a pointer to the release page; the daemon asks GitHub for it at most once a day. Turn that off with `[update] check = false` ([configuration.md](configuration.md#update)). The desktop app has no updater of its own.
 
 The database migrates forward automatically on the first start of a newer version.
 

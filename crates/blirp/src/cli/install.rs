@@ -22,7 +22,14 @@ pub async fn update(
     let target = release.version()?;
     if check {
         if target > current {
-            println!("blirp {target} is available (you have {current}); run `blirp update`");
+            // An invalid receipt is reported by the update itself.
+            let how = if install::installed().is_ok_and(|i| i.is_some()) {
+                "run `blirp update`"
+            } else {
+                "this copy was not installed by the install script: update it the way you \
+                 installed it (installer, package manager, source build)"
+            };
+            println!("blirp {target} is available (you have {current}); {how}");
             return Ok(ExitCode::from(UPDATE_AVAILABLE));
         }
         println!("blirp {current} is up to date");
