@@ -83,7 +83,12 @@ pub(super) fn get_brief_in(c: &Connection, project_id: &str) -> Result<Option<Br
     )
 }
 
-fn put_brief_in(tx: &Transaction<'_>, project_id: &str, body_md: &str, by: &str) -> Result<Brief> {
+pub(super) fn put_brief_in(
+    tx: &Transaction<'_>,
+    project_id: &str,
+    body_md: &str,
+    by: &str,
+) -> Result<Brief> {
     let current: Option<i64> = one(
         tx,
         "SELECT MAX(version) FROM brief_history WHERE project_id = ?1",

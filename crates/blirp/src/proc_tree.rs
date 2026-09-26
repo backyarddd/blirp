@@ -40,6 +40,24 @@ impl ProcessTree {
         }
     }
 
+    /// Tree of a plain child process (not a PTY), e.g. a summarizer run.
+    /// Windows: assigns the process to a new kill-on-close job. Unix: the
+    /// child must have been spawned with `process_group(0)`.
+    #[cfg(windows)]
+    pub fn for_process_handle(handle: std::os::windows::io::RawHandle) -> Self {
+        let job = win::Job::for_process(handle)
+            .map_err(|e| tracing::warn!(error = %e, "cannot assign child process to a job object"))
+            .ok();
+        Self { job }
+    }
+
+    #[cfg(unix)]
+    pub fn for_process_group(pid: u32) -> Self {
+        Self {
+            pgid: i32::try_from(pid).ok(),
+        }
+    }
+
     /// Ask the tree to exit (unix SIGHUP) or terminate it (Windows). Returns
     /// false when no tree handle exists and the caller must fall back to
     /// killing the main process.

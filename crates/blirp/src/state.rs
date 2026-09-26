@@ -1,5 +1,7 @@
 //! Shared daemon state.
 
+use crate::memory::distill::Distiller;
+use crate::memory::{IngestTrigger, NoopIngest};
 use crate::pty::Registry;
 use blirp_core::config::Config;
 use blirp_core::model::{AgentInfo, Machine, ServerEvent};
@@ -24,6 +26,9 @@ pub struct AppState {
     /// handlers (WebSockets) exit on it so graceful shutdown can finish.
     pub shutdown: watch::Receiver<bool>,
     pub agents_cache: Mutex<Option<(Instant, Vec<AgentInfo>)>>,
+    /// Distill queue (§9); its worker starts with the daemon.
+    pub distiller: Distiller,
+    ingest: RwLock<Arc<dyn IngestTrigger>>,
 }
 
 impl AppState {
@@ -48,6 +53,8 @@ impl AppState {
             terminals: Registry::default(),
             shutdown,
             agents_cache: Mutex::new(None),
+            distiller: Distiller::default(),
+            ingest: RwLock::new(Arc::new(NoopIngest)),
         }
     }
 
@@ -61,6 +68,26 @@ impl AppState {
 
     pub fn set_config(&self, c: Config) {
         *self.config.write().unwrap_or_else(PoisonError::into_inner) = c;
+    }
+
+    /// Install the ingest subsystem's handler for transcript hints from hooks.
+    pub fn set_ingest_trigger(&self, t: Arc<dyn IngestTrigger>) {
+        *self.ingest.write().unwrap_or_else(PoisonError::into_inner) = t;
+    }
+
+    pub fn ingest_trigger(&self) -> Arc<dyn IngestTrigger> {
+        self.ingest
+            .read()
+            .unwrap_or_else(PoisonError::into_inner)
+            .clone()
+    }
+
+    /// Drop the cached `/api/agents` list (config or integration changed).
+    pub fn invalidate_agents(&self) {
+        *self
+            .agents_cache
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner) = None;
     }
 
     /// Broadcast to `/api/events/ws` subscribers (none connected is fine).

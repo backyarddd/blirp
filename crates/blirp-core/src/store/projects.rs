@@ -59,14 +59,14 @@ fn folder_name(p: &Path) -> String {
 }
 
 /// Longest registered path on this machine that contains `p`.
-fn longest_prefix<'a>(paths: &'a [ProjectPath], p: &Path) -> Option<&'a ProjectPath> {
+pub(super) fn longest_prefix<'a>(paths: &'a [ProjectPath], p: &Path) -> Option<&'a ProjectPath> {
     paths
         .iter()
         .filter(|pp| p.starts_with(&pp.path))
         .max_by_key(|pp| pp.path.len())
 }
 
-fn live_local_paths(c: &Connection, machine_id: &str) -> Result<Vec<ProjectPath>> {
+pub(super) fn live_local_paths(c: &Connection, machine_id: &str) -> Result<Vec<ProjectPath>> {
     all(
         c,
         "SELECT pp.* FROM project_paths pp JOIN projects p ON p.id = pp.project_id
@@ -85,7 +85,7 @@ fn get_project_in(c: &Connection, id: &str) -> Result<Option<Project>> {
     )
 }
 
-fn live_project_in(c: &Connection, id: &str) -> Result<Project> {
+pub(super) fn live_project_in(c: &Connection, id: &str) -> Result<Project> {
     get_project_in(c, id)?
         .filter(|p| !p.deleted)
         .ok_or(StoreError::NotFound("project"))
