@@ -1,7 +1,7 @@
-# Coding-agent on-disk transcript formats (Windows, `C:\Users\alice`)
+# Coding-agent on-disk transcript formats (Windows survey)
 
-Investigation date: 2026-09-25. Read-only survey of every installed agent's local
-session store, for designing a Rust ingester. All example lines below are
+Investigation date: 2026-09-25. Read-only survey of the supported agents' local session
+stores on a Windows install, for designing a Rust ingester. All example lines below are
 **sanitized**: every real string value is replaced by a type placeholder
 (`<uuid>`, `<text>`, `<abs path>`, `<iso8601>`, `<int>`, `<bool>`, `<...>`), keys
 and enum-like values (`type`/`role`/`subtype`) are kept verbatim, nesting is
@@ -152,7 +152,7 @@ own file pair under `<sessionId>/subagents/`:
 
 ## 2. Codex — `~/.codex/`
 
-### Path layout — **no `.zst` compression on this install**
+### Path layout — **no `.zst` compression on the surveyed version**
 `~/.codex/sessions/<YYYY>/<MM>/<DD>/rollout-<YYYY-MM-DDTHH-mm-ss>-<uuid7>.jsonl`
 — plain JSONL, one file per session/turn burst, date-sharded by day.
 Also: `~/.codex/session_index.jsonl` (top-level index:
@@ -252,7 +252,7 @@ Key ones for an ingester:
 Note: `~/.opencode` (a *different* dir, project-local) only holds an npm
 install for an MCP helper — the real data dir is
 `~/.local/share/opencode` (also checked `%APPDATA%\opencode` and
-`%LOCALAPPDATA%\opencode` — neither exists on this machine).
+`%LOCALAPPDATA%\opencode` — neither existed on the surveyed install).
 
 ---
 
@@ -268,13 +268,11 @@ install for an MCP helper — the real data dir is
   settings.yaml, .credentials.yaml, .anonymous-user-id
 ```
 - cwd is encoded the same family of way as Claude Code but with a **double
-  dash separator and leading/trailing `--`**, e.g. cwd `C:\Users\alice` →
-  `--C-Users-alice--`.
+  dash separator and leading/trailing `--`**, e.g. cwd `C:\Users\me` →
+  `--C-Users-me--`.
 - `session.v3.jsonl.zstd` — verified real Zstandard frames (magic bytes
-  `28 B5 2F FD`); no `zstd`/`7z` binary or Python `zstandard` module is
-  available on this machine, so the raw per-event JSONL could not be
-  decompressed for this survey without installing tooling (out of scope for
-  a read-only pass). The v3 filename suggests a versioned line-oriented
+  `28 B5 2F FD`); the raw per-event JSONL was not decompressed for this
+  survey. The v3 filename suggests a versioned line-oriented
   event schema paralleling the uncompressed cache below.
 - `storages/session_projcache/sessions/session-<uuid>.json` is an
   **uncompressed, fully structured snapshot** of the same session state
@@ -303,14 +301,14 @@ install for an MCP helper — the real data dir is
   - `sessionStats.val`: `{turns,steps,llmMs,toolMs,ttftMs,ttftSteps,decodeMs,decodeTokens,lastTurn,openStep,pendingCalls}`.
   - `permissions.val`: `{preset,sandbox,approval,seeded}`.
   - `modelSelection.val`: `{lastUsed:{provider,model,reasoningEffort},pending}`.
-  - `subagent.val` / `subagentCatalog.val`: mostly empty on this machine (`{}` / `{inheritedEventCount}`) — subagent nesting appears to be tracked via `subagentCatalog`/`subagentTiming` rows and an `inheritedEventCount` pointer into the parent's event log rather than a separate file per subagent.
+  - `subagent.val` / `subagentCatalog.val`: mostly empty in the sampled sessions (`{}` / `{inheritedEventCount}`) — subagent nesting appears to be tracked via `subagentCatalog`/`subagentTiming` rows and an `inheritedEventCount` pointer into the parent's event log rather than a separate file per subagent.
 
 ---
 
 ## 5. Gemini CLI — `~/.gemini/`
 
-**No chat/session transcript store exists on this machine.** Contents are
-config-only:
+**No chat/session transcript store existed on the surveyed install.**
+Contents were config-only:
 ```
 ~/.gemini/
   GEMINI.md                    (project-memory markdown)
@@ -319,23 +317,21 @@ config-only:
     mcp_config.json
     projects/<uuid>.json        ({id,name,projectResources:{resources:[{gitFolder:{folderUri,defaultBranch,allowWrite}}]}})
     sidecars/                   (empty)
-  other-ide*/                 (a separate Google IDE product's data, not Gemini-CLI sessions)
 ```
 No `tmp/<hash>/chats` directory (the layout the task expected) was found
-anywhere under `~/.gemini`; this install has apparently never produced a
+anywhere under `~/.gemini`; that install had apparently never produced a
 persisted Gemini CLI conversation, or Gemini CLI stores active sessions
 somewhere this survey didn't find (checked `%APPDATA%` and `%LOCALAPPDATA%`
 equivalents implicitly via the home-dir walk — nothing named for Gemini CLI
 session storage turned up outside `~/.gemini`).
 
-`~/.gemini/settings.json` does show the **other-memory** plugin's hook
-wiring (bonus finding, sanitized — see §7/§8 below).
+`~/.gemini/settings.json` holds hook wiring; its shape is in §7.
 
 ---
 
 ## 6. Cursor — `~/.cursor/` + `%APPDATA%\Cursor\`
 
-Two independent stores for two different Cursor products on this machine:
+Two independent stores for two different Cursor products:
 
 ### 6a. Cursor CLI / background agent — `~/.cursor/projects/<project>/agent-transcripts/<uuid>/<uuid>.jsonl`
 Directory naming under `~/.cursor/projects/`: sanitized cwd (`C:\...` →
@@ -369,7 +365,7 @@ SQLite, tables: `ItemTable` (generic key/value settings), `cursorDiskKV`
   modelConfig:{modelName,maxMode,selectedModels:[{modelId,parameters:[{id,value}]}]},
   subComposerIds[], subagentComposerIds[], todos[], totalLinesAdded/Removed,
   ...}`; `checkpointId:<composerId>:<uuid>` (git checkpoint refs);
-  `composerVirtualRowHeights:_recentIds`. On this machine `conversationMap`
+  `composerVirtualRowHeights:_recentIds`. In the sampled data `conversationMap`
   and `fullConversationHeadersOnly` were empty for every sampled composer
   (draft/near-empty chats), so the actual per-message bubble schema
   (normally reached via `conversationMap[bubbleId]` or a separate
@@ -390,105 +386,46 @@ SQLite, tables: `ItemTable` (generic key/value settings), `cursorDiskKV`
 
 ---
 
-## 7. Other agent dirs found in `~/`
+## 7. Hook configuration shapes (values sanitized)
 
-| dir | contents | verdict |
-|---|---|---|
-| `~/.agent` | `rules/*.md` only | config/rules dir, no session store |
-| `~/.agents` | `.skill-lock.json`, `skills/*` | shared skill-cache dir, no session store |
-| `~/.copilot` | `config.json` (first-launch marker), `logs/process-*.log` | no transcript store found; only a process log |
-| `~/.otherbot` | `settings.json` (account scopes, MCP/tool permission flags), `local-exec-daemon*.json/.log` (a local execution daemon's own connection/credential files) | conversation data is not stored locally here — this looks like a thin local relay for a cloud-hosted agent; no session/transcript files found |
-| `~/.other` | `defaults.json` (workflow flags: model_profile, branching_strategy, hooks.context_warnings, etc.) | config only, no session store |
-| `~/.other-memory` | see below | plugin data dir, not a primary agent |
-
-### `~/.other-memory` (other-memory plugin)
-```
-~/.other-memory/
-  other-memory.db (+ -wal/-shm)   sqlite: observations(+fts), session_summaries(+fts),
-                                  user_prompts(+fts), sdk_sessions, pending_messages,
-                                  schema_versions   — derived memory, not a raw transcript
-  chroma/                        local vector-store data for semantic recall
-  corpora/, logs/, observer-sessions/
-  settings.json                  CLAUDE_MEM_* env config (models, ports, feature flags)
-  supervisor.json                {"processes":{"worker":{pid,type,startedAt}, "mcp-server":{...}, "chroma-mcp":{...}}}
-  transcript-watch.json          declarative parser schema (see below) for tailing *other* agents' native transcripts
-```
-`transcript-watch.json` is directly relevant to this task: it is other-memory's
-own hand-written schema for **tailing Codex's JSONL** (matches everything
-found in §2 independently — `session_meta`/`turn_context` matched by `type`,
-`user_message`/`agent_message`/tool-call variants matched by `payload.type`,
-mapped to actions `session_context`, `session_init`, `assistant_message`,
-`tool_use`, `tool_result`, `session-end`). Only a `codex` schema is present
-in this file — Claude Code itself is ingested directly via hooks rather than
-by tailing its own JSONL.
-
-**How it installs hooks (`~/.claude/settings.json` shape):** On *this*
-machine, `~/.claude/settings.json`'s hooks are currently wired to a different
-plugin (`other-hooks`, not `other-memory`) — see §8 for the exact shape.
-other-memory's own hook-installation mechanism is still visible and live in
-`~/.gemini/settings.json` (it hooks multiple agent hosts, not just Claude
-Code), with this shape (commands paraphrased):
+### Claude Code — `~/.claude/settings.json`
 ```json
 {
   "hooks": {
-    "SessionStart": [ { "matcher": "*", "hooks": [
-      { "name": "other-memory", "type": "command",
-        "command": "<bun runtime> <other-memory worker script> hook gemini-cli context",
-        "timeout": 10000 } ] } ],
-    "BeforeAgent": [ { "matcher": "*", "hooks": [
-      { "name": "other-memory", "type": "command",
-        "command": "<bun runtime> <other-memory worker script> hook gemini-cli user-message",
-        "timeout": 10000 } ] } ],
-    "AfterAgent": [ { "matcher": "*", "hooks": [
-      { "name": "other-memory", "type": "command",
-        "command": "<bun runtime> <other-memory worker script> hook gemini-cli observation",
-        "timeout": 10000 } ] } ],
-    "BeforeTool": [ { "matcher": "*", "hooks": [ { "...": "same pattern, event name 'BeforeTool'" } ] } ]
-  }
-}
-```
-Pattern: one hook entry per lifecycle event (`SessionStart`, `BeforeAgent`,
-`AfterAgent`, `BeforeTool`, and likely `AfterTool`/`SessionEnd`), each a
-`matcher:"*"` array wrapping a single `command`-type hook that shells out to
-other-memory's worker service with `hook <host-agent-name> <event-name>`. The
-marketplace path the command points to (`<vendor>/plugin`) no longer
-exists under `~/.claude/plugins/marketplaces` on this machine, so the
-Gemini-CLI wiring is currently stale/orphaned even though the file entry
-survives.
-
----
-
-## 8. `~/.claude/settings.json` hooks section (current, live)
-
-```json
-{
-  "hooks": {
-    "SessionStart": [ { "hooks": [ { "type": "command", "command": "<node> <other-hooks session-start script>" } ] } ],
-    "PostToolUse":  [ { "hooks": [ { "type": "command", "command": "<node> <other-hooks post-tool-use script>" } ] } ],
-    "Stop":         [ { "hooks": [ { "type": "command", "command": "<node> <other-hooks stop script>" } ] } ],
-    "SessionEnd":   [ { "hooks": [ { "type": "command", "command": "<node> <other-hooks session-end script>" } ] } ]
+    "SessionStart": [ { "hooks": [ { "type": "command", "command": "<hook program> session-start" } ] } ],
+    "PostToolUse":  [ { "hooks": [ { "type": "command", "command": "<hook program> post-tool-use" } ] } ],
+    "Stop":         [ { "hooks": [ { "type": "command", "command": "<hook program> stop" } ] } ],
+    "SessionEnd":   [ { "hooks": [ { "type": "command", "command": "<hook program> session-end" } ] } ]
   },
-  "statusLine": { "type": "command", "command": "<node> <other-hooks statusline script>" }
+  "statusLine": { "type": "command", "command": "<statusline program>" }
 }
 ```
 Shape: top-level `hooks` keyed by lifecycle event name; each event is an
 array of `{ "matcher"?: "<glob>", "hooks": [ { "type": "command", "command": "<text>", "timeout"?: <int> } ] }`.
-No `matcher` key is present on this machine's entries (they fire
-unconditionally); `other-memory`'s equivalent entries (§7) additionally use
-`"matcher": "*"` explicitly. Currently active hook owner is
-**other-hooks**, not other-memory, for Claude Code specifically.
+Entries without `matcher` fire unconditionally. Other tools' entries sit
+next to blirp's and must be preserved.
 
-## 9. `~/.codex/config.toml` — hooks/mcp/notify-related keys (values sanitized)
+### Gemini CLI — `~/.gemini/settings.json`
+```json
+{
+  "hooks": {
+    "SessionStart": [ { "matcher": "*", "hooks": [
+      { "name": "<tool name>", "type": "command",
+        "command": "<program> hook gemini-cli context", "timeout": 10000 } ] } ],
+    "BeforeAgent": [ { "matcher": "*", "hooks": [ { "...": "same pattern" } ] } ],
+    "AfterAgent":  [ { "matcher": "*", "hooks": [ { "...": "same pattern" } ] } ],
+    "BeforeTool":  [ { "matcher": "*", "hooks": [ { "...": "same pattern" } ] } ]
+  }
+}
+```
+Same structure as Claude Code plus an optional `name` per hook: one entry
+per lifecycle event, each a `matcher` array wrapping `command`-type hooks.
 
+### Codex — `~/.codex/config.toml` (hooks/mcp/notify-related keys)
 ```toml
 notify = [ "<abs path to notify program>", "turn-ended" ]
 
-[hooks.state]
-[hooks.state."someplugin@market:hooks/hooks.json:session_start:0:0"]
-trusted_hash = "sha256:<hex>"
-[hooks.state."someplugin@market:hooks/hooks.json:user_prompt_submit:0:0"]
-trusted_hash = "sha256:<hex>"
-[hooks.state."someplugin@market:hooks/hooks.json:subagent_start:0:0"]
+[hooks.state."<plugin>@<marketplace>:<hook-file>:session_start:0:0"]
 trusted_hash = "sha256:<hex>"
 
 [mcp_servers.<name>]
@@ -544,11 +481,9 @@ hook script — the actual hook script content lives inside the plugin, not in
    needs a zstd decoder; a usable uncompressed snapshot/cache already exists
    at `storages/session_projcache/sessions/*.json` if full fidelity isn't
    required.
-5. **Gemini CLI**: no transcript store found on this machine to ingest.
+5. **Gemini CLI**: no transcript store was found on the surveyed install.
 6. **Cursor**: two sources — `~/.cursor/projects/*/agent-transcripts/*/*.jsonl`
    for the CLI/background agent, and `state.vscdb` (`cursorDiskKV`/
    `composerHeaders`) under `%APPDATA%\Cursor\User\{global,workspace}Storage`
    for the editor's chat; bubble-level message content wasn't observed
-   populated on this machine and needs verification on a richer install.
-7. **Others** (`.agent`, `.agents`, `.copilot`, `.otherbot`, `.other`): no
-   session/transcript stores to ingest — config/skill dirs only.
+   populated in the sampled data and needs verification on a richer install.

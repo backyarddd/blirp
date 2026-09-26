@@ -10,7 +10,7 @@
 //!   `{role, message: {content}}` per line (Anthropic blocks), no
 //!   timestamps; subagents in `<parent>/subagents/<child>.jsonl`.
 //!
-//! The transcript layout was verified on this machine (one sparse file);
+//! The transcript layout was verified on real (sparse) data;
 //! the store.db layout follows community documentation of the format and is
 //! parsed defensively. The Cursor editor's own `state.vscdb` is not an agent
 //! CLI store and is not ingested.

@@ -631,7 +631,7 @@ mod tests {
 
     const EXE: &str = "C:/Users/alice/.cargo/bin/blirp.exe";
 
-    /// Sanitized copy of the live `~/.claude/settings.json` shape (agent-formats.md §8).
+    /// Sanitized `~/.claude/settings.json` shape (agent-formats.md §7).
     const CLAUDE_SETTINGS: &str = r#"{
   "hooks": {
     "SessionStart": [ { "hooks": [ { "type": "command", "command": "node /x/other-hooks/session-start.js" } ] } ],
@@ -642,7 +642,7 @@ mod tests {
   "statusLine": { "type": "command", "command": "node /x/other-hooks/statusline.js" }
 }"#;
 
-    /// Sanitized other-memory style entries (agent-formats.md §7).
+    /// Sanitized third-party entries (agent-formats.md §7).
     const GEMINI_SETTINGS: &str = r#"{
   "hooks": {
     "SessionStart": [ { "matcher": "*", "hooks": [
@@ -651,7 +651,7 @@ mod tests {
   "ui": { "theme": "dark" }
 }"#;
 
-    /// Sanitized `~/.codex/config.toml` shape (agent-formats.md §9).
+    /// Sanitized `~/.codex/config.toml` shape (agent-formats.md §7).
     const CODEX_CONFIG: &str = r#"notify = [ "C:/x/notify.exe", "turn-ended" ]
 
 [hooks.state."someplugin@market:hooks/hooks.json:session_start:0:0"]

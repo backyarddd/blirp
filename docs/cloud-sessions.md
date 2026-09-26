@@ -87,7 +87,7 @@ The dialog shows "Claude Code is not logged in on <hub>" when `claude auth statu
 
 ### Claude Code does not show its prompt
 
-`claude` started inside a launchd job that was loaded over SSH, while the Mac's screen is locked, can stop before drawing its prompt (with and without blirp); it cannot reach the login keychain there. Store a [login token](agents.md#headless-login-for-a-hub) (`claude setup-token`, then `blirp agents set-token claude`) so claude does not need the keychain, and check a first cloud session before relying on it.
+`claude` started inside a launchd job that was loaded over SSH, while the Mac's screen is locked, can stop before drawing its prompt (with and without blirp): it cannot reach the login keychain there. Store a [login token](agents.md#headless-login-for-a-hub) (`claude setup-token`, then `blirp agents set-token claude`) so claude does not need the keychain, and check a first cloud session before relying on it.
 
 ### The Mac still sleeps
 
