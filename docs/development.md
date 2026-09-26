@@ -18,6 +18,18 @@ Read [ARCHITECTURE.md](ARCHITECTURE.md) first: it is the design contract, and a 
 | `.github/workflows/` | `ci.yml` (every push and PR: web checks, Rust on Linux/macOS/Windows with the install-script test, Playwright e2e on Linux, `cargo deny` and `pnpm audit`), `release.yml` (tags `v*`, or a dry run started by hand); `.github/dependabot.yml` |
 | `docs/` | user and developer docs; `ARCHITECTURE.md`; `agent-formats.md` (survey of agents' on-disk transcript formats) |
 
+## Rules for changes
+
+Read [ARCHITECTURE.md](ARCHITECTURE.md) before changing anything; it is the contract.
+
+- Projects are folders; git is optional. Never assume `.git` exists.
+- Never edit the user's agent config or project files except through the explicit, reversible `blirp hooks install` flow.
+- Hooks always exit 0 within 2 s.
+- All writes to replicated tables go through `Store::apply`.
+- Redact before storing, syncing or summarizing transcript text.
+- No `unwrap`/`expect` in non-test code without a justification comment. No `any` in TypeScript.
+- Conventional commits (`type(scope): summary`).
+
 ## Requirements
 
 - Rust 1.91 or newer (`rust-version` in `Cargo.toml`; CI pins 1.94.0) with `rustfmt` and `clippy`.
