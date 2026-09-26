@@ -291,6 +291,20 @@ async fn api_auth_projects_memory_files() {
         .await
         .unwrap();
     assert_eq!(r.status(), 403);
+    // DNS rebinding: a page on another name that resolves to 127.0.0.1.
+    let r = h
+        .http
+        .get(h.url("/api/health"))
+        .bearer_auth(&h.token)
+        .header("Host", format!("rebind.example:{}", h.daemon.port))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(r.status(), 403);
+    assert_eq!(
+        r.json::<ErrorBody>().await.unwrap().error.code,
+        "forbidden_host"
+    );
     let r = h.http.get(h.url("/")).send().await.unwrap();
     assert_eq!(r.status(), 200);
     assert_eq!(r.headers()["x-frame-options"], "DENY");
