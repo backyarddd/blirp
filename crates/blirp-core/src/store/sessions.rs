@@ -268,11 +268,15 @@ impl Store {
         })
     }
 
+    /// Newest sessions of a project, without ingested subagent children
+    /// (their parent's session covers them, §8).
     pub fn recent_sessions(&self, project_id: &str, limit: i64) -> Result<Vec<Session>> {
         self.read(|c| {
             all(
                 c,
-                "SELECT * FROM sessions WHERE project_id = ?1 ORDER BY started_at DESC, id DESC LIMIT ?2",
+                "SELECT * FROM sessions WHERE project_id = ?1
+                   AND NOT (origin = 'external' AND parent_session_id IS NOT NULL)
+                 ORDER BY started_at DESC, id DESC LIMIT ?2",
                 params![project_id, limit],
                 session_row,
             )

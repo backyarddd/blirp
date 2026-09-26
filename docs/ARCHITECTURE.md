@@ -288,7 +288,7 @@ Apply (`Store::apply_distill`, one transaction): session title (if unset) + `sum
 ## Active plans      (active plan records not shown under Pinned, max 5)
 ## Recent decisions  (max 8)
 ## Gotchas           (max 5)
-## Recent sessions   (last 3 titled or summarized, excluding the session being started: date, agent, machine, title: summary)
+## Recent sessions   (last 3 titled or summarized, excluding the session being started and ingested subagent children: date, agent, machine, title: summary)
 Tools: search older history with the blirp MCP tools (mem_search, mem_session, mem_recent, mem_record) or `blirp mem search "<query>"`.
 ```
 Records sort by pinned, then `updated_at` desc, then id; a record appears once (under Pinned when it is pinned and within the cap, else in its kind's section; unpinned notes are not injected); list items are one line (<= 400 chars); empty sections are omitted; sections are filled in the order above until the budget is used, and the Tools line is always kept. Dates are UTC `YYYY-MM-DD`. Nothing depends on the current time, so the text changes only when memory changes and agent prompt caches keep hitting. At launch the rendered text (plus a handoff pack, if any) is written to `~/.blirp/launch/<session>/memory.md`; `GET /api/inject?session=` returns exactly that file, `?cwd=` renders for the folder's project.
