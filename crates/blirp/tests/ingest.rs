@@ -368,7 +368,8 @@ fn claude_session_launched_by_blirp_keeps_its_fields() {
     let launched = Session {
         id: blirp_core::new_id(),
         project_id: resolved.project.id.clone(),
-        machine_id: "m".into(),
+        // Launched on this machine: ingest only touches local sessions.
+        machine_id: h.store.machine_id().unwrap().unwrap(),
         agent: "claude".into(),
         agent_session_id: Some(CLAUDE_SID.into()),
         origin: SessionOrigin::Blirp,
@@ -1225,4 +1226,54 @@ async fn hook_transcript_path_is_ingested_promptly() {
     let outbox = store.outbox_after(0, 1_000_000).unwrap();
     assert_eq!(outbox.iter().filter(|e| e.entity == "events").count(), 9);
     daemon.shutdown().await.unwrap();
+}
+
+/// Sessions replicated from another machine are never re-ingested or
+/// re-linked here, even when their transcript is visible (synced config
+/// dir): no rows change, nothing enters the outbox.
+#[test]
+fn transcripts_of_other_machines_sessions_are_left_alone() {
+    let h = H::new();
+    let project = h.store.register_project("elsewhere", &h.cwd, None).unwrap();
+    let remote = Session {
+        id: "remote-session".into(),
+        project_id: project.id,
+        machine_id: "elsewhere".into(),
+        agent: "claude".into(),
+        agent_session_id: Some(CLAUDE_SID.into()),
+        origin: SessionOrigin::External,
+        cwd: h.cwd.display().to_string(),
+        title: Some("theirs".into()),
+        status: SessionStatus::Completed,
+        branch: None,
+        worktree: None,
+        transcript_path: None,
+        started_at: 1,
+        ended_at: Some(1),
+        last_activity_at: 1,
+        exit_code: None,
+        summary: None,
+        distilled_through_seq: 0,
+        tokens_in: 0,
+        tokens_out: 0,
+        cost_usd: 0.0,
+        parent_session_id: None,
+    };
+    h.store
+        .apply_remote(&blirp_core::store::Change::Session(remote.clone()))
+        .unwrap();
+    let outbox = h.outbox_len();
+    put_claude(&h);
+    h.pass();
+
+    assert_eq!(h.session("claude", CLAUDE_SID), remote);
+    assert!(h.events(&remote).is_empty());
+    // Its subagent belongs to the same machine and is skipped too.
+    assert!(
+        h.store
+            .session_by_agent_id("claude", &format!("{CLAUDE_SID}:agent-a1"))
+            .unwrap()
+            .is_none()
+    );
+    assert_eq!(h.outbox_len(), outbox);
 }

@@ -109,6 +109,24 @@ impl<'e> StoreSink<'e> {
                 continue;
             }
             let existing = store.session_by_agent_id(agent, &asid)?;
+            let parent = match &p.meta.parent {
+                Some(pa) => store.session_by_agent_id(agent, pa)?,
+                None => None,
+            };
+            let foreign =
+                |s: &Option<Session>| s.as_ref().is_some_and(|s| s.machine_id != eng.machine.id);
+            if foreign(&existing) || foreign(&parent) {
+                // The transcript belongs to a replicated session of another
+                // machine (e.g. a synced agent config dir). Its origin ingests
+                // it; writing here would fight that machine's rows.
+                eng.warn_once(
+                    agent,
+                    &self.source_key,
+                    "transcript belongs to another machine's session; skipped",
+                );
+                self.excluded.insert(asid);
+                continue;
+            }
             let mut link = None;
             let mut project = None;
             if existing.is_none() {
@@ -129,10 +147,7 @@ impl<'e> StoreSink<'e> {
                     project = Some((r.project.id, r.created));
                 }
             }
-            let parent = match &p.meta.parent {
-                Some(pa) => store.session_by_agent_id(agent, pa)?.map(|s| s.id),
-                None => None,
-            };
+            let parent = parent.map(|s| s.id);
             plans.push(Plan {
                 asid,
                 p,
@@ -147,6 +162,13 @@ impl<'e> StoreSink<'e> {
             let mut out = Vec::new();
             for plan in &plans {
                 let mut base = tx.session_by_agent_id(agent, &plan.asid)?;
+                if base
+                    .as_ref()
+                    .is_some_and(|s| s.machine_id != eng.machine.id)
+                {
+                    // Replicated in since planning; see the check above.
+                    continue;
+                }
                 if base.is_none()
                     && let Some(id) = &plan.link
                 {
