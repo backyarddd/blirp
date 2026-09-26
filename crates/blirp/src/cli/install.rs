@@ -131,7 +131,19 @@ pub async fn update(
     });
     // The daemon comes back either way: the new version, or the old one.
     let restarted = if was_running {
-        restart_daemon(paths, &inst.dir.join(install::CLI_FILES[0])).await
+        super::lifecycle::start_daemon(paths, &inst.dir.join(install::CLI_FILES[0]))
+            .await
+            .map(|(info, by_service)| {
+                println!(
+                    "Daemon started again (pid {}{}).",
+                    info.pid,
+                    if by_service {
+                        ", by the autostart service"
+                    } else {
+                        ""
+                    }
+                );
+            })
     } else {
         Ok(())
     };
@@ -173,33 +185,6 @@ fn stage_app(file: &Path, dir: &Path, name: &str) -> anyhow::Result<PathBuf> {
         std::fs::set_permissions(&staged, std::fs::Permissions::from_mode(0o755))?;
     }
     Ok(staged)
-}
-
-/// Start the daemon again after an update: through the autostart service
-/// when it manages one, else `<new blirp> daemon --detach`.
-async fn restart_daemon(paths: &Paths, cli: &Path) -> anyhow::Result<()> {
-    if super::service::start_managed()? {
-        println!("Daemon restarted by the autostart service.");
-        return Ok(());
-    }
-    // Output captured and passed on: without a console of its own (no
-    // window) the child could not write to this terminal.
-    let out = tokio::process::Command::from(blirp_core::process::command(cli))
-        .args(["daemon", "--detach"])
-        .env(blirp_core::paths::HOME_ENV, paths.home())
-        .stdin(std::process::Stdio::null())
-        .output()
-        .await
-        .with_context(|| format!("run {} daemon --detach", cli.display()))?;
-    print!("{}", String::from_utf8_lossy(&out.stdout));
-    eprint!("{}", String::from_utf8_lossy(&out.stderr));
-    if !out.status.success() {
-        bail!(
-            "the updated daemon did not start ({}); see `blirp logs`",
-            out.status
-        );
-    }
-    Ok(())
 }
 
 // ---------------------------------------------------------------- uninstall
@@ -519,7 +504,13 @@ fn headless() -> bool {
 /// `blirp` / `blirp app`: make sure the daemon runs, then open the desktop
 /// app if it is installed, else the browser UI. Headless: print how to reach it.
 pub async fn launch(paths: &Paths) -> anyhow::Result<ExitCode> {
-    let info = crate::daemon::detach(paths, None).await?;
+    let info = match crate::daemon::running_daemon(paths).await {
+        Some(info) => info,
+        None => {
+            let exe = std::env::current_exe().context("locate the blirp executable")?;
+            super::lifecycle::start_daemon(paths, &exe).await?.0
+        }
+    };
     let base = info.base_url();
     let login = format!("{base}/#token={}", info.token);
     if headless() {

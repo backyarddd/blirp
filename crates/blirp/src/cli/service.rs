@@ -275,10 +275,31 @@ pub(crate) fn uninstall() -> anyhow::Result<ExitCode> {
     Ok(ExitCode::SUCCESS)
 }
 
-/// Start the daemon through the autostart service, if one is installed
-/// (`blirp update` restarting a stopped daemon). False when there is none.
-pub(crate) fn start_managed() -> anyhow::Result<bool> {
-    platform::start_managed()
+/// Start the daemon through the autostart service, if one is installed for
+/// this data dir (`blirp start`). False when there is none, or it serves
+/// another data dir.
+pub(crate) fn start_managed(paths: &Paths) -> anyhow::Result<bool> {
+    platform::start_managed(paths.home())
+}
+
+/// Whether an installed launchd/systemd definition runs the daemon for
+/// `home`: the `BLIRP_HOME` it sets (`entry`: that setting for `home`,
+/// rendered as install writes it), else the default data dir. Keeps a shell
+/// with another `BLIRP_HOME` (a test or second setup) from starting the
+/// service's daemon instead of its own.
+#[cfg_attr(windows, allow(dead_code))]
+fn serves_home(definition: &str, entry: &str, home: &Path, default_home: Option<&Path>) -> bool {
+    if definition.contains("BLIRP_HOME") {
+        definition.contains(entry)
+    } else {
+        default_home == Some(home)
+    }
+}
+
+/// `~/.blirp`: the data dir of a service installed without `BLIRP_HOME`.
+#[cfg_attr(windows, allow(dead_code))]
+fn default_home() -> Option<PathBuf> {
+    blirp_core::paths::user_home().map(|h| h.join(".blirp"))
 }
 
 async fn status(paths: &Paths) -> anyhow::Result<ExitCode> {
@@ -382,8 +403,14 @@ mod platform {
         })
     }
 
-    pub fn start_managed() -> anyhow::Result<bool> {
-        if !loaded()? {
+    pub fn start_managed(home: &Path) -> anyhow::Result<bool> {
+        let entry = format!(
+            "<key>BLIRP_HOME</key>\n    <string>{}</string>",
+            xml_escape(&home.display().to_string())
+        );
+        let serves = std::fs::read_to_string(plist_path()?)
+            .is_ok_and(|p| serves_home(&p, &entry, home, default_home().as_deref()));
+        if !serves || !loaded()? {
             return Ok(false);
         }
         must(
@@ -481,8 +508,14 @@ mod platform {
         Ok(Removed::DaemonKept)
     }
 
-    pub fn start_managed() -> anyhow::Result<bool> {
-        if !unit_path()?.exists() {
+    pub fn start_managed(home: &Path) -> anyhow::Result<bool> {
+        let entry = format!(
+            "Environment={}",
+            systemd_quote(&format!("BLIRP_HOME={}", home.display()))
+        );
+        let serves = std::fs::read_to_string(unit_path()?)
+            .is_ok_and(|u| serves_home(&u, &entry, home, default_home().as_deref()));
+        if !serves {
             return Ok(false);
         }
         let enabled = tool(
@@ -577,7 +610,7 @@ mod platform {
     }
 
     /// The Run entry only acts at login; the caller starts the daemon.
-    pub fn start_managed() -> anyhow::Result<bool> {
+    pub fn start_managed(_home: &Path) -> anyhow::Result<bool> {
         Ok(false)
     }
 
@@ -596,6 +629,56 @@ mod tests {
         let stopped = uninstall_message(Removed::DaemonStopped);
         assert!(stopped.contains("stopped") && !stopped.contains("keeps running"));
         assert!(uninstall_message(Removed::NotInstalled).contains("not installed"));
+    }
+
+    #[test]
+    fn service_serves_only_its_data_dir() {
+        let default = Path::new("/home/me/.blirp");
+        let other = Path::new("/tmp/test home");
+        let plist_entry = |h: &Path| {
+            format!(
+                "<key>BLIRP_HOME</key>\n    <string>{}</string>",
+                xml_escape(&h.display().to_string())
+            )
+        };
+        let unit_entry = |h: &Path| {
+            format!(
+                "Environment={}",
+                systemd_quote(&format!("BLIRP_HOME={}", h.display()))
+            )
+        };
+        let exe = Path::new("/b");
+        let logs = Path::new("/l");
+        for (with_home, without, entry) in [
+            (
+                launch_agent_plist(exe, logs, Some(other), None),
+                launch_agent_plist(exe, logs, None, None),
+                &plist_entry as &dyn Fn(&Path) -> String,
+            ),
+            (
+                systemd_unit(exe, Some(other), None),
+                systemd_unit(exe, None, None),
+                &unit_entry,
+            ),
+        ] {
+            // Installed with BLIRP_HOME: only that data dir.
+            assert!(serves_home(&with_home, &entry(other), other, Some(default)));
+            assert!(!serves_home(
+                &with_home,
+                &entry(default),
+                default,
+                Some(default)
+            ));
+            // Installed without: the default data dir only.
+            assert!(serves_home(
+                &without,
+                &entry(default),
+                default,
+                Some(default)
+            ));
+            assert!(!serves_home(&without, &entry(other), other, Some(default)));
+            assert!(!serves_home(&without, &entry(default), default, None));
+        }
     }
 
     #[test]

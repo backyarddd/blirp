@@ -41,6 +41,9 @@ enum Command {
     },
     /// Show whether the daemon is running.
     Status,
+    /// Start the daemon in the background unless it is running: through the
+    /// autostart service when one is installed, else like `daemon --detach`.
+    Start,
     /// Stop the daemon gracefully (sessions end as detached); kills it if it
     /// does not stop within 15 s.
     Stop,
@@ -240,6 +243,7 @@ async fn run(cmd: Command, paths: Paths) -> anyhow::Result<ExitCode> {
             Ok(ExitCode::SUCCESS)
         }
         Command::Status => status(&paths).await,
+        Command::Start => lifecycle::start(&paths).await,
         Command::Stop => lifecycle::stop(&paths).await,
         Command::Open => open(&paths).await,
         Command::Sessions { project, limit } => sessions(&paths, project, limit).await,

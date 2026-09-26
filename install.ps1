@@ -336,9 +336,12 @@ param(
     if ($Service) {
       & $exe service install
       if ($LASTEXITCODE -ne 0) { throw 'blirp service install failed' }
-    } elseif ($wasRunning) {
-      & $exe daemon --detach | Out-Null
-      if ($LASTEXITCODE -eq 0) { Say 'restarted the daemon' } else { Say 'warning: the daemon did not restart; run `blirp daemon --detach`' }
+    }
+    # Same as install.sh: `blirp start` knows the autostart service (a no-op
+    # when the daemon already runs).
+    if ($wasRunning) {
+      & $exe start | Out-Null
+      if ($LASTEXITCODE -eq 0) { Say 'restarted the daemon' } else { Say 'warning: the daemon did not start again; run `blirp start` and see `blirp logs`' }
     }
 
     Say "done: blirp $ver"

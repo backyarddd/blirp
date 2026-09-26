@@ -34,7 +34,7 @@ These appear only for files downloaded with a browser: macOS quarantines them an
 - **"was not installed by the blirp install script"**: that `blirp` came from a source build, a package or a classic installer (no install receipt next to it). Update it the same way you installed it, or install with the script.
 - **"is not signed by the blirp release key"** or **"checksum mismatch"**: the download does not match what the release was signed with; nothing was changed. Try again; if it persists, report it (and do not install that file by hand).
 - **"no published release found"** or **403 rate limit**: GitHub's anonymous API limit is 60 requests per hour per IP; set `GITHUB_TOKEN`. For a private repository `GITHUB_TOKEN` is required.
-- After an update the daemon is started again automatically. If it is not (`blirp status`), start it with `blirp` or `blirp daemon --detach` and look at `blirp logs`.
+- After an update (or re-running the install script) the daemon is started again automatically, through the autostart service when one is installed. If it is not (`blirp status`), start it with `blirp start` and look at `blirp logs`.
 
 ## Logs
 

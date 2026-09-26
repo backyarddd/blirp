@@ -31,7 +31,7 @@ The scripts download the latest published release, check every file against the 
 | Linux | `~/.local/bin/blirp` | `~/.local/share/blirp/blirp.AppImage` + menu entry `~/.local/share/applications/blirp.desktop` | printed instructions, or `--modify-path` |
 | Windows | `%LOCALAPPDATA%\Programs\blirp\blirp.exe` with `conpty.dll` and `x64\OpenConsole.exe` | `blirp-desktop.exe` in the same folder + Start Menu entry | added to your user `Path` |
 
-They also write an install receipt (`install.json`: next to `blirp.exe` on Windows, in `~/.local/share/blirp/` on macOS/Linux) that `blirp update` and `blirp uninstall` read. Running a script again upgrades in place (a running daemon is stopped and started again).
+They also write an install receipt (`install.json`: next to `blirp.exe` on Windows, in `~/.local/share/blirp/` on macOS/Linux) that `blirp update` and `blirp uninstall` read. Running a script again upgrades in place (a running daemon is stopped and started again with `blirp start`, through the autostart service when one is installed).
 
 No code-signing prompts appear: files fetched with `curl` or `irm` carry no quarantine flag or Mark-of-the-Web, so Gatekeeper and SmartScreen do not ask. See [faq.md](faq.md#why-is-blirp-not-code-signed) for why blirp is not signed and how the downloads are verified instead.
 

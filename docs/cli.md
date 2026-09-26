@@ -12,6 +12,7 @@ Without a command, `blirp` does what [`blirp app`](#blirp-app) does.
 |---|---|---|
 | [`app`](#blirp-app) (or no command) | starts it | start the daemon, open the desktop app or the browser UI |
 | [`daemon`](#blirp-daemon) | - | run the daemon |
+| [`start`](#blirp-start) | starts it | start the daemon (through the autostart service when installed) |
 | [`status`](#blirp-status) | - | is the daemon running |
 | [`open`](#blirp-open) | yes | open the UI in the browser, logged in |
 | [`sessions`](#blirp-sessions) | yes | list recent sessions |
@@ -36,7 +37,7 @@ blirp
 blirp app
 ```
 
-Starts the daemon in the background if it is not running (like `blirp daemon --detach`), then opens the desktop app when it is installed (macOS `~/Applications/blirp.app` or `/Applications/blirp.app`, Linux `~/.local/share/blirp/blirp.AppImage` or `blirp-desktop` next to `blirp`, Windows `blirp-desktop.exe` next to `blirp.exe`), else the UI in your default browser, logged in. In an SSH session (`SSH_CONNECTION` / `SSH_TTY`), or on Linux without `DISPLAY` / `WAYLAND_DISPLAY`, it opens nothing: it prints the daemon URL, a login link to use through an SSH port forward, and the hub / LAN portal alternative ([portal.md](portal.md)).
+Starts the daemon in the background if it is not running (like `blirp start`), then opens the desktop app when it is installed (macOS `~/Applications/blirp.app` or `/Applications/blirp.app`, Linux `~/.local/share/blirp/blirp.AppImage` or `blirp-desktop` next to `blirp`, Windows `blirp-desktop.exe` next to `blirp.exe`), else the UI in your default browser, logged in. In an SSH session (`SSH_CONNECTION` / `SSH_TTY`), or on Linux without `DISPLAY` / `WAYLAND_DISPLAY`, it opens nothing: it prints the daemon URL, a login link to use through an SSH port forward, and the hub / LAN portal alternative ([portal.md](portal.md)).
 
 ## blirp daemon
 
@@ -48,6 +49,10 @@ Runs the daemon in the foreground: local API and UI on `127.0.0.1`, terminals, t
 
 - `--detach`: start the daemon in the background (new session / no console window) and return once it answers health checks (up to 20 s). If a daemon is already running, prints its pid and port and exits 0.
 - `--port <PORT>`: listen on this port instead of `daemon.port`; `0` picks a free port.
+
+## blirp start
+
+Starts the daemon in the background unless it is running, and returns once it answers. When an autostart service is installed for this data directory (macOS LaunchAgent, Linux `systemd --user` unit; see `blirp service`) it starts the daemon through it (`launchctl kickstart`, `systemctl --user start`), so the service keeps supervising it; otherwise it runs `blirp daemon --detach`. The install scripts use it after an upgrade, and the desktop app when it finds no daemon.
 
 ## blirp status
 
@@ -163,7 +168,7 @@ Per-user autostart, never a system service: macOS LaunchAgent `dev.blirp.daemon`
 blirp update [--check] [--version <X.Y.Z>]
 ```
 
-Updates an installation made by the install scripts to the latest published release, or to `--version` (the only way to go to an older release). It verifies the minisign signature of the release's `SHA256SUMS.txt` with the key built into blirp and the SHA-256 of every download, then stops the daemon, replaces `blirp` (Windows: plus `conpty.dll`, `x64\OpenConsole.exe`) and the desktop app if the script installed it, updates the install receipt and starts the daemon again if it was running (through the autostart service when one manages it). Nothing is changed when a check fails. A `blirp` the scripts did not install (source build, package) is not replaced; the command says so.
+Updates an installation made by the install scripts to the latest published release, or to `--version` (the only way to go to an older release). It verifies the minisign signature of the release's `SHA256SUMS.txt` with the key built into blirp and the SHA-256 of every download, then stops the daemon, replaces `blirp` (Windows: plus `conpty.dll`, `x64\OpenConsole.exe`) and the desktop app if the script installed it, updates the install receipt and starts the daemon again if it was running (like `blirp start`, so through the autostart service when one manages it). Nothing is changed when a check fails. A `blirp` the scripts did not install (source build, package) is not replaced; the command says so.
 
 - `--check`: only report. Prints one line; exit code `0` when up to date, `10` when an update is available.
 - `GITHUB_TOKEN` and `BLIRP_RELEASE_BASE_URL` work as for the install scripts ([install.md](install.md#private-repository-mirrors-and-testing)).

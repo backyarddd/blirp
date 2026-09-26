@@ -1,4 +1,5 @@
-//! `blirp stop`, `blirp logs` (§4) and what `blirp doctor` reads from the log.
+//! `blirp start`, `blirp stop`, `blirp logs` (§4) and what `blirp doctor`
+//! reads from the log.
 
 use anyhow::{Context as _, bail};
 use blirp_core::paths::{Paths, RuntimeInfo};
@@ -11,6 +12,8 @@ use std::time::{Duration, Instant};
 /// 5 s grace; this leaves room for closing sockets and the database.
 const GRACEFUL: Duration = Duration::from_secs(15);
 const AFTER_KILL: Duration = Duration::from_secs(5);
+/// Like `daemon --detach`: how long a starting daemon may take to answer.
+const STARTUP: Duration = Duration::from_secs(20);
 
 /// Whether a daemon holds `daemon.lock`. The OS releases the lock when the
 /// process dies, so unlike a pid from runtime.json this can never point at
@@ -106,6 +109,83 @@ pub async fn stop(paths: &Paths) -> anyhow::Result<ExitCode> {
     }
     RuntimeInfo::remove_if_owned(paths, info.pid)?;
     println!("blirp daemon killed (pid {})", info.pid);
+    Ok(ExitCode::SUCCESS)
+}
+
+/// Start the daemon: through the autostart service when one is installed for
+/// this data dir (launchd `kickstart`, `systemctl --user start`), so it stays
+/// under the service (restarted after a crash), else `<cli> daemon --detach`.
+/// `cli` is the binary to start; `blirp update` passes the one it installed.
+/// Returns the daemon once it answers, and whether the service started it.
+pub async fn start_daemon(paths: &Paths, cli: &Path) -> anyhow::Result<(RuntimeInfo, bool)> {
+    match super::service::start_managed(paths) {
+        Ok(true) => {
+            let deadline = Instant::now() + STARTUP;
+            loop {
+                if let Some(info) = crate::daemon::running_daemon(paths).await {
+                    return Ok((info, true));
+                }
+                if Instant::now() >= deadline {
+                    bail!(
+                        "the autostart service did not bring the daemon up within {}s; \
+                         see `blirp service status` and `blirp logs`",
+                        STARTUP.as_secs()
+                    );
+                }
+                tokio::time::sleep(Duration::from_millis(200)).await;
+            }
+        }
+        Ok(false) => {}
+        // Running beats supervised: start it directly and say why.
+        Err(e) => eprintln!(
+            "blirp: the autostart service could not start the daemon ({e:#}); starting it directly"
+        ),
+    }
+    // Output captured: without a console of its own (no window) the child
+    // could not write to this terminal.
+    let out = tokio::process::Command::from(blirp_core::process::command(cli))
+        .args(["daemon", "--detach"])
+        .env(blirp_core::paths::HOME_ENV, paths.home())
+        .stdin(std::process::Stdio::null())
+        .output()
+        .await
+        .with_context(|| format!("run {} daemon --detach", cli.display()))?;
+    if !out.status.success() {
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        bail!(
+            "the daemon did not start ({}): {}; see `blirp logs`",
+            out.status,
+            stderr.trim()
+        );
+    }
+    let info = crate::daemon::running_daemon(paths)
+        .await
+        .context("the daemon started but does not answer; see `blirp logs`")?;
+    Ok((info, false))
+}
+
+/// `blirp start`: start the daemon unless it is running (the install scripts
+/// after an upgrade, the desktop app).
+pub async fn start(paths: &Paths) -> anyhow::Result<ExitCode> {
+    if let Some(info) = crate::daemon::running_daemon(paths).await {
+        println!(
+            "blirp daemon is already running (pid {}, port {})",
+            info.pid, info.port
+        );
+        return Ok(ExitCode::SUCCESS);
+    }
+    let exe = std::env::current_exe().context("locate the blirp executable")?;
+    let (info, by_service) = start_daemon(paths, &exe).await?;
+    println!(
+        "blirp daemon running (pid {}, port {}){}",
+        info.pid,
+        info.port,
+        if by_service {
+            ", started by the autostart service"
+        } else {
+            ""
+        }
+    );
     Ok(ExitCode::SUCCESS)
 }
 

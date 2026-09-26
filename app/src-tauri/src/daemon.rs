@@ -6,7 +6,7 @@ use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
 const HEALTH_TIMEOUT: Duration = Duration::from_secs(2);
-/// `blirp daemon --detach` itself waits up to 20 s for health.
+/// `blirp start` itself waits up to 20 s for health.
 const DETACH_TIMEOUT: Duration = Duration::from_secs(40);
 const STOP_TIMEOUT: Duration = Duration::from_secs(15);
 
@@ -67,15 +67,16 @@ pub async fn ensure(paths: &Paths) -> anyhow::Result<RuntimeInfo> {
     }
     let bin = sidecar()?;
     tracing::info!(bin = %bin.display(), "starting the blirp daemon");
-    // stderr goes to a file, not a pipe: on Windows the daemon that --detach
-    // spawns inherits every inheritable handle, so a pipe would never reach
-    // EOF while the daemon runs.
+    // stderr goes to a file, not a pipe: on Windows the daemon that
+    // `daemon --detach` spawns inherits every inheritable handle, so a pipe
+    // would never reach EOF while the daemon runs. `start` goes through the
+    // autostart service when one is installed, so the daemon stays under it.
     let err_path = paths.logs_dir().join("desktop-daemon-start.log");
     let err_file = std::fs::File::create(&err_path)
         .with_context(|| format!("create {}", err_path.display()))?;
-    // No console window flash for the short-lived --detach process.
+    // No console window flash for the short-lived starter process.
     let mut cmd = tokio::process::Command::from(blirp_core::process::command(&bin));
-    cmd.args(["daemon", "--detach"])
+    cmd.arg("start")
         .env(blirp_core::paths::HOME_ENV, paths.home())
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::null())
@@ -104,7 +105,7 @@ pub async fn ensure(paths: &Paths) -> anyhow::Result<RuntimeInfo> {
             }
         );
     }
-    // --detach returned after health succeeded; confirm with our own probe.
+    // `start` returned after health succeeded; confirm with our own probe.
     let deadline = Instant::now() + Duration::from_secs(10);
     loop {
         if let Some(info) = probe(paths).await {

@@ -443,8 +443,15 @@ mv -f "$receipt.tmp" "$receipt"
 
 if [ -n "$service" ]; then
   "$bin" service install
-elif [ -n "$was_running" ]; then
-  "$bin" daemon --detach >/dev/null && say "restarted the daemon"
+fi
+# `blirp start` goes through launchd/systemd when they manage the daemon, so
+# a daemon the service supervised stays supervised. A no-op when it runs.
+if [ -n "$was_running" ]; then
+  if "$bin" start >/dev/null; then
+    say "restarted the daemon"
+  else
+    say "warning: the daemon did not start again; run \`blirp start\` and see \`blirp logs\`"
+  fi
 fi
 
 say "done: blirp $ver"
