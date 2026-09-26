@@ -441,7 +441,9 @@ DELETE /api/sessions/:id                 204; only when not running (409 `sessio
                                          retitle) are ignored and never queued, and a node applies a pulled session
                                          delete even when it has a later write of its own for that row.
 POST /api/sessions/:id/open              {target: "folder"|"editor"}: session folder in the OS file manager, or in
-                                         $VISUAL / $EDITOR / `code` (first on PATH), else the OS default; 204
+                                         $VISUAL / $EDITOR unless a terminal editor (vim, nano, emacs -nw, ...), else
+                                         `code`/`cursor`/`codium`/`zed`/`subl` (first on PATH), else the file manager;
+                                         204; 422 `open_failed` when it cannot start or exits with an error within 1.5 s
 GET  /api/terminals/:id/ws               terminal attach (§6)
 GET  /api/search?q=&project=&kind=       FTS over events + records
 GET  /api/agents                         detected agents + versions + integration status + auth (claude:

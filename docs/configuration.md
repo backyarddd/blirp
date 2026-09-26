@@ -128,7 +128,7 @@ Normally managed by `blirp hub enable|disable`, `blirp pair` and **Settings > Ma
 | `BLIRP_LOG` | daemon | Log filter in `tracing` `EnvFilter` syntax, default `info` (e.g. `BLIRP_LOG=debug`, `BLIRP_LOG=info,blirp::ingest=debug`). |
 | `OLLAMA_HOST` | Ollama summarizer | Ollama base URL (`host:port` or URL), default `http://127.0.0.1:11434`. |
 | `CLAUDE_CONFIG_DIR`, `CODEX_HOME`, `XDG_DATA_HOME`, `XDG_CONFIG_HOME`, `GEMINI_CLI_HOME`, `CURSOR_CONFIG_DIR`, `AMP_DATA_DIR`, `PI_CODING_AGENT_DIR`, `DSH_HOME`, `APPDATA` | ingest, global hooks | Where agents keep transcripts and config; blirp follows the same overrides as the agents. |
-| `VISUAL`, `EDITOR` | **Open in editor** | Editor used for a session folder, else `code` on PATH, else the OS default. |
+| `VISUAL`, `EDITOR` | **Open in editor** | Editor used for a session folder when it is a graphical one (terminal editors such as vim, nano or `emacs -nw` are skipped: the daemon has no terminal to show them in), else the first of `code`, `cursor`, `codium`, `zed`, `subl` on PATH, else the OS file manager. |
 | `SHELL` | Shell sessions (macOS/Linux) | The shell to start. |
 | `GITHUB_TOKEN` | install scripts, `blirp update`, daemon update check | Bearer token for the GitHub API; downloads then go through the API (private repository, rate limits). |
 | `BLIRP_RELEASE_BASE_URL` | install scripts, `blirp update`, daemon update check | Releases API to use instead of `https://api.github.com/repos/backyarddd/blirp/releases` (mirror, local test server). |
