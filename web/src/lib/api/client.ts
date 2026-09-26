@@ -27,6 +27,7 @@ import type {
   PutWikiPage,
   Record as MemoryRecord,
   Resource,
+  RevertBrief,
   SearchHitKind,
   SearchResults,
   Session,
@@ -192,7 +193,8 @@ export const api = {
     memory: (id: string) => request<ProjectMemory>('GET', `${p(id)}/memory`),
     putBrief: (id: string, body_md: string) => request<Brief>('PUT', `${p(id)}/brief`, { body_md }),
     briefHistory: (id: string) => request<Brief[]>('GET', `${p(id)}/brief/history`),
-    revertBrief: (id: string, version: number) => request<Brief>('POST', `${p(id)}/brief/revert`, { version }),
+    /** Prefer the history entry's `id`: versions written on another machine can shift the numbers. */
+    revertBrief: (id: string, target: RevertBrief) => request<Brief>('POST', `${p(id)}/brief/revert`, target),
     records: (id: string) => request<MemoryRecord[]>('GET', `${p(id)}/records`),
     createRecord: (id: string, r: CreateRecord) => request<MemoryRecord>('POST', `${p(id)}/records`, r),
     updateRecord: (id: string, rid: string, r: PatchRecord) =>

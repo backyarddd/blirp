@@ -12,6 +12,7 @@
   import { ApiError, api, errorMessage } from '../api/client';
   import type { Session } from '../api/types.gen';
   import { app } from '../app.svelte';
+  import { remoteRefusal } from '../capabilities';
   import { agentLabel, canResume, isLive, sessionTitle } from '../status';
   import { formatElapsed } from '../time';
   import Menu, { type MenuItem } from './Menu.svelte';
@@ -53,16 +54,39 @@
   // Opening a folder shows a window on this machine's desktop: local clients, local sessions.
   const canOpen = $derived(app.admin && session.machine_id === app.health?.machine.id);
 
-  // Ended sessions only: the daemon refuses live ones (409 `session_live`).
+  const remote = $derived(session.machine_id !== app.health?.machine.id);
+
+  /** Name of the machine that owns this session, for error messages. */
+  async function ownerName(machineId: string): Promise<string> {
+    try {
+      const m = (await api.machines.list()).find((x) => x.id === machineId);
+      if (m) return m.name;
+    } catch {
+      // Only for the message; fall through to a generic name.
+    }
+    return 'The machine that runs this session';
+  }
+
+  // Ended sessions only: the daemon refuses live ones (409 `session_live`). Another machine's
+  // session is deleted by that machine: it must be online and accept changes from here.
   async function remove(): Promise<void> {
     const msg = `Delete "${sessionTitle(session)}"? Its transcript and subagent sessions are removed on every synced machine. Memory records it produced stay.`;
     if (!confirm(msg)) return;
     // The `session_deleted` event may unmount this toolbar before the reply arrives.
-    const id = session.id;
+    const { id, machine_id } = session;
+    const isRemote = remote;
     busy = true;
-    const ok = await app.act(() => api.sessions.delete(id).then(() => true), 'Session deleted');
-    busy = false;
-    if (ok) app.removeSession(id);
+    try {
+      await api.sessions.delete(id);
+      app.toast('Session deleted', 'info');
+      app.removeSession(id);
+    } catch (e) {
+      const why = isRemote && e instanceof ApiError ? remoteRefusal(e.code, await ownerName(machine_id)) : null;
+      if (why === null) app.noteForbidden(e);
+      app.toast(`Could not delete the session: ${why ?? errorMessage(e)}`);
+    } finally {
+      busy = false;
+    }
   }
 
   // The worktree lives on this machine under BLIRP_HOME/worktrees; the daemon refuses others.

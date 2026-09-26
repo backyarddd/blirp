@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { NONE_DENIED, denyFor, rightsFrom } from './capabilities';
+import { NONE_DENIED, denyFor, remoteRefusal, rightsFrom } from './capabilities';
 
 const LOCAL = { admin: true, control_terminals: true, local: true };
 const VIEWER = { admin: false, control_terminals: false, local: false };
@@ -38,5 +38,14 @@ describe('denyFor', () => {
 
   it('accumulates', () => {
     expect(denyFor('admin_only', denyFor('control_not_allowed', NONE_DENIED))).toEqual({ admin: true, control: true });
+  });
+});
+
+describe('remoteRefusal', () => {
+  it('explains why the owning machine refused', () => {
+    expect(remoteRefusal('machine_unreachable', 'laptop')).toMatch(/^laptop is offline/);
+    expect(remoteRefusal('control_not_allowed', 'laptop')).toContain('Allow the hub to control this machine');
+    expect(remoteRefusal('proxy_failed', 'laptop')).toMatch(/did not answer/);
+    expect(remoteRefusal('session_live', 'laptop')).toBeNull();
   });
 });

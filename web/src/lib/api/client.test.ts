@@ -75,6 +75,12 @@ describe('request', () => {
     expect(f.mock.calls[1]?.[0]).toBe('/api/projects/p/files?root=C%3A%5Cw%5Capp');
   });
 
+  it('reverts a brief by its history id', async () => {
+    const f = mockFetch(async () => new Response('{}', { status: 200 }));
+    await api.projects.revertBrief('p', { id: 'b1' });
+    expect((f.mock.calls[0]?.[1] as RequestInit).body).toBe('{"id":"b1"}');
+  });
+
   it('keeps the daemon error code for conflict handling', async () => {
     mockFetch(async () => new Response('{"error":{"code":"remote_session","message":"elsewhere"}}', { status: 409 }));
     const err = await api.sessions.distill('s').catch((e: unknown) => e);
