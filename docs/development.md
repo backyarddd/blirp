@@ -118,7 +118,7 @@ A new agent touches these places. Look at an existing agent with the same shape 
 
 ## Release process
 
-1. Bump `version` in `[workspace.package]` of the root `Cargo.toml` (app, CLI and installers take it from there), run `cargo check` to update `Cargo.lock`, commit `chore(release): vX.Y.Z`.
+1. Bump `version` in `[workspace.package]` of the root `Cargo.toml` (app, CLI and installers take it from there), run `cargo check` to update `Cargo.lock`, move the `[Unreleased]` entries of `CHANGELOG.md` into a `## [X.Y.Z] - YYYY-MM-DD` section (with its compare link at the bottom), commit `chore(release): vX.Y.Z`. The draft's release notes are that section; the workflow fails without it.
 2. Tag and push: `git tag vX.Y.Z && git push origin vX.Y.Z`.
 3. `release.yml` creates a **draft** GitHub release with:
    - CLI archives `blirp-<ver>-<target>.tar.gz` (Linux x64/arm64, macOS arm64/x64) and `.zip` (Windows x64, with ConPTY), each with a `.sha256`; every archive and installer includes `THIRD_PARTY_NOTICES` (made once by the `notices` job; a dependency under a license missing from `about.toml` fails it);

@@ -8,7 +8,8 @@ name: Release
 # SHA256SUMS.txt and its minisign signature SHA256SUMS.txt.sig, and renders
 # the Homebrew / winget manifests. Publish the draft by hand after checking
 # it: the install scripts and `blirp update` only see published releases
-# (`releases/latest` skips drafts and prereleases).
+# (`releases/latest` skips drafts and prereleases). The release notes are the
+# version's section of CHANGELOG.md.
 #
 # Dry run: start the workflow by hand (Actions > Release > Run workflow, or
 # `gh workflow run release.yml --ref <branch>`). It builds every CLI archive
@@ -79,6 +80,22 @@ jobs:
           fi
           echo "version=$version" >> "$GITHUB_OUTPUT"
 
+      # The release notes are the version's section of CHANGELOG.md, without
+      # the link definitions at its end; a version without one fails here.
+      - name: Release notes from CHANGELOG.md
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          awk -v v="$VERSION" '
+            /^## \[/ { if (on) exit; on = index($0, "## [" v "]") == 1; next }
+            on && !/^\[[^]]*\]: /
+          ' CHANGELOG.md > "$RUNNER_TEMP/notes.md"
+          if ! grep -q '[^[:space:]]' "$RUNNER_TEMP/notes.md"; then
+            echo "::error::CHANGELOG.md has no section for $VERSION (## [$VERSION] - YYYY-MM-DD)"
+            exit 1
+          fi
+          cat "$RUNNER_TEMP/notes.md"
+
       - name: Create (or reuse) the draft release
         if: github.event_name == 'push'
         id: release
@@ -87,7 +104,7 @@ jobs:
         run: |
           if ! gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1; then
             gh release create "$GITHUB_REF_NAME" --draft --verify-tag \
-              --title "blirp ${GITHUB_REF_NAME#v}" --generate-notes
+              --title "blirp ${GITHUB_REF_NAME#v}" --notes-file "$RUNNER_TEMP/notes.md"
           fi
           echo "id=$(gh release view "$GITHUB_REF_NAME" --json databaseId --jq .databaseId)" >> "$GITHUB_OUTPUT"
 
