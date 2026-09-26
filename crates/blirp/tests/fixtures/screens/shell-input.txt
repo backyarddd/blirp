@@ -1,0 +1,2 @@
+PowerShell 7.5.3
+PS C:\work\proj> 

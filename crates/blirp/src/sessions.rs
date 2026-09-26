@@ -9,9 +9,10 @@ use crate::state::SharedState;
 use axum::http::StatusCode;
 use blirp_core::model::{LaunchSession, ServerEvent, Session, SessionOrigin, SessionStatus};
 use blirp_core::{git, now_ms};
+use regex::Regex;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::sync::{Arc, LazyLock};
 use std::time::{Duration, Instant};
 
 const DEFAULT_COLS: u16 = 120;
@@ -24,18 +25,27 @@ const MAX_PROMPT: usize = 64 * 1024;
 /// How long the initial prompt waits for the user to answer a startup dialog.
 const PROMPT_GATE_MAX_WAIT: Duration = Duration::from_secs(600);
 
-/// Startup dialogs (folder trust) that must be answered by the user before
-/// the initial prompt can be typed: claude, codex, gemini/cursor wording.
-fn is_gate(screen: &str) -> bool {
-    let s = screen.to_lowercase();
-    [
-        "trust this folder",
-        "trust the files in this folder",
-        "trust the contents of this directory",
-        "do you trust",
-    ]
-    .iter()
-    .any(|g| s.contains(g))
+/// Interactive dialogs the user must answer themselves: selection menus
+/// with a highlighted numbered choice (claude `❯ 1.`, codex `› 1.`, also
+/// inside a box), confirm/cancel hints, yes/no questions, and the trust,
+/// permission and MCP-server wording of claude, codex, gemini and cursor.
+/// Typing the initial prompt into one would answer it (a `1` picks the
+/// first choice, Enter confirms the default), e.g. approve an MCP server.
+static DIALOG: LazyLock<Regex> = LazyLock::new(|| {
+    // Infallible: a literal pattern, exercised by the screen fixture tests.
+    #[allow(clippy::expect_used)]
+    Regex::new(concat!(
+        r"(?mi)^[\s│┃|]*[❯›»▶►>]\s*\d+[.)]\s",
+        r"|enter to (confirm|select|continue)|press enter|esc to (cancel|reject|exit|go back)",
+        r"|\((y/n|yes/no)\)|\[(y/n|yes/no)\]",
+        r"|trust this folder|trust the files in this folder|trust the contents of this directory",
+        r"|do you trust|do you want to|new mcp server|allow .{0,40}\?",
+    ))
+    .expect("valid regex")
+});
+
+fn is_dialog(screen: &str) -> bool {
+    DIALOG.is_match(screen)
 }
 
 /// Env vars of a parent agent session that must not leak into sessions
@@ -665,7 +675,9 @@ pub fn remove_worktree(state: &SharedState, id: &str, force: bool) -> ApiResult<
     Ok(updated)
 }
 
-/// Type `prompt` once the agent's output has settled, then press Enter.
+/// Type `prompt` once the agent's output has settled with no dialog on
+/// screen, then press Enter. While any dialog is visible nothing is typed
+/// (the user answers it); one that stays open 10 min drops the prompt.
 async fn type_prompt(term: Arc<Terminal>, prompt: String) {
     let begin = Instant::now();
     loop {
@@ -675,8 +687,7 @@ async fn type_prompt(term: Arc<Terminal>, prompt: String) {
         let settled = term
             .last_output()
             .is_some_and(|t| t.elapsed() >= PROMPT_SETTLE);
-        if settled && is_gate(&term.screen_text()) {
-            // A trust dialog is waiting for the user; typing now would answer it.
+        if is_dialog(&term.screen_text()) {
             if begin.elapsed() >= PROMPT_GATE_MAX_WAIT {
                 tracing::info!(session = %term.session_id, "initial prompt dropped: a dialog stayed open");
                 return;
@@ -698,6 +709,11 @@ async fn type_prompt(term: Arc<Terminal>, prompt: String) {
     term.write(bytes);
     // Some TUIs drop an Enter that arrives in the same read as a paste.
     tokio::time::sleep(Duration::from_millis(150)).await;
+    // A dialog that popped up meanwhile gets no Enter from us.
+    if is_dialog(&term.screen_text()) {
+        tracing::info!(session = %term.session_id, "initial prompt not submitted: a dialog opened");
+        return;
+    }
     term.write(b"\r".to_vec());
 }
 
@@ -795,12 +811,25 @@ pub fn mark_detached(state: &SharedState) -> anyhow::Result<()> {
 
 #[cfg(test)]
 mod tests {
+    /// Captured screens (tests/fixtures/screens): dialogs must hold the
+    /// initial prompt back, normal input screens must not.
     #[test]
-    fn startup_gates() {
-        assert!(super::is_gate(
-            "Quick safety check: Is this a project you created or one you trust?\n❯ 1. Yes, I trust this folder"
-        ));
-        assert!(!super::is_gate("> type your prompt\n? for shortcuts"));
+    fn dialogs_hold_the_prompt_back() {
+        let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/screens");
+        let screen = |name: &str| std::fs::read_to_string(dir.join(name)).unwrap();
+        for dialog in [
+            "claude-mcp-server.txt",
+            "claude-trust.txt",
+            "claude-permission.txt",
+            "claude-theme.txt",
+            "codex-trust.txt",
+            "generic-yes-no.txt",
+        ] {
+            assert!(super::is_dialog(&screen(dialog)), "{dialog}");
+        }
+        for input in ["claude-input.txt", "codex-input.txt", "shell-input.txt"] {
+            assert!(!super::is_dialog(&screen(input)), "{input}");
+        }
     }
 
     #[test]

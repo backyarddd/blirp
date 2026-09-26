@@ -1,0 +1,18 @@
+╭───────────────────────────────────────────────────╮
+│ ✻ Welcome to Claude Code!                         │
+│                                                   │
+│   /help for help, /status for your current setup  │
+│                                                   │
+│   cwd: /Users/dev/work/proj                       │
+╰───────────────────────────────────────────────────╯
+
+ Tips for getting started:
+
+ 1. Run /init to create a CLAUDE.md file with instructions for Claude
+ 2. Use Claude to help with file analysis, editing, bash commands and git
+ 3. Be as specific as you would with another engineer for the best results
+
+╭───────────────────────────────────────────────────────────────────╮
+│ > Try "how does <filepath> work?"                                 │
+╰───────────────────────────────────────────────────────────────────╯
+  ? for shortcuts

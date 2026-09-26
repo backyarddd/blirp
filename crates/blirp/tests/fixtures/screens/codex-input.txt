@@ -1,0 +1,13 @@
+>_ OpenAI Codex (v0.153.2)
+
+ model:     gpt-5-codex   /model to change
+ directory: ~/work/proj
+
+  To get started, describe a task or try one of these commands:
+
+  /init - create an AGENTS.md file with instructions for Codex
+  /status - show current session configuration
+
+› Ask Codex to do anything
+
+  ⏎ send   ⌃J newline   ⌃T transcript   ⌃C quit
