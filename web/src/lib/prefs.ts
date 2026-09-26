@@ -20,3 +20,7 @@ export function writePref(key: string, value: string): void {
 
 export const isMac: boolean =
   typeof navigator !== 'undefined' && /Mac|iPhone|iPad/.test(navigator.platform || navigator.userAgent);
+
+/** The browser's own platform (not the session's machine): terminal key conventions follow it. */
+export const isWindows: boolean =
+  typeof navigator !== 'undefined' && /Win/.test(navigator.platform || navigator.userAgent);

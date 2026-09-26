@@ -28,6 +28,27 @@ export function matchShortcut(e: KeyLike, mac: boolean, inTerminal: boolean): Sh
   return KEYS[e.key.toLowerCase()] ?? null;
 }
 
+/** Where the SPA runs; terminal copy/paste keys follow that platform's native terminals. */
+export type ClientPlatform = 'mac' | 'windows' | 'linux';
+
+/**
+ * Copy/paste chords inside a terminal pane. macOS: Cmd+C / Cmd+V. Windows and Linux: Ctrl+Shift+C /
+ * Ctrl+Shift+V. Windows also pastes on plain Ctrl+V, like Windows Terminal; on Linux (and macOS)
+ * plain Ctrl+V stays with the program (readline quoted insert, vim block select). Plain Ctrl+C is
+ * always the program's interrupt. `paste` lets the browser raise its paste event.
+ */
+export function terminalClipboardKey(e: KeyLike, platform: ClientPlatform): 'copy' | 'paste' | null {
+  if (e.altKey) return null;
+  const key = e.key.toLowerCase();
+  if (key !== 'c' && key !== 'v') return null;
+  const chord =
+    platform === 'mac'
+      ? e.metaKey && !e.ctrlKey
+      : e.ctrlKey && !e.metaKey && (e.shiftKey || (platform === 'windows' && key === 'v'));
+  if (!chord) return null;
+  return key === 'c' ? 'copy' : 'paste';
+}
+
 export function shortcutLabel(key: string, mac: boolean): string {
   return mac ? `⌘${key}` : `Ctrl+${key}`;
 }

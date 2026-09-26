@@ -8,8 +8,8 @@
   import '@xterm/xterm/css/xterm.css';
   import { api, errorMessage, socketUrl, terminalWsPath } from '../api/client';
   import { theme } from '../theme.svelte';
-  import { isMac } from '../prefs';
-  import { matchShortcut } from '../shortcuts';
+  import { isMac, isWindows } from '../prefs';
+  import { matchShortcut, terminalClipboardKey } from '../shortcuts';
   import { app } from '../app.svelte';
   import { hasTerminal, sessionStatusInfo } from '../status';
   import type { SessionStatus } from '../api/types.gen';
@@ -250,9 +250,8 @@
 
     t.attachCustomKeyEventHandler((e) => {
       if (e.type !== 'keydown') return true;
-      const key = e.key.toLowerCase();
-      const clip = isMac ? e.metaKey && !e.ctrlKey && !e.altKey : e.ctrlKey && e.shiftKey && !e.altKey;
-      if (clip && key === 'c') {
+      const clip = terminalClipboardKey(e, isMac ? 'mac' : isWindows ? 'windows' : 'linux');
+      if (clip === 'copy') {
         e.preventDefault();
         const sel = t.getSelection();
         if (sel) {
@@ -264,7 +263,8 @@
       }
       // Let the browser raise a native paste event, which xterm turns into input
       // (bracketed paste aware) without needing clipboard-read permission.
-      if (clip && key === 'v') return false;
+      // Pasted files and images are uploaded instead (onPaste below).
+      if (clip === 'paste') return false;
       // App shortcuts bubble to the global handler instead of reaching the PTY.
       if (matchShortcut(e, isMac, true)) return false;
       return true;

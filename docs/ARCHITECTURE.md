@@ -554,7 +554,7 @@ Layout mirrors the reference (Xirp-style):
 - Session detail (for ended/external sessions): transcript viewer (events), summary, resume/continue buttons.
 - Search: global FTS with filters.
 - Settings: agents (detected, versions, integration status, install/uninstall global hooks; for claude its login state, login token state, the `claude setup-token` / `blirp agents set-token claude` steps and, for admins, a password field to paste a token and a Remove button; the token is never shown back), memory, machines & sync (hub enable, invite/code/QR, join, devices, revoke), portal, about/updates.
-- Keyboard: Ctrl/Cmd+K palette, Ctrl/Cmd+T new session, Ctrl/Cmd+G grid, Ctrl/Cmd+Left/Right switch session, Ctrl/Cmd+W close tab (does not kill; Stop kills).
+- Keyboard: Ctrl/Cmd+K palette, Ctrl/Cmd+T new session, Ctrl/Cmd+G grid, Ctrl/Cmd+Left/Right switch session, Ctrl/Cmd+W close tab (does not kill; Stop kills). In a terminal: copy Ctrl+Shift+C / Cmd+C, paste Ctrl+Shift+V / Cmd+V, and on a Windows client plain Ctrl+V too (Windows Terminal's default); elsewhere plain Ctrl+V goes to the program. The client's own platform decides, not the session's machine.
 - Notifications (browser Notification API) when a session becomes `waiting` or finishes while not focused.
 - Themes: light and dark via CSS custom properties, follows system, toggle in settings. Accessible: keyboard reachable, visible focus, aria labels on icon buttons.
 

@@ -30,12 +30,12 @@ A session is one run of an agent (or shell, or custom command) in a folder. blir
 
 ### Pasting images and files
 
-Paste a screenshot or a copied file into a terminal pane (Ctrl+Shift+V on Windows and Linux, Cmd+V on macOS, or the context menu's Paste), or drag files from your desktop onto the pane. blirp uploads each file to the machine that runs the session (also a cloud or other paired machine) and types its path into the terminal, the way a native terminal types a dropped file's path:
+Paste a screenshot or a copied file into a terminal pane (Ctrl+V or Ctrl+Shift+V on Windows, Ctrl+Shift+V on Linux, Cmd+V on macOS, or the context menu's Paste), or drag files from your desktop onto the pane. blirp uploads each file to the machine that runs the session (also a cloud or other paired machine) and types its path into the terminal, the way a native terminal types a dropped file's path:
 
 - Claude Code and Codex attach an image whose path is pasted like this, as they do for a file dropped onto a native terminal. For other files, and other agents, the path is there to use in your prompt ("read this log: <path>").
 - Files are saved as `~/.blirp/uploads/<session>/<time>-<name>` (name reduced to letters, digits, `.`, `-`, `_`) on that machine, readable only by your user. They are deleted when you delete the session and after 7 days, and are never synced.
 - At most 25 MB per file. Plain text pastes work exactly as before; when the clipboard holds both text and a picture of it (copying cells or paragraphs from an office app), the text is pasted.
-- Plain Ctrl+V (Windows and Linux) still goes to the program in the terminal: Claude Code then reads the clipboard of the machine it runs on, which only works for sessions on this machine.
+- On Linux (and macOS) plain Ctrl+V still goes to the program in the terminal, as in native terminals: Claude Code then reads the clipboard of the machine it runs on, which only works for sessions on this machine. On Windows plain Ctrl+V pastes, as in Windows Terminal (Claude Code's own image paste there is Alt+V, which still reaches it).
 - Needs **Terminal control** on portal devices, like typing.
 
 ### Statuses
