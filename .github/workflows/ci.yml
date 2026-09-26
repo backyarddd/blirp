@@ -98,6 +98,31 @@ jobs:
           cargo test --locked -p blirp-core export_bindings
           git diff --exit-code -- web/src/lib/api/types.gen.ts
 
+      # install.sh (Linux, macOS) or install.ps1 (Windows) against a fake
+      # release on 127.0.0.1, signed with a throwaway key, into a temp home;
+      # tampered assets must be refused. minisign makes the test key.
+      - name: Install scripts
+        shell: bash
+        run: |
+          case $RUNNER_OS in
+            Linux) asset=minisign-0.12-linux.tar.gz sum=9a599b48ba6eb7b1e80f12f36b94ceca7c00b7a5173c95c3efc88d9822957e73 exe=minisign-linux/x86_64/minisign ;;
+            macOS) asset=minisign-0.12-macos.zip sum=89000b19535765f9cffc65a65d64a820f433ef6db8020667f7570e06bf6aac63 exe=minisign ;;
+            Windows) asset=minisign-0.12-win64.zip sum=37b600344e20c19314b2e82813db2bfdcc408b77b876f7727889dbd46d539479 exe=minisign-win64/x86_64/minisign.exe ;;
+          esac
+          dir=target/minisign
+          mkdir -p "$dir"
+          curl -fsSL --retry 3 -o "$dir/$asset" "https://github.com/jedisct1/minisign/releases/download/0.12/$asset"
+          if command -v sha256sum >/dev/null; then got=$(sha256sum "$dir/$asset"); else got=$(shasum -a 256 "$dir/$asset"); fi
+          [ "${got%% *}" = "$sum" ] || { echo "::error::$asset does not match its pinned sha256"; exit 1; }
+          case $asset in
+            *.zip) unzip -oq "$dir/$asset" -d "$dir" ;;
+            *) tar -xzf "$dir/$asset" -C "$dir" --warning=no-unknown-keyword ;;
+          esac
+          chmod +x "$dir/$exe"
+          cargo build --locked -p blirp
+          bin=target/debug/blirp
+          if [ "$RUNNER_OS" = Windows ]; then bin=$bin.exe; fi
+          sh scripts/test-install.sh "$bin" "$dir/$exe"
 
   e2e:
     name: e2e (ubuntu-latest)
