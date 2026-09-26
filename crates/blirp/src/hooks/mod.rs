@@ -8,6 +8,7 @@ use crate::memory::distill::DISTILLING_ENV;
 use crate::memory::launch::{MEMORY_FILE, inject_mode};
 use crate::memory::render::render_injection;
 use crate::state::SharedState;
+use blirp_core::config::MemoryConfig;
 use blirp_core::model::{
     BUILTIN_AGENTS, InjectMode, ServerEvent, Session, SessionOrigin, SessionStatus,
 };
@@ -105,27 +106,31 @@ fn payload_cwd(p: &Value) -> Option<String> {
 }
 
 /// Memory for a SessionStart: the launch file (which may carry a handoff pack)
-/// on first start of a blirp session, else a fresh render.
+/// on first start of a blirp session, else a fresh render. `None` when
+/// injection is off for the agent (§12) and there is no launch file.
 fn session_start_context(
     store: &Store,
     paths: &Paths,
     session: &Session,
     source: Option<&str>,
-    max_chars: usize,
-) -> ApiResult<String> {
+    memory: &MemoryConfig,
+) -> ApiResult<Option<String>> {
     let launch = paths.launch_dir(&session.id).join(MEMORY_FILE);
     if session.origin == SessionOrigin::Blirp
         && matches!(source, None | Some("startup"))
         && let Ok(text) = std::fs::read_to_string(&launch)
     {
-        return Ok(text);
+        return Ok(Some(text));
     }
-    Ok(render_injection(
+    if !memory.inject_enabled(&session.agent) {
+        return Ok(None);
+    }
+    Ok(Some(render_injection(
         store,
         &session.project_id,
         Some(&session.id),
-        max_chars,
-    )?)
+        memory.inject_max_chars as usize,
+    )?))
 }
 
 /// Daemon side of a hook (blocking; runs on the blocking pool).
@@ -290,14 +295,13 @@ pub fn handle(
     let additional_context = if event == HookEvent::SessionStart
         && !(req.global && launched && mode == InjectMode::Instructions)
     {
-        let max = state.config().memory.inject_max_chars as usize;
-        Some(session_start_context(
+        session_start_context(
             store,
             &state.paths,
             &updated,
             str_field(p, &["source"]),
-            max,
-        )?)
+            &state.config().memory,
+        )?
     } else {
         None
     };
@@ -365,13 +369,15 @@ fn offline_context(env: &HookEnv<'_>, payload: &Value) -> Option<String> {
         }
     };
     // Read-only: never create config.toml from a hook.
-    let max = std::fs::read_to_string(paths.config_file())
+    let memory = std::fs::read_to_string(paths.config_file())
         .ok()
         .and_then(|t| blirp_core::config::Config::parse(&t, &paths.config_file()).ok())
         .unwrap_or_default()
-        .memory
-        .inject_max_chars as usize;
-    render_injection(&store, &project, None, max).ok()
+        .memory;
+    if !memory.inject_enabled(env.agent) {
+        return None;
+    }
+    render_injection(&store, &project, None, memory.inject_max_chars as usize).ok()
 }
 
 async fn post(

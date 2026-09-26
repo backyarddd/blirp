@@ -316,3 +316,65 @@ async fn agents_report_integration_and_mcp_http_needs_the_token() {
     assert!(body.contains("\"name\":\"blirp\""), "{body}");
     h.daemon.shutdown().await.unwrap();
 }
+
+// Users can turn launch-time injection off, globally or per agent; launches
+// and SessionStart hooks both respect it.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn injection_can_be_turned_off() {
+    let h = Harness::start().await;
+    let (dir, _) = h.project("quiet").await;
+    let set = |memory: Value| {
+        let h = &h;
+        async move {
+            let mut view: Value = h.get("/api/settings").await;
+            for (k, v) in memory.as_object().unwrap() {
+                view["config"]["memory"][k] = v.clone();
+            }
+            let r = h
+                .http
+                .patch(format!("{}/api/settings", h.base))
+                .bearer_auth(&h.token)
+                .json(&json!({"config": view["config"]}))
+                .send()
+                .await
+                .unwrap();
+            assert!(r.status().is_success(), "{}", r.status());
+        }
+    };
+    let start = |sid: &'static str| {
+        let dir = dir.clone();
+        let h = &h;
+        async move {
+            h.hook(
+                "claude",
+                "SessionStart",
+                json!({"payload": {"session_id": sid, "cwd": dir, "source": "startup"}, "global": true}),
+            )
+            .await
+        }
+    };
+
+    set(json!({"inject_disabled_agents": ["claude", "shell"]})).await;
+    assert!(start("q-1").await["additional_context"].is_null());
+    // A shell launch writes an empty memory file.
+    let r = h
+        .post("/api/sessions", json!({"cwd": dir, "agent": "shell"}))
+        .await;
+    assert_eq!(r.status(), 201);
+    let s: Session = r.json().await.unwrap();
+    let memory = h.home.path().join("launch").join(&s.id).join("memory.md");
+    assert_eq!(std::fs::read_to_string(memory).unwrap(), "");
+
+    set(json!({"inject_disabled_agents": [], "inject": false})).await;
+    assert!(start("q-2").await["additional_context"].is_null());
+
+    set(json!({"inject": true})).await;
+    let ctx = start("q-3").await;
+    assert!(
+        ctx["additional_context"]
+            .as_str()
+            .unwrap()
+            .contains("quiet is a test project.")
+    );
+    h.daemon.shutdown().await.unwrap();
+}

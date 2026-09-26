@@ -285,6 +285,8 @@ Tools: search older history with the blirp MCP tools (mem_search, mem_session, m
 ```
 Records sort by pinned, then `updated_at` desc, then id; a record appears once (under Pinned when it is pinned and within the cap, else in its kind's section; unpinned notes are not injected); list items are one line (<= 400 chars); empty sections are omitted; sections are filled in the order above until the budget is used, and the Tools line is always kept. Dates are UTC `YYYY-MM-DD`. Nothing depends on the current time, so the text changes only when memory changes and agent prompt caches keep hitting. At launch the rendered text (plus a handoff pack, if any) is written to `~/.blirp/launch/<session>/memory.md`; `GET /api/inject?session=` returns exactly that file, `?cwd=` renders for the folder's project.
 
+Injection can be turned off (§12 `memory.inject = false`, or per agent with `memory.inject_disabled_agents`): launches then write an empty `memory.md` (a continue/fork handoff pack is still passed on, since the user asked for it), and SessionStart hooks (daemon and offline fallback) return no context. The MCP tools and `blirp mem` keep working on demand.
+
 Per-agent integration (launch-time never edits user files; "verified" = checked against the installed CLI on the reference machine, "docs" = from official docs only):
 
 | Agent | Session-start injection (launch) | On-demand | Status source | Verified |
@@ -437,6 +439,8 @@ A portal browser device without terminal control is therefore read-only. `tests/
            brief_mode = "auto" | "review"
            inject_max_chars = 8000
            distill_max_chars = 60000
+           inject = true                     # false: no launch-time memory for any agent
+           inject_disabled_agents = []       # e.g. ["codex", "custom:mine"]: no memory for these
 [sync]     role = "standalone" | "hub" | "node"
            hub = "<node id>"
            relay = "default" | "disabled" | "<url>"

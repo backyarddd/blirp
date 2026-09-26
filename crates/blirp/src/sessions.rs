@@ -396,12 +396,19 @@ fn integrate(
     handoff: Option<&str>,
 ) -> LaunchIntegration {
     let launch_dir = state.paths.launch_dir(&session.id);
-    let max = state.config().memory.inject_max_chars as usize;
-    let memory = match render_injection(&state.store, &session.project_id, Some(&session.id), max) {
-        Ok(m) => m,
-        Err(e) => {
-            tracing::warn!(session = %session.id, error = %e, "rendering memory failed; launching without it");
-            String::new()
+    let config = state.config().memory;
+    let max = config.inject_max_chars as usize;
+    // Turned off by the user (§12): no memory, but a handoff pack the user
+    // asked for with continue/fork is still passed on.
+    let memory = if !config.inject_enabled(&agent.id) {
+        String::new()
+    } else {
+        match render_injection(&state.store, &session.project_id, Some(&session.id), max) {
+            Ok(m) => m,
+            Err(e) => {
+                tracing::warn!(session = %session.id, error = %e, "rendering memory failed; launching without it");
+                String::new()
+            }
         }
     };
     let memory = match handoff {

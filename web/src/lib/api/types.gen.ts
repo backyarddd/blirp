@@ -551,7 +551,17 @@ export type Summarizer = "auto" | "claude" | "codex" | "ollama" | "none";
 
 export type BriefMode = "auto" | "review";
 
-export type MemoryConfig = { summarizer: Summarizer, ollama_model: string, distill_idle_secs: number, daily_distill_limit: number, brief_mode: BriefMode, inject_max_chars: number, distill_max_chars: number, };
+export type MemoryConfig = { summarizer: Summarizer, ollama_model: string, distill_idle_secs: number, daily_distill_limit: number, brief_mode: BriefMode, inject_max_chars: number, distill_max_chars: number, 
+/**
+ * Inject project memory when agents start (§9). Off: sessions start
+ * without memory; MCP tools and the CLI still reach it on demand.
+ */
+inject: boolean, 
+/**
+ * Agents (`claude`, `custom:<name>`, ...) that never get memory
+ * injected, even when `inject` is on.
+ */
+inject_disabled_agents: Array<string>, };
 
 export type SyncConfig = { role: MachineRole, 
 /**
