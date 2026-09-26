@@ -384,7 +384,8 @@ GET  /api/health                         {version, machine, role, capabilities: 
 GET  /api/update                         UpdateStatus {current, latest, available, notes_url, enabled,
                                          self_update}: newest published release; asks GitHub at most once a
                                          day (hourly after a failure), never when `update.check = false` (§17);
-                                         self_update: `blirp update` can replace this binary (receipt matches)
+                                         self_update: `blirp update` can replace this binary (receipt matches,
+                                         or it is the sidecar of the app the receipt lists)
                                          (the calling client's rights)
 GET  /api/machines                       list; DELETE /api/machines/:id (revoke)
 GET  /api/machines/:id/health | /agents  that machine's health / agents (relayed for another machine, §10)

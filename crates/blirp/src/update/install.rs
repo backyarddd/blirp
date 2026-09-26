@@ -96,12 +96,8 @@ impl Installed {
     }
 }
 
-/// The receipt of the running binary, when the install script put it here.
-pub fn installed() -> anyhow::Result<Option<Installed>> {
-    let exe = crate::memory::blirp_exe();
-    let Some(dir) = exe.parent() else {
-        return Ok(None);
-    };
+/// The receipt for a binary in `dir` (whether or not it names `dir`).
+fn read_receipt(dir: &Path) -> anyhow::Result<Option<(Receipt, PathBuf)>> {
     let Some(receipt_path) = receipt_path(dir) else {
         return Ok(None);
     };
@@ -112,12 +108,57 @@ pub fn installed() -> anyhow::Result<Option<Installed>> {
     };
     let receipt: Receipt = serde_json::from_str(text.trim_start_matches('\u{feff}'))
         .with_context(|| format!("invalid install receipt {}", receipt_path.display()))?;
-    let same = dunce::canonicalize(&receipt.install_dir).is_ok_and(|d| d == dir);
-    Ok(same.then(|| Installed {
+    Ok(Some((receipt, receipt_path)))
+}
+
+fn is_install_dir(receipt: &Receipt, dir: &Path) -> bool {
+    dunce::canonicalize(&receipt.install_dir).is_ok_and(|d| d == dir)
+}
+
+/// The receipt of the running binary, when the install script put it here.
+pub fn installed() -> anyhow::Result<Option<Installed>> {
+    let exe = crate::memory::blirp_exe();
+    let Some(dir) = exe.parent() else {
+        return Ok(None);
+    };
+    let Some((receipt, receipt_path)) = read_receipt(dir)? else {
+        return Ok(None);
+    };
+    Ok(is_install_dir(&receipt, dir).then(|| Installed {
         receipt,
         receipt_path,
         dir: dir.to_path_buf(),
     }))
+}
+
+/// Whether `blirp update` (run from the installed CLI) replaces the running
+/// binary: it is the script-installed CLI, or the sidecar inside the desktop
+/// app the script installed (a daemon the app started runs from there:
+/// `blirp.app/Contents/MacOS/blirp`, or the AppImage's mount). On Windows the
+/// app's sidecar is the CLI itself (same folder).
+pub fn self_updating() -> anyhow::Result<bool> {
+    let exe = crate::memory::blirp_exe();
+    let Some(dir) = exe.parent() else {
+        return Ok(false);
+    };
+    let Some((receipt, _)) = read_receipt(dir)? else {
+        return Ok(false);
+    };
+    if is_install_dir(&receipt, dir) {
+        return Ok(true);
+    }
+    let Some(app) = receipt.app().and_then(|a| dunce::canonicalize(a).ok()) else {
+        return Ok(false);
+    };
+    // Set by the AppImage runtime for everything started from the mount.
+    let appimage = std::env::var_os("APPIMAGE").and_then(|p| dunce::canonicalize(p).ok());
+    Ok(runs_from_app(&exe, &app, appimage.as_deref()))
+}
+
+/// `exe` (canonical) belongs to the installed `app` (canonical): inside the
+/// bundle, or started from that AppImage (`appimage`: canonical `$APPIMAGE`).
+fn runs_from_app(exe: &Path, app: &Path, appimage: Option<&Path>) -> bool {
+    exe.starts_with(app) || appimage == Some(app)
 }
 
 /// Default desktop app locations, for launching (`blirp` without arguments).
@@ -442,6 +483,32 @@ pub fn purgeable(dir: &Path, user_home: Option<&Path>) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn app_sidecar_counts_as_the_script_install() {
+        let bundle = Path::new("/Users/me/Applications/blirp.app");
+        let image = Path::new("/home/me/.local/share/blirp/blirp.AppImage");
+        // macOS: the sidecar inside the installed bundle.
+        assert!(runs_from_app(
+            &bundle.join("Contents/MacOS/blirp"),
+            bundle,
+            None
+        ));
+        assert!(!runs_from_app(
+            Path::new("/Applications/blirp.app/Contents/MacOS/blirp"),
+            bundle,
+            None
+        ));
+        // Linux: started from the installed AppImage's mount.
+        let mounted = Path::new("/tmp/.mount_blirpAb12/usr/bin/blirp");
+        assert!(runs_from_app(mounted, image, Some(image)));
+        assert!(!runs_from_app(
+            mounted,
+            image,
+            Some(Path::new("/home/me/Downloads/blirp.AppImage"))
+        ));
+        assert!(!runs_from_app(mounted, image, None));
+    }
 
     fn inst(dir: &Path, app: &str) -> Installed {
         Installed {

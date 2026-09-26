@@ -15,8 +15,8 @@ pub fn routes() -> Router<SharedState> {
 /// Whether `blirp update` would replace this binary (it refuses anything the
 /// install script did not install).
 async fn self_update() -> bool {
-    match tokio::task::spawn_blocking(crate::update::install::installed).await {
-        Ok(Ok(installed)) => installed.is_some(),
+    match tokio::task::spawn_blocking(crate::update::install::self_updating).await {
+        Ok(Ok(yes)) => yes,
         Ok(Err(e)) => {
             tracing::warn!(error = format!("{e:#}"), "read the install receipt");
             false

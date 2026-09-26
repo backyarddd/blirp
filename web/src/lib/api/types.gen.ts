@@ -163,7 +163,8 @@ notes_url: string | null,
 enabled: boolean, 
 /**
  * `blirp update` can replace this daemon's binary: the install script
- * installed it (its receipt matches). False for installers, package
+ * installed it (its receipt matches), or it is the sidecar of the
+ * desktop app the script installed. False for installers, package
  * managers and source builds, which update the way they were installed.
  */
 self_update: boolean, };
