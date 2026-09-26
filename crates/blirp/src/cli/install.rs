@@ -510,7 +510,7 @@ pub async fn launch(paths: &Paths) -> anyhow::Result<ExitCode> {
         .find(|p| p.exists())
     {
         Some(app) => {
-            open_app(&app).with_context(|| format!("start {}", app.display()))?;
+            open_app(&app, paths).with_context(|| format!("start {}", app.display()))?;
             println!("Opened the blirp desktop app ({})", app.display());
         }
         None => {
@@ -521,10 +521,20 @@ pub async fn launch(paths: &Paths) -> anyhow::Result<ExitCode> {
     Ok(ExitCode::SUCCESS)
 }
 
-fn open_app(app: &Path) -> anyhow::Result<()> {
+fn open_app(app: &Path, paths: &Paths) -> anyhow::Result<()> {
     let mut cmd = if cfg!(target_os = "macos") {
         let mut c = std::process::Command::new("open");
         c.arg("-a").arg(app);
+        // Launch Services does not pass this shell's environment on; a
+        // custom data dir must reach the app or it would start a second
+        // daemon for ~/.blirp.
+        if std::env::var_os(blirp_core::paths::HOME_ENV).is_some_and(|v| !v.is_empty()) {
+            c.arg("--env").arg(format!(
+                "{}={}",
+                blirp_core::paths::HOME_ENV,
+                paths.home().display()
+            ));
+        }
         c
     } else {
         std::process::Command::new(app)
