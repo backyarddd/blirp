@@ -277,8 +277,52 @@ fn json_col(row: &rusqlite::Row<'_>, col: &str) -> rusqlite::Result<Option<JsonV
     .transpose()
 }
 
+/// Memory written on this machine (records, briefs, wiki pages, resources
+/// from users, MCP clients or the distiller) is redacted before it is stored
+/// and replicated (§9). `None` when nothing needed redacting.
+fn redact_memory(change: &Change) -> Option<Change> {
+    use crate::redact::{redact, redact_json};
+    use std::borrow::Cow;
+    let red = |s: &str| match redact(s) {
+        Cow::Borrowed(_) => None,
+        Cow::Owned(o) => Some(o),
+    };
+    let mut c = change.clone();
+    let mut changed = false;
+    let mut fix = |field: &mut String| {
+        if let Some(r) = red(field) {
+            *field = r;
+            changed = true;
+        }
+    };
+    match &mut c {
+        Change::Record(r) => {
+            fix(&mut r.title);
+            fix(&mut r.body);
+        }
+        Change::Brief(b) => fix(&mut b.body_md),
+        Change::WikiPage(w) => {
+            fix(&mut w.title);
+            fix(&mut w.body_md);
+        }
+        Change::Resource(r) => {
+            fix(&mut r.title);
+            fix(&mut r.url);
+            if let Some(m) = &mut r.meta {
+                let before = m.clone();
+                redact_json(m);
+                changed |= *m != before;
+            }
+        }
+        _ => return None,
+    }
+    changed.then_some(c)
+}
+
 /// Write the row(s) for `change` and append it to the outbox.
 pub(crate) fn apply_in(tx: &Transaction<'_>, change: &Change) -> Result<bool> {
+    let redacted = redact_memory(change);
+    let change = redacted.as_ref().unwrap_or(change);
     let written = write_row(tx, change)?;
     if written == 0 && matches!(change, Change::Event(_)) {
         return Ok(false);
@@ -304,10 +348,44 @@ pub(crate) fn apply_in(tx: &Transaction<'_>, change: &Change) -> Result<bool> {
     Ok(true)
 }
 
+/// Every id a change carries must have the shape of a blirp id
+/// ([`crate::is_safe_id`]): ids name files and arrive from other machines.
+pub(crate) fn check_ids(change: &Change) -> Result<()> {
+    let ids: Vec<Option<&str>> = match change {
+        Change::Machine(m) => vec![Some(&m.id)],
+        Change::DeleteMachine { id }
+        | Change::DeleteSession { id }
+        | Change::DeleteRecord { id } => vec![Some(id)],
+        Change::Project(p) => vec![Some(&p.id)],
+        Change::ProjectPath(p) => vec![Some(&p.project_id), Some(&p.machine_id)],
+        Change::DeleteProjectPath { machine_id, .. } => vec![Some(machine_id)],
+        Change::Session(s) => vec![
+            Some(&s.id),
+            Some(&s.project_id),
+            Some(&s.machine_id),
+            s.parent_session_id.as_deref(),
+        ],
+        Change::Event(e) => vec![Some(&e.session_id)],
+        Change::Record(r) => vec![
+            Some(&r.id),
+            Some(&r.project_id),
+            r.source_session_id.as_deref(),
+        ],
+        Change::Brief(b) => vec![Some(&b.project_id)],
+        Change::WikiPage(w) => vec![Some(&w.id), Some(&w.project_id)],
+        Change::Resource(r) => vec![Some(&r.id), Some(&r.project_id)],
+    };
+    match ids.into_iter().flatten().find(|id| !crate::is_safe_id(id)) {
+        Some(bad) => Err(StoreError::Invalid(format!("invalid id {bad:?}"))),
+        None => Ok(()),
+    }
+}
+
 /// Write the row(s) for `change` only; returns the affected row count.
 /// Replication applies received changes with this so they are never
 /// queued again (no echo).
 fn write_row(tx: &Transaction<'_>, change: &Change) -> Result<usize> {
+    check_ids(change)?;
     Ok(match change {
         Change::Machine(m) => tx.execute(
             "INSERT INTO machines(id, name, os, role, last_seen, revoked) VALUES (?1,?2,?3,?4,?5,?6)
@@ -589,6 +667,46 @@ pub(crate) mod tests {
         assert!(store.apply(Change::Event(ev.clone())).unwrap());
         assert!(!store.apply(Change::Event(ev)).unwrap());
         assert_eq!(store.outbox_after(0, 10).unwrap().len(), 2);
+    }
+
+    #[test]
+    fn memory_is_redacted_before_it_is_stored_and_queued() {
+        let (_d, store) = temp_store();
+        let key = "AKIAIOSFODNN7EXAMPLE";
+        let r = store
+            .create_record(Record {
+                id: crate::new_id(),
+                project_id: "p".into(),
+                kind: RecordKind::Note,
+                title: format!("key {key}"),
+                body: format!("use {key}"),
+                status: RecordStatus::Active,
+                pinned: false,
+                source_session_id: None,
+                created_at: 1,
+                updated_at: 1,
+                updated_by: "user".into(),
+            })
+            .unwrap();
+        store
+            .put_brief("p", &format!("brief {key}"), "user")
+            .unwrap();
+        store
+            .create_wiki_page("p", "w", "wiki", &format!("page {key}"), "user")
+            .unwrap();
+        let stored = store.get_record(&r.id).unwrap().unwrap();
+        assert!(stored.body.contains("[REDACTED:") && !stored.title.contains(key));
+        assert!(!store.get_brief("p").unwrap().unwrap().body_md.contains(key));
+        assert!(
+            !store
+                .get_wiki_page("p", "w")
+                .unwrap()
+                .unwrap()
+                .body_md
+                .contains(key)
+        );
+        let outbox = serde_json::to_string(&store.outbox_after(0, 100).unwrap()).unwrap();
+        assert!(!outbox.contains(key), "{outbox}");
     }
 
     #[test]

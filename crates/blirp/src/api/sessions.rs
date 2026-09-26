@@ -177,9 +177,15 @@ async fn remove_worktree(
 /// events and subagent sessions (replicated as a delete, §5).
 async fn remove(
     State(s): State<SharedState>,
-    _: Control,
+    Control(principal): Control,
     ApiPath(id): ApiPath<String>,
-) -> ApiResult<StatusCode> {
+) -> ApiResult<Response> {
+    // A session belongs to its machine (§10): only that machine deletes it.
+    if let Some(m) = remote_machine(&s, &id).await? {
+        let path = format!("/api/sessions/{id}");
+        return crate::sync::forward(&s, &m, &principal, axum::http::Method::DELETE, &path, None)
+            .await;
+    }
     if s.terminals.get(&id).is_some() {
         return Err(ApiError::conflict(
             "session_live",
@@ -193,7 +199,9 @@ async fn remove(
             other => other.into(),
         })?;
         // Launch files (memory, handoff) of this machine's launch.
-        let dir = paths.launch_dir(&sid);
+        let dir = paths
+            .launch_dir(&sid)
+            .map_err(|e| ApiError::bad_request(e.to_string()))?;
         if let Err(e) = std::fs::remove_dir_all(&dir)
             && e.kind() != std::io::ErrorKind::NotFound
         {
@@ -203,7 +211,9 @@ async fn remove(
     })
     .await?;
     s.emit(ServerEvent::SessionDeleted { session_id: id });
-    Ok(StatusCode::NO_CONTENT)
+    Ok(axum::response::IntoResponse::into_response(
+        StatusCode::NO_CONTENT,
+    ))
 }
 
 async fn patch(

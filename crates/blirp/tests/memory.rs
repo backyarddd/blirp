@@ -244,7 +244,7 @@ async fn continue_from_builds_a_handoff_and_distill_endpoint() {
     let s: Session = r.json().await.unwrap();
     assert_eq!(s.parent_session_id.as_deref(), Some(src.as_str()));
     assert_eq!(s.cwd, dir);
-    let launch = h.daemon.state.paths.launch_dir(&s.id);
+    let launch = h.daemon.state.paths.launch_dir(&s.id).unwrap();
     let handoff = std::fs::read_to_string(launch.join("handoff.md")).unwrap();
     assert!(handoff.contains("# blirp handoff"), "{handoff}");
     assert!(handoff.contains("**User:** implement the frobnicator"));

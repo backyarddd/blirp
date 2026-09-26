@@ -10,12 +10,12 @@ blirp runs as your user account and starts coding agents that can already read a
 |---|---|---|
 | Your user account on the machine | trusted | - |
 | Other local user accounts | untrusted | data dir `0700` and `runtime.json`/`identity.key` `0600` (macOS/Linux); Windows profile ACL; daemon bound to `127.0.0.1` and token-authenticated |
-| Web pages open in your browser | untrusted | token auth (never in a URL a page can guess), `SameSite=Strict` HttpOnly cookies, same-origin check on mutations and WebSocket upgrades, CSP, `X-Frame-Options: DENY`; a DNS-rebinding page gets no cookie and no token |
+| Web pages open in your browser | untrusted | token auth (never in a URL a page can guess), `SameSite=Strict` HttpOnly cookies, same-origin check on mutations and WebSocket upgrades, CSP, `X-Frame-Options: DENY`; the loopback listener answers only requests addressed to `127.0.0.1`, `localhost` or `[::1]` with its port, so a DNS-rebinding page is refused |
 | Devices on your LAN | untrusted | nothing listens on the LAN unless you run a hub with `portal.lan = true`; then TLS, one-time login links, hashed device tokens, per-device permissions, revocation |
-| Paired machines | trusted with your data | they receive all synced (redacted) history and may control terminals on other machines unless you turn it off per machine |
+| Paired machines | trusted with your data | they receive all synced (redacted) history and shared memory (records, briefs, wiki, resources); they write only their own folders, sessions and transcripts (checked by the hub and again by every node); they control a node only when it set `sync.allow_hub_control`, and the hub unless you turn it off per machine |
 | Portal browser devices | partly trusted | read all synced data, edit memory and settings; terminals only with **Terminal control** ([portal.md](portal.md#what-a-browser-device-may-do)) |
 | Relay and discovery servers (sync) | untrusted | end-to-end encryption and key authentication; they see endpoint ids and IP addresses only; can be disabled |
-| Summarizer provider | as trusted as your agent's provider | receives redacted transcript excerpts only if you use `claude`/`codex` summarizers; `ollama` or `none` keep everything local |
+| Summarizer provider | as trusted as your agent's provider | receives redacted transcript excerpts only if you use `claude`/`codex` summarizers (`codex` only when chosen explicitly); `ollama` or `none` keep everything local |
 | Agents and their transcripts | as trusted as the agents | blirp never gives an agent more rights than it has; memory is injected as context, see [prompt injection](#memory-is-context-not-instructions) |
 
 ## What is stored where
@@ -35,7 +35,7 @@ Nothing is stored outside `~/.blirp` except what you ask for: autostart entries 
 
 ## Redaction
 
-All transcript text, titles and event metadata pass through the redactor before they are written to the database, so nothing unredacted is ever synced, summarized, searched or injected. Matches become `[REDACTED:<kind>]`. The rule set follows gitleaks (cloud provider keys, GitHub/GitLab/Slack/Stripe/OpenAI/Anthropic/npm/PyPI/Hugging Face and other tokens, private key blocks, JWTs, credentials in connection strings, `.env` lines, secret-named keys, high-entropy values assigned to secret-looking names); the full list is in [memory.md](memory.md#redaction). Every rule has positive and negative tests.
+All transcript text, titles and event metadata pass through the redactor before they are written to the database, and so do memory written on the machine (records, briefs, wiki pages and resources from the UI, API, MCP `mem_record` or accepted suggestions) and the summarizer's reply, so nothing unredacted is ever synced, summarized, searched or injected. Matches become `[REDACTED:<kind>]`. The rule set follows gitleaks (cloud provider keys, GitHub/GitLab/Slack/Stripe/OpenAI/Anthropic/npm/PyPI/Hugging Face and other tokens, private key blocks, JWTs, credentials in connection strings, `.env` lines, secret-named keys, high-entropy values assigned to secret-looking names); the full list is in [memory.md](memory.md#redaction). Every rule has positive and negative tests.
 
 ### Redaction limits
 
@@ -51,7 +51,7 @@ Terminal output (the live screen) is not stored in the database and not redacted
 
 ## Authorization
 
-Requests run with `control` and `admin` rights ([api.md](api.md#listeners-and-authentication)). Only this machine's own local clients have `admin`: pairing, hub and device management, global hooks install, opening folders or editors on the machine, and stopping the daemon. `control` (launch/stop/resume sessions, distill, terminal input) is granted to local clients, to browser devices with **Terminal control**, and to paired machines unless turned off on the hub. The MCP endpoint and daemon shutdown exist only on the loopback listener.
+Requests run with `control` and `admin` rights ([api.md](api.md#listeners-and-authentication)). Only this machine's own local clients have `admin`: pairing, hub and device management, global hooks install, opening folders or editors on the machine, and stopping the daemon. `control` (launch/stop/resume sessions, distill, terminal input) is granted to local clients, to browser devices with **Terminal control**, to paired machines on the hub unless turned off there, and to the hub and other machines on a node only when the node set `sync.allow_hub_control = true`. Replicated rows are checked for ownership: a machine's folders, sessions and transcript events are written only by that machine, and ids are checked before anything is stored or used as a file name. Shared memory (records, briefs, wiki pages, resources, project names) can be edited by every paired machine by design; it is injected into agents, so a compromised machine can plant [prompt injection](#memory-is-context-not-instructions) there. The MCP endpoint and daemon shutdown exist only on the loopback listener.
 
 ## Network exposure
 
@@ -72,7 +72,7 @@ Never expose the daemon port or the portal to the internet. For remote access us
 
 ## Summarizer runs
 
-The `claude` and `codex` summarizers run with tools, hooks, plugins, MCP servers and session persistence disabled (`--tools ""`, `--safe-mode`, `--sandbox read-only`, ...), in an empty scratch folder, with a 180 s timeout that kills the process tree. A transcript cannot make the summarizer run commands or read files.
+The `claude` summarizer runs with every tool, hooks, plugins, MCP servers and session persistence disabled (`--tools ""`, `--safe-mode`, `--no-session-persistence`), in an empty scratch folder, with a 180 s timeout that kills the process tree: a transcript cannot make it run commands or read files. `codex` has no way to switch off every built-in tool: blirp disables its shell and exec tools, hooks, MCP servers, apps, plugins, browser and computer use and keeps its read-only sandbox, but a crafted transcript could still steer it to a remaining built-in tool (for example to read files). `auto` therefore never picks `codex`; it runs only when you set `summarizer = "codex"`. Summarizer replies are redacted before they are stored.
 
 ## Memory is context, not instructions
 

@@ -115,10 +115,10 @@ fn session_start_context(
     source: Option<&str>,
     memory: &MemoryConfig,
 ) -> ApiResult<Option<String>> {
-    let launch = paths.launch_dir(&session.id).join(MEMORY_FILE);
     if session.origin == SessionOrigin::Blirp
         && matches!(source, None | Some("startup"))
-        && let Ok(text) = std::fs::read_to_string(&launch)
+        && let Ok(dir) = paths.launch_dir(&session.id)
+        && let Ok(text) = std::fs::read_to_string(dir.join(MEMORY_FILE))
     {
         return Ok(Some(text));
     }
@@ -353,7 +353,8 @@ fn offline_context(env: &HookEnv<'_>, payload: &Value) -> Option<String> {
         None => Paths::resolve().ok()?,
     };
     if let Some(sid) = (env.var)("BLIRP_SESSION_ID").filter(|v| !v.is_empty())
-        && let Ok(text) = std::fs::read_to_string(paths.launch_dir(&sid).join(MEMORY_FILE))
+        && let Ok(dir) = paths.launch_dir(&sid)
+        && let Ok(text) = std::fs::read_to_string(dir.join(MEMORY_FILE))
     {
         return Some(text);
     }
@@ -548,9 +549,9 @@ mod tests {
     fn daemon_down_falls_back_to_launch_file() {
         let home = tempfile::tempdir().unwrap();
         let paths = Paths::at(home.path());
-        std::fs::create_dir_all(paths.launch_dir("S1")).unwrap();
+        std::fs::create_dir_all(paths.launch_dir("S1").unwrap()).unwrap();
         std::fs::write(
-            paths.launch_dir("S1").join(MEMORY_FILE),
+            paths.launch_dir("S1").unwrap().join(MEMORY_FILE),
             "# blirp memory: X",
         )
         .unwrap();
@@ -631,8 +632,8 @@ mod tests {
         }
         .write(&paths)
         .unwrap();
-        std::fs::create_dir_all(paths.launch_dir("S")).unwrap();
-        std::fs::write(paths.launch_dir("S").join(MEMORY_FILE), "M").unwrap();
+        std::fs::create_dir_all(paths.launch_dir("S").unwrap()).unwrap();
+        std::fs::write(paths.launch_dir("S").unwrap().join(MEMORY_FILE), "M").unwrap();
         let var = env_fn(vec![
             ("BLIRP_HOME", home.path().display().to_string()),
             ("BLIRP_SESSION_ID", "S".into()),

@@ -70,7 +70,8 @@ async fn inject(
                 .get_session(id)?
                 .ok_or_else(|| ApiError::not_found("session"))?;
             // What the session was actually given at launch, when it was launched here.
-            if let Ok(markdown) = std::fs::read_to_string(st.paths.launch_dir(id).join(MEMORY_FILE))
+            if let Ok(dir) = st.paths.launch_dir(id)
+                && let Ok(markdown) = std::fs::read_to_string(dir.join(MEMORY_FILE))
             {
                 return Ok(Injection { markdown });
             }

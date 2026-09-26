@@ -636,7 +636,7 @@ mod tests {
         .await;
         assert!(!err, "{text}");
         assert!(
-            text.contains("record r-Parser quirk") && text.contains("session s1 seq"),
+            text.contains("record r-Parser_quirk") && text.contains("session s1 seq"),
             "{text}"
         );
         assert!(text.contains("**"), "{text}");

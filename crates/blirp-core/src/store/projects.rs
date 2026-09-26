@@ -434,6 +434,11 @@ impl Store {
     pub fn delete_project(&self, id: &str) -> Result<()> {
         self.write(|tx| {
             let mut p = live_project_in(tx, id)?;
+            // Deleted first: other machines accept the removal of their
+            // folders only for a deleted project (§10 ownership).
+            p.deleted = true;
+            p.updated_at = crate::now_ms();
+            apply_in(tx, &Change::Project(p))?;
             let paths = all(
                 tx,
                 "SELECT * FROM project_paths WHERE project_id = ?1",
@@ -449,9 +454,6 @@ impl Store {
                     },
                 )?;
             }
-            p.deleted = true;
-            p.updated_at = crate::now_ms();
-            apply_in(tx, &Change::Project(p))?;
             Ok(())
         })
     }

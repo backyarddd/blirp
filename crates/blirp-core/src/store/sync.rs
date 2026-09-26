@@ -12,9 +12,128 @@
 use super::misc::device_row;
 use super::projects::path_row;
 use super::sessions::session_row;
-use super::{Change, Result, Store, StoreError, all, one, write_row};
-use rusqlite::{Transaction, params};
+use super::{Change, Result, Store, StoreError, all, check_ids, one, write_row};
+use crate::model::Session;
+use rusqlite::{Connection, Transaction, params};
 use serde::{Deserialize, Serialize};
+
+/// Largest accepted replicated entry. API bodies are capped at 2 MB, so a
+/// legitimate entry stays below this even with JSON escaping.
+pub const MAX_ENTRY_BYTES: usize = 4 << 20;
+
+/// Session fields only the session's own machine may set: they decide what
+/// that machine runs and reads (resume argv, folder, worktree, transcript).
+fn same_owned_fields(a: &Session, b: &Session) -> bool {
+    a.machine_id == b.machine_id
+        && a.agent == b.agent
+        && a.agent_session_id == b.agent_session_id
+        && a.origin == b.origin
+        && a.cwd == b.cwd
+        && a.worktree == b.worktree
+        && a.transcript_path == b.transcript_path
+        && a.parent_session_id == b.parent_session_id
+}
+
+/// §10 ownership: a machine's folders, sessions and their events are
+/// written only by that machine. Another machine may only re-point an
+/// existing folder or session to another project (merge), retitle a
+/// session or change its status fields, and unregister folders of a deleted
+/// project. `hub` is set when a node applies a pull: the hub also writes
+/// the machine rows of the nodes it pairs and revokes. Records, briefs,
+/// wiki pages, resources and projects are shared by design.
+fn check_owner(
+    c: &Connection,
+    origin: &str,
+    hub: Option<&str>,
+    change: &Change,
+) -> std::result::Result<(), String> {
+    let session = |id: &str| -> std::result::Result<Option<Session>, String> {
+        one(
+            c,
+            "SELECT * FROM sessions WHERE id = ?1",
+            params![id],
+            session_row,
+        )
+        .map_err(|e| e.to_string())
+    };
+    let path_project = |machine: &str,
+                        path: &str|
+     -> std::result::Result<Option<crate::model::ProjectPath>, String> {
+        one(
+            c,
+            "SELECT * FROM project_paths WHERE machine_id = ?1 AND path = ?2",
+            params![machine, path],
+            path_row,
+        )
+        .map_err(|e| e.to_string())
+    };
+    let foreign = |owner: &str| owner != origin;
+    match change {
+        Change::Machine(m) if foreign(&m.id) && hub != Some(origin) => {
+            Err(format!("machine row of {}", m.id))
+        }
+        Change::DeleteMachine { id } => Err(format!("machine delete of {id}")),
+        Change::ProjectPath(p) if foreign(&p.machine_id) => {
+            match path_project(&p.machine_id, &p.path)? {
+                Some(old) if old.git_remote == p.git_remote => Ok(()),
+                _ => Err(format!("folder of machine {}", p.machine_id)),
+            }
+        }
+        Change::DeleteProjectPath { machine_id, path } if foreign(machine_id) => {
+            let Some(old) = path_project(machine_id, path)? else {
+                return Ok(());
+            };
+            let deleted: bool = one(
+                c,
+                "SELECT deleted FROM projects WHERE id = ?1",
+                params![old.project_id],
+                |r| r.get(0),
+            )
+            .map_err(|e| e.to_string())?
+            .unwrap_or(true);
+            if deleted {
+                Ok(())
+            } else {
+                Err(format!("folder removal on machine {machine_id}"))
+            }
+        }
+        Change::Session(s) => match session(&s.id)? {
+            Some(old) if !foreign(&old.machine_id) && !foreign(&s.machine_id) => Ok(()),
+            Some(old) if same_owned_fields(&old, s) => Ok(()),
+            Some(old) => Err(format!("session of machine {}", old.machine_id)),
+            None if !foreign(&s.machine_id) => Ok(()),
+            None => Err(format!("new session for machine {}", s.machine_id)),
+        },
+        Change::DeleteSession { id } => match session(id)? {
+            Some(old) if foreign(&old.machine_id) => {
+                Err(format!("delete of a session of machine {}", old.machine_id))
+            }
+            _ => Ok(()),
+        },
+        Change::Event(e) => match session(&e.session_id)? {
+            Some(s) if !foreign(&s.machine_id) => Ok(()),
+            Some(s) => Err(format!("event of a session of machine {}", s.machine_id)),
+            None => Err("event of an unknown session".into()),
+        },
+        _ => Ok(()),
+    }
+}
+
+/// Everything a replicated entry must pass before it is logged or applied.
+fn check_entry(
+    c: &Connection,
+    origin: &str,
+    hub: Option<&str>,
+    e: &WireEntry,
+) -> std::result::Result<Change, String> {
+    if e.payload_json.len() > MAX_ENTRY_BYTES {
+        return Err(format!("payload of {} bytes", e.payload_json.len()));
+    }
+    let change = e.change().map_err(|err| err.to_string())?;
+    check_ids(&change).map_err(|err| err.to_string())?;
+    check_owner(c, origin, hub, &change)?;
+    Ok(change)
+}
 
 /// One outbox entry as sent from a node to the hub. `payload_json` is the
 /// serialized [`Change`].
@@ -274,21 +393,14 @@ impl Store {
                     )));
                 }
                 acked = acked.max(e.origin_seq);
-                let change = match e.change() {
+                let change = match check_entry(tx, origin, None, e) {
                     Ok(c) => c,
                     Err(err) => {
-                        tracing::warn!(origin, origin_seq = e.origin_seq, error = %err, "rejecting replicated entry");
+                        tracing::warn!(origin, origin_seq = e.origin_seq, entity = %e.entity, error = %err, "rejecting replicated entry");
                         rejected += 1;
                         continue;
                     }
                 };
-                if let Change::Machine(m) = &change
-                    && m.id != origin
-                {
-                    tracing::warn!(origin, target = %m.id, "rejecting machine row written for another machine");
-                    rejected += 1;
-                    continue;
-                }
                 let n = tx.execute(
                     "INSERT OR IGNORE INTO hub_log(origin_machine, origin_seq, entity, op, key, payload_json, ts)
                      VALUES (?1,?2,?3,?4,?5,?6,?7)",
@@ -417,10 +529,11 @@ impl Store {
                         if *hub_seq <= cur.last_pulled_hub_seq {
                             continue;
                         }
-                        let change = match entry.change() {
+                        // The hub checked this too; a node does not rely on it.
+                        let change = match check_entry(tx, origin_machine, Some(hub), entry) {
                             Ok(c) => c,
                             Err(err) => {
-                                tracing::warn!(origin = %origin_machine, hub_seq, error = %err, "skipping malformed replicated entry");
+                                tracing::warn!(origin = %origin_machine, hub_seq, entity = %entry.entity, error = %err, "skipping rejected replicated entry");
                                 continue;
                             }
                         };
@@ -684,6 +797,176 @@ mod tests {
         assert_eq!((out.acked, out.inserted, out.rejected), (2, 0, 2));
         assert_eq!(hub.hub_head().unwrap(), 0);
         assert!(hub.get_project("p").unwrap().is_none());
+    }
+
+    fn wire(seq: i64, change: &Change) -> WireEntry {
+        let (entity, op, key) = change.describe();
+        WireEntry {
+            origin_seq: seq,
+            entity: entity.into(),
+            op: op.into(),
+            key,
+            payload_json: serde_json::to_string(change).unwrap(),
+            ts: 1,
+        }
+    }
+
+    fn session_of(id: &str, machine: &str) -> crate::model::Session {
+        crate::model::Session {
+            id: id.into(),
+            project_id: "p".into(),
+            machine_id: machine.into(),
+            agent: "codex".into(),
+            agent_session_id: Some("r1".into()),
+            origin: crate::model::SessionOrigin::External,
+            cwd: "/w".into(),
+            title: None,
+            status: crate::model::SessionStatus::Completed,
+            branch: None,
+            worktree: None,
+            transcript_path: None,
+            started_at: 1,
+            ended_at: None,
+            last_activity_at: 1,
+            exit_code: None,
+            summary: None,
+            distilled_through_seq: 0,
+            tokens_in: 0,
+            tokens_out: 0,
+            cost_usd: 0.0,
+            parent_session_id: None,
+            stopped_by_user: false,
+        }
+    }
+
+    #[test]
+    fn machines_only_write_their_own_rows() {
+        use crate::model::{Event, EventKind, ProjectPath};
+        let (_h, hub) = temp_store();
+        hub.apply(project("p", "shared")).unwrap();
+        let hs = session_of("hs", "H");
+        hub.apply(Change::Session(hs.clone())).unwrap();
+        let path = |m: &str, p: &str| ProjectPath {
+            project_id: "p".into(),
+            machine_id: m.into(),
+            path: p.into(),
+            git_remote: None,
+        };
+        hub.apply(Change::ProjectPath(path("H", "/hub"))).unwrap();
+
+        let evil = [
+            // A folder on the hub's disk (then readable via the files API).
+            Change::ProjectPath(path("H", "/Users/h")),
+            // A session of the hub with an option-shaped resume id.
+            Change::Session(session_of("planted", "H")),
+            Change::Session(crate::model::Session {
+                agent_session_id: Some("-cnotify=[\"calc\"]".into()),
+                ..hs.clone()
+            }),
+            Change::Session(crate::model::Session {
+                machine_id: "A".into(),
+                ..hs.clone()
+            }),
+            Change::DeleteSession { id: "hs".into() },
+            Change::Event(Event {
+                session_id: "hs".into(),
+                seq: 1,
+                ts: 1,
+                kind: EventKind::User,
+                text: "x".into(),
+                meta: None,
+            }),
+            Change::DeleteMachine { id: "H".into() },
+            // A live project's folder cannot be removed by another machine.
+            Change::DeleteProjectPath {
+                machine_id: "H".into(),
+                path: "/hub".into(),
+            },
+            // Ids that would escape launch/<id>/.
+            Change::Session(session_of("../../x", "A")),
+        ];
+        let mut entries: Vec<WireEntry> = evil
+            .iter()
+            .enumerate()
+            .map(|(i, c)| wire(i as i64 + 1, c))
+            .collect();
+        let mut big = wire(100, &project("q", &"x".repeat(MAX_ENTRY_BYTES)));
+        big.origin_seq = entries.len() as i64 + 1;
+        entries.push(big);
+        let out = hub.hub_ingest("H", "A", &entries).unwrap();
+        assert_eq!(
+            (out.inserted, out.rejected),
+            (0, entries.len()),
+            "every entry is rejected"
+        );
+        assert_eq!(hub.get_session("hs").unwrap().unwrap(), hs);
+        assert!(hub.get_session("planted").unwrap().is_none());
+        assert_eq!(hub.project_paths("p").unwrap(), [path("H", "/hub")]);
+
+        // Allowed: A's own rows, retitling and re-pointing H's session (merge),
+        // and dropping H's folder once the project is deleted.
+        let mut own = session_of("as", "A");
+        own.cwd = "/a".into();
+        let fine = [
+            Change::Session(own),
+            Change::ProjectPath(path("A", "/a")),
+            Change::Session(crate::model::Session {
+                title: Some("renamed".into()),
+                ..hs.clone()
+            }),
+            Change::Project(crate::model::Project {
+                id: "p".into(),
+                name: "shared".into(),
+                created_at: 1,
+                updated_at: 2,
+                deleted: true,
+            }),
+            Change::DeleteProjectPath {
+                machine_id: "H".into(),
+                path: "/hub".into(),
+            },
+        ];
+        let entries: Vec<WireEntry> = fine
+            .iter()
+            .enumerate()
+            .map(|(i, c)| wire(100 + i as i64, c))
+            .collect();
+        let out = hub.hub_ingest("H", "A", &entries).unwrap();
+        assert_eq!((out.inserted, out.rejected), (fine.len(), 0));
+        assert_eq!(
+            hub.get_session("hs").unwrap().unwrap().title.as_deref(),
+            Some("renamed")
+        );
+        assert_eq!(hub.project_paths("p").unwrap(), [path("A", "/a")]);
+
+        // A node checks pulled entries itself: the hub cannot plant a
+        // folder of the node, and a third machine cannot either.
+        let (_b, b) = temp_store();
+        let page = HubPage {
+            own_seen: 0,
+            entries: vec![
+                PulledEntry::Remote {
+                    hub_seq: 1,
+                    origin_machine: "H".into(),
+                    entry: wire(1, &project("p", "shared")),
+                },
+                PulledEntry::Remote {
+                    hub_seq: 2,
+                    origin_machine: "H".into(),
+                    entry: wire(2, &Change::ProjectPath(path("B", "/etc"))),
+                },
+                PulledEntry::Remote {
+                    hub_seq: 3,
+                    origin_machine: "C".into(),
+                    entry: wire(1, &Change::Session(session_of("cs", "B"))),
+                },
+            ],
+            up_to: 3,
+            more: false,
+        };
+        assert_eq!(b.node_apply_pull("H", &page).unwrap(), 1);
+        assert!(b.project_paths("p").unwrap().is_empty());
+        assert!(b.get_session("cs").unwrap().is_none());
     }
 
     #[test]

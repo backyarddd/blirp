@@ -410,7 +410,13 @@ fn integrate(
     agent: &Agent,
     handoff: Option<&str>,
 ) -> LaunchIntegration {
-    let launch_dir = state.paths.launch_dir(&session.id);
+    let launch_dir = match state.paths.launch_dir(&session.id) {
+        Ok(d) => d,
+        Err(e) => {
+            tracing::warn!(error = %e, "no launch dir; launching without memory");
+            return LaunchIntegration::default();
+        }
+    };
     let config = state.config().memory;
     let max = config.inject_max_chars as usize;
     // Turned off by the user (§12): no memory, but a handoff pack the user
@@ -515,7 +521,7 @@ async fn start(
         (Some(p), _) => Some(p),
         (None, Some(_)) if agent.id != "shell" => Some(continue_prompt(
             integ.inject,
-            &state.paths.launch_dir(&session.id).join(HANDOFF_FILE),
+            &integ.memory_file.with_file_name(HANDOFF_FILE),
         )),
         _ => None,
     };
