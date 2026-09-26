@@ -126,11 +126,14 @@ pub async fn start_daemon(paths: &Paths, cli: &Path) -> anyhow::Result<(RuntimeI
                     return Ok((info, true));
                 }
                 if Instant::now() >= deadline {
-                    bail!(
-                        "the autostart service did not bring the daemon up within {}s; \
-                         see `blirp service status` and `blirp logs`",
+                    // Running beats supervised. Should the service's daemon
+                    // still come up, `daemon --detach` finds it and is done.
+                    eprintln!(
+                        "blirp: the autostart service did not bring the daemon up within {}s \
+                         (see `blirp service status`); starting it directly",
                         STARTUP.as_secs()
                     );
+                    break;
                 }
                 tokio::time::sleep(Duration::from_millis(200)).await;
             }

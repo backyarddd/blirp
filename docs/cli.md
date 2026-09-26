@@ -52,7 +52,7 @@ Runs the daemon in the foreground: local API and UI on `127.0.0.1`, terminals, t
 
 ## blirp start
 
-Starts the daemon in the background unless it is running, and returns once it answers. When an autostart service is installed for this data directory (macOS LaunchAgent, Linux `systemd --user` unit; see `blirp service`) it starts the daemon through it (`launchctl kickstart`, `systemctl --user start`), so the service keeps supervising it; otherwise it runs `blirp daemon --detach`. The install scripts use it after an upgrade, and the desktop app when it finds no daemon.
+Starts the daemon in the background unless it is running, and returns once it answers. When an autostart service is installed for this data directory (macOS LaunchAgent, Linux `systemd --user` unit; see `blirp service`) it starts the daemon through it (`launchctl kickstart`, `systemctl --user start`), so the service keeps supervising it; otherwise it runs `blirp daemon --detach`. A service whose binary no longer exists is skipped, and when the service does not bring the daemon up within 20 s it is started directly (with a warning). The install scripts use it after an upgrade, and the desktop app when it finds no daemon.
 
 ## blirp status
 

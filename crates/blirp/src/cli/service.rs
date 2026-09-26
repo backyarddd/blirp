@@ -296,6 +296,51 @@ fn serves_home(definition: &str, entry: &str, home: &Path, default_home: Option<
     }
 }
 
+/// Whether starting through this launchd/systemd definition can work: it
+/// serves `home` (`serves_home`) and the binary it runs still exists. A
+/// definition left behind by a moved or deleted binary would "start" and
+/// then fail at once, so the caller starts the daemon directly instead.
+#[cfg_attr(windows, allow(dead_code))]
+fn usable(definition: &str, exe: Option<PathBuf>, entry: &str, home: &Path) -> bool {
+    serves_home(definition, entry, home, default_home().as_deref())
+        && exe.is_some_and(|e| e.is_file())
+}
+
+/// The binary a LaunchAgent runs: its first `ProgramArguments` string.
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+fn plist_exe(plist: &str) -> Option<PathBuf> {
+    let args = plist.split_once("<key>ProgramArguments</key>")?.1;
+    let first = args.split_once("<string>")?.1.split_once("</string>")?.0;
+    let text = first
+        .replace("&lt;", "<")
+        .replace("&gt;", ">")
+        .replace("&quot;", "\"")
+        .replace("&apos;", "'")
+        // Last, so an escaped entity is not unescaped twice.
+        .replace("&amp;", "&");
+    Some(PathBuf::from(text))
+}
+
+/// The binary a systemd unit runs: the first word of `ExecStart=`, quoted
+/// the way `systemd_quote` writes it (a hand-edited unit may not quote it).
+#[cfg_attr(any(windows, target_os = "macos"), allow(dead_code))]
+fn unit_exe(unit: &str) -> Option<PathBuf> {
+    let line = unit.lines().find_map(|l| l.strip_prefix("ExecStart="))?;
+    let Some(quoted) = line.strip_prefix('"') else {
+        return line.split_whitespace().next().map(PathBuf::from);
+    };
+    let mut out = String::new();
+    let mut chars = quoted.chars();
+    while let Some(c) = chars.next() {
+        match c {
+            '\\' => out.push(chars.next()?),
+            '"' => return Some(PathBuf::from(out.replace("%%", "%"))),
+            c => out.push(c),
+        }
+    }
+    None
+}
+
 /// `~/.blirp`: the data dir of a service installed without `BLIRP_HOME`.
 #[cfg_attr(windows, allow(dead_code))]
 fn default_home() -> Option<PathBuf> {
@@ -408,9 +453,9 @@ mod platform {
             "<key>BLIRP_HOME</key>\n    <string>{}</string>",
             xml_escape(&home.display().to_string())
         );
-        let serves = std::fs::read_to_string(plist_path()?)
-            .is_ok_and(|p| serves_home(&p, &entry, home, default_home().as_deref()));
-        if !serves || !loaded()? {
+        let usable = std::fs::read_to_string(plist_path()?)
+            .is_ok_and(|p| usable(&p, plist_exe(&p), &entry, home));
+        if !usable || !loaded()? {
             return Ok(false);
         }
         must(
@@ -513,9 +558,9 @@ mod platform {
             "Environment={}",
             systemd_quote(&format!("BLIRP_HOME={}", home.display()))
         );
-        let serves = std::fs::read_to_string(unit_path()?)
-            .is_ok_and(|u| serves_home(&u, &entry, home, default_home().as_deref()));
-        if !serves {
+        let usable = std::fs::read_to_string(unit_path()?)
+            .is_ok_and(|u| usable(&u, unit_exe(&u), &entry, home));
+        if !usable {
             return Ok(false);
         }
         let enabled = tool(
@@ -751,6 +796,25 @@ WantedBy=default.target
         let bare = systemd_unit(Path::new("/b"), None, None);
         assert!(!bare.contains("Environment="));
         assert!(bare.contains("ExecStart=\"/b\" daemon\nRestart=on-failure"));
+    }
+
+    #[test]
+    fn service_definitions_name_their_binary() {
+        let odd = Path::new(r#"/Apps/R&D <x> "q" 5%/b\in/blirp"#);
+        let plist = launch_agent_plist(odd, Path::new("/l"), Some(Path::new("/h")), None);
+        assert_eq!(plist_exe(&plist).as_deref(), Some(odd));
+        let unit = systemd_unit(odd, Some(Path::new("/h")), Some("/usr/bin"));
+        assert_eq!(unit_exe(&unit).as_deref(), Some(odd));
+        assert_eq!(
+            unit_exe("[Service]\nExecStart=/usr/bin/blirp daemon\n").as_deref(),
+            Some(Path::new("/usr/bin/blirp"))
+        );
+        assert_eq!(unit_exe("[Service]\nExecStart=\"/unterminated\n"), None);
+        assert_eq!(plist_exe("<plist></plist>"), None);
+        // A definition whose binary is gone is not used.
+        let home = default_home().unwrap_or_else(|| PathBuf::from("/h"));
+        let gone = systemd_unit(Path::new("/nonexistent/blirp"), None, None);
+        assert!(!usable(&gone, unit_exe(&gone), "", &home));
     }
 
     #[test]

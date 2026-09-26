@@ -6,8 +6,9 @@ use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
 const HEALTH_TIMEOUT: Duration = Duration::from_secs(2);
-/// `blirp start` itself waits up to 20 s for health.
-const DETACH_TIMEOUT: Duration = Duration::from_secs(40);
+/// `blirp start` waits up to 20 s for the autostart service's daemon, then up
+/// to 20 s for one it starts directly (`daemon --detach`); this outlasts both.
+const DETACH_TIMEOUT: Duration = Duration::from_secs(60);
 const STOP_TIMEOUT: Duration = Duration::from_secs(15);
 
 fn http() -> anyhow::Result<reqwest::Client> {
