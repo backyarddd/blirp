@@ -93,6 +93,11 @@ pub struct CustomAgent {
 #[serde(default, deny_unknown_fields)]
 pub struct SessionsConfig {
     pub worktree_default: bool,
+    /// Keep this machine from sleeping while any session it runs is live.
+    /// Unset: on for the hub role (cloud sessions), off otherwise.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub keep_awake: Option<bool>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS, Default)]
@@ -212,6 +217,14 @@ impl Default for UpdateConfig {
 }
 
 impl Config {
+    /// Whether live sessions keep this machine awake (`sessions.keep_awake`,
+    /// default on for a hub).
+    pub fn keep_awake(&self) -> bool {
+        self.sessions
+            .keep_awake
+            .unwrap_or(self.sync.role == MachineRole::Hub)
+    }
+
     /// Load `path`, writing a default file first if it does not exist.
     pub fn load_or_init(path: &Path) -> Result<Self, ConfigError> {
         match std::fs::read_to_string(path) {
@@ -368,6 +381,7 @@ command = "my-agent"
 args = ["--fast"]
 [sessions]
 worktree_default = true
+keep_awake = false
 [memory]
 summarizer = "ollama"
 ollama_model = "llama3"
@@ -403,6 +417,18 @@ check = false
         assert!(c.portal.lan);
         assert!(!c.update.check);
         assert!(Config::default().update.check);
+        assert!(!c.keep_awake());
+    }
+
+    #[test]
+    fn keep_awake_defaults_to_the_hub_role() {
+        assert!(!Config::default().keep_awake());
+        let hub = parse("[sync]\nrole = \"hub\"").unwrap();
+        assert!(hub.keep_awake());
+        let off = parse("[sync]\nrole = \"hub\"\n[sessions]\nkeep_awake = false").unwrap();
+        assert!(!off.keep_awake());
+        let on = parse("[sessions]\nkeep_awake = true").unwrap();
+        assert!(on.keep_awake());
     }
 
     #[test]

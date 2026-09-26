@@ -4,9 +4,11 @@
 pub mod agents;
 pub mod api;
 pub mod cli;
+pub mod clone;
 pub mod daemon;
 pub mod hooks;
 pub mod ingest;
+pub mod keep_awake;
 pub mod mcp;
 pub mod memory;
 pub mod portal;

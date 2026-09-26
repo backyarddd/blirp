@@ -195,7 +195,8 @@ fn canonical(p: &Path) -> PathBuf {
     dunce::canonicalize(p).unwrap_or_else(|_| p.to_path_buf())
 }
 
-fn remote_url(dir: &Path) -> Option<String> {
+/// URL of `origin`, else of the first remote; `None` without remotes.
+pub fn remote_url(dir: &Path) -> Option<String> {
     if let Ok(url) = git_line(dir, &["remote", "get-url", "origin"]) {
         return Some(url).filter(|u| !u.is_empty());
     }

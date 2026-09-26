@@ -1,7 +1,7 @@
 //! Agent specs (§7): binaries, launch/resume argv, detection.
 
 use blirp_core::config::Config;
-use blirp_core::model::{AgentInfo, AgentIntegration, InjectMode, IntegrationState};
+use blirp_core::model::{AgentAuth, AgentInfo, AgentIntegration, InjectMode, IntegrationState};
 use blirp_core::process;
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
@@ -456,6 +456,34 @@ pub fn probe_version(path: &Path) -> Option<String> {
         .map(|l| l.chars().take(120).collect())
 }
 
+/// `claude auth status` (JSON by default, local only: no model call, no
+/// tokens). It runs in the daemon's own context, which is what matters: on
+/// macOS a daemon started over SSH cannot read the login keychain and
+/// reports "not logged in" even when a terminal on the Mac is. `None` when
+/// the CLI has no such command (older versions) or its output is not JSON.
+pub fn probe_claude_auth(path: &Path) -> Option<AgentAuth> {
+    let cmd = wrap_for_platform(path, vec!["auth".into(), "status".into()]).ok()?;
+    match process::run(cmd.std_command(), Duration::from_secs(10), 64 * 1024) {
+        // Exits 1 when logged out; the JSON says which.
+        Ok(out) => parse_claude_auth(&out.stdout),
+        Err(e) => {
+            tracing::debug!(error = %e, "claude auth status failed");
+            None
+        }
+    }
+}
+
+fn parse_claude_auth(stdout: &[u8]) -> Option<AgentAuth> {
+    let v: serde_json::Value = serde_json::from_slice(stdout).ok()?;
+    let logged_in = v.get("loggedIn")?.as_bool()?;
+    let method = v
+        .get("authMethod")
+        .and_then(|m| m.as_str())
+        .filter(|m| !m.is_empty() && *m != "none")
+        .map(str::to_string);
+    Some(AgentAuth { logged_in, method })
+}
+
 /// Memory integration status of `agent` against the real user configs (read-only).
 pub fn integration(agent: &str) -> AgentIntegration {
     let status = match crate::hooks::install::Homes::from_env() {
@@ -492,6 +520,10 @@ pub fn detect_all(config: &Config) -> Vec<AgentInfo> {
                         Some(p) if a.id != "shell" => probe_version(p),
                         _ => None,
                     };
+                    let auth = match &a.path {
+                        Some(p) if a.id == "claude" => probe_claude_auth(p),
+                        _ => None,
+                    };
                     AgentInfo {
                         id: a.id.clone(),
                         display_name: a.display_name.clone(),
@@ -501,6 +533,7 @@ pub fn detect_all(config: &Config) -> Vec<AgentInfo> {
                         version,
                         can_resume: a.can_resume(),
                         integration: integration(&a.id),
+                        auth,
                     }
                 })
             })
@@ -518,6 +551,7 @@ pub fn detect_all(config: &Config) -> Vec<AgentInfo> {
                     version: None,
                     can_resume: a.can_resume(),
                     integration: integration(&a.id),
+                    auth: None,
                 })
             })
             .collect()
@@ -527,6 +561,29 @@ pub fn detect_all(config: &Config) -> Vec<AgentInfo> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // Output of `claude auth status` 2.1.x (logged in; over SSH on macOS).
+    #[test]
+    fn claude_auth_status_is_parsed() {
+        let yes = br#"{"loggedIn": true, "authMethod": "claude.ai", "apiProvider": "firstParty", "email": "x@y"}"#;
+        assert_eq!(
+            parse_claude_auth(yes),
+            Some(AgentAuth {
+                logged_in: true,
+                method: Some("claude.ai".into())
+            })
+        );
+        let no = br#"{"loggedIn": false, "authMethod": "none", "apiProvider": "firstParty"}"#;
+        assert_eq!(
+            parse_claude_auth(no),
+            Some(AgentAuth {
+                logged_in: false,
+                method: None
+            })
+        );
+        assert_eq!(parse_claude_auth(b"error: unknown command 'auth'"), None);
+        assert_eq!(parse_claude_auth(br#"{"other": 1}"#), None);
+    }
 
     fn agent(id: &str, path: &str) -> Agent {
         let mut a = Agent::resolve(id, &Config::default()).unwrap();

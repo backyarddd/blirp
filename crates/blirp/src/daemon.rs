@@ -257,6 +257,11 @@ impl Daemon {
                             if let Err(e) = st.store.backfill_events(2000) {
                                 tracing::warn!(error = %e, "queueing events for replication failed");
                             }
+                            st.keep_awake.update(
+                                st.terminals.all().len(),
+                                st.config().keep_awake(),
+                                std::time::Instant::now(),
+                            );
                             owned
                         })
                         .await
@@ -333,6 +338,14 @@ impl Daemon {
         }
         if let Err(e) = self.monitor.await {
             tracing::error!(error = %e, "status monitor failed");
+        }
+        let state = self.state.clone();
+        if let Err(e) = tokio::task::spawn_blocking(move || {
+            state.keep_awake.update(0, false, std::time::Instant::now());
+        })
+        .await
+        {
+            tracing::error!(error = %e, "releasing sleep prevention failed");
         }
         RuntimeInfo::remove_if_owned(&self.state.paths, std::process::id())?;
         tracing::info!("blirp daemon stopped");

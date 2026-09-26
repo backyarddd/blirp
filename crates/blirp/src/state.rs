@@ -36,6 +36,10 @@ pub struct AppState {
     pub sync: crate::sync::SyncState,
     /// Single-use WebSocket tickets of the loopback listener (§11).
     pub ws_tickets: crate::api::ticket::WsTickets,
+    /// Sleep prevention while sessions run (`sessions.keep_awake`).
+    pub keep_awake: crate::keep_awake::KeepAwake,
+    /// `git clone` jobs started with `POST /api/machines/:id/clone`.
+    pub clones: crate::clone::CloneJobs,
 }
 
 impl AppState {
@@ -65,6 +69,8 @@ impl AppState {
             ingest: RwLock::new(Arc::new(NoopIngest)),
             sync: crate::sync::SyncState::default(),
             ws_tickets: crate::api::ticket::WsTickets::default(),
+            keep_awake: crate::keep_awake::KeepAwake::default(),
+            clones: crate::clone::CloneJobs::default(),
         }
     }
 
