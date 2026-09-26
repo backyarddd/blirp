@@ -19,7 +19,7 @@ pub(super) fn project_row(r: &Row<'_>) -> rusqlite::Result<Project> {
     })
 }
 
-fn path_row(r: &Row<'_>) -> rusqlite::Result<ProjectPath> {
+pub(super) fn path_row(r: &Row<'_>) -> rusqlite::Result<ProjectPath> {
     Ok(ProjectPath {
         project_id: r.get("project_id")?,
         machine_id: r.get("machine_id")?,

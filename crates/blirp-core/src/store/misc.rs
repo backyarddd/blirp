@@ -17,7 +17,7 @@ fn machine_row(r: &Row<'_>) -> rusqlite::Result<Machine> {
     })
 }
 
-fn device_row(r: &Row<'_>) -> rusqlite::Result<Device> {
+pub(super) fn device_row(r: &Row<'_>) -> rusqlite::Result<Device> {
     Ok(Device {
         id: r.get("id")?,
         name: r.get("name")?,
