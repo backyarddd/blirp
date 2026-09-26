@@ -2,11 +2,13 @@
   import Pencil from '@lucide/svelte/icons/pencil';
   import Plus from '@lucide/svelte/icons/plus';
   import Trash from '@lucide/svelte/icons/trash-2';
+  import Merge from '@lucide/svelte/icons/git-merge';
   import { api } from '../lib/api/client';
   import { app } from '../lib/app.svelte';
   import { navigate } from '../lib/router.svelte';
   import { href, type ProjectTab } from '../lib/router';
   import ProjectBadge from '../lib/components/ProjectBadge.svelte';
+  import Modal from '../lib/components/Modal.svelte';
   import Overview from './project/Overview.svelte';
   import Sessions from './project/Sessions.svelte';
   import Memory from './project/Memory.svelte';
@@ -49,7 +51,11 @@
 
   async function remove(): Promise<void> {
     if (!project) return;
-    if (!confirm(`Remove "${project.name}" from blirp? Files on disk are not touched; its memory is hidden.`)) return;
+    const msg =
+      `Delete "${project.name}" from blirp? It is hidden and its folders are unregistered on every synced machine. ` +
+      'Files on disk are not touched, and its sessions and memory stay in the database. ' +
+      'A new session in one of its folders starts a new project.';
+    if (!confirm(msg)) return;
     const ok = await app.act(async () => {
       await api.projects.remove(project.id);
       return true;
@@ -58,6 +64,35 @@
       app.removeProject(project.id);
       navigate(href.projects());
     }
+  }
+
+  let merging = $state(false);
+  let mergeInto = $state('');
+  let mergeBusy = $state(false);
+  const mergeTargets = $derived(
+    app.projects.filter((p) => p.id !== projectId).sort((a, b) => a.name.localeCompare(b.name)),
+  );
+  const mergeTarget = $derived(app.projectById.get(mergeInto));
+
+  function openMerge(): void {
+    mergeInto = '';
+    merging = true;
+  }
+
+  async function merge(): Promise<void> {
+    const from = project;
+    const into = mergeTarget;
+    if (!from || !into) return;
+    mergeBusy = true;
+    const merged = await app.act(() => api.projects.merge(from.id, into.id), `Merged "${from.name}" into "${into.name}"`);
+    mergeBusy = false;
+    if (!merged) return;
+    merging = false;
+    app.upsertProject(merged);
+    app.removeProject(from.id);
+    // Moved sessions keep their ids; the daemon only reports the two projects.
+    void app.refreshSessions();
+    navigate(href.project(merged.id));
   }
 </script>
 
@@ -85,6 +120,7 @@
         {:else}
           <h1 class="page-title ellipsis">{project.name}</h1>
           <ProjectBadge {project} />
+          {#if app.control}
           <button
             type="button"
             class="icon-btn sm"
@@ -95,10 +131,16 @@
               renaming = true;
             }}><Pencil size={14} /></button
           >
+          {/if}
         {/if}
         <span class="spacer"></span>
-        <button type="button" class="btn ghost sm" onclick={remove}><Trash size={14} aria-hidden="true" />Remove</button>
-        <button type="button" class="btn primary" onclick={() => app.openNewSession(project.id)}><Plus size={16} aria-hidden="true" />New session</button>
+        {#if app.control}
+          <button type="button" class="btn ghost sm" onclick={openMerge} disabled={mergeTargets.length === 0}
+            ><Merge size={14} aria-hidden="true" />Merge into…</button
+          >
+          <button type="button" class="btn ghost sm" onclick={remove}><Trash size={14} aria-hidden="true" />Delete</button>
+          <button type="button" class="btn primary" onclick={() => app.openNewSession(project.id)}><Plus size={16} aria-hidden="true" />New session</button>
+        {/if}
       </div>
       <ul class="paths small muted">
         {#each project.paths as p (p.machine_id + p.path)}
@@ -140,6 +182,30 @@
     {/if}
   </div>
 </div>
+
+<Modal open={merging && project !== undefined} title="Merge project" onclose={() => (merging = false)}>
+  {#if project}
+    <form id="merge-project" onsubmit={(e) => (e.preventDefault(), void merge())}>
+      <label class="field">
+        <span>Merge "{project.name}" into</span>
+        <select class="select" bind:value={mergeInto} required>
+          <option value="" disabled>Pick a project</option>
+          {#each mergeTargets as p (p.id)}<option value={p.id}>{p.name}</option>{/each}
+        </select>
+      </label>
+      <p class="small">
+        Everything in "{project.name}" moves to {mergeTarget ? `"${mergeTarget.name}"` : 'the project you pick'}: its folders, sessions,
+        records, wiki pages (a clashing page name gets a number added), resources and pending suggestions. Its brief moves only when
+        the target has none; otherwise the target's brief is kept. "{project.name}" is then deleted.
+      </p>
+      <p class="small muted">The change syncs to every paired machine and cannot be undone. Files on disk are not touched.</p>
+    </form>
+  {/if}
+  {#snippet footer()}
+    <button type="button" class="btn" onclick={() => (merging = false)}>Cancel</button>
+    <button type="submit" form="merge-project" class="btn primary" disabled={!mergeTarget || mergeBusy}>{mergeBusy ? 'Merging…' : 'Merge'}</button>
+  {/snippet}
+</Modal>
 
 <style>
   .crumbs a {
