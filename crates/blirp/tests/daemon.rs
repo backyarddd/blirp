@@ -434,3 +434,67 @@ async fn shutdown_endpoint_requests_stop() {
     .expect("stop was not requested");
     h.daemon.shutdown().await.unwrap();
 }
+
+async fn wait_no_terminal(h: &Harness, id: &str) {
+    let deadline = Instant::now() + Duration::from_secs(20);
+    while h.daemon.state.terminals.get(id).is_some() {
+        assert!(Instant::now() < deadline, "terminal {id} never went away");
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+}
+
+// Concurrent resumes of one session must start exactly one agent; the
+// others are refused while the first is starting or running.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn concurrent_resumes_start_one_agent() {
+    let h = Harness::start().await;
+    let proj = h._home.path().join("race");
+    std::fs::create_dir(&proj).unwrap();
+    let r = h
+        .send(
+            reqwest::Method::POST,
+            "/api/sessions",
+            json!({"cwd": proj, "agent": "shell"}),
+        )
+        .await;
+    assert_eq!(r.status(), 201);
+    let session: Session = r.json().await.unwrap();
+    let stop = format!("/api/sessions/{}/stop", session.id);
+    assert_eq!(
+        h.send(reqwest::Method::POST, &stop, json!({}))
+            .await
+            .status(),
+        202
+    );
+    wait_status(&h, &session.id, SessionStatus::Completed).await;
+    wait_no_terminal(&h, &session.id).await;
+
+    for _ in 0..3 {
+        let path = format!("/api/sessions/{}/resume", session.id);
+        let codes: Vec<u16> = futures_util::future::join_all(
+            (0..8).map(|_| h.send(reqwest::Method::POST, &path, json!({}))),
+        )
+        .await
+        .into_iter()
+        .map(|r| r.status().as_u16())
+        .collect();
+        assert_eq!(codes.iter().filter(|c| **c == 200).count(), 1, "{codes:?}");
+        assert!(codes.iter().all(|c| *c == 200 || *c == 409), "{codes:?}");
+        let live = h.daemon.state.terminals.all();
+        assert_eq!(live.len(), 1);
+        assert_eq!(live[0].session_id, session.id);
+
+        // Stopping ends the one agent and frees the session for the next round.
+        assert_eq!(
+            h.send(reqwest::Method::POST, &stop, json!({}))
+                .await
+                .status(),
+            202
+        );
+        wait_status(&h, &session.id, SessionStatus::Completed).await;
+        wait_no_terminal(&h, &session.id).await;
+        assert!(h.daemon.state.terminals.is_empty());
+    }
+    let Harness { daemon, _home, .. } = h;
+    daemon.shutdown().await.unwrap();
+}

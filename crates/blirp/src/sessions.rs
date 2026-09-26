@@ -4,7 +4,7 @@ use crate::agents::{Agent, AgentError, LaunchContext};
 use crate::api::{ApiError, ApiResult};
 use crate::memory::launch::{HANDOFF_FILE, LaunchInput, LaunchIntegration, continue_prompt};
 use crate::memory::render::render_injection;
-use crate::pty::{ExitInfo, SpawnRequest, Terminal};
+use crate::pty::{ExitInfo, Reservation, SpawnRequest, Terminal};
 use crate::state::SharedState;
 use axum::http::StatusCode;
 use blirp_core::model::{LaunchSession, ServerEvent, Session, SessionOrigin, SessionStatus};
@@ -292,9 +292,15 @@ pub async fn launch(state: &SharedState, req: LaunchSession) -> ApiResult<Sessio
     state.emit(ServerEvent::SessionCreated {
         session: session.clone(),
     });
+    // A fresh id is always free.
+    let reservation = state
+        .terminals
+        .reserve(&session.id)
+        .ok_or_else(|| ApiError::conflict("already_running", "session is already starting"))?;
     start(
         state,
         session,
+        reservation,
         &agent,
         StartOptions {
             resume: false,
@@ -324,12 +330,12 @@ pub async fn resume(state: &SharedState, id: &str) -> ApiResult<Session> {
             "this session runs on another machine that is not reachable",
         ));
     }
-    if state.terminals.get(id).is_some() {
-        return Err(ApiError::conflict(
-            "already_running",
-            "session is still running",
-        ));
-    }
+    // Reserved before anything else, so concurrent resumes of the same
+    // session cannot both spawn an agent; released again on any error.
+    let reservation = state
+        .terminals
+        .reserve(id)
+        .ok_or_else(|| ApiError::conflict("already_running", "session is still running"))?;
     if !Path::new(&session.cwd).is_dir() {
         return Err(ApiError::bad_request(format!(
             "session folder {} no longer exists",
@@ -340,6 +346,7 @@ pub async fn resume(state: &SharedState, id: &str) -> ApiResult<Session> {
     start(
         state,
         session,
+        reservation,
         &agent,
         StartOptions {
             resume: true,
@@ -411,6 +418,7 @@ fn integrate(
 async fn start(
     state: &SharedState,
     session: Session,
+    reservation: Reservation,
     agent: &Agent,
     opts: StartOptions,
 ) -> ApiResult<Session> {
@@ -487,8 +495,8 @@ async fn start(
     let spawned = tokio::task::spawn_blocking(move || {
         let on_exit_state = st.clone();
         let on_exit_id = sid.clone();
-        Terminal::spawn(&sid, spawn, move |info| {
-            on_exit(&on_exit_state, &on_exit_id, info)
+        Terminal::spawn(&sid, spawn, move |term, info| {
+            on_exit(&on_exit_state, &on_exit_id, term, info)
         })
     })
     .await
@@ -515,10 +523,11 @@ async fn start(
             ));
         }
     };
-    state.terminals.insert(term.clone());
-    // A process that exited before registration already ran on_exit.
+    reservation.fill(term.clone());
+    // A process that exited before registration already ran on_exit, whose
+    // removal found nothing to remove.
     if term.has_exited() {
-        state.terminals.remove(&session.id);
+        state.terminals.remove(&term);
     }
 
     if let Some(prompt) = prompt.filter(|p| !p.trim().is_empty()) {
@@ -563,9 +572,15 @@ async fn type_prompt(term: Arc<Terminal>, prompt: String) {
     term.write(b"\r".to_vec());
 }
 
-/// Runs on the PTY waiter thread when the session process exits.
-fn on_exit(state: &SharedState, session_id: &str, info: ExitInfo) {
-    state.terminals.remove(session_id);
+/// Runs on the PTY waiter thread when the session process exits. The exit is
+/// recorded before the terminal leaves the registry, so a resume (which can
+/// only start once it is gone) never has its fresh status overwritten.
+fn on_exit(state: &SharedState, session_id: &str, term: &Arc<Terminal>, info: ExitInfo) {
+    record_exit(state, session_id, info);
+    state.terminals.remove(term);
+}
+
+fn record_exit(state: &SharedState, session_id: &str, info: ExitInfo) {
     let now = now_ms();
     match state.store.modify_session(session_id, |s| {
         s.status = info.status;

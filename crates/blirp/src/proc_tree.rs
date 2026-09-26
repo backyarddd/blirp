@@ -93,6 +93,37 @@ impl ProcessTree {
         }
     }
 
+    /// After [`ProcessTree::terminate`]: unix waits up to `grace` for every
+    /// member of the process group to exit, then SIGKILLs the group. This
+    /// does not depend on the group leader: members that ignore SIGHUP die
+    /// even when the leader already exited. Windows: nothing to do,
+    /// terminating the job is final.
+    pub fn escalate(&self, grace: std::time::Duration) {
+        #[cfg(unix)]
+        {
+            let deadline = std::time::Instant::now() + grace;
+            while self.alive() {
+                if std::time::Instant::now() >= deadline {
+                    self.signal(libc::SIGKILL);
+                    return;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(50));
+            }
+        }
+        #[cfg(windows)]
+        let _ = grace;
+    }
+
+    /// Whether any process of the group still exists (zombies included).
+    #[cfg(unix)]
+    pub fn alive(&self) -> bool {
+        let Some(pgid) = self.pgid else { return false };
+        #[allow(unsafe_code)]
+        // SAFETY: signal 0 only checks existence and permission.
+        let rc = unsafe { libc::killpg(pgid, 0) };
+        rc == 0 || std::io::Error::last_os_error().raw_os_error() == Some(libc::EPERM)
+    }
+
     #[cfg(unix)]
     fn signal(&self, sig: i32) -> bool {
         let Some(pgid) = self.pgid else { return false };
@@ -178,5 +209,52 @@ mod win {
             // SAFETY: we own the handle and close it exactly once.
             unsafe { CloseHandle(self.0) };
         }
+    }
+}
+
+#[cfg(all(test, unix))]
+mod tests {
+    use super::ProcessTree;
+    use std::os::unix::process::CommandExt;
+    use std::time::{Duration, Instant};
+
+    fn group(script: &str) -> (std::process::Child, ProcessTree) {
+        let child = std::process::Command::new("sh")
+            .args(["-c", script])
+            .process_group(0)
+            .spawn()
+            .unwrap();
+        let tree = ProcessTree::for_process_group(child.id());
+        (child, tree)
+    }
+
+    fn wait_dead(tree: &ProcessTree) {
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while tree.alive() {
+            assert!(Instant::now() < deadline, "process group survived SIGKILL");
+            std::thread::sleep(Duration::from_millis(20));
+        }
+    }
+
+    #[test]
+    fn escalation_kills_a_group_that_ignores_sighup() {
+        let (mut child, tree) = group("trap '' HUP; sleep 60");
+        std::thread::sleep(Duration::from_millis(200));
+        tree.terminate();
+        tree.escalate(Duration::from_millis(300));
+        child.wait().unwrap();
+        wait_dead(&tree);
+    }
+
+    #[test]
+    fn escalation_does_not_depend_on_the_leader() {
+        // The leader exits at once; its background child ignores SIGHUP and
+        // keeps the group alive.
+        let (mut child, tree) = group("trap '' HUP; sleep 60 & exit 0");
+        child.wait().unwrap();
+        assert!(tree.alive());
+        tree.terminate();
+        tree.escalate(Duration::from_millis(300));
+        wait_dead(&tree);
     }
 }
