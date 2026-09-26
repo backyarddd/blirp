@@ -33,6 +33,7 @@ const TOUCH_EVERY_MS: i64 = 60 * 1000;
 
 struct Running {
     handle: axum_server::Handle<SocketAddr>,
+    port: u16,
     url: String,
     fingerprint: String,
     task: JoinHandle<()>,
@@ -104,16 +105,22 @@ fn load_or_create_cert(
     Ok((cert, key))
 }
 
-/// Start or stop the portal to match the config (hub + `portal.lan`).
+/// Start, stop or restart the portal to match the config (hub +
+/// `portal.lan`, on `portal.lan_port`). Callers hold the sync transition
+/// lock so two changes never race.
 pub async fn sync_with_config(state: &SharedState) -> anyhow::Result<()> {
     let cfg = state.config();
-    let want = cfg.sync.role == MachineRole::Hub && cfg.portal.lan;
-    let running = lock(&state.sync.portal.running).is_some();
+    let want = (cfg.sync.role == MachineRole::Hub && cfg.portal.lan).then_some(cfg.portal.lan_port);
+    let running = lock(&state.sync.portal.running).as_ref().map(|r| r.port);
     match (want, running) {
-        (true, false) => start(state).await,
-        (false, true) => {
+        (Some(_), None) => start(state).await,
+        (None, Some(_)) => {
             stop(state).await;
             Ok(())
+        }
+        (Some(port), Some(old)) if port != old => {
+            stop(state).await;
+            start(state).await
         }
         _ => Ok(()),
     }
@@ -155,6 +162,7 @@ async fn start(state: &SharedState) -> anyhow::Result<()> {
     tracing::info!(%url, fingerprint = %fp, "LAN portal listening");
     *lock(&state.sync.portal.running) = Some(Running {
         handle,
+        port,
         url,
         fingerprint: fp,
         task,
@@ -172,6 +180,7 @@ pub async fn stop(state: &SharedState) {
         }
         lock(&state.sync.portal.invites).clear();
         tracing::info!("LAN portal stopped");
+        crate::sync::emit_status(state);
     }
 }
 

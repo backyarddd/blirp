@@ -115,6 +115,8 @@ async fn patch_settings(
         Ok(())
     })
     .await?;
+    // Apply portal changes (portal.lan, lan_port) now, not at the next start.
+    crate::sync::apply_portal_config(&s).await?;
     get_settings(State(s)).await
 }
 

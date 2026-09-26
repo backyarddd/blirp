@@ -106,6 +106,25 @@ pub fn routes() -> Router<SharedState> {
         .route("/api/devices/{id}/{*rest}", axum::routing::any(unknown))
 }
 
+/// Start, stop or move the LAN portal to match a changed config.
+pub(crate) async fn apply_portal_config(s: &SharedState) -> ApiResult<()> {
+    let _guard = s.sync.transition.lock().await;
+    crate::portal::sync_with_config(s)
+        .await
+        .map_err(|e| portal_failed(&e))
+}
+
+/// The LAN portal could not start (port taken, certificate); the config
+/// that asked for it is kept.
+fn portal_failed(e: &anyhow::Error) -> ApiError {
+    tracing::warn!(error = %format!("{e:#}"), "LAN portal failed to start");
+    ApiError::new(
+        StatusCode::CONFLICT,
+        "portal_failed",
+        format!("the LAN portal could not start: {e:#}"),
+    )
+}
+
 async fn unknown() -> ApiError {
     ApiError::new(StatusCode::NOT_FOUND, "not_found", "no such endpoint")
 }
@@ -319,11 +338,12 @@ async fn hub_enable(State(s): State<SharedState>, _: Admin) -> ApiResult<Json<Sy
                 set_role(&s, MachineRole::Standalone, None).await?;
                 return Err(e);
             }
-            crate::portal::sync_with_config(&s)
-                .await
-                .map_err(|e| ApiError::internal("starting the LAN portal", format!("{e:#}")))?;
         }
     }
+    // Also when already a hub: the portal settings may have changed.
+    crate::portal::sync_with_config(&s)
+        .await
+        .map_err(|e| portal_failed(&e))?;
     status(&s).await.map(Json)
 }
 
