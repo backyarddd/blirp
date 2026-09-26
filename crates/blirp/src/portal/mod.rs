@@ -227,10 +227,7 @@ pub async fn authenticate(state: &SharedState, token: String) -> ApiResult<Optio
         }
         let now = blirp_core::now_ms();
         if now - d.last_seen > TOUCH_EVERY_MS {
-            store.upsert_device(&Device {
-                last_seen: now,
-                ..d.clone()
-            })?;
+            store.touch_device(&d.id, now)?;
         }
         Ok(Some(Principal {
             control: d.can_control_terminals,
