@@ -9,14 +9,26 @@
 //!
 //! Unix: the child leads its own process group (portable-pty starts PTY
 //! children with `setsid`; plain children are spawned with
-//! `process_group(0)`), so its pid is the group id; killing sends SIGHUP to
-//! the group, then SIGKILL.
+//! `process_group(0)`), so its pid is the group id. The group alone is not
+//! the tree: a shell puts background jobs (`nohup sleep &`, `(...) &` with
+//! job control) into process groups of their own. The tree is therefore the
+//! group, plus every process of the child's session (a PTY child's pid is
+//! its session id, and reparenting to init keeps the session), plus every
+//! descendant still linked by parent pid. Terminating sends SIGHUP and
+//! SIGTERM to all of them, escalation SIGKILL to whatever is left.
+
+#[cfg(unix)]
+use std::sync::{Mutex, PoisonError};
 
 pub struct ProcessTree {
     #[cfg(windows)]
     job: Option<win::Job>,
     #[cfg(unix)]
     pgid: Option<i32>,
+    /// (pid, session id) of the members found when terminating, so they are
+    /// still found after the leader died and parent links are gone.
+    #[cfg(unix)]
+    seen: Mutex<Vec<(i32, i32)>>,
 }
 
 impl ProcessTree {
@@ -28,6 +40,8 @@ impl ProcessTree {
             job: None,
             #[cfg(unix)]
             pgid: None,
+            #[cfg(unix)]
+            seen: Mutex::new(Vec::new()),
         }
     }
 
@@ -59,12 +73,13 @@ impl ProcessTree {
     pub fn for_process_group(pid: u32) -> Self {
         Self {
             pgid: i32::try_from(pid).ok(),
+            seen: Mutex::new(Vec::new()),
         }
     }
 
-    /// Ask the tree to exit (unix SIGHUP) or terminate it (Windows). Returns
-    /// false when no tree handle exists and the caller must fall back to
-    /// killing the main process.
+    /// Ask the tree to exit (unix SIGHUP + SIGTERM) or terminate it
+    /// (Windows). Returns false when no tree handle exists and the caller
+    /// must fall back to killing the main process.
     pub fn terminate(&self) -> bool {
         #[cfg(windows)]
         {
@@ -81,11 +96,32 @@ impl ProcessTree {
         }
         #[cfg(unix)]
         {
-            self.signal(libc::SIGHUP)
+            if self.pgid.is_none() {
+                return false;
+            }
+            let members = self.members();
+            {
+                let mut seen = self.seen.lock().unwrap_or_else(PoisonError::into_inner);
+                for &pid in &members {
+                    if let Some(sid) = unix::sid(pid)
+                        && !seen.iter().any(|(p, _)| *p == pid)
+                    {
+                        seen.push((pid, sid));
+                    }
+                }
+            }
+            for sig in [libc::SIGHUP, libc::SIGTERM] {
+                self.signal(sig);
+                for &pid in &members {
+                    unix::kill(pid, sig);
+                }
+            }
+            true
         }
     }
 
-    /// Hard kill of whatever is left (unix SIGKILL; Windows: same as terminate).
+    /// Hard kill of whatever is left (unix SIGKILL to the whole tree;
+    /// Windows: same as terminate).
     pub fn force_kill(&self) {
         #[cfg(windows)]
         {
@@ -94,38 +130,90 @@ impl ProcessTree {
         #[cfg(unix)]
         {
             self.signal(libc::SIGKILL);
+            for pid in self.members() {
+                unix::kill(pid, libc::SIGKILL);
+            }
         }
     }
 
     /// After [`ProcessTree::terminate`]: unix waits up to `grace` for every
-    /// member of the process group to exit, then SIGKILLs the group. This
-    /// does not depend on the group leader: members that ignore SIGHUP die
-    /// even when the leader already exited. Windows: nothing to do,
-    /// terminating the job is final.
+    /// process of the tree to exit, then SIGKILLs what is left. This does not
+    /// depend on the leader: processes that ignore SIGHUP/SIGTERM, or moved
+    /// to process groups of their own, die even when the leader already
+    /// exited. Windows: nothing to do, terminating the job is final.
     pub fn escalate(&self, grace: std::time::Duration) {
         #[cfg(unix)]
         {
             let deadline = std::time::Instant::now() + grace;
             while self.alive() {
                 if std::time::Instant::now() >= deadline {
-                    self.signal(libc::SIGKILL);
+                    self.force_kill();
                     return;
                 }
-                std::thread::sleep(std::time::Duration::from_millis(50));
+                std::thread::sleep(std::time::Duration::from_millis(200));
             }
         }
         #[cfg(windows)]
         let _ = grace;
     }
 
-    /// Whether any process of the group still exists (zombies included).
+    /// Whether any process of the tree still runs (a group of zombies only
+    /// counts until they are reaped).
     #[cfg(unix)]
     pub fn alive(&self) -> bool {
         let Some(pgid) = self.pgid else { return false };
         #[allow(unsafe_code)]
         // SAFETY: signal 0 only checks existence and permission.
         let rc = unsafe { libc::killpg(pgid, 0) };
-        rc == 0 || std::io::Error::last_os_error().raw_os_error() == Some(libc::EPERM)
+        let group = rc == 0 || std::io::Error::last_os_error().raw_os_error() == Some(libc::EPERM);
+        group || !self.members().is_empty()
+    }
+
+    /// Live (non-zombie) processes of the tree other than the group: the
+    /// leader's session, descendants by parent pid, and members seen at
+    /// terminate time that are still the same process (same session id).
+    #[cfg(unix)]
+    fn members(&self) -> Vec<i32> {
+        let Some(leader) = self.pgid else {
+            return Vec::new();
+        };
+        let procs = unix::processes();
+        let mut set: Vec<i32> = procs
+            .iter()
+            .filter(|p| p.pid == leader || unix::sid(p.pid) == Some(leader))
+            .map(|p| p.pid)
+            .collect();
+        if !set.contains(&leader) {
+            set.push(leader);
+        }
+        // Descendants still linked to a member (fixpoint over parent pids).
+        loop {
+            let before = set.len();
+            for p in &procs {
+                if set.contains(&p.ppid) && !set.contains(&p.pid) {
+                    set.push(p.pid);
+                }
+            }
+            if set.len() == before {
+                break;
+            }
+        }
+        let seen = self
+            .seen
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .clone();
+        for (pid, sid) in seen {
+            if !set.contains(&pid)
+                && procs.iter().any(|p| p.pid == pid)
+                && unix::sid(pid) == Some(sid)
+            {
+                set.push(pid);
+            }
+        }
+        let own = i32::try_from(std::process::id()).unwrap_or(0);
+        set.retain(|&p| p > 1 && p != own && procs.iter().any(|x| x.pid == p));
+        set
     }
 
     #[cfg(unix)]
@@ -142,6 +230,66 @@ impl ProcessTree {
             }
         }
         true
+    }
+}
+
+#[cfg(unix)]
+#[allow(unsafe_code)]
+mod unix {
+    use std::time::Duration;
+
+    pub struct Proc {
+        pub pid: i32,
+        pub ppid: i32,
+    }
+
+    /// Every live (non-zombie) process: `ps` is the portable listing on
+    /// Linux and macOS. An unreadable listing yields none.
+    pub fn processes() -> Vec<Proc> {
+        let mut cmd = crate::process::command("ps");
+        cmd.args(["-A", "-o", "pid=,ppid=,stat="]);
+        let out = match crate::process::run(cmd, Duration::from_secs(5), 8 << 20) {
+            Ok(o) if o.success() => o.stdout,
+            Ok(o) => {
+                tracing::warn!(status = ?o.status, "ps failed; process tree limited to its group");
+                return Vec::new();
+            }
+            Err(e) => {
+                tracing::warn!(error = %e, "ps failed; process tree limited to its group");
+                return Vec::new();
+            }
+        };
+        parse(&String::from_utf8_lossy(&out))
+    }
+
+    pub fn parse(text: &str) -> Vec<Proc> {
+        text.lines()
+            .filter_map(|l| {
+                let mut f = l.split_whitespace();
+                let pid = f.next()?.parse().ok()?;
+                let ppid = f.next()?.parse().ok()?;
+                let stat = f.next().unwrap_or("");
+                (!stat.starts_with('Z')).then_some(Proc { pid, ppid })
+            })
+            .collect()
+    }
+
+    pub fn sid(pid: i32) -> Option<i32> {
+        // SAFETY: getsid has no memory-safety preconditions.
+        let s = unsafe { libc::getsid(pid) };
+        (s > 0).then_some(s)
+    }
+
+    pub fn kill(pid: i32, sig: i32) {
+        // SAFETY: kill has no memory-safety preconditions; a gone process
+        // only yields ESRCH.
+        let rc = unsafe { libc::kill(pid, sig) };
+        if rc != 0 {
+            let err = std::io::Error::last_os_error();
+            if err.raw_os_error() != Some(libc::ESRCH) {
+                tracing::debug!(error = %err, pid, sig, "kill failed");
+            }
+        }
     }
 }
 
@@ -256,6 +404,63 @@ mod tests {
         tree.escalate(Duration::from_millis(300));
         child.wait().unwrap();
         wait_dead(&tree);
+    }
+
+    #[test]
+    fn ps_listing_skips_zombies() {
+        let procs = super::unix::parse("  12     1 Ss\n  13    12 Z+\n garbage\n  14    12 R+\n");
+        let pids: Vec<i32> = procs.iter().map(|p| p.pid).collect();
+        assert_eq!(pids, [12, 14]);
+    }
+
+    /// A PTY-like child: its own session, like portable-pty's `setsid`.
+    fn session(script: &str) -> (std::process::Child, ProcessTree) {
+        let mut cmd = std::process::Command::new("sh");
+        cmd.args(["-c", script]);
+        #[allow(unsafe_code)]
+        // SAFETY: setsid is async-signal-safe and touches no Rust state.
+        unsafe {
+            cmd.pre_exec(|| {
+                if libc::setsid() == -1 {
+                    return Err(std::io::Error::last_os_error());
+                }
+                Ok(())
+            });
+        }
+        let child = cmd.spawn().unwrap();
+        let tree = ProcessTree::for_process_group(child.id());
+        (child, tree)
+    }
+
+    // Background jobs in process groups of their own (job control on) that
+    // ignore SIGHUP and SIGTERM still die with the tree, also after the
+    // leader exited and they were reparented.
+    #[test]
+    fn stop_kills_jobs_outside_the_group() {
+        let dir = tempfile::tempdir().unwrap();
+        let pidfile = dir.path().join("pid");
+        let script = format!(
+            "set -m; (trap '' HUP TERM; exec sleep 60) & echo $! > '{}'; nohup sleep 60 >/dev/null 2>&1 & wait",
+            pidfile.display()
+        );
+        let (mut child, tree) = session(&script);
+        let deadline = Instant::now() + Duration::from_secs(5);
+        let job: i32 = loop {
+            if let Some(p) = std::fs::read_to_string(&pidfile)
+                .ok()
+                .and_then(|t| t.trim().parse().ok())
+            {
+                break p;
+            }
+            assert!(Instant::now() < deadline, "background job did not start");
+            std::thread::sleep(Duration::from_millis(20));
+        };
+        assert!(tree.members().contains(&job));
+        tree.terminate();
+        tree.escalate(Duration::from_millis(500));
+        child.wait().unwrap();
+        wait_dead(&tree);
+        assert!(!super::unix::processes().iter().any(|p| p.pid == job));
     }
 
     #[test]
