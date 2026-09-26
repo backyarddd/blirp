@@ -632,6 +632,24 @@ async fn subagent_children_are_filtered_and_counted() {
         .send(reqwest::Method::DELETE, "/api/sessions/live", json!({}))
         .await;
     assert_eq!(r.status(), 409);
+    // Another machine's session: stop, resume and delete are all forwarded
+    // to it and fail the same specific way when it cannot be reached.
+    store
+        .insert_session(&Session {
+            machine_id: "other-machine".into(),
+            ..mk("theirs", None, SessionOrigin::External, 5)
+        })
+        .unwrap();
+    for (method, path) in [
+        (reqwest::Method::POST, "/api/sessions/theirs/stop"),
+        (reqwest::Method::POST, "/api/sessions/theirs/resume"),
+        (reqwest::Method::DELETE, "/api/sessions/theirs"),
+    ] {
+        let r = h.send(method, path, json!({})).await;
+        assert_eq!(r.status(), 409, "{path}");
+        let body: serde_json::Value = r.json().await.unwrap();
+        assert_eq!(body["error"]["code"], "machine_unreachable", "{path}");
+    }
     h.daemon.shutdown().await.unwrap();
 }
 
