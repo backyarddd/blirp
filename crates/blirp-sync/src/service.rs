@@ -285,12 +285,7 @@ impl SyncService {
 
     /// Hub: drop every live connection of `node_id` (after it was revoked).
     pub fn disconnect(&self, node_id: &str) {
-        if let Some(peer) = lock(&self.inner.peers).remove(node_id) {
-            for c in peer.conns.iter().chain(peer.proxy.iter()) {
-                close(c, CLOSE_FORBIDDEN, b"revoked");
-            }
-            tracing::info!(node = %node_id, "closed connections of revoked machine");
-        }
+        close_peer(&self.inner, node_id);
         (self.inner.on_status)();
     }
 
@@ -325,8 +320,31 @@ impl SyncService {
         .await
     }
 
-    /// Stop all tasks and close the endpoint. Idempotent.
-    pub async fn shutdown(&self) {
+    /// Node: leave the hub. Stops syncing, pushes what is still queued
+    /// (starting new batches for at most `push_for`), then asks the hub to
+    /// revoke this machine. Call [`Self::shutdown`] afterwards, also when
+    /// this fails.
+    pub async fn leave(&self, push_for: Duration) -> Result<()> {
+        let Role::Node { hub } = &self.inner.role else {
+            return Err(SyncError::Unavailable("only a node leaves a hub".into()));
+        };
+        // The regular session must not push concurrently.
+        self.stop_tasks().await;
+        let push_until = tokio::time::Instant::now() + push_for;
+        let conn = connect(&self.inner.ep, hub, ALPN_SYNC).await?;
+        let result = repl::leave(
+            &conn,
+            self.inner.store.clone(),
+            self.inner.machine.clone(),
+            &hub.id.to_string(),
+            push_until,
+        )
+        .await;
+        close(&conn, CLOSE_OK, b"left");
+        result
+    }
+
+    async fn stop_tasks(&self) {
         let _ = self.shutdown_tx.send(true);
         let tasks: Vec<JoinHandle<()>> = lock(&self.tasks).drain(..).collect();
         for t in &tasks {
@@ -335,6 +353,11 @@ impl SyncService {
         for t in tasks {
             let _ = t.await;
         }
+    }
+
+    /// Stop all tasks and close the endpoint. Idempotent.
+    pub async fn shutdown(&self) {
+        self.stop_tasks().await;
         let conns: Vec<Connection> = lock(&self.inner.peers)
             .drain()
             .flat_map(|(_, p)| p.conns.into_iter().chain(p.proxy))
@@ -480,8 +503,14 @@ async fn handle_incoming(inner: &Arc<Inner>, incoming: Incoming) -> Result<()> {
             )
             .await;
             forget_conn(inner, &remote, &conn);
+            if matches!(result, Ok(repl::HubSessionEnd::Left)) {
+                tracing::info!(node = %remote, "machine left the hub; revoked");
+                close_peer(inner, &remote);
+                // Its revoked machine row replicates to the other nodes.
+                inner.kick.notify_one();
+            }
             (inner.on_status)();
-            result
+            result.map(|_| ())
         }
         (ALPN_PROXY, Role::Hub) => {
             if !authorized(inner, &remote).await? {
@@ -506,6 +535,16 @@ async fn handle_incoming(inner: &Arc<Inner>, incoming: Incoming) -> Result<()> {
             close(&conn, CLOSE_FORBIDDEN, b"forbidden");
             Ok(())
         }
+    }
+}
+
+/// Hub: close every live connection of a revoked machine.
+fn close_peer(inner: &Inner, node_id: &str) {
+    if let Some(peer) = lock(&inner.peers).remove(node_id) {
+        for c in peer.conns.iter().chain(peer.proxy.iter()) {
+            close(c, CLOSE_FORBIDDEN, b"revoked");
+        }
+        tracing::info!(node = %node_id, "closed connections of revoked machine");
     }
 }
 
@@ -637,6 +676,29 @@ fn register_node(store: &Store, node_id: &str, meta: &MachineMeta) -> Result<()>
         last_seen: now,
         revoked: false,
     }))?;
+    Ok(())
+}
+
+/// Hub: revoke a paired machine (its device and its replicated machine row;
+/// the caller closes its connections). Revoked devices lose terminal
+/// control too; pairing again restores it.
+pub fn revoke_machine(store: &Store, node_id: &str) -> Result<()> {
+    for d in store.list_devices()? {
+        if d.node_id.as_deref() == Some(node_id) && !d.revoked {
+            store.upsert_device(&Device {
+                revoked: true,
+                can_control_terminals: false,
+                ..d
+            })?;
+        }
+    }
+    if let Some(m) = store.get_machine(node_id)? {
+        store.apply(Change::Machine(Machine {
+            revoked: true,
+            last_seen: m.last_seen.max(blirp_core::now_ms()),
+            ..m
+        }))?;
+    }
     Ok(())
 }
 

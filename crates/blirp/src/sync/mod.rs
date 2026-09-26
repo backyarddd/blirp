@@ -15,16 +15,16 @@ use axum::http::StatusCode;
 use axum::routing::{delete, get, post};
 use blirp_core::config::Config;
 use blirp_core::model::{
-    BrowserInvite, Device, DeviceKind, JoinHub, JoinPreview, JoinPreviewRequest, Machine,
+    BrowserInvite, Device, DeviceKind, JoinHub, JoinPreview, JoinPreviewRequest, LeftHub, Machine,
     MachineRole, PatchDevice, ServerEvent, SyncInvite, SyncStatus,
 };
-use blirp_core::store::Change;
 use blirp_sync::pair::{MachineMeta, PairError, Ticket};
 use blirp_sync::service::{ProxyServe, StatusHook};
 use blirp_sync::{Role, SyncError, SyncService};
 use iroh::{EndpointAddr, SecretKey};
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex, OnceLock, PoisonError};
+use std::time::Duration;
 
 /// `settings` key holding the hub's last known address (JSON `EndpointAddr`).
 const HUB_ADDR_KEY: &str = "sync.hub_addr";
@@ -96,6 +96,7 @@ pub fn routes() -> Router<SharedState> {
         .route("/api/sync/invite", post(invite))
         .route("/api/sync/join", post(join))
         .route("/api/sync/join/preview", post(join_preview))
+        .route("/api/sync/leave", post(leave))
         .route("/api/devices", get(list_devices))
         .route("/api/devices/browser-invite", post(browser_invite))
         .route(
@@ -525,20 +526,8 @@ async fn revoke_node(s: &SharedState, node_id: &str) -> ApiResult<()> {
     let store = s.store.clone();
     let id = node_id.to_string();
     blocking(move || {
-        let now = blirp_core::now_ms();
-        for d in store.list_devices()? {
-            if d.node_id.as_deref() == Some(id.as_str()) && !d.revoked {
-                store.upsert_device(&Device { revoked: true, ..d })?;
-            }
-        }
-        if let Some(m) = store.get_machine(&id)? {
-            store.apply(Change::Machine(Machine {
-                revoked: true,
-                last_seen: m.last_seen.max(now),
-                ..m
-            }))?;
-        }
-        Ok(())
+        blirp_sync::service::revoke_machine(&store, &id)
+            .map_err(|e| ApiError::internal("revoking the machine", e))
     })
     .await?;
     if let Some(svc) = s.sync.service() {
@@ -608,8 +597,7 @@ async fn patch_device(
     Ok(Json(device))
 }
 
-/// `DELETE /api/machines/:id`: on the hub, revoke that machine; on a node,
-/// the hub's id means "leave the hub".
+/// `DELETE /api/machines/:id`: on the hub, revoke that machine.
 async fn revoke_machine(
     State(s): State<SharedState>,
     ApiPath(id): ApiPath<String>,
@@ -633,28 +621,84 @@ async fn revoke_machine(
             }
             revoke_node(&s, &id).await?;
         }
-        MachineRole::Node if config.sync.hub.as_deref() == Some(id.as_str()) => {
-            stop_service(&s).await;
-            let store = s.store.clone();
-            blocking(move || {
-                Ok(store.set_settings(&std::collections::BTreeMap::from([(
-                    HUB_ADDR_KEY.to_string(),
-                    None,
-                )]))?)
-            })
-            .await?;
-            // A consent for this hub, not for the next one joined.
-            set_role(&s, MachineRole::Standalone, None, Some(false)).await?;
-            emit_status(&s);
-        }
         _ => {
             return Err(ApiError::conflict(
                 "not_hub",
-                "only the hub can revoke other machines",
+                "only the hub can revoke other machines (a node leaves with POST /api/sync/leave)",
             ));
         }
     }
     Ok(StatusCode::NO_CONTENT)
+}
+
+/// How long leaving keeps starting push batches, and the bound for the
+/// whole exchange with the hub.
+const LEAVE_PUSH: Duration = Duration::from_secs(5);
+const LEAVE_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// `POST /api/sync/leave` (node): push what is still queued, have the hub
+/// revoke this machine, then become standalone. An unreachable hub does not
+/// block leaving; the answer then warns that the hub still lists this
+/// machine.
+async fn leave(State(s): State<SharedState>, _: Admin) -> ApiResult<Json<LeftHub>> {
+    let _guard = s.sync.transition.lock().await;
+    let config = s.config();
+    let Some(hub) = config
+        .sync
+        .hub
+        .clone()
+        .filter(|_| config.sync.role == MachineRole::Node)
+    else {
+        return Err(ApiError::conflict(
+            "not_node",
+            "this machine is not paired with a hub",
+        ));
+    };
+    let revoked = match s.sync.service() {
+        None => Err("sync is not running".to_string()),
+        Some(svc) => match tokio::time::timeout(LEAVE_TIMEOUT, svc.leave(LEAVE_PUSH)).await {
+            Ok(Ok(())) => Ok(()),
+            Ok(Err(e)) => Err(e.to_string()),
+            Err(_) => Err("the hub did not answer in time".to_string()),
+        },
+    };
+    stop_service(&s).await;
+    let store = s.store.clone();
+    let hub_id = hub.clone();
+    // Read before the role change empties the outbox.
+    let unsynced = blocking(move || {
+        let n = store.pending_outbox(&hub_id)?;
+        store.set_settings(&std::collections::BTreeMap::from([(
+            HUB_ADDR_KEY.to_string(),
+            None,
+        )]))?;
+        Ok(n)
+    })
+    .await?;
+    // A consent for this hub, not for the next one joined.
+    set_role(&s, MachineRole::Standalone, None, Some(false)).await?;
+    emit_status(&s);
+    let lost = if unsynced > 0 {
+        format!(" {unsynced} change(s) made here had not reached the hub and were not synced.")
+    } else {
+        String::new()
+    };
+    let warning = match revoked {
+        Ok(()) if lost.is_empty() => None,
+        Ok(()) => Some(format!("The hub revoked this machine.{lost}")),
+        Err(e) => {
+            tracing::warn!(hub = %hub, error = %e, "left the hub without reaching it");
+            Some(format!(
+                "Could not reach the hub ({e}), so it still lists this machine as paired. \
+                 Revoke it on the hub under Settings > Machines & Sync.{lost}"
+            ))
+        }
+    };
+    tracing::info!(hub = %hub, "left the hub");
+    Ok(Json(LeftHub {
+        status: status(&s).await?,
+        warning,
+    }))
 }
 
 /// Shutdown signal for one long-lived connection (WebSocket): flips on

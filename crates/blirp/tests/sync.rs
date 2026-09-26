@@ -9,8 +9,8 @@
 use blirp::api::Principal;
 use blirp::daemon::{Daemon, DaemonOptions};
 use blirp_core::model::{
-    BrowserInvite, Device, ErrorBody, Health, ProjectMemory, ProjectSummary, Record, Session,
-    SyncInvite, SyncStatus, TerminalServerMessage,
+    BrowserInvite, Device, ErrorBody, Health, LeftHub, ProjectMemory, ProjectSummary, Record,
+    Session, SyncInvite, SyncStatus, TerminalServerMessage,
 };
 use blirp_core::paths::Paths;
 use blirp_core::store::{PulledEntry, Store};
@@ -696,6 +696,77 @@ async fn pair_replicate_proxy_revoke_and_portal() {
 
     b.daemon.shutdown().await.unwrap();
     a.daemon.shutdown().await.unwrap();
+}
+
+/// Pair `node` with `hub` (made a hub first) and wait for the connection.
+async fn pair(hub: &Node, node: &Node) {
+    let _: SyncStatus = hub.ok(Method::POST, "/api/sync/hub/enable", None).await;
+    let inv: SyncInvite = hub.ok(Method::POST, "/api/sync/invite", None).await;
+    let _: SyncStatus = node
+        .ok(
+            Method::POST,
+            "/api/sync/join",
+            Some(json!({"invite": inv.invite, "code": inv.code, "allow_hub_control": true})),
+        )
+        .await;
+    eventually("node connected", || async {
+        sync_status(node).await.connected
+    })
+    .await;
+}
+
+// Leaving pushes what is still queued and has the hub revoke the machine;
+// a hub that cannot be reached does not block leaving but is reported.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn leaving_the_hub_pushes_and_revokes() {
+    let tmp = tempfile::tempdir().unwrap();
+    let a = Node::start(&tmp.path().join("a"), "hub-a", None).await;
+    let b = Node::start(&tmp.path().join("b"), "node-b", None).await;
+    pair(&a, &b).await;
+
+    // Only a node leaves; the hub cannot leave itself.
+    let r = a.req(Method::POST, "/api/sync/leave", None).await;
+    assert_eq!(r.status(), 409);
+    // A node revokes nothing through the machines route.
+    let r = b
+        .req(Method::DELETE, &format!("/api/machines/{}", a.id()), None)
+        .await;
+    assert_eq!(r.status(), 409);
+
+    // Written right before leaving: the final push carries it.
+    let pb = b.project(&tmp.path().join("work-b")).await;
+    let rb = b.record(&pb, "last words").await;
+    let left: LeftHub = b.ok(Method::POST, "/api/sync/leave", None).await;
+    assert_eq!(left.warning, None);
+    assert_eq!(left.status.role.as_str(), "standalone");
+    assert!(a.has_record(&pb, &rb.id).await, "final push missing");
+    let config: Value = b.get("/api/settings").await;
+    assert_eq!(config["config"]["sync"]["allow_hub_control"], false);
+
+    // The hub revoked exactly that machine and dropped its terminal control.
+    let devices: Vec<Device> = a.get("/api/devices").await;
+    let dev = devices
+        .iter()
+        .find(|d| d.node_id.as_deref() == Some(b.id().as_str()))
+        .unwrap();
+    assert!(dev.revoked && !dev.can_control_terminals, "{dev:?}");
+    let machines: Vec<blirp_core::model::Machine> = a.get("/api/machines").await;
+    assert!(machines.iter().any(|m| m.id == b.id() && m.revoked));
+    assert!(machines.iter().any(|m| m.id == a.id() && !m.revoked));
+
+    // Paired again, then the hub goes away: leaving still works and warns.
+    pair(&a, &b).await;
+    let devices: Vec<Device> = a.get("/api/devices").await;
+    assert!(
+        devices.iter().all(|d| !d.revoked),
+        "pairing again restores it"
+    );
+    a.daemon.shutdown().await.unwrap();
+    let left: LeftHub = b.ok(Method::POST, "/api/sync/leave", None).await;
+    let warning = left.warning.expect("warning");
+    assert!(warning.contains("Revoke it on the hub"), "{warning}");
+    assert_eq!(left.status.role.as_str(), "standalone");
+    b.daemon.shutdown().await.unwrap();
 }
 
 // A settings save from a copy read before "Enable hub" (the UI's snapshot)

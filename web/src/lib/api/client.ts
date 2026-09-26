@@ -19,6 +19,7 @@ import type {
   JoinHub,
   JoinPreview,
   LaunchSession,
+  LeftHub,
   Machine,
   MachineDirs,
   OpenTarget,
@@ -280,6 +281,8 @@ export const api = {
     join: (body: JoinHub) => request<SyncStatus>('POST', '/api/sync/join', body),
     /** The hub an invite points at, read from the invite alone (nothing is contacted). */
     previewJoin: (invite: string) => request<JoinPreview>('POST', '/api/sync/join/preview', { invite }),
+    /** Node: pushes what is queued, has the hub revoke this machine and becomes standalone. */
+    leave: () => request<LeftHub>('POST', '/api/sync/leave'),
   },
   devices: {
     list: () => request<Device[]>('GET', '/api/devices'),

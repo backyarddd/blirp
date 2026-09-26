@@ -3,6 +3,8 @@
 //! The node dials the hub and opens one bidirectional stream for strict
 //! request/response: `hello` -> `welcome`, then any number of
 //! `push {entries}` -> `push_ack {acked}` and `pull {after}` -> `page`.
+//! A node leaving the hub sends `leave` -> `left`: the hub revokes it (the
+//! connection's TLS-authenticated endpoint id, never an id from the message).
 //! The hub opens one unidirectional stream on which it sends
 //! `notify {head}` whenever `hub_log` grows, so the node pulls promptly.
 //! Batches are at most [`MAX_BATCH_ENTRIES`] entries / [`MAX_BATCH_BYTES`].
@@ -40,6 +42,8 @@ pub enum NodeMsg {
     Pull {
         after: i64,
     },
+    /// This machine leaves the hub: revoke it.
+    Leave,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -59,6 +63,8 @@ pub enum HubMsg {
     Notify {
         head: i64,
     },
+    /// Answer to `leave`: the machine is revoked.
+    Left,
     Error {
         code: String,
         message: String,
@@ -69,9 +75,17 @@ fn remote_err(code: String, message: String) -> SyncError {
     SyncError::Remote { code, message }
 }
 
-/// Hub side of one node connection. Returns when the node disconnects.
-/// `on_exchange(logged)` runs after every answered request; `logged` is
-/// true when a push added rows (to wake other nodes).
+/// How a node's sync session with the hub ended.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HubSessionEnd {
+    Disconnected,
+    /// The node left the hub and is now revoked.
+    Left,
+}
+
+/// Hub side of one node connection. Returns when the node disconnects or
+/// leaves. `on_exchange(logged)` runs after every answered request;
+/// `logged` is true when a push added rows (to wake other nodes).
 pub async fn serve_hub(
     conn: Connection,
     store: Arc<Store>,
@@ -79,7 +93,7 @@ pub async fn serve_hub(
     node_id: String,
     mut head: watch::Receiver<i64>,
     on_exchange: impl Fn(bool) + Send + Sync + 'static,
-) -> Result<()> {
+) -> Result<HubSessionEnd> {
     let (mut send, mut recv) = conn.accept_bi().await.map_err(SyncError::connection)?;
     let hello: NodeMsg = read_frame(&mut recv, MAX_FRAME).await?;
     let NodeMsg::Hello { versions, machine } = hello else {
@@ -129,7 +143,7 @@ pub async fn serve_hub(
         loop {
             let msg: NodeMsg = match read_frame(&mut recv, MAX_FRAME).await {
                 Ok(m) => m,
-                Err(crate::wire::WireError::Closed) => return Ok(()),
+                Err(crate::wire::WireError::Closed) => return Ok(HubSessionEnd::Disconnected),
                 Err(e) => return Err(e.into()),
             };
             let reply = match msg {
@@ -156,6 +170,18 @@ pub async fn serve_hub(
                     on_exchange(false);
                     HubMsg::Page { page }
                 }
+                NodeMsg::Leave => {
+                    // Only ever the authenticated peer of this connection.
+                    let (st, node) = (store.clone(), node_id.clone());
+                    blocking(move || crate::service::revoke_machine(&st, &node)).await?;
+                    on_exchange(false);
+                    write_frame(&mut send, &HubMsg::Left).await?;
+                    let _ = send.finish();
+                    // Dropping the connection now could discard the unsent
+                    // frame; the node closes it once it has read `left`.
+                    let _ = tokio::time::timeout(Duration::from_secs(1), conn.closed()).await;
+                    return Ok(HubSessionEnd::Left);
+                }
                 NodeMsg::Hello { .. } => {
                     return Err(SyncError::Protocol("duplicate hello".into()));
                 }
@@ -179,25 +205,7 @@ pub async fn run_node(
     mut shutdown: watch::Receiver<bool>,
     on_synced: impl Fn() + Send + Sync,
 ) -> Result<()> {
-    let (mut send, mut recv) = conn.open_bi().await.map_err(SyncError::connection)?;
-    write_frame(
-        &mut send,
-        &NodeMsg::Hello {
-            versions: crate::PROTOCOL_VERSIONS.to_vec(),
-            machine,
-        },
-    )
-    .await?;
-    match timed(read_frame(&mut recv, MAX_CONTROL_FRAME)).await? {
-        HubMsg::Welcome { hub_machine_id, .. } if hub_machine_id == hub_id => {}
-        HubMsg::Welcome { hub_machine_id, .. } => {
-            return Err(SyncError::Protocol(format!(
-                "expected hub {hub_id}, got {hub_machine_id}"
-            )));
-        }
-        HubMsg::Error { code, message } => return Err(remote_err(code, message)),
-        other => return Err(SyncError::Protocol(format!("unexpected {other:?}"))),
-    }
+    let (mut send, mut recv) = handshake(conn, machine, &hub_id).await?;
 
     // Hub notifications arrive on a uni stream read by its own task (frame
     // reads are not cancel safe, so they must not sit in a select).
@@ -219,7 +227,7 @@ pub async fn run_node(
         tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
         let mut need_pull = true;
         loop {
-            push_pending(&mut send, &mut recv, &store, &hub_id).await?;
+            push_pending(&mut send, &mut recv, &store, &hub_id, None).await?;
             if need_pull {
                 pull_all(&mut send, &mut recv, &store, &hub_id).await?;
                 need_pull = false;
@@ -262,6 +270,51 @@ pub async fn run_node(
     result
 }
 
+/// Node: leave the hub. Pushes what is still queued, starting new batches
+/// until `push_until` (what is left stays in the outbox), then asks the hub
+/// to revoke this machine.
+pub async fn leave(
+    conn: &Connection,
+    store: Arc<Store>,
+    machine: Machine,
+    hub_id: &str,
+    push_until: tokio::time::Instant,
+) -> Result<()> {
+    let (mut send, mut recv) = handshake(conn, machine, hub_id).await?;
+    push_pending(&mut send, &mut recv, &store, hub_id, Some(push_until)).await?;
+    write_frame(&mut send, &NodeMsg::Leave).await?;
+    match timed(read_frame(&mut recv, MAX_CONTROL_FRAME)).await? {
+        HubMsg::Left => Ok(()),
+        HubMsg::Error { code, message } => Err(remote_err(code, message)),
+        other => Err(SyncError::Protocol(format!("unexpected {other:?}"))),
+    }
+}
+
+/// Node: open the request stream and exchange hello/welcome with `hub_id`.
+async fn handshake(
+    conn: &Connection,
+    machine: Machine,
+    hub_id: &str,
+) -> Result<(SendStream, RecvStream)> {
+    let (mut send, mut recv) = conn.open_bi().await.map_err(SyncError::connection)?;
+    write_frame(
+        &mut send,
+        &NodeMsg::Hello {
+            versions: crate::PROTOCOL_VERSIONS.to_vec(),
+            machine,
+        },
+    )
+    .await?;
+    match timed(read_frame(&mut recv, MAX_CONTROL_FRAME)).await? {
+        HubMsg::Welcome { hub_machine_id, .. } if hub_machine_id == hub_id => Ok((send, recv)),
+        HubMsg::Welcome { hub_machine_id, .. } => Err(SyncError::Protocol(format!(
+            "expected hub {hub_id}, got {hub_machine_id}"
+        ))),
+        HubMsg::Error { code, message } => Err(remote_err(code, message)),
+        other => Err(SyncError::Protocol(format!("unexpected {other:?}"))),
+    }
+}
+
 async fn timed<T>(
     f: impl std::future::Future<Output = Result<T, crate::wire::WireError>>,
 ) -> Result<T> {
@@ -271,11 +324,13 @@ async fn timed<T>(
         .map_err(Into::into)
 }
 
+/// Push the outbox in batches. With `until`, no batch starts after it.
 async fn push_pending(
     send: &mut SendStream,
     recv: &mut RecvStream,
     store: &Arc<Store>,
     hub_id: &str,
+    until: Option<tokio::time::Instant>,
 ) -> Result<()> {
     loop {
         let st = store.clone();
@@ -288,6 +343,9 @@ async fn push_pending(
         let Some(last) = batch.last().map(|e| e.origin_seq) else {
             return Ok(());
         };
+        if until.is_some_and(|u| tokio::time::Instant::now() >= u) {
+            return Ok(());
+        }
         write_frame(send, &NodeMsg::Push { entries: batch }).await?;
         match timed(read_frame(recv, MAX_CONTROL_FRAME)).await? {
             HubMsg::PushAck { acked } if acked >= last => {

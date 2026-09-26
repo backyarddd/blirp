@@ -71,7 +71,7 @@
   }
 
   let busy = $state(false);
-  async function roleChange(fn: () => Promise<unknown>, success: string): Promise<void> {
+  async function roleChange(fn: () => Promise<unknown>, success?: string): Promise<void> {
     busy = true;
     const out = await app.act(fn, success);
     busy = false;
@@ -96,9 +96,13 @@
   }
 
   function leaveHub(): void {
-    const hub = status?.hub;
-    if (!hub || !confirm('Leave the hub? This machine stops syncing and becomes standalone.')) return;
-    void roleChange(() => api.machines.revoke(hub).then(() => true), 'Left the hub');
+    if (!confirm('Leave the hub? This machine stops syncing and becomes standalone.')) return;
+    void roleChange(async () => {
+      const left = await api.sync.leave();
+      // The hub could not be told, or changes made here did not reach it.
+      app.toast(left.warning ?? 'Left the hub', left.warning ? 'error' : 'info');
+      return left;
+    });
   }
 
   let invite: SyncInvite | null = $state.raw(null);

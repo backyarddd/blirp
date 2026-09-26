@@ -754,6 +754,7 @@ const MUTATING_ROUTES: &[(&str, &str, Need)] = &[
     ("POST", "/api/sync/invite", Need::Admin),
     ("POST", "/api/sync/join", Need::Admin),
     ("POST", "/api/sync/join/preview", Need::Admin),
+    ("POST", "/api/sync/leave", Need::Admin),
     ("POST", "/api/devices/browser-invite", Need::Admin),
     ("PATCH", "/api/devices/d1", Need::Admin),
     ("DELETE", "/api/devices/d1", Need::Admin),

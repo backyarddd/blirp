@@ -1074,6 +1074,15 @@ pub struct JoinHub {
     pub allow_hub_control: Option<bool>,
 }
 
+/// `POST /api/sync/leave`: this machine is standalone again.
+#[derive(Debug, Clone, Serialize, Deserialize, TS)]
+pub struct LeftHub {
+    pub status: SyncStatus,
+    /// Set when the hub could not be told (it still lists this machine as
+    /// paired) or changes made here had not reached it.
+    pub warning: Option<String>,
+}
+
 /// `POST /api/sync/join/preview`: what an invite says about its hub,
 /// without contacting it.
 #[derive(Debug, Clone, Serialize, Deserialize, TS)]
@@ -1222,7 +1231,7 @@ mod tests {
             GitStatusEntry, GitStatus, GitDiff, FileEntry, DirListing, FileContent, SessionsPage, SessionDetail,
             LaunchSession, PatchSession, RemoveWorktree, OpenTarget, OpenSession, EventsPage, SearchHit, SearchResults, AgentInfo,
             AgentIntegration, AgentAuth, AgentToken, SetAgentToken, MachineDirs, MachineDir, CloneRepo, CloneJob, Injection, SummaryItem, DistillFailure, SessionSummary,
-            SettingsView, SettingsPatch, Capabilities, DistillStatus, DistillPause, SyncStatus, SyncInvite, JoinHub, JoinPreviewRequest, JoinPreview, WsTicketRequest, WsTicket, BrowserInvite, PatchDevice,
+            SettingsView, SettingsPatch, Capabilities, DistillStatus, DistillPause, SyncStatus, SyncInvite, JoinHub, JoinPreviewRequest, JoinPreview, LeftHub, WsTicketRequest, WsTicket, BrowserInvite, PatchDevice,
             ServerEvent, TerminalServerMessage, TerminalClientMessage,
             Config, DaemonConfig, MachineConfig, AgentsConfig, CustomAgent, SessionsConfig,
             Summarizer, BriefMode, MemoryConfig, SyncConfig, PortalConfig, UpdateConfig,

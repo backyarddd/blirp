@@ -745,6 +745,16 @@ export type JoinPreview = {
 hub_id: string | null, };
 
 /**
+ * `POST /api/sync/leave`: this machine is standalone again.
+ */
+export type LeftHub = { status: SyncStatus, 
+/**
+ * Set when the hub could not be told (it still lists this machine as
+ * paired) or changes made here had not reached it.
+ */
+warning: string | null, };
+
+/**
  * `POST /api/ws-ticket` (loopback listener): browsers cannot send
  * `Authorization` on a WebSocket, so they trade the bearer token for a
  * single-use ticket bound to one path and pass it as `?ticket=`.
