@@ -41,13 +41,14 @@ CSRF protection: a mutating request or WebSocket upgrade that carries an `Origin
 
 | Status | Codes |
 |---|---|
-| 400 | `invalid_request` (validation, malformed JSON or query, unknown fields), `unknown_agent`, `not_git`, pairing errors (`wrong_code`, `expired`, `too_many_attempts`, `unknown_invite`, `invite_required`, ...), `invalid_invite` |
+| 400 | `invalid_request` (validation, malformed JSON or query, unknown fields), `unknown_agent`, `not_git`, pairing errors (`wrong_code`, `invite_expired`, `too_many_attempts`, `unknown_invite`, `invite_required`, `no_hub_found`, `multiple_hubs`, ...), `invalid_invite` |
 | 401 | `unauthorized`, `invalid_invite` (device login) |
 | 403 | `forbidden_origin`, `control_not_allowed`, `admin_only` |
 | 404 | `not_found`, `terminal_not_found`, `not_git` (git endpoints on a plain folder) |
 | 405 | `method_not_allowed` |
-| 409 | `conflict`, `session_live`, `not_running`, `already_running`, `nothing_to_distill`, `remote_session`, `machine_unreachable`, `machine_offline`, `paired_node`, `not_hub`, `already_synced`, `portal_disabled` |
-| 422 | `agent_not_installed`, `worktree_failed`, `spawn_failed`, global hooks install failures |
+| 409 | `conflict`, `session_live`, `not_running`, `already_running`, `nothing_to_distill`, `remote_session`, `machine_unreachable`, `machine_offline`, `paired_node`, `not_hub`, `already_synced`, `portal_disabled`, `portal_failed`, `not_node` |
+| 422 | `agent_not_installed`, `worktree_failed`, `spawn_failed`, `open_failed`, global hooks install failures |
+| 502 | `sync_failed` (settings were saved, but the sync endpoint could not restart) |
 | 429 | `rate_limited` (device login) |
 | 500 | `internal` (details only in the daemon log) |
 

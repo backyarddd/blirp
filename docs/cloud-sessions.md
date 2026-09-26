@@ -23,7 +23,7 @@ Do this at the Mac itself (or over Screen Sharing), logged in as the user the ag
    blirp service install     # ~/Library/LaunchAgents/dev.blirp.daemon.plist
    blirp service status
    ```
-   Run this in Terminal on the Mac, not over SSH. A daemon started from an SSH session cannot read the login keychain, so `claude` would not be logged in there; blirp shows this in the new-session dialog.
+   Run this in Terminal on the Mac, or over SSH while you are logged in at the Mac: `service install` loads the daemon into your login session either way. Keep the Mac logged in (turn on automatic login so it comes back after a restart). A daemon started directly in an SSH shell (`blirp daemon --detach`) runs outside that session and cannot read the login keychain, so `claude` would not be logged in there; blirp shows this in the new-session dialog.
    A LaunchAgent on a Mac whose screen is locked (or after a reboot before anyone logs in) cannot read the keychain either. To make Claude independent of it, give the hub a login token: `claude setup-token` on any machine with a browser, then `blirp agents set-token claude` on the Mac ([agents.md](agents.md#headless-login-for-a-hub)). This works over SSH too.
 4. Keep the Mac up:
    - **System Settings > Users & Groups > Automatically log in as** your user, so the LaunchAgent starts after a reboot (not available with FileVault; then log in once after each reboot, for example over Screen Sharing).

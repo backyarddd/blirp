@@ -130,7 +130,7 @@ blirp pair <CODE>
 blirp pair 'blirp://join/<invite>#<code>'
 ```
 
-Pairs this standalone machine with a hub ([sync-and-hub.md](sync-and-hub.md#pair-machines)). With only a code, the hub is found on the local network (one hub, one open invite). Waits up to 2 minutes for the hub. On success the machine becomes a `node` and prints its sync status.
+Pairs this standalone machine with a hub ([sync-and-hub.md](sync-and-hub.md#pair-machines)). With only a code, the hub is found on the local network (one hub, one open invite); that lookup gives up after 5 seconds with `no_hub_found`, so pass the full invite when mDNS is blocked. Once the hub is known, pairing waits up to 2 minutes for it. On success the machine becomes a `node` and prints its sync status.
 
 ## blirp hub
 

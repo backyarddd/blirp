@@ -411,8 +411,9 @@ mod platform {
                 "Autostart installed ({plist_s}). A daemon is already running (pid {pid}); \
                  the service takes over at your next login."
             ),
-            // Over SSH there is no GUI session to bootstrap into; the plist
-            // still loads at the next login, so this is not a failure.
+            // With nobody logged in at the Mac (SSH only) there is no GUI
+            // session to bootstrap into; the plist still loads at the next
+            // login, so this is not a failure.
             (false, _, None) => match tool("launchctl", &["bootstrap", &domain(), &plist_s])? {
                 (true, _) => println!("Autostart installed and started ({plist_s})."),
                 (false, out) => println!(
