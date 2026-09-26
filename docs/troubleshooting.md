@@ -166,7 +166,7 @@ The portal does not start although it is enabled: it runs only on a hub, and a c
 ## Linux desktop
 
 - No tray icon on GNOME: install the "AppIndicator and KStatusNotifierItem Support" extension. Without it, closing the window still keeps the daemon running; launch blirp again to get the window back.
-- `blirp service install` refuses to run from an AppImage (it would record a temporary path). Install the standalone binary for autostart.
+- The desktop AppImage runs `blirp` from a temporary mount that is gone once the app exits. Autostart (`blirp service install`) and the global agent integration (Settings > Agents, `blirp hooks install`) therefore record the installed CLI (from the install script, or `blirp` on `PATH`) and refuse with "runs from a temporary location" when there is none: install the CLI (see [install.md](install.md)) and try again.
 
 ## Still stuck
 

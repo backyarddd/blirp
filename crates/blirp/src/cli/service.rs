@@ -35,20 +35,6 @@ pub async fn run(cmd: &ServiceCommand, paths: &Paths) -> anyhow::Result<ExitCode
     }
 }
 
-/// The binary autostart will run: this one, unless it lives somewhere that
-/// will not exist after a reboot.
-fn service_exe() -> anyhow::Result<PathBuf> {
-    let exe = std::env::current_exe().context("locate the blirp executable")?;
-    if std::env::var_os("APPIMAGE").is_some() || exe.starts_with("/tmp") {
-        bail!(
-            "this blirp runs from a temporary location ({}); install the standalone \
-             blirp binary (see docs/install.md) and run `blirp service install` with it",
-            exe.display()
-        );
-    }
-    Ok(exe)
-}
-
 /// `BLIRP_HOME` baked into the unit when set explicitly, so the service uses
 /// the same data dir as the shell that installed it.
 fn explicit_home(paths: &Paths) -> Option<PathBuf> {
@@ -241,7 +227,9 @@ fn user_home() -> anyhow::Result<PathBuf> {
 // ------------------------------------------------------------------ install
 
 async fn install(paths: &Paths) -> anyhow::Result<ExitCode> {
-    let exe = service_exe()?;
+    let exe = std::env::current_exe().context("locate the blirp executable")?;
+    // Autostart must not point into a mount that is gone after a reboot.
+    let exe = crate::memory::persistent_exe(exe)?;
     paths.ensure_dirs()?;
     let running = crate::daemon::running_daemon(paths).await;
     platform::install(paths, &exe, running.as_ref().map(|r| r.pid)).await?;

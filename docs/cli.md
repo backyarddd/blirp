@@ -111,7 +111,7 @@ blirp hooks uninstall [--agent <AGENT>]
 blirp hooks status    [--agent <AGENT>]
 ```
 
-Global integration for sessions started outside blirp. Supported agents: `claude`, `codex`, `gemini`, `cursor`, `opencode`. Without `--agent`, `install` handles every supported agent found on PATH, `uninstall` and `status` all supported agents. Prints one line per agent: `hooks <installed|not_installed|unsupported>  mcp <...>`, plus a note after install (Codex: run `/hooks` once to trust them). Exit code 1 if any agent failed (e.g. a config file with comments). Does not need the daemon. Exactly what changes: [memory.md](memory.md#global-hooks).
+Global integration for sessions started outside blirp. Supported agents: `claude`, `codex`, `gemini`, `cursor`, `opencode`. Without `--agent`, `install` handles every supported agent found on PATH, `uninstall` and `status` all supported agents. Prints one line per agent: `hooks <installed|not_installed|unsupported>  mcp <...>`, plus a note after install (Codex: run `/hooks` once to trust them). Exit code 1 if any agent failed (e.g. a config file with comments). Entries run the absolute path of this binary; from an AppImage mount they run the installed CLI instead (as for `blirp service install`). Does not need the daemon. Exactly what changes: [memory.md](memory.md#global-hooks).
 
 ## blirp agents
 
@@ -160,7 +160,7 @@ blirp service status      # installed? daemon running?
 blirp service uninstall   # remove the autostart entry; a running daemon keeps running
 ```
 
-Per-user autostart, never a system service: macOS LaunchAgent `dev.blirp.daemon`, Linux `systemd --user` unit `blirp.service`, Windows `HKCU\...\Run` value `blirp`. Records the absolute path of the binary you ran it with and, on macOS/Linux, your current `PATH` and `BLIRP_HOME`; re-run after moving the binary or changing where agents are installed. Refuses to install from a temporary location (an AppImage mount or `/tmp`). Idempotent.
+Per-user autostart, never a system service: macOS LaunchAgent `dev.blirp.daemon`, Linux `systemd --user` unit `blirp.service`, Windows `HKCU\...\Run` value `blirp`. Records the absolute path of the binary you ran it with and, on macOS/Linux, your current `PATH` and `BLIRP_HOME`; re-run after moving the binary or changing where agents are installed. Run from a temporary location (an AppImage mount or `/tmp`), it records the installed CLI instead (the one the install receipt names, else `blirp` on `PATH`) and refuses when there is none. Idempotent.
 
 ## blirp update
 

@@ -161,6 +161,19 @@ fn runs_from_app(exe: &Path, app: &Path, appimage: Option<&Path>) -> bool {
     exe.starts_with(app) || appimage == Some(app)
 }
 
+/// The CLI the install script put on this machine, whichever binary runs
+/// (e.g. the desktop app's AppImage). None without a (readable) receipt.
+pub fn installed_cli() -> Option<PathBuf> {
+    let exe = crate::memory::blirp_exe();
+    match read_receipt(exe.parent()?) {
+        Ok(r) => r.map(|(r, _)| r.install_dir.join(CLI_FILES[0])),
+        Err(e) => {
+            tracing::warn!(error = %format!("{e:#}"), "ignoring the install receipt");
+            None
+        }
+    }
+}
+
 /// Default desktop app locations, for launching (`blirp` without arguments).
 pub fn app_candidates(exe_dir: &Path) -> Vec<PathBuf> {
     let home = blirp_core::paths::user_home();

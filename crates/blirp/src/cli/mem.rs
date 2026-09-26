@@ -276,12 +276,16 @@ pub fn run_hooks(cmd: HooksCommand) -> anyhow::Result<ExitCode> {
             .map(|a| a.to_string())
             .collect(),
     };
-    let exe = crate::memory::blirp_exe();
+    // Written into the agents' own config files, so it must outlive this process.
+    let exe = match action {
+        "install" => Some(crate::memory::persistent_exe(crate::memory::blirp_exe())?),
+        _ => None,
+    };
     let mut failed = false;
     for a in agents {
-        let result = match action {
-            "install" => install::install(&a, &homes, &exe),
-            "uninstall" => install::uninstall(&a, &homes),
+        let result = match (action, &exe) {
+            ("install", Some(exe)) => install::install(&a, &homes, exe),
+            ("uninstall", _) => install::uninstall(&a, &homes),
             _ => Ok(install::status(&a, &homes)),
         };
         match result {

@@ -155,7 +155,8 @@ async fn agent_hooks(
         let homes = crate::hooks::install::Homes::from_env()
             .ok_or_else(|| ApiError::internal("locating the home directory", "no home"))?;
         let result = if install {
-            crate::hooks::install::install(&agent_id, &homes, &crate::memory::blirp_exe())
+            crate::memory::persistent_exe(crate::memory::blirp_exe())
+                .and_then(|exe| crate::hooks::install::install(&agent_id, &homes, &exe))
         } else {
             crate::hooks::install::uninstall(&agent_id, &homes)
         };
