@@ -329,8 +329,10 @@ async fn api_auth_projects_memory_files() {
         );
     }
 
-    // Register a folder; files API stays inside it.
-    let proj = h._home.path().join("proj");
+    // Register a folder; files API stays inside it. Not inside the data
+    // dir (BLIRP_HOME), which the files API never serves.
+    let work = tempfile::tempdir().unwrap();
+    let proj = work.path().join("proj");
     std::fs::create_dir_all(proj.join("src")).unwrap();
     std::fs::write(proj.join("src/main.rs"), "fn main() {}\n").unwrap();
     let r = h

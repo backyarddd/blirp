@@ -396,7 +396,7 @@ GET  /api/projects/:id/git               {is_git, branch, status[], ahead/behind
 GET  /api/projects/:id/files?path=       directory listing (read-only) ; GET .../files/content?path= (text, <= 1 MiB)
                                          files and git take optional `root=` (one of the project's folders here);
                                          paths are relative, `..`/absolute paths and symlinks escaping the root are rejected,
-                                         and so is anything inside BLIRP_HOME (403 `path_in_data_dir`)
+                                         and so is anything inside BLIRP_HOME but `worktrees/` (403 `path_in_data_dir`)
 GET  /api/sessions?project=&status=&agent=&machine=&q=&parent=&include_children=&cursor=
                                          ingested subagent sessions (origin external with a parent, §8) are
                                          left out unless include_children=true; parent=<id> lists only that

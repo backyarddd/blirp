@@ -84,7 +84,7 @@ CSRF protection: a mutating request or WebSocket upgrade that carries an `Origin
 | `GET /api/projects/:id/git?root=` | `{is_git, root, branch, head, upstream, ahead, behind, entries[{path, orig_path, index, worktree, conflicted}]}`; 404 `not_git` for plain folders |
 | `GET /api/projects/:id/git/diff?path=&root=` | `{path, diff, truncated}` (working tree diff, capped at 1 MiB) |
 
-Files and git are read-only and take paths relative to the project folder on this machine (`root` picks one when the project has several). Absolute paths, `..` and symlinks leading outside the folder are rejected, and so is anything inside blirp's own data folder (`BLIRP_HOME`, e.g. when the project folder is your home folder): 403 `path_in_data_dir`.
+Files and git are read-only and take paths relative to the project folder on this machine (`root` picks one when the project has several). Absolute paths, `..` and symlinks leading outside the folder are rejected, and so is anything inside blirp's own data folder (`BLIRP_HOME`, e.g. when the project folder is your home folder; session worktrees under `worktrees/` excepted): 403 `path_in_data_dir`.
 
 ### Memory
 

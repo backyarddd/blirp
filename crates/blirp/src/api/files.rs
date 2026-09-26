@@ -83,7 +83,8 @@ pub fn resolve_inside(root: &Path, rel: &str, data_dir: &Path) -> ApiResult<Path
         ));
     }
     let data_dir = dunce::canonicalize(data_dir).unwrap_or_else(|_| data_dir.to_path_buf());
-    if target.starts_with(&data_dir) {
+    // Session worktrees (checkouts of the user's repos) live there too.
+    if target.starts_with(&data_dir) && !target.starts_with(data_dir.join("worktrees")) {
         return Err(ApiError::new(
             StatusCode::FORBIDDEN,
             "path_in_data_dir",
@@ -384,6 +385,10 @@ mod tests {
         // Also when the data dir is the project folder itself.
         let e = resolve_inside(&data, "", &data).unwrap_err();
         assert_eq!(e.code, "path_in_data_dir");
+        // Session worktrees are checkouts of the user's repos: served.
+        std::fs::create_dir_all(data.join("worktrees/p/w")).unwrap();
+        std::fs::write(data.join("worktrees/p/w/a.txt"), "x").unwrap();
+        assert!(resolve_inside(root, ".blirp/worktrees/p/w/a.txt", &data).is_ok());
     }
 
     #[test]
