@@ -481,7 +481,7 @@ test('agents: integration rows, and install/uninstall round trip in the temp hom
 
 test('command palette jumps to a project', async () => {
   await page.goto(`${env.url}/sessions`);
-  await page.keyboard.press('Control+k');
+  await page.keyboard.press('ControlOrMeta+k');
   const palette = page.getByRole('dialog', { name: 'Command palette' });
   await expect(palette).toBeVisible();
   await palette.getByRole('combobox').fill('git-repo');
