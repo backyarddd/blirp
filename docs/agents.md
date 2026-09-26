@@ -38,11 +38,12 @@ Give it a long-lived login token instead (valid one year; needs a Pro, Max, Team
 What blirp does with it:
 
 - Stores it in `~/.blirp/secrets/claude_oauth_token` (folder `0700`, file `0600` on macOS and Linux; on Windows the user profile's permissions). It is not in the database, so it is never synced; it is never logged and never returned by the API, which reports only `token: {stored, env}`.
-- Passes it as `CLAUDE_CODE_OAUTH_TOKEN` to claude only: sessions, the claude summarizer and the `claude auth status` check. No other agent and no shell session gets it.
-- If the daemon's own environment already sets `CLAUDE_CODE_OAUTH_TOKEN`, sessions inherit that value and the stored token is not used.
+- Passes the stored token as `CLAUDE_CODE_OAUTH_TOKEN` to claude only: sessions, the claude summarizer and the `claude auth status` check. blirp gives it to no other agent and no shell session.
+- If you set `CLAUDE_CODE_OAUTH_TOKEN` in the daemon's own environment yourself, that value wins: the stored token is not used, and like any environment variable of the daemon, every process it starts (other agents and shells too) inherits it.
+- A daemon started from inside a claude session blirp launched (for example `blirp daemon --detach` or `blirp update` run by claude) inherits that session's copy of the stored token. blirp recognizes the copy and drops it at start, so it is not taken for your own setting and not passed to other programs.
 - `blirp agents clear-token claude` (or **Remove token**) deletes it. Running sessions keep the login they started with.
 
-Claude Code ranks `ANTHROPIC_AUTH_TOKEN`, `ANTHROPIC_API_KEY` and `apiKeyHelper` above this token, and the token can only make model requests, so Remote Control and claude.ai connectors do not work with it ([Claude Code authentication](https://code.claude.com/docs/en/authentication#generate-a-long-lived-token)). Run `claude setup-token` again before it expires.
+Claude Code ranks cloud provider credentials (`CLAUDE_CODE_USE_BEDROCK`, `CLAUDE_CODE_USE_VERTEX`, `CLAUDE_CODE_USE_FOUNDRY`), then `ANTHROPIC_AUTH_TOKEN`, `ANTHROPIC_API_KEY` and `apiKeyHelper` above this token, and the token can only make model requests, so Remote Control and claude.ai connectors do not work with it ([Claude Code authentication](https://code.claude.com/docs/en/authentication#generate-a-long-lived-token)). Run `claude setup-token` again before it expires.
 
 ## Codex
 

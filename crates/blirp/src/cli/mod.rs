@@ -162,6 +162,7 @@ pub fn main() -> ExitCode {
             return ExitCode::FAILURE;
         }
     };
+    forget_inherited_claude_token(&paths);
     match command {
         Command::Mem(cmd) => report(mem::run_mem(&paths, cmd)),
         Command::Logs { lines, follow } => report(lifecycle::logs(&paths, lines, follow)),
@@ -169,6 +170,21 @@ pub fn main() -> ExitCode {
         Command::Hooks(cmd) => report(mem::run_hooks(cmd)),
         Command::Agents(cmd) => report(agents::run(&paths, cmd)),
         command => run_async(command, paths),
+    }
+}
+
+/// Run from inside a claude session blirp started (`blirp daemon --detach`,
+/// `blirp update`), this process inherits that session's copy of the stored
+/// login token. Dropped here, before any thread exists, so the daemon this
+/// starts, and everything that daemon starts, never inherits it: claude
+/// still gets the stored token (read at each spawn, so set-token and
+/// clear-token keep working), other programs get nothing.
+#[allow(unsafe_code)]
+fn forget_inherited_claude_token(paths: &Paths) {
+    if blirp_core::claude_token::env_is_stored_copy(paths) {
+        // SAFETY: called from `main` before the async runtime or any other
+        // thread is started, so nothing reads the environment concurrently.
+        unsafe { std::env::remove_var(blirp_core::claude_token::ENV) };
     }
 }
 

@@ -278,3 +278,98 @@ fn set_and_clear_claude_token() {
     assert!(o.status.success(), "{}", text(&o));
     assert!(!file.exists());
 }
+
+/// A daemon started from inside a claude session blirp launched inherits
+/// that session's copy of the stored login token. It must not treat the
+/// copy as the user's own setting, nor hand it to other programs.
+#[tokio::test]
+async fn daemon_started_inside_claude_drops_the_inherited_token() {
+    use blirp_core::model::AgentInfo;
+    const SECRET: &str = "tok-inherited-copy-test";
+    let tmp = tempfile::tempdir().unwrap();
+    let home = tmp.path().join("blirp");
+    let user = tmp.path().join("user");
+    let work = tmp.path().join("work");
+    for d in [&user, &work] {
+        std::fs::create_dir_all(d).unwrap();
+    }
+    let paths = blirp_core::paths::Paths::at(&home);
+    blirp_core::claude_token::store(&paths, SECRET).unwrap();
+
+    let mut cmd = blirp_core::process::command(env!("CARGO_BIN_EXE_blirp"));
+    cmd.args(["daemon", "--detach", "--port", "0"])
+        .env("BLIRP_HOME", &home)
+        .env("HOME", &user)
+        .env("USERPROFILE", &user)
+        .env("APPDATA", user.join("AppData"))
+        .env(blirp_core::claude_token::ENV, SECRET);
+    for v in INGEST_VARS {
+        cmd.env_remove(v);
+    }
+    let o = cmd.output().unwrap();
+    let _stop = StopOnDrop(&home, &user);
+    assert!(o.status.success(), "{}", text(&o));
+    let info = blirp_core::paths::RuntimeInfo::read(&paths)
+        .unwrap()
+        .unwrap();
+    blirp::install_crypto_provider();
+    let http = reqwest::Client::new();
+    let api = |method: reqwest::Method, path: &str| {
+        http.request(method, format!("{}{path}", info.base_url()))
+            .bearer_auth(&info.token)
+    };
+
+    // Not reported as the environment's token: the stored one is in use.
+    let agents: Vec<AgentInfo> = api(reqwest::Method::GET, "/api/agents")
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let token = agents
+        .into_iter()
+        .find(|a| a.id == "claude")
+        .and_then(|a| a.token)
+        .unwrap();
+    assert!(token.stored && !token.env, "{token:?}");
+
+    // A shell session does not get it.
+    let out = work.join("seen.txt");
+    let prompt = if cfg!(windows) {
+        format!(
+            "Set-Content -LiteralPath '{}' -Value ('[' + $env:{} + ']')",
+            out.display(),
+            blirp_core::claude_token::ENV
+        )
+    } else {
+        format!(
+            "printf '[%s]' \"${}\" > '{}'",
+            blirp_core::claude_token::ENV,
+            out.display()
+        )
+    };
+    let r = api(reqwest::Method::POST, "/api/sessions")
+        .json(&serde_json::json!({"cwd": work, "agent": "shell", "prompt": prompt}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(r.status(), 201, "{:?}", r.text().await);
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
+    let seen = loop {
+        if let Ok(s) = std::fs::read_to_string(&out)
+            && s.contains(']')
+        {
+            break s;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the shell never ran the prompt"
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+    };
+    assert_eq!(seen.trim(), "[]");
+
+    let o = blirp(&home, &user, &["stop"]);
+    assert!(o.status.success(), "{}", text(&o));
+}

@@ -66,19 +66,16 @@ pub fn validate(raw: &str) -> Result<&str, TokenError> {
 }
 
 /// Store the token, replacing any earlier one. The secrets dir is 0700 and
-/// the file 0600 on unix (written to a fresh temp file, then renamed, so it
-/// is never readable by others, not even briefly); on Windows both inherit
-/// the user profile ACL.
+/// the file 0600 on unix (written to a new temp file with a random name,
+/// then renamed, so it is never readable by others, not even briefly, and
+/// concurrent stores never share a temp file); on Windows both inherit the
+/// user profile ACL.
 pub fn store(paths: &Paths, raw: &str) -> Result<(), TokenError> {
     let token = validate(raw)?;
     create_private_dir(&paths.secrets_dir())?;
     let file = paths.claude_token_file();
-    let tmp = file.with_extension("tmp");
-    match std::fs::remove_file(&tmp) {
-        Ok(()) => {}
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
-        Err(e) => return Err(io("remove", &tmp)(e)),
-    }
+    let suffix = crate::random_hex::<8>().map_err(io("random name for", &file))?;
+    let tmp = file.with_extension(format!("{suffix}.tmp"));
     let mut opts = std::fs::OpenOptions::new();
     // create_new: never write through something already at the temp path.
     opts.write(true).create_new(true);
@@ -96,7 +93,8 @@ pub fn store(paths: &Paths, raw: &str) -> Result<(), TokenError> {
         });
     if let Err(e) = written.and_then(|()| std::fs::rename(&tmp, &file).map_err(io("rename", &file)))
     {
-        // Best effort: the temp file holds the token; the error is what matters.
+        // Best effort: the temp file holds the token (clear() also removes
+        // leftovers); the error is what matters.
         let _ = std::fs::remove_file(&tmp);
         return Err(e);
     }
@@ -114,13 +112,42 @@ pub fn read(paths: &Paths) -> Result<Option<String>, TokenError> {
     }
 }
 
-/// Remove the stored token. `false` when there was none.
+/// Remove the stored token, and any temp file a store interrupted by a
+/// crash left behind. `false` when no token was stored.
 pub fn clear(paths: &Paths) -> Result<bool, TokenError> {
+    let dir = paths.secrets_dir();
     let file = paths.claude_token_file();
-    match std::fs::remove_file(&file) {
+    let prefix = format!(
+        "{}.",
+        file.file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or_default()
+    );
+    match std::fs::read_dir(&dir) {
+        Ok(entries) => {
+            for entry in entries {
+                let path = entry.map_err(io("list", &dir))?.path();
+                let leftover = path
+                    .file_name()
+                    .and_then(|n| n.to_str())
+                    .is_some_and(|n| n.starts_with(&prefix) && n.ends_with(".tmp"));
+                if leftover {
+                    remove(&path)?;
+                }
+            }
+        }
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+        Err(e) => return Err(io("list", &dir)(e)),
+    }
+    remove(&file)
+}
+
+/// `false` when there was nothing to remove.
+fn remove(path: &Path) -> Result<bool, TokenError> {
+    match std::fs::remove_file(path) {
         Ok(()) => Ok(true),
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(false),
-        Err(e) => Err(io("remove", &file)(e)),
+        Err(e) => Err(io("remove", path)(e)),
     }
 }
 
@@ -129,26 +156,66 @@ fn process_env() -> Option<OsString> {
     std::env::var_os(ENV).filter(|v| !v.is_empty())
 }
 
+/// `inherited`, unless it is only a copy of the stored token: blirp gives
+/// that to the claude sessions it starts, so a daemon or CLI started from
+/// inside one (`blirp daemon --detach` or `blirp update` run by claude)
+/// inherits it. Such a copy is not the user's own setting; taken as one, it
+/// would pin that token until a restart and reach every process started.
+fn user_env(paths: &Paths, inherited: Option<OsString>) -> Option<OsString> {
+    let value = inherited?;
+    match read(paths) {
+        Ok(Some(stored)) if value.to_str() == Some(stored.as_str()) => None,
+        _ => Some(value),
+    }
+}
+
+/// Whether this process's [`ENV`] is only an inherited copy of the stored
+/// token (see [`user_env`]). The CLI removes such a copy from its own
+/// environment at start, so nothing it starts (the daemon, and everything
+/// the daemon starts) inherits it.
+pub fn env_is_stored_copy(paths: &Paths) -> bool {
+    let inherited = process_env();
+    inherited.is_some() && user_env(paths, inherited).is_none()
+}
+
 /// What claude processes started by this process log in with.
 pub fn status(paths: &Paths) -> AgentToken {
     AgentToken {
         // A file that holds no usable token is not used, so it does not count.
         stored: matches!(read(paths), Ok(Some(_))),
-        env: process_env().is_some(),
+        env: user_env(paths, process_env()).is_some(),
+    }
+}
+
+/// Changes whenever what claude logs in with may have changed: the
+/// [`status`], and the token file's modification time and size (a token
+/// replaced by another).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Stamp {
+    status: AgentToken,
+    file: Option<(Option<std::time::SystemTime>, u64)>,
+}
+
+pub fn stamp(paths: &Paths) -> Stamp {
+    Stamp {
+        status: status(paths),
+        file: std::fs::metadata(paths.claude_token_file())
+            .ok()
+            .map(|m| (m.modified().ok(), m.len())),
     }
 }
 
 /// The env var to add to a claude process started now: the stored token,
 /// read at every spawn so `set-token` takes effect without a restart.
-/// `None` when this process's environment already sets [`ENV`] (children
-/// inherit it; an explicit setting wins) or no token is stored. A token
+/// `None` when this process's environment sets [`ENV`] itself (children
+/// inherit it; the user's own setting wins) or no token is stored. A token
 /// that cannot be read is logged (never its content) and left out.
 pub fn launch_env(paths: &Paths) -> Option<(String, String)> {
     launch_env_with(paths, process_env())
 }
 
 fn launch_env_with(paths: &Paths, inherited: Option<OsString>) -> Option<(String, String)> {
-    if inherited.is_some() {
+    if user_env(paths, inherited).is_some() {
         return None;
     }
     match read(paths) {
@@ -234,6 +301,15 @@ mod tests {
         );
         // The daemon's own setting is inherited and wins.
         assert_eq!(launch_env_with(&paths, Some("mine".into())), None);
+        assert_eq!(user_env(&paths, Some("mine".into())), Some("mine".into()));
+        // A copy of the stored token (a daemon started from inside a claude
+        // session blirp launched) is not the user's setting: the stored
+        // token is still passed on, so set-token and clear-token keep working.
+        assert_eq!(user_env(&paths, Some("tok".into())), None);
+        assert_eq!(
+            launch_env_with(&paths, Some("tok".into())),
+            Some((ENV.to_string(), "tok".to_string()))
+        );
         // Read at every call: a new token is used at the next spawn.
         store(&paths, "newer").unwrap();
         assert_eq!(
@@ -242,6 +318,39 @@ mod tests {
         );
         clear(&paths).unwrap();
         assert_eq!(launch_env_with(&paths, None), None);
+        // With nothing stored, an inherited value is the user's own.
+        assert_eq!(user_env(&paths, Some("tok".into())), Some("tok".into()));
+    }
+
+    #[test]
+    fn clear_removes_leftover_temp_files() {
+        let dir = tempfile::tempdir().unwrap();
+        let paths = Paths::at(dir.path());
+        store(&paths, "tok").unwrap();
+        // What a store interrupted by a crash leaves behind.
+        let leftover = paths
+            .secrets_dir()
+            .join("claude_oauth_token.0011223344556677.tmp");
+        std::fs::write(&leftover, "old").unwrap();
+        let other = paths.secrets_dir().join("unrelated.tmp");
+        std::fs::write(&other, "x").unwrap();
+        assert!(clear(&paths).unwrap());
+        assert!(!leftover.exists());
+        assert!(other.exists());
+        assert!(!paths.claude_token_file().exists());
+    }
+
+    #[test]
+    fn stamp_changes_with_the_token() {
+        let dir = tempfile::tempdir().unwrap();
+        let paths = Paths::at(dir.path());
+        let none = stamp(&paths);
+        store(&paths, "first").unwrap();
+        let first = stamp(&paths);
+        assert_ne!(none, first);
+        // Same status ({stored: true}), another token.
+        store(&paths, "second-token").unwrap();
+        assert_ne!(first, stamp(&paths));
     }
 
     #[test]
@@ -258,16 +367,15 @@ mod tests {
         let mode = |p: &Path| std::fs::metadata(p).unwrap().permissions().mode() & 0o777;
         let dir = tempfile::tempdir().unwrap();
         let paths = Paths::at(dir.path());
-        // A loose secrets dir and a loose leftover temp file are not reused as they are.
+        // A loose secrets dir is tightened.
         std::fs::create_dir(paths.secrets_dir()).unwrap();
         std::fs::set_permissions(paths.secrets_dir(), std::fs::Permissions::from_mode(0o755))
             .unwrap();
-        let tmp = paths.claude_token_file().with_extension("tmp");
-        std::fs::write(&tmp, "old").unwrap();
-        std::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(0o644)).unwrap();
         store(&paths, "tok").unwrap();
         assert_eq!(mode(&paths.secrets_dir()), 0o700);
         assert_eq!(mode(&paths.claude_token_file()), 0o600);
-        assert!(!tmp.exists());
+        // A replaced token stays owner-only.
+        store(&paths, "tok2").unwrap();
+        assert_eq!(mode(&paths.claude_token_file()), 0o600);
     }
 }

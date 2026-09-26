@@ -28,7 +28,8 @@ pub struct AppState {
     /// Notified by `POST /api/daemon/shutdown` (desktop tray "Quit"); the
     /// foreground daemon treats it like a termination signal.
     pub stop_requested: Notify,
-    pub agents_cache: Mutex<Option<(Instant, Vec<AgentInfo>)>>,
+    /// Detected agents, when, and the claude login token state they saw.
+    pub agents_cache: Mutex<Option<(Instant, blirp_core::claude_token::Stamp, Vec<AgentInfo>)>>,
     /// Distill queue (§9); its worker starts with the daemon.
     pub distiller: Distiller,
     ingest: RwLock<Arc<dyn IngestTrigger>>,
