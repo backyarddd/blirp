@@ -10,6 +10,8 @@ so every tag needs one.
 
 ## [Unreleased]
 
+## [0.1.1] - 2026-09-26
+
 ### Added
 
 - Paste images and files into a terminal pane, or drop files onto it: they
@@ -78,5 +80,6 @@ done before it.
   all-or-nothing) and `blirp uninstall`; classic NSIS, MSI, DMG, deb, rpm
   and AppImage packages.
 
-[Unreleased]: https://github.com/backyarddd/blirp/compare/v0.1.0...HEAD
+[Unreleased]: https://github.com/backyarddd/blirp/compare/v0.1.1...HEAD
+[0.1.1]: https://github.com/backyarddd/blirp/compare/v0.1.0...v0.1.1
 [0.1.0]: https://github.com/backyarddd/blirp/releases/tag/v0.1.0

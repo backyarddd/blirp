@@ -562,7 +562,7 @@ dependencies = [
 
 [[package]]
 name = "blirp"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "anyhow",
  "axum",
@@ -616,7 +616,7 @@ dependencies = [
 
 [[package]]
 name = "blirp-core"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "dunce",
  "gethostname",
@@ -639,7 +639,7 @@ dependencies = [
 
 [[package]]
 name = "blirp-desktop"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "anyhow",
  "blirp-core",
@@ -661,7 +661,7 @@ dependencies = [
 
 [[package]]
 name = "blirp-sync"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "blirp-core",
  "data-encoding",
