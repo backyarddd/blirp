@@ -152,7 +152,7 @@ mod helper {
 impl Inhibit for Platform {
     fn acquire(&self) -> anyhow::Result<Box<dyn Assertion>> {
         use anyhow::Context as _;
-        let mut cmd = std::process::Command::new("/usr/bin/caffeinate");
+        let mut cmd = blirp_core::process::command("/usr/bin/caffeinate");
         // -i: no idle system sleep; -w: ends with the daemon, whatever happens to it.
         cmd.args(["-i", "-w", &std::process::id().to_string()]);
         Ok(Box::new(
@@ -167,7 +167,7 @@ impl Inhibit for Platform {
         use anyhow::Context as _;
         let inhibit = blirp_core::process::which("systemd-inhibit")
             .context("systemd-inhibit is not installed")?;
-        let mut cmd = std::process::Command::new(inhibit);
+        let mut cmd = blirp_core::process::command(inhibit);
         // The held command ends with the daemon, so a crash cannot leave the
         // lock behind (`sleep infinity` would).
         let watch = format!(
