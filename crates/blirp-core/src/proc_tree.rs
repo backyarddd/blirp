@@ -1,4 +1,5 @@
-//! Whole-process-tree control for PTY children (§6).
+//! Whole-process-tree control for child processes: PTY sessions (§6),
+//! summarizer runs and short-lived helpers ([`crate::process::run`]).
 //!
 //! Windows: the child is assigned to a job object with
 //! `JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE`; killing terminates the job, and the
@@ -6,10 +7,10 @@
 //! assigned (a few microseconds after creation) escape the job; ConPTY's
 //! close still sends them `CTRL_CLOSE_EVENT`.
 //!
-//! Unix: portable-pty starts the child with `setsid`, so its pid is the
-//! process group id; killing sends SIGHUP to the group, then SIGKILL.
-
-use portable_pty::Child;
+//! Unix: the child leads its own process group (portable-pty starts PTY
+//! children with `setsid`; plain children are spawned with
+//! `process_group(0)`), so its pid is the group id; killing sends SIGHUP to
+//! the group, then SIGKILL.
 
 pub struct ProcessTree {
     #[cfg(windows)]
@@ -19,33 +20,36 @@ pub struct ProcessTree {
 }
 
 impl ProcessTree {
-    pub fn attach(child: &(dyn Child + Send + Sync)) -> Self {
-        #[cfg(windows)]
-        {
-            let job = child
-                .as_raw_handle()
-                .map(win::Job::for_process)
-                .transpose()
-                .unwrap_or_else(|e| {
-                    tracing::warn!(error = %e, "cannot assign session process to a job object; stop will only kill the main process");
-                    None
-                });
-            Self { job }
-        }
-        #[cfg(unix)]
-        {
-            Self {
-                pgid: child.process_id().and_then(|p| i32::try_from(p).ok()),
-            }
+    /// No tree handle: [`ProcessTree::terminate`] reports false and the
+    /// caller kills the main process itself.
+    pub fn none() -> Self {
+        Self {
+            #[cfg(windows)]
+            job: None,
+            #[cfg(unix)]
+            pgid: None,
         }
     }
 
-    /// Tree of a plain child process (not a PTY), e.g. a summarizer run.
-    /// Windows: assigns the process to a new kill-on-close job. Unix: the
-    /// child must have been spawned with `process_group(0)`.
+    /// Tree of a child process. Windows: assigns the process to a new
+    /// kill-on-close job. Unix: the child must lead its own process group.
     #[cfg(windows)]
     pub fn for_process_handle(handle: std::os::windows::io::RawHandle) -> Self {
-        let job = win::Job::for_process(handle)
+        Self::job_for(handle, true)
+    }
+
+    /// Like [`ProcessTree::for_process_handle`], but dropping it leaves the
+    /// tree alone (Windows): background helpers a short-lived tool starts on
+    /// purpose (git's fsmonitor daemon) outlive it, and only an explicit
+    /// terminate kills them.
+    #[cfg(windows)]
+    pub fn for_process_handle_detached(handle: std::os::windows::io::RawHandle) -> Self {
+        Self::job_for(handle, false)
+    }
+
+    #[cfg(windows)]
+    fn job_for(handle: std::os::windows::io::RawHandle, kill_on_close: bool) -> Self {
+        let job = win::Job::for_process(handle, kill_on_close)
             .map_err(|e| tracing::warn!(error = %e, "cannot assign child process to a job object"))
             .ok();
         Self { job }
@@ -162,13 +166,25 @@ mod win {
     unsafe impl Sync for Job {}
 
     impl Job {
-        pub fn for_process(process: RawHandle) -> io::Result<Job> {
+        pub fn for_process(process: RawHandle, kill_on_close: bool) -> io::Result<Job> {
             // SAFETY: null attributes and name are documented as valid.
             let handle = unsafe { CreateJobObjectW(std::ptr::null(), std::ptr::null()) };
             if handle.is_null() {
                 return Err(io::Error::last_os_error());
             }
             let job = Job(handle);
+            if kill_on_close {
+                job.kill_on_close()?;
+            }
+            // SAFETY: `process` is a live process handle owned by the
+            // caller's child, valid for the duration of this call.
+            if unsafe { AssignProcessToJobObject(job.0, process as HANDLE) } == 0 {
+                return Err(io::Error::last_os_error());
+            }
+            Ok(job)
+        }
+
+        fn kill_on_close(&self) -> io::Result<()> {
             // SAFETY: an all-zero JOBOBJECT_EXTENDED_LIMIT_INFORMATION is a
             // valid "no limits" value (plain integers and structs of integers).
             let mut info: JOBOBJECT_EXTENDED_LIMIT_INFORMATION = unsafe { std::mem::zeroed() };
@@ -178,7 +194,7 @@ mod win {
             // SAFETY: `info` is a live, correctly sized struct of the class passed.
             let ok = unsafe {
                 SetInformationJobObject(
-                    job.0,
+                    self.0,
                     JobObjectExtendedLimitInformation,
                     (&raw const info).cast(),
                     size,
@@ -187,12 +203,7 @@ mod win {
             if ok == 0 {
                 return Err(io::Error::last_os_error());
             }
-            // SAFETY: `process` is the live process handle owned by the
-            // portable-pty child, valid for the duration of this call.
-            if unsafe { AssignProcessToJobObject(job.0, process as HANDLE) } == 0 {
-                return Err(io::Error::last_os_error());
-            }
-            Ok(job)
+            Ok(())
         }
 
         pub fn terminate(&self, code: u32) -> io::Result<()> {
@@ -213,6 +224,7 @@ mod win {
 }
 
 #[cfg(all(test, unix))]
+#[allow(clippy::unwrap_used)]
 mod tests {
     use super::ProcessTree;
     use std::os::unix::process::CommandExt;

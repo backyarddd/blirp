@@ -5,6 +5,7 @@ pub mod config;
 pub mod git;
 pub mod model;
 pub mod paths;
+pub mod proc_tree;
 pub mod process;
 pub mod redact;
 pub mod store;

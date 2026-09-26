@@ -275,14 +275,19 @@ async fn ollama_up(base: &str) -> bool {
 /// ollama in that order). `Ok(None)` for `none`. CLI summarizers run in a
 /// fresh dir under `scratch`.
 pub async fn select_backend(cfg: &MemoryConfig, scratch: &Path) -> Result<Option<Backend>, String> {
+    // PATH scans touch the filesystem: off the async runtime.
+    let (claude_exe, codex_exe) =
+        tokio::task::spawn_blocking(|| (process::which("claude"), process::which("codex")))
+            .await
+            .map_err(|e| format!("looking up summarizers: {e}"))?;
     let claude = || {
-        process::which("claude").map(|exe| Backend::Claude {
+        claude_exe.clone().map(|exe| Backend::Claude {
             exe,
             scratch: scratch.to_path_buf(),
         })
     };
     let codex = || {
-        process::which("codex").map(|exe| Backend::Codex {
+        codex_exe.clone().map(|exe| Backend::Codex {
             exe,
             scratch: scratch.to_path_buf(),
         })
@@ -335,7 +340,12 @@ async fn run_process(
     dir: &Path,
     timeout: Duration,
 ) -> Result<ProcOut, String> {
-    let wrapped = wrap_for_platform(program, args).map_err(|e| e.to_string())?;
+    // Shim parsing reads the file: off the async runtime.
+    let program_path = program.to_path_buf();
+    let wrapped = tokio::task::spawn_blocking(move || wrap_for_platform(&program_path, args))
+        .await
+        .map_err(|e| format!("preparing {}: {e}", program.display()))?
+        .map_err(|e| e.to_string())?;
     let mut cmd = tokio::process::Command::new(&wrapped.program);
     cmd.args(&wrapped.args)
         .envs(wrapped.env)
@@ -365,11 +375,11 @@ async fn run_process(
     #[cfg(windows)]
     let tree = child
         .raw_handle()
-        .map(crate::proc_tree::ProcessTree::for_process_handle);
+        .map(blirp_core::proc_tree::ProcessTree::for_process_handle);
     #[cfg(unix)]
     let tree = child
         .id()
-        .map(crate::proc_tree::ProcessTree::for_process_group);
+        .map(blirp_core::proc_tree::ProcessTree::for_process_group);
 
     let mut sin = child.stdin.take();
     let mut sout = child.stdout.take();

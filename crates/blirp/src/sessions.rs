@@ -224,14 +224,16 @@ pub async fn launch(state: &SharedState, req: LaunchSession) -> ApiResult<Sessio
     let source = match req.continue_from.clone() {
         Some(src) => {
             let store = state.store.clone();
-            let source = crate::api::blocking(move || {
-                store
+            let (source, folder_here) = crate::api::blocking(move || {
+                let s = store
                     .get_session(&src)?
-                    .ok_or_else(|| ApiError::not_found("continue_from session"))
+                    .ok_or_else(|| ApiError::not_found("continue_from session"))?;
+                let here = Path::new(&s.cwd).is_dir();
+                Ok((s, here))
             })
             .await?;
             if req.project_id.is_none() && req.cwd.is_none() {
-                if source.machine_id == state.machine.id && Path::new(&source.cwd).is_dir() {
+                if source.machine_id == state.machine.id && folder_here {
                     req.cwd = Some(source.cwd.clone());
                 } else {
                     req.project_id = Some(source.project_id.clone());
@@ -252,7 +254,7 @@ pub async fn launch(state: &SharedState, req: LaunchSession) -> ApiResult<Sessio
     if req.prompt.as_ref().is_some_and(|p| p.len() > MAX_PROMPT) {
         return Err(ApiError::bad_request("prompt exceeds 64 KiB"));
     }
-    let agent = Agent::resolve(&req.agent, &state.config()).map_err(agent_error)?;
+    let agent = resolve_agent(state, &req.agent).await?;
     if agent.path.is_none() {
         return Err(agent_error(AgentError::NotInstalled(agent.display_name)));
     }
@@ -322,6 +324,12 @@ pub async fn launch(state: &SharedState, req: LaunchSession) -> ApiResult<Sessio
     .await
 }
 
+/// [`Agent::resolve`] scans PATH, so it runs on the blocking pool.
+async fn resolve_agent(state: &SharedState, id: &str) -> ApiResult<Agent> {
+    let (id, config) = (id.to_string(), state.config());
+    crate::api::blocking(move || Agent::resolve(&id, &config).map_err(agent_error)).await
+}
+
 /// POST /api/sessions/:id/resume
 pub async fn resume(state: &SharedState, id: &str) -> ApiResult<Session> {
     let store = state.store.clone();
@@ -345,13 +353,14 @@ pub async fn resume(state: &SharedState, id: &str) -> ApiResult<Session> {
         .terminals
         .reserve(id)
         .ok_or_else(|| ApiError::conflict("already_running", "session is still running"))?;
-    if !Path::new(&session.cwd).is_dir() {
+    let cwd = session.cwd.clone();
+    if !crate::api::blocking(move || Ok(Path::new(&cwd).is_dir())).await? {
         return Err(ApiError::bad_request(format!(
             "session folder {} no longer exists",
             session.cwd
         )));
     }
-    let agent = Agent::resolve(&session.agent, &state.config()).map_err(agent_error)?;
+    let agent = resolve_agent(state, &session.agent).await?;
     start(
         state,
         session,

@@ -145,7 +145,7 @@ The machine id is the iroh endpoint id from `identity.key`. Installs that predat
 
 Worktree sessions resolve to the parent repo's project (git common dir).
 
-Implementation notes: a subfolder of an unregistered repo registers the repo top level (step 2). The Home project is named `Home (<machine name>)`, has no `project_paths` rows (so it never captures subfolders by prefix) and its id is kept in the local `settings` key `home_project_id`. git runs as the `git` CLI with a timeout; when git is missing every folder is treated as non-git.
+Implementation notes: a subfolder of an unregistered repo registers the repo top level (step 2). The Home project is named `Home (<machine name>)`, has no `project_paths` rows (so it never captures subfolders by prefix) and its id is kept in the local `settings` key `home_project_id`. git runs as the `git` CLI with a timeout; when git is missing every folder is treated as non-git. Short-lived helpers (git, `--version` probes) run in their own process group / job: a timeout kills the whole tree, and after a normal exit output pipes that a background grandchild still holds are read for at most 1 s (the helper itself is left running). Blocking work (PATH scans, filesystem checks, shim parsing) never runs on the async runtime.
 
 ## 6. PTY supervisor (`blirp::pty`)
 

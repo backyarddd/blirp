@@ -7,9 +7,9 @@
 //! terminal queries itself while no client is attached so ConPTY and TUIs
 //! never block waiting for a terminal.
 
-use crate::proc_tree::ProcessTree;
 use anyhow::Context as _;
 use blirp_core::model::SessionStatus;
+use blirp_core::proc_tree::ProcessTree;
 use bytes::Bytes;
 use portable_pty::{ChildKiller, CommandBuilder, MasterPty, PtySize, native_pty_system};
 use std::collections::HashMap;
@@ -155,7 +155,7 @@ impl Terminal {
             .with_context(|| format!("spawn {}", req.program.to_string_lossy()))?;
         // Only the child may hold the slave side, or EOF never arrives on unix.
         drop(pair.slave);
-        let tree = ProcessTree::attach(child.as_ref());
+        let tree = process_tree(child.as_ref());
         let killer = child.clone_killer();
         let mut reader = PtyReader::new(pair.master.as_ref())?;
         let mut writer = pair.master.take_writer().context("pty writer")?;
@@ -450,6 +450,20 @@ fn snapshot(parser: &mut vt100::Parser<Callbacks>) -> Snapshot {
         rows,
         data: String::from_utf8_lossy(&out).into_owned(),
     }
+}
+
+/// The session's whole process tree (§6); without one, Stop kills only the
+/// main process.
+fn process_tree(child: &(dyn portable_pty::Child + Send + Sync)) -> ProcessTree {
+    #[cfg(windows)]
+    let tree = child
+        .as_raw_handle()
+        .map_or_else(ProcessTree::none, ProcessTree::for_process_handle);
+    #[cfg(unix)]
+    let tree = child
+        .process_id()
+        .map_or_else(ProcessTree::none, ProcessTree::for_process_group);
+    tree
 }
 
 enum Slot {
