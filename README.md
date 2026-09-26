@@ -134,7 +134,7 @@ Index: [docs/README.md](docs/README.md).
 
 ## Building from source
 
-Requirements: Rust 1.89+ (CI pins 1.94.0), Node.js 22, pnpm 12. For the desktop app also the [Tauri 2 prerequisites](https://v2.tauri.app/start/prerequisites/).
+Requirements: Rust 1.91+ (CI pins 1.94.0), Node.js 22, pnpm 12. For the desktop app also the [Tauri 2 prerequisites](https://v2.tauri.app/start/prerequisites/).
 
 ```sh
 pnpm -C web install && pnpm -C web build     # the UI, embedded into the binary

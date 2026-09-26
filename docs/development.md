@@ -20,7 +20,7 @@ Read [ARCHITECTURE.md](ARCHITECTURE.md) first: it is the design contract, and a 
 
 ## Requirements
 
-- Rust 1.89 or newer (`rust-version` in `Cargo.toml`; CI pins 1.94.0) with `rustfmt` and `clippy`.
+- Rust 1.91 or newer (`rust-version` in `Cargo.toml`; CI pins 1.94.0) with `rustfmt` and `clippy`.
 - Node.js 22 and pnpm 12.
 - `git` (tests create repositories).
 - Desktop app and, on Linux, any `cargo clippy/test --workspace` (the Tauri crate is a workspace member): the [Tauri 2 prerequisites](https://v2.tauri.app/start/prerequisites/). Debian/Ubuntu:

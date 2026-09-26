@@ -109,7 +109,7 @@ Classic installers and packages write no install receipt, so `blirp update` does
 
 ## Build from source
 
-Requirements: Rust 1.89+ (CI pins 1.94.0), Node.js 22, pnpm 12, and for the desktop app the [Tauri 2 prerequisites](https://v2.tauri.app/start/prerequisites/).
+Requirements: Rust 1.91+ (CI pins 1.94.0), Node.js 22, pnpm 12, and for the desktop app the [Tauri 2 prerequisites](https://v2.tauri.app/start/prerequisites/).
 
 ```sh
 pnpm -C web install && pnpm -C web build     # the UI, embedded into the binary
