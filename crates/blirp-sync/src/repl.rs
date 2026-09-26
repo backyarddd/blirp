@@ -28,6 +28,8 @@ pub const MAX_BATCH_BYTES: usize = 4 << 20;
 // Polling; a store-level change notification would cut latency.
 pub const OUTBOX_POLL: Duration = Duration::from_millis(500);
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(60);
+/// Error code of a pull whose cursor went back behind the compacted log.
+pub const RESYNC_REQUIRED: &str = "resync_required";
 
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
@@ -166,12 +168,31 @@ pub async fn serve_hub(
                         st.hub_flush_own(&own)?;
                         // The node has applied everything up to `after`:
                         // compaction may go that far for it.
-                        st.hub_record_pull(&node, after)?;
-                        Ok(st.hub_page(&node, after, MAX_BATCH_ENTRIES, MAX_BATCH_BYTES)?)
+                        if !st.hub_record_pull(&node, after)? {
+                            return Ok(None);
+                        }
+                        Ok(Some(st.hub_page(
+                            &node,
+                            after,
+                            MAX_BATCH_ENTRIES,
+                            MAX_BATCH_BYTES,
+                        )?))
                     })
                     .await?;
                     on_exchange(false);
-                    HubMsg::Page { page }
+                    match page {
+                        Some(page) => HubMsg::Page { page },
+                        None => {
+                            tracing::warn!(node = %node_id, after, "node's sync position went back behind the compacted log");
+                            HubMsg::Error {
+                                code: RESYNC_REQUIRED.into(),
+                                message: "this machine's sync position went back behind the hub's \
+                                          compacted log (its database lost recent changes); \
+                                          resync needed: leave the hub and pair again"
+                                    .into(),
+                            }
+                        }
+                    }
                 }
                 NodeMsg::Leave => {
                     // Only ever the authenticated peer of this connection.

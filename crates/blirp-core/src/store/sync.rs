@@ -424,6 +424,19 @@ const COMPACTED: [(&str, &str); 3] = [
     ),
 ];
 
+/// Highest floor up to which `hub_log` was compacted (hub).
+const COMPACTED_KEY: &str = "sync.hub_log_compacted";
+
+fn compacted_in(c: &Connection) -> Result<i64> {
+    Ok(one(
+        c,
+        "SELECT CAST(value_json AS INTEGER) FROM settings WHERE key = ?1",
+        params![COMPACTED_KEY],
+        |r| r.get(0),
+    )?
+    .unwrap_or(0))
+}
+
 /// One batch of [`Store::compact_hub_log`]: upserts of `entity` at or below
 /// `floor` after `pos` (key, hub_seq), in row order. Returns what it did
 /// and where the next batch starts (None: this entity is done).
@@ -472,6 +485,15 @@ fn compact_batch_in(
          LIMIT 1",
     )?;
     let mut done = Compacted::default();
+    let changed = || -> Result<()> {
+        tx.execute(
+            "INSERT INTO settings(key, value_json) VALUES (?1, ?2)
+             ON CONFLICT(key) DO UPDATE SET value_json = excluded.value_json
+             WHERE CAST(value_json AS INTEGER) < CAST(excluded.value_json AS INTEGER)",
+            params![COMPACTED_KEY, floor.to_string()],
+        )?;
+        Ok(())
+    };
     for (hub_seq, key, origin, origin_seq, stripped) in &rows {
         if !superseded.exists(params![entity, key, hub_seq, floor])?
             || !first.exists(params![entity, key, hub_seq])?
@@ -488,6 +510,9 @@ fn compact_batch_in(
             )?;
             done.stripped += 1;
         }
+    }
+    if done != Compacted::default() {
+        changed()?;
     }
     let next = if rows.len() < batch {
         None
@@ -741,6 +766,12 @@ impl Store {
                         e.origin_seq
                     )));
                 }
+                // Already logged (or rejected) in an earlier transaction: the
+                // cursor moves with the log. Its row may have been compacted
+                // away, so the log's unique key no longer catches it.
+                if e.origin_seq <= cur.last_pushed_origin_seq {
+                    continue;
+                }
                 acked = acked.max(e.origin_seq);
                 let (change, payload) = match check_entry(tx, origin, None, e) {
                     Ok(c) => c,
@@ -883,15 +914,40 @@ impl Store {
         })
     }
 
-    /// Hub: `machine` asked for the log after `after`, so it has applied
+    /// Hub: `machine` asks for the log after `after`, so it has applied
     /// everything up to there. Bounds compaction ([`Store::compact_hub_log`]).
-    pub fn hub_record_pull(&self, machine: &str, after: i64) -> Result<()> {
+    /// Returns false, recording nothing, when its cursor went back below a
+    /// position it already pulled from and below what was compacted (e.g.
+    /// its database lost recent writes): its pulls could then skip writes
+    /// they must apply, so it has to leave and pair again.
+    pub fn hub_record_pull(&self, machine: &str, after: i64) -> Result<bool> {
         self.write(|tx| {
+            let recorded: Option<i64> = one(
+                tx,
+                "SELECT after FROM hub_pulls WHERE machine_id = ?1",
+                params![machine],
+                |r| r.get(0),
+            )?;
+            if recorded.is_some_and(|r| after < r) && after < compacted_in(tx)? {
+                return Ok(false);
+            }
             tx.execute(
                 "INSERT INTO hub_pulls(machine_id, after) VALUES (?1, ?2)
                  ON CONFLICT(machine_id) DO UPDATE SET after = excluded.after
                  WHERE after <> excluded.after",
                 params![machine, after],
+            )?;
+            Ok(true)
+        })
+    }
+
+    /// Hub: forget `machine`'s pull position (it was revoked): pairing
+    /// again starts from whatever cursor it has.
+    pub fn hub_forget_pull(&self, machine: &str) -> Result<()> {
+        self.write(|tx| {
+            tx.execute(
+                "DELETE FROM hub_pulls WHERE machine_id = ?1",
+                params![machine],
             )?;
             Ok(())
         })
@@ -1169,7 +1225,7 @@ mod tests {
         let mut total = 0;
         loop {
             let after = node.sync_cursors(hub_id).unwrap().last_pulled_hub_seq;
-            hub.hub_record_pull(node_id, after).unwrap();
+            assert!(hub.hub_record_pull(node_id, after).unwrap());
             let page = hub.hub_page(node_id, after, 2, 4 << 20).unwrap();
             total += node.node_apply_pull(hub_id, &page).unwrap();
             if !page.more {
@@ -2211,5 +2267,119 @@ mod tests {
             })
             .collect();
         assert_eq!(changes, [proj, change]);
+    }
+
+    // A batch pushed again after its rows were compacted away (the node
+    // never saw the ack) is not logged again: the cursor dedups it.
+    #[test]
+    fn repushed_batch_after_compaction_is_ignored() {
+        let (_h, hub) = temp_store();
+        let (_a, a) = temp_store();
+        machine_device(&hub, "A", false);
+        a.apply(project("p", "shared")).unwrap();
+        let s1 = session_of("s1", "A");
+        for i in 0..4 {
+            a.apply(Change::Session(crate::model::Session {
+                title: Some(format!("t{i}")),
+                ..s1.clone()
+            }))
+            .unwrap();
+        }
+        let batch = a.outbox_batch(0, 500, 4 << 20).unwrap();
+        push(&a, "A", &hub, "H");
+        pull(&a, "A", &hub, "H");
+        pull(&a, "A", &hub, "H");
+        let done = hub.compact_hub_log(1000).unwrap();
+        assert!(done.removed > 0, "{done:?}");
+        let rows = log_rows(&hub);
+        let out = hub.hub_ingest("H", "A", &batch).unwrap();
+        assert_eq!(
+            (out.inserted, out.acked),
+            (0, batch.last().unwrap().origin_seq)
+        );
+        assert_eq!(log_rows(&hub), rows);
+        assert_eq!(
+            hub.get_session("s1").unwrap().unwrap().title.as_deref(),
+            Some("t3")
+        );
+    }
+
+    // A node whose cursor went back behind the compacted log (its database
+    // lost recent writes) is refused instead of silently diverging; a new
+    // or re-paired node is not.
+    #[test]
+    fn pull_cursor_going_back_behind_compaction_is_refused() {
+        let (_h, hub) = temp_store();
+        let (_a, a) = temp_store();
+        machine_device(&hub, "A", false);
+        a.apply(project("p", "shared")).unwrap();
+        let s1 = session_of("s1", "A");
+        for i in 0..4 {
+            a.apply(Change::Session(crate::model::Session {
+                title: Some(format!("t{i}")),
+                ..s1.clone()
+            }))
+            .unwrap();
+        }
+        push(&a, "A", &hub, "H");
+        pull(&a, "A", &hub, "H");
+        pull(&a, "A", &hub, "H");
+        let head = hub.hub_head().unwrap();
+        // Going back is harmless while nothing was compacted.
+        assert!(hub.hub_record_pull("A", 1).unwrap());
+        assert!(hub.hub_record_pull("A", head).unwrap());
+        assert!(hub.compact_hub_log(1000).unwrap().removed > 0);
+        assert!(!hub.hub_record_pull("A", 1).unwrap());
+        assert!(hub.hub_record_pull("A", head).unwrap(), "forward is fine");
+        assert!(hub.hub_record_pull("NEW", 0).unwrap(), "never pulled");
+        // Revoked (left) and paired again: it starts from its cursor.
+        hub.hub_forget_pull("A").unwrap();
+        assert!(hub.hub_record_pull("A", 1).unwrap());
+    }
+
+    // Folder upserts compact by their owner (the machine in the key).
+    #[test]
+    fn folder_upserts_compact_by_owner() {
+        let (_h, hub) = temp_store();
+        let (_a, a) = temp_store();
+        machine_device(&hub, "A", false);
+        a.apply(project("p", "shared")).unwrap();
+        a.apply(project("q", "other")).unwrap();
+        let folder = |project: &str, remote: Option<&str>| {
+            Change::ProjectPath(crate::model::ProjectPath {
+                project_id: project.into(),
+                machine_id: "A".into(),
+                path: "/w".into(),
+                git_remote: remote.map(Into::into),
+            })
+        };
+        a.apply(folder("p", None)).unwrap();
+        a.apply(folder("p", Some("host/o/r"))).unwrap();
+        a.apply(folder("q", Some("host/o/r2"))).unwrap();
+        a.apply(folder("q", Some("host/o/r3"))).unwrap();
+        push(&a, "A", &hub, "H");
+        pull(&a, "A", &hub, "H");
+        pull(&a, "A", &hub, "H");
+        // The first and the last stay; the two between go.
+        let done = hub.compact_hub_log(1000).unwrap();
+        assert_eq!(done.removed + done.stripped, 2, "{done:?}");
+        let (_c, c) = temp_store();
+        pull(&c, "C", &hub, "H");
+        let roots = |s: &Store| {
+            s.read(|c| {
+                all(
+                    c,
+                    "SELECT project_id, git_remote FROM project_paths WHERE machine_id = 'A'",
+                    [],
+                    |r| Ok((r.get::<_, String>(0)?, r.get::<_, Option<String>>(1)?)),
+                )
+            })
+            .unwrap()
+        };
+        assert_eq!(
+            roots(&c),
+            [("q".to_string(), Some("host/o/r3".to_string()))]
+        );
+        assert_eq!(roots(&c), roots(&hub));
     }
 }

@@ -147,6 +147,7 @@ If `blirp doctor` says `CLAUDE_CODE_OAUTH_TOKEN from the environment`, the daemo
 - **`sync.relay = "disabled"`** only works when the machines can reach each other directly (same LAN, Tailscale, open UDP). Across NATs use `default` or your own relay.
 - Firewalls must allow UDP for the daemon (QUIC). Corporate networks that block UDP need the relay (`default`), which also carries traffic when no direct path exists.
 - A revoked machine is refused; pair it again with a new invite.
+- `resync_required`: this machine's sync position went back behind what the hub has already cleaned up from its log (for example after its database was restored or lost recent changes). Leave the hub and pair again.
 - If `~/.blirp/identity.key` was deleted or replaced, the machine has a new identity: the hub no longer knows it. Leave and pair again.
 - Keep hub and nodes on the same blirp version (`unsupported_version` in the log otherwise).
 

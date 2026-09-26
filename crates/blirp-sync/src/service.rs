@@ -712,6 +712,8 @@ pub fn revoke_machine(store: &Store, node_id: &str) -> Result<()> {
             })?;
         }
     }
+    // Its position no longer bounds compaction; pairing again starts over.
+    store.hub_forget_pull(node_id)?;
     if let Some(m) = store.get_machine(node_id)? {
         store.apply(Change::Machine(Machine {
             revoked: true,
