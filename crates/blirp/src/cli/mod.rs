@@ -2,6 +2,7 @@
 
 mod later;
 mod mem;
+mod sync;
 
 use anyhow::{Context as _, bail};
 use blirp_core::model::{Health, SessionsPage};
@@ -62,11 +63,30 @@ enum Command {
     /// Install or remove global agent hooks and MCP registration.
     #[command(subcommand)]
     Hooks(mem::HooksCommand),
+    /// Pair this machine with a hub: `blirp pair <invite> <code>`, or just
+    /// `blirp pair <code>` to find the hub on the local network.
+    Pair {
+        /// Invite (`blirp1-...`), join link (`blirp://join/...`) or, alone, the code.
+        first: String,
+        /// Code shown on the hub (`XXXX-XXXX`).
+        code: Option<String>,
+    },
+    /// Make this machine the hub other machines pair with.
+    Hub {
+        #[command(subcommand)]
+        action: sync::HubAction,
+    },
+    /// Paired machines and browser devices (hub).
+    Devices {
+        #[command(subcommand)]
+        action: sync::DevicesAction,
+    },
     #[command(flatten)]
     Later(later::LaterCommand),
 }
 
 pub fn main() -> ExitCode {
+    crate::install_crypto_provider();
     let cli = Cli::parse();
     // Hooks must stay fast and always succeed: no runtime, no logging, no
     // failure exit even without a home directory.
@@ -148,13 +168,18 @@ async fn run(cmd: Command, paths: Paths) -> anyhow::Result<ExitCode> {
             crate::mcp::serve_stdio(paths).await?;
             Ok(ExitCode::SUCCESS)
         }
+        Command::Pair { first, code } => {
+            sync::pair(&Client::connect(&paths).await?, first, code).await
+        }
+        Command::Hub { action } => sync::hub(&Client::connect(&paths).await?, action).await,
+        Command::Devices { action } => sync::devices(&Client::connect(&paths).await?, action).await,
         Command::Later(_) | Command::Hook { .. } | Command::Mem(_) | Command::Hooks(_) => {
             Ok(ExitCode::from(2))
         }
     }
 }
 
-struct Client {
+pub(crate) struct Client {
     info: RuntimeInfo,
     http: reqwest::Client,
 }
@@ -168,6 +193,34 @@ impl Client {
             .timeout(Duration::from_secs(10))
             .build()?;
         Ok(Client { info, http })
+    }
+
+    /// Send a request; non-2xx answers become errors with the API message.
+    pub(crate) async fn send(
+        &self,
+        method: reqwest::Method,
+        path: &str,
+        body: Option<serde_json::Value>,
+    ) -> anyhow::Result<reqwest::Response> {
+        let mut req = self
+            .http
+            .request(method.clone(), format!("{}{path}", self.info.base_url()))
+            .bearer_auth(&self.info.token)
+            // Pairing waits for the hub (connect + handshake).
+            .timeout(Duration::from_secs(120));
+        if let Some(b) = body {
+            req = req.json(&b);
+        }
+        let resp = req.send().await?;
+        if resp.status().is_success() {
+            return Ok(resp);
+        }
+        let status = resp.status();
+        let text = resp.text().await.unwrap_or_default();
+        match serde_json::from_str::<blirp_core::model::ErrorBody>(&text) {
+            Ok(e) => bail!("{} ({})", e.error.message, e.error.code),
+            Err(_) => bail!("{method} {path} failed: {status} {text}"),
+        }
     }
 
     async fn get<T: serde::de::DeserializeOwned>(&self, path: &str) -> anyhow::Result<T> {

@@ -29,6 +29,8 @@ pub struct AppState {
     /// Distill queue (§9); its worker starts with the daemon.
     pub distiller: Distiller,
     ingest: RwLock<Arc<dyn IngestTrigger>>,
+    /// Machine sync, remote proxy and LAN portal (§10, §13).
+    pub sync: crate::sync::SyncState,
 }
 
 impl AppState {
@@ -55,6 +57,7 @@ impl AppState {
             agents_cache: Mutex::new(None),
             distiller: Distiller::default(),
             ingest: RwLock::new(Arc::new(NoopIngest)),
+            sync: crate::sync::SyncState::default(),
         }
     }
 

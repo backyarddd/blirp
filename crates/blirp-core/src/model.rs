@@ -779,6 +779,63 @@ pub struct SettingsPatch {
     pub values: Option<BTreeMap<String, Option<JsonValue>>>,
 }
 
+/// `GET /api/sync/status` (§10).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
+pub struct SyncStatus {
+    pub role: MachineRole,
+    /// This machine's id (its iroh endpoint id).
+    pub machine_id: String,
+    /// Hub endpoint id: the paired hub on a node, this machine on a hub,
+    /// null when standalone.
+    pub hub: Option<String>,
+    /// Node: the sync session with the hub is up. Hub: the endpoint is running.
+    pub connected: bool,
+    /// Last completed exchange with the hub (node) or with any node (hub).
+    pub last_sync_at: Option<i64>,
+    /// Local writes not yet acknowledged by the hub (0 on a hub or standalone).
+    pub pending_outbox: i64,
+    /// HTTPS LAN portal (hub with `portal.lan`), null when not serving.
+    pub portal_url: Option<String>,
+    /// SHA-256 of the portal's self-signed certificate, `AA:BB:...`.
+    pub portal_cert_fingerprint: Option<String>,
+}
+
+/// `POST /api/sync/invite`: show `code` and `invite` (or a QR of `uri`) to
+/// the machine that joins.
+#[derive(Debug, Clone, Serialize, Deserialize, TS)]
+pub struct SyncInvite {
+    /// `blirp1-<base32 ticket>`
+    pub invite: String,
+    /// `XXXX-XXXX`, single use, 5 attempts.
+    pub code: String,
+    /// `blirp://join/<invite>#<code>`
+    pub uri: String,
+    pub expires_at: i64,
+}
+
+/// `POST /api/sync/join`.
+#[derive(Debug, Clone, Serialize, Deserialize, TS)]
+#[serde(deny_unknown_fields)]
+pub struct JoinHub {
+    /// Invite from the hub; an empty string finds the hub on the local network.
+    pub invite: String,
+    pub code: String,
+}
+
+/// `POST /api/devices/browser-invite`: one-time login link for a browser (5 min).
+#[derive(Debug, Clone, Serialize, Deserialize, TS)]
+pub struct BrowserInvite {
+    pub url: String,
+    pub expires_at: i64,
+}
+
+/// `PATCH /api/devices/:id`.
+#[derive(Debug, Clone, Serialize, Deserialize, TS)]
+#[serde(deny_unknown_fields)]
+pub struct PatchDevice {
+    pub can_control_terminals: bool,
+}
+
 str_enum!(MemoryPart {
     Brief = "brief",
     Records = "records",
@@ -803,6 +860,10 @@ pub enum ServerEvent {
     MemoryUpdated {
         project_id: String,
         part: MemoryPart,
+    },
+    /// Sync role, connection or portal state changed.
+    SyncUpdated {
+        status: SyncStatus,
     },
     /// Events were dropped because the client fell behind; refetch state.
     Resync,
@@ -869,7 +930,8 @@ mod tests {
             GitStatusEntry, GitStatus, GitDiff, FileEntry, DirListing, FileContent, SessionsPage,
             LaunchSession, PatchSession, OpenTarget, OpenSession, EventsPage, SearchHit, SearchResults, AgentInfo,
             AgentIntegration, Injection, SummaryItem, DistillFailure, SessionSummary,
-            SettingsView, SettingsPatch, ServerEvent, TerminalServerMessage, TerminalClientMessage,
+            SettingsView, SettingsPatch, SyncStatus, SyncInvite, JoinHub, BrowserInvite, PatchDevice,
+            ServerEvent, TerminalServerMessage, TerminalClientMessage,
             Config, DaemonConfig, MachineConfig, AgentsConfig, CustomAgent, SessionsConfig,
             Summarizer, BriefMode, MemoryConfig, SyncConfig, PortalConfig,
         );

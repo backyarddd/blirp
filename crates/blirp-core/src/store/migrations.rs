@@ -4,7 +4,7 @@
 use rusqlite::Connection;
 
 /// Index `i` holds the migration that moves the schema from version `i` to `i + 1`.
-pub(crate) const MIGRATIONS: &[&str] = &[V1];
+pub(crate) const MIGRATIONS: &[&str] = &[V1, V2];
 
 /// Schema of §5. Note on the FTS tables: they are external-content tables keyed
 /// by the implicit rowid of `events`/`records`. blirp never runs `VACUUM`
@@ -223,6 +223,13 @@ CREATE TABLE hub_log(
     ts             INTEGER NOT NULL,
     UNIQUE(origin_machine, origin_seq)
 );
+"#;
+
+/// Replication (§10): pulling checks the outbox for unsynced local writes to
+/// the same row, and the hub filters `hub_log` by origin.
+const V2: &str = r#"
+CREATE INDEX outbox_entity_key ON outbox(entity, key, origin_seq);
+CREATE INDEX hub_log_origin ON hub_log(origin_machine, hub_seq);
 "#;
 
 #[derive(Debug, thiserror::Error)]

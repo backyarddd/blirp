@@ -21,6 +21,78 @@ use blirp_core::store::StoreError;
 use serde::Deserialize;
 
 pub const COOKIE: &str = "blirp_session";
+/// Long-lived browser device cookie on the LAN portal (§13).
+pub const DEVICE_COOKIE: &str = "blirp_device";
+
+/// Who is calling. `require_auth` attaches it to every authenticated
+/// request; the sync proxy attaches it to requests relayed from another
+/// machine (extensions never come from the network).
+#[derive(Debug, Clone)]
+pub struct Principal {
+    /// May type into terminals and launch, resume or stop sessions.
+    pub control: bool,
+    /// May manage the hub, pairing and devices (local clients only).
+    pub admin: bool,
+    /// Portal browser device id.
+    pub device: Option<String>,
+    /// Short description for logs and proxied requests.
+    pub label: String,
+}
+
+impl Principal {
+    pub fn local() -> Self {
+        Self {
+            control: true,
+            admin: true,
+            device: None,
+            label: "local".into(),
+        }
+    }
+
+    pub fn require_control(&self) -> ApiResult<()> {
+        if self.control {
+            Ok(())
+        } else {
+            Err(ApiError::new(
+                StatusCode::FORBIDDEN,
+                "control_not_allowed",
+                "this device may not control terminals; allow it in Settings > Devices",
+            ))
+        }
+    }
+
+    pub fn require_admin(&self) -> ApiResult<()> {
+        if self.admin {
+            Ok(())
+        } else {
+            Err(ApiError::new(
+                StatusCode::FORBIDDEN,
+                "admin_only",
+                "only the machine's own desktop app or CLI can do this",
+            ))
+        }
+    }
+}
+
+impl<S: Send + Sync> FromRequestParts<S> for Principal {
+    type Rejection = ApiError;
+    async fn from_request_parts(
+        parts: &mut axum::http::request::Parts,
+        _: &S,
+    ) -> Result<Self, Self::Rejection> {
+        parts.extensions.get::<Principal>().cloned().ok_or_else(|| {
+            ApiError::new(
+                StatusCode::UNAUTHORIZED,
+                "unauthorized",
+                "not authenticated",
+            )
+        })
+    }
+}
+
+/// Marks requests that arrived on the LAN portal listener.
+#[derive(Debug, Clone, Copy)]
+pub struct PortalListener;
 
 #[derive(Debug)]
 pub struct ApiError {
@@ -127,39 +199,69 @@ impl<S: Send + Sync, T: serde::de::DeserializeOwned> FromRequestParts<S> for Api
     }
 }
 
+/// Which listener a router serves. Only the loopback listener mounts `/mcp`:
+/// MCP clients are local agents, and the LAN portal and sync proxy have no
+/// device-authenticated MCP yet.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Listener {
+    Local,
+    Portal,
+    Proxy,
+}
+
+/// The local API router (127.0.0.1 listener).
 pub fn router(state: SharedState) -> Router {
-    let api = Router::new()
+    build(state, Listener::Local)
+}
+
+/// The API for requests relayed by the sync proxy (no `/mcp`).
+pub fn proxy_router(state: SharedState) -> Router {
+    build(state, Listener::Proxy)
+}
+
+/// The same API for the LAN portal: device-cookie auth only, plus the
+/// one-time browser login route (no `/mcp`).
+pub fn portal_router(state: SharedState) -> Router {
+    build(state, Listener::Portal)
+}
+
+fn build(state: SharedState, listener: Listener) -> Router {
+    let mut api = Router::new()
         .merge(misc::routes())
         .merge(projects::routes())
         .merge(memory::routes())
         .merge(files::routes())
         .merge(sessions::routes())
         .merge(open::routes())
-        .merge(integration::routes(&state))
-        .route("/api/terminals/{id}/ws", get(terminal::attach))
-        .merge(later_phase_routes())
+        .merge(integration::routes())
+        .merge(crate::sync::routes())
+        .route("/api/terminals/{id}/ws", get(terminal::attach));
+    if listener == Listener::Local {
+        api = api.merge(integration::mcp_routes(&state));
+    }
+    let api = api
         .route("/api/{*rest}", any(api_not_found))
         .method_not_allowed_fallback(method_not_allowed)
         .layer(middleware::from_fn_with_state(state.clone(), require_auth));
 
-    Router::new()
-        .merge(api)
-        .route("/auth", get(auth_login))
+    let app = match listener {
+        Listener::Portal => Router::new()
+            .merge(api)
+            .route("/device-login", get(crate::portal::device_login)),
+        Listener::Local | Listener::Proxy => {
+            Router::new().merge(api).route("/auth", get(auth_login))
+        }
+    };
+    let app = app
         .fallback(crate::static_files::serve)
         .layer(middleware::from_fn(check_origin))
         .layer(middleware::from_fn(security_headers))
-        .with_state(state)
-}
-
-/// Endpoints owned by later phases (sync, devices).
-fn later_phase_routes() -> Router<SharedState> {
-    async fn later() -> ApiError {
-        ApiError::not_implemented("this endpoint is not available in this version of blirp")
+        .with_state(state);
+    if listener == Listener::Portal {
+        app.layer(axum::Extension(PortalListener))
+    } else {
+        app
     }
-    Router::new()
-        .route("/api/sync/{*rest}", any(later))
-        .route("/api/devices/{*rest}", any(later))
-        .route("/api/machines/{id}", axum::routing::delete(later))
 }
 
 async fn api_not_found() -> ApiError {
@@ -202,15 +304,40 @@ fn request_token(headers: &HeaderMap) -> Option<&str> {
         .or_else(|| cookie_value(headers, COOKIE))
 }
 
-async fn require_auth(State(state): State<SharedState>, req: Request, next: Next) -> Response {
-    match request_token(req.headers()) {
-        Some(t) if token_eq(t.trim(), &state.token) => next.run(req).await,
-        _ => ApiError::new(
-            StatusCode::UNAUTHORIZED,
-            "unauthorized",
-            "missing or invalid token",
-        )
-        .into_response(),
+fn unauthorized() -> Response {
+    ApiError::new(
+        StatusCode::UNAUTHORIZED,
+        "unauthorized",
+        "missing or invalid token",
+    )
+    .into_response()
+}
+
+async fn require_auth(State(state): State<SharedState>, mut req: Request, next: Next) -> Response {
+    // Relayed by the sync proxy, which already authenticated the peer.
+    if req.extensions().get::<Principal>().is_some() {
+        return next.run(req).await;
+    }
+    if req.extensions().get::<PortalListener>().is_none() {
+        return match request_token(req.headers()) {
+            Some(t) if token_eq(t.trim(), &state.token) => {
+                req.extensions_mut().insert(Principal::local());
+                next.run(req).await
+            }
+            _ => unauthorized(),
+        };
+    }
+    // LAN portal: browser device cookie only.
+    let Some(token) = cookie_value(req.headers(), DEVICE_COOKIE).map(str::to_string) else {
+        return unauthorized();
+    };
+    match crate::portal::authenticate(&state, token).await {
+        Ok(Some(p)) => {
+            req.extensions_mut().insert(p);
+            next.run(req).await
+        }
+        Ok(None) => unauthorized(),
+        Err(e) => e.into_response(),
     }
 }
 

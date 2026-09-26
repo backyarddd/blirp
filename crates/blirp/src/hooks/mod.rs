@@ -393,6 +393,9 @@ async fn post(
 /// and return what to print. Never fails; bounded by `HOOK_BUDGET`.
 pub fn run(env: &HookEnv<'_>) -> Option<String> {
     let begin = Instant::now();
+    // reqwest panics building a client without a rustls provider (the sync
+    // stack enables `rustls-no-provider`); a hook must never panic.
+    crate::install_crypto_provider();
     if (env.var)(DISTILLING_ENV).as_deref() == Some("1") {
         return None;
     }

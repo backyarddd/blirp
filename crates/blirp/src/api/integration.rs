@@ -1,7 +1,7 @@
 //! Memory-engine endpoints (§11): hook ingress, rendered injection, manual
 //! distill, global integration install/uninstall and MCP over HTTP.
 
-use super::{ApiError, ApiJson, ApiQuery, ApiResult, blocking};
+use super::{ApiError, ApiJson, ApiQuery, ApiResult, Principal, blocking};
 use crate::hooks::{HookIngress, HookReply};
 use crate::memory::launch::MEMORY_FILE;
 use crate::memory::render::render_injection;
@@ -13,7 +13,16 @@ use axum::{Json, Router};
 use blirp_core::model::{AgentInfo, Injection};
 use serde::Deserialize;
 
-pub fn routes(state: &SharedState) -> Router<SharedState> {
+pub fn routes() -> Router<SharedState> {
+    Router::new()
+        .route("/api/hooks/{agent}/{event}", post(hook))
+        .route("/api/inject", get(inject))
+        .route("/api/sessions/{id}/distill", post(distill))
+        .route("/api/agents/{id}/hooks/{action}", post(agent_hooks))
+}
+
+/// `/mcp`, mounted on the loopback listener only (see `api::build`).
+pub fn mcp_routes(state: &SharedState) -> Router<SharedState> {
     let cancel = tokio_util::sync::CancellationToken::new();
     let mut shutdown = state.shutdown.clone();
     let c = cancel.clone();
@@ -22,19 +31,17 @@ pub fn routes(state: &SharedState) -> Router<SharedState> {
         let _ = shutdown.changed().await;
         c.cancel();
     });
-    Router::new()
-        .route("/api/hooks/{agent}/{event}", post(hook))
-        .route("/api/inject", get(inject))
-        .route("/api/sessions/{id}/distill", post(distill))
-        .route("/api/agents/{id}/hooks/{action}", post(agent_hooks))
-        .nest_service("/mcp", crate::mcp::http_service(state.clone(), cancel))
+    Router::new().nest_service("/mcp", crate::mcp::http_service(state.clone(), cancel))
 }
 
 async fn hook(
     State(s): State<SharedState>,
+    principal: Principal,
     Path((agent, event)): Path<(String, String)>,
     ApiJson(body): ApiJson<HookIngress>,
 ) -> ApiResult<Json<HookReply>> {
+    // Only `blirp hook` on this machine (runtime token) reports agent events.
+    principal.require_admin()?;
     let st = s.clone();
     blocking(move || crate::hooks::handle(&st, &agent, &event, body))
         .await
@@ -86,7 +93,13 @@ async fn inject(
     .map(Json)
 }
 
-async fn distill(State(s): State<SharedState>, Path(id): Path<String>) -> ApiResult<StatusCode> {
+async fn distill(
+    State(s): State<SharedState>,
+    principal: Principal,
+    Path(id): Path<String>,
+) -> ApiResult<StatusCode> {
+    // Runs the summarizer agent on this machine.
+    principal.require_control()?;
     let store = s.store.clone();
     let sid = id.clone();
     let events = blocking(move || {
@@ -108,8 +121,11 @@ async fn distill(State(s): State<SharedState>, Path(id): Path<String>) -> ApiRes
 
 async fn agent_hooks(
     State(s): State<SharedState>,
+    principal: Principal,
     Path((id, action)): Path<(String, String)>,
 ) -> ApiResult<Json<AgentInfo>> {
+    // Writes the user's global agent configuration.
+    principal.require_admin()?;
     let install = match action.as_str() {
         "install" => true,
         "uninstall" => false,

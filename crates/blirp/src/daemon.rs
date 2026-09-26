@@ -61,15 +61,18 @@ fn acquire_lock(paths: &Paths) -> anyhow::Result<File> {
     }
 }
 
-fn load_machine(store: &Store, config: &Config) -> anyhow::Result<Machine> {
-    let id = match store.get_setting(MACHINE_ID_KEY)? {
-        Some(serde_json::Value::String(id)) => id,
-        _ => {
-            let id = blirp_core::new_id();
+/// This machine's row. Its id is the iroh endpoint id (§10); an older
+/// install that used a local uuid is rebound to it once.
+fn load_machine(store: &Store, config: &Config, id: String) -> anyhow::Result<Machine> {
+    match store.get_setting(MACHINE_ID_KEY)? {
+        Some(serde_json::Value::String(old)) if old == id => {}
+        Some(serde_json::Value::String(old)) => {
+            tracing::info!(%old, new = %id, "moving this machine to its endpoint id");
+            store.rebind_machine(&old, &id)?;
             store.set_setting(MACHINE_ID_KEY, &serde_json::Value::String(id.clone()))?;
-            id
         }
-    };
+        _ => store.set_setting(MACHINE_ID_KEY, &serde_json::Value::String(id.clone()))?,
+    }
     let machine = Machine {
         id,
         name: config.machine.name.clone(),
@@ -97,6 +100,7 @@ async fn bind(port: u16) -> anyhow::Result<TcpListener> {
 impl Daemon {
     /// Start serving. Returns once the listener is bound and runtime.json written.
     pub async fn start(opts: DaemonOptions) -> anyhow::Result<Daemon> {
+        crate::install_crypto_provider();
         let paths = opts.paths;
         paths.ensure_dirs()?;
         let lock = acquire_lock(&paths)?;
@@ -105,7 +109,8 @@ impl Daemon {
             Store::open(&paths.db_file())
                 .with_context(|| format!("open database {}", paths.db_file().display()))?,
         );
-        let machine = load_machine(&store, &config)?;
+        let identity = blirp_sync::identity::load_or_create(&paths.identity_key())?;
+        let machine = load_machine(&store, &config, blirp_sync::identity::machine_id(&identity))?;
         let token = blirp_core::random_hex::<32>().context("generate token")?;
         let listener = bind(opts.port.unwrap_or(config.daemon.port)).await?;
         let port = listener.local_addr()?.port();
@@ -120,6 +125,7 @@ impl Daemon {
             port,
             shutdown_rx.clone(),
         ));
+        state.sync.set_identity(identity);
         crate::sessions::mark_detached(&state)?;
         crate::memory::distill::Distiller::start(state.clone());
 
@@ -161,6 +167,8 @@ impl Daemon {
             }
         });
 
+        crate::sync::start(&state).await;
+
         RuntimeInfo {
             pid: std::process::id(),
             port,
@@ -192,6 +200,7 @@ impl Daemon {
             t.kill_for_shutdown();
         }
         let _ = self.shutdown_tx.send(true);
+        crate::sync::stop(&self.state).await;
         let deadline = tokio::time::Instant::now() + SHUTDOWN_GRACE;
         while !self.state.terminals.is_empty() && tokio::time::Instant::now() < deadline {
             tokio::time::sleep(Duration::from_millis(50)).await;

@@ -1,9 +1,10 @@
 //! Sessions: list, launch, detail, events, stop, resume, rename.
 
-use super::{ApiError, ApiJson, ApiQuery, ApiResult, blocking};
+use super::{ApiError, ApiJson, ApiQuery, ApiResult, Principal, blocking};
 use crate::state::SharedState;
 use axum::extract::{Path, State};
 use axum::http::StatusCode;
+use axum::response::Response;
 use axum::routing::{get, post};
 use axum::{Json, Router};
 use blirp_core::model::{
@@ -52,10 +53,28 @@ async fn list(
 
 async fn launch(
     State(s): State<SharedState>,
+    principal: Principal,
     ApiJson(body): ApiJson<LaunchSession>,
-) -> ApiResult<(StatusCode, Json<Session>)> {
+) -> ApiResult<Response> {
+    principal.require_control()?;
+    if let Some(m) = body.machine.clone()
+        && m != s.machine.id
+    {
+        return crate::sync::launch_remote(&s, &m, &principal, &body).await;
+    }
     let session = crate::sessions::launch(&s, body).await?;
-    Ok((StatusCode::CREATED, Json(session)))
+    Ok(axum::response::IntoResponse::into_response((
+        StatusCode::CREATED,
+        Json(session),
+    )))
+}
+
+/// The machine a session runs on when that is not this one.
+async fn remote_machine(s: &SharedState, id: &str) -> ApiResult<Option<String>> {
+    if s.terminals.get(id).is_some() {
+        return Ok(None);
+    }
+    crate::sync::remote_machine_of(s, id).await
 }
 
 async fn detail(State(s): State<SharedState>, Path(id): Path<String>) -> ApiResult<Json<Session>> {
@@ -94,13 +113,36 @@ async fn events(
     .map(Json)
 }
 
-async fn stop(State(s): State<SharedState>, Path(id): Path<String>) -> ApiResult<StatusCode> {
+async fn stop(
+    State(s): State<SharedState>,
+    Path(id): Path<String>,
+    principal: Principal,
+) -> ApiResult<Response> {
+    principal.require_control()?;
+    if let Some(m) = remote_machine(&s, &id).await? {
+        let path = format!("/api/sessions/{id}/stop");
+        return crate::sync::forward(&s, &m, &principal, axum::http::Method::POST, &path, None)
+            .await;
+    }
     crate::sessions::stop(&s, &id)?;
-    Ok(StatusCode::ACCEPTED)
+    Ok(axum::response::IntoResponse::into_response(
+        StatusCode::ACCEPTED,
+    ))
 }
 
-async fn resume(State(s): State<SharedState>, Path(id): Path<String>) -> ApiResult<Json<Session>> {
-    crate::sessions::resume(&s, &id).await.map(Json)
+async fn resume(
+    State(s): State<SharedState>,
+    Path(id): Path<String>,
+    principal: Principal,
+) -> ApiResult<Response> {
+    principal.require_control()?;
+    if let Some(m) = remote_machine(&s, &id).await? {
+        let path = format!("/api/sessions/{id}/resume");
+        return crate::sync::forward(&s, &m, &principal, axum::http::Method::POST, &path, None)
+            .await;
+    }
+    let session = crate::sessions::resume(&s, &id).await?;
+    Ok(axum::response::IntoResponse::into_response(Json(session)))
 }
 
 async fn patch(

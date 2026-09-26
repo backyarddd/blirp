@@ -385,9 +385,80 @@ config?: Config,
 values?: { [key in string]: JsonValue | null }, };
 
 /**
+ * `GET /api/sync/status` (§10).
+ */
+export type SyncStatus = { role: MachineRole, 
+/**
+ * This machine's id (its iroh endpoint id).
+ */
+machine_id: string, 
+/**
+ * Hub endpoint id: the paired hub on a node, this machine on a hub,
+ * null when standalone.
+ */
+hub: string | null, 
+/**
+ * Node: the sync session with the hub is up. Hub: the endpoint is running.
+ */
+connected: boolean, 
+/**
+ * Last completed exchange with the hub (node) or with any node (hub).
+ */
+last_sync_at: number | null, 
+/**
+ * Local writes not yet acknowledged by the hub (0 on a hub or standalone).
+ */
+pending_outbox: number, 
+/**
+ * HTTPS LAN portal (hub with `portal.lan`), null when not serving.
+ */
+portal_url: string | null, 
+/**
+ * SHA-256 of the portal's self-signed certificate, `AA:BB:...`.
+ */
+portal_cert_fingerprint: string | null, };
+
+/**
+ * `POST /api/sync/invite`: show `code` and `invite` (or a QR of `uri`) to
+ * the machine that joins.
+ */
+export type SyncInvite = { 
+/**
+ * `blirp1-<base32 ticket>`
+ */
+invite: string, 
+/**
+ * `XXXX-XXXX`, single use, 5 attempts.
+ */
+code: string, 
+/**
+ * `blirp://join/<invite>#<code>`
+ */
+uri: string, expires_at: number, };
+
+/**
+ * `POST /api/sync/join`.
+ */
+export type JoinHub = { 
+/**
+ * Invite from the hub; an empty string finds the hub on the local network.
+ */
+invite: string, code: string, };
+
+/**
+ * `POST /api/devices/browser-invite`: one-time login link for a browser (5 min).
+ */
+export type BrowserInvite = { url: string, expires_at: number, };
+
+/**
+ * `PATCH /api/devices/:id`.
+ */
+export type PatchDevice = { can_control_terminals: boolean, };
+
+/**
  * Frames pushed on `/api/events/ws`.
  */
-export type ServerEvent = { "type": "session_created", session: Session, } | { "type": "session_updated", session: Session, } | { "type": "project_updated", project_id: string, } | { "type": "memory_updated", project_id: string, part: MemoryPart, } | { "type": "resync" };
+export type ServerEvent = { "type": "session_created", session: Session, } | { "type": "session_updated", session: Session, } | { "type": "project_updated", project_id: string, } | { "type": "memory_updated", project_id: string, part: MemoryPart, } | { "type": "sync_updated", status: SyncStatus, } | { "type": "resync" };
 
 /**
  * Text frames sent by the server on `/api/terminals/:id/ws` (§6). Raw

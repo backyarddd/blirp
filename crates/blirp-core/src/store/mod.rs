@@ -11,12 +11,14 @@ mod migrations;
 mod misc;
 mod projects;
 mod sessions;
+mod sync;
 
 pub use engine::{BY_DISTILLER, BriefApply, DistillOutcome, DistillPlan, MACHINE_ID_KEY};
 pub use memory::RecordFilter;
 pub use migrations::MigrationError;
 pub use projects::ResolvedProject;
 pub use sessions::SessionFilter;
+pub use sync::{HubPage, IngestOutcome, PulledEntry, SyncCursors, WireEntry};
 
 use crate::model::{
     Brief, Event, Machine, Project, ProjectPath, Record, Resource, Session, WikiPage,
@@ -56,6 +58,11 @@ pub type Result<T, E = StoreError> = std::result::Result<T, E>;
 #[serde(tag = "entity", content = "row", rename_all = "snake_case")]
 pub enum Change {
     Machine(Machine),
+    /// Drops a machine row; only emitted when a pre-identity machine id is
+    /// replaced by the iroh endpoint id (see [`Store::rebind_machine`]).
+    DeleteMachine {
+        id: String,
+    },
     Project(Project),
     ProjectPath(ProjectPath),
     DeleteProjectPath {
@@ -80,6 +87,7 @@ impl Change {
     fn describe(&self) -> (&'static str, &'static str, String) {
         match self {
             Change::Machine(m) => ("machines", "upsert", m.id.clone()),
+            Change::DeleteMachine { id } => ("machines", "delete", id.clone()),
             Change::Project(p) => ("projects", "upsert", p.id.clone()),
             Change::ProjectPath(p) => (
                 "project_paths",
@@ -261,13 +269,38 @@ fn json_col(row: &rusqlite::Row<'_>, col: &str) -> rusqlite::Result<Option<JsonV
 
 /// Write the row(s) for `change` and append it to the outbox.
 pub(crate) fn apply_in(tx: &Transaction<'_>, change: &Change) -> Result<bool> {
-    let written = match change {
+    let written = write_row(tx, change)?;
+    if written == 0 && matches!(change, Change::Event(_)) {
+        return Ok(false);
+    }
+    let (entity, op, key) = change.describe();
+    tx.execute(
+        "INSERT INTO outbox(entity, op, key, payload_json, ts) VALUES (?1,?2,?3,?4,?5)",
+        params![
+            entity,
+            op,
+            key,
+            serde_json::to_string(change)?,
+            crate::now_ms()
+        ],
+    )?;
+    Ok(true)
+}
+
+/// Write the row(s) for `change` only; returns the affected row count.
+/// Replication applies received changes with this so they are never
+/// queued again (no echo).
+fn write_row(tx: &Transaction<'_>, change: &Change) -> Result<usize> {
+    Ok(match change {
         Change::Machine(m) => tx.execute(
             "INSERT INTO machines(id, name, os, role, last_seen, revoked) VALUES (?1,?2,?3,?4,?5,?6)
              ON CONFLICT(id) DO UPDATE SET name=excluded.name, os=excluded.os, role=excluded.role,
                last_seen=excluded.last_seen, revoked=excluded.revoked",
             params![m.id, m.name, m.os, m.role, m.last_seen, m.revoked],
         )?,
+        Change::DeleteMachine { id } => {
+            tx.execute("DELETE FROM machines WHERE id=?1", params![id])?
+        }
         Change::Project(p) => tx.execute(
             "INSERT INTO projects(id, name, created_at, updated_at, deleted) VALUES (?1,?2,?3,?4,?5)
              ON CONFLICT(id) DO UPDATE SET name=excluded.name, created_at=excluded.created_at,
@@ -354,22 +387,7 @@ pub(crate) fn apply_in(tx: &Transaction<'_>, change: &Change) -> Result<bool> {
                created_at=excluded.created_at, deleted=excluded.deleted",
             params![r.id, r.project_id, r.kind, r.url, r.title, json_text(&r.meta), r.created_at, r.deleted],
         )?,
-    };
-    if written == 0 && matches!(change, Change::Event(_)) {
-        return Ok(false);
-    }
-    let (entity, op, key) = change.describe();
-    tx.execute(
-        "INSERT INTO outbox(entity, op, key, payload_json, ts) VALUES (?1,?2,?3,?4,?5)",
-        params![
-            entity,
-            op,
-            key,
-            serde_json::to_string(change)?,
-            crate::now_ms()
-        ],
-    )?;
-    Ok(true)
+    })
 }
 
 /// `SELECT` helper returning at most one mapped row.

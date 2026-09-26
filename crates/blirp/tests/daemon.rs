@@ -390,15 +390,12 @@ async fn api_auth_projects_memory_files() {
         "invalid_request"
     );
 
-    // Later-phase endpoints answer 501 with the standard error shape.
+    // Unknown endpoints answer 404 with the standard error shape.
     let r = h
-        .send(reqwest::Method::POST, "/api/sync/hub/enable", json!({}))
+        .send(reqwest::Method::POST, "/api/no-such-endpoint", json!({}))
         .await;
-    assert_eq!(r.status(), 501);
-    assert_eq!(
-        r.json::<ErrorBody>().await.unwrap().error.code,
-        "not_implemented"
-    );
+    assert_eq!(r.status(), 404);
+    assert_eq!(r.json::<ErrorBody>().await.unwrap().error.code, "not_found");
 
     // Unknown agent is rejected before anything is spawned.
     let r = h

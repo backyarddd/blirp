@@ -8,8 +8,18 @@ pub mod daemon;
 pub mod hooks;
 pub mod mcp;
 pub mod memory;
+pub mod portal;
 pub mod proc_tree;
 pub mod pty;
 pub mod sessions;
 pub mod state;
 pub mod static_files;
+pub mod sync;
+
+/// Install ring as the process-wide rustls provider. iroh turns on
+/// reqwest's rustls backend without a provider, so every reqwest client
+/// needs this first. Idempotent.
+pub fn install_crypto_provider() {
+    // Err only means a provider is already installed, which is fine.
+    let _ = rustls::crypto::ring::default_provider().install_default();
+}

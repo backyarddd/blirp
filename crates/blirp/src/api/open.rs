@@ -2,7 +2,7 @@
 //! file manager or the user's editor. The program is spawned detached; the
 //! request returns as soon as it started.
 
-use super::{ApiError, ApiJson, ApiResult, blocking};
+use super::{ApiError, ApiJson, ApiResult, Principal, blocking};
 use crate::state::SharedState;
 use axum::Router;
 use axum::extract::{Path, State};
@@ -20,9 +20,12 @@ pub fn routes() -> Router<SharedState> {
 
 async fn open(
     State(s): State<SharedState>,
+    principal: Principal,
     Path(id): Path<String>,
     ApiJson(body): ApiJson<OpenSession>,
 ) -> ApiResult<StatusCode> {
+    // Opens a window on this machine's desktop: its own app or CLI only.
+    principal.require_admin()?;
     let (store, machine) = (s.store.clone(), s.machine.id.clone());
     blocking(move || {
         let session = store
