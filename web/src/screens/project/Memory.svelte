@@ -85,9 +85,14 @@
     }
   }
 
-  async function revert(version: number): Promise<void> {
-    if (!confirm(`Revert the brief to version ${version}? The current text stays in history.`)) return;
-    const b = await app.act(() => api.projects.revertBrief(pid, version), `Brief reverted to v${version}`);
+  // By id: numbers shift when older versions from another machine arrive. Entries replicated by
+  // older blirp versions have no id and fall back to the number.
+  const isCurrent = (v: Brief): boolean => (v.id && brief?.id ? v.id === brief.id : v.version === brief?.version);
+
+  async function revert(v: Brief): Promise<void> {
+    if (!confirm(`Revert the brief to version ${v.version}? The current text stays in history.`)) return;
+    const target = v.id ? { id: v.id } : { version: v.version };
+    const b = await app.act(() => api.projects.revertBrief(pid, target), `Brief reverted to v${v.version}`);
     if (b) {
       brief = b;
       void history.reload();
@@ -124,7 +129,7 @@
         <h3 class="section-title">Versions</h3>
         <Loadable loading={history.loading} error={history.error} empty={(history.data?.length ?? 0) === 0} emptyText="No earlier versions." onretry={() => history.load()}>
           <ul class="list">
-            {#each history.data ?? [] as v (v.version)}
+            {#each history.data ?? [] as v (v.id || v.version)}
               <li class="ver">
                 <details>
                   <summary>
@@ -133,9 +138,9 @@
                   </summary>
                   <div class="ver-body"><Markdown source={v.body_md || '_Empty_'} /></div>
                 </details>
-                {#if v.version !== brief?.version && app.control}
-                  <button type="button" class="btn sm" onclick={() => revert(v.version)}>Revert</button>
-                {:else if v.version === brief?.version}
+                {#if !isCurrent(v) && app.control}
+                  <button type="button" class="btn sm" onclick={() => revert(v)}>Revert</button>
+                {:else if isCurrent(v)}
                   <span class="badge accent">current</span>
                 {/if}
               </li>

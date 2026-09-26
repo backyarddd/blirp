@@ -37,7 +37,9 @@ pub struct Config {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
 #[serde(default, deny_unknown_fields)]
 pub struct DaemonConfig {
-    /// Preferred local API port; falls back to an ephemeral port when taken.
+    /// Local API port on 127.0.0.1. The daemon refuses to start when it is
+    /// taken (another program could otherwise answer at the well-known
+    /// address); `0` explicitly picks a free port each start.
     pub port: u16,
 }
 

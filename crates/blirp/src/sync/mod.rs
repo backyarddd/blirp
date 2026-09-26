@@ -15,11 +15,11 @@ use axum::http::StatusCode;
 use axum::routing::{delete, get, post};
 use blirp_core::config::Config;
 use blirp_core::model::{
-    BrowserInvite, Device, DeviceKind, JoinHub, Machine, MachineRole, PatchDevice, ServerEvent,
-    SyncInvite, SyncStatus,
+    BrowserInvite, Device, DeviceKind, JoinHub, JoinPreview, JoinPreviewRequest, Machine,
+    MachineRole, PatchDevice, ServerEvent, SyncInvite, SyncStatus,
 };
 use blirp_core::store::Change;
-use blirp_sync::pair::{MachineMeta, PairError};
+use blirp_sync::pair::{MachineMeta, PairError, Ticket};
 use blirp_sync::service::{ProxyServe, StatusHook};
 use blirp_sync::{Role, SyncError, SyncService};
 use iroh::{EndpointAddr, SecretKey};
@@ -95,6 +95,7 @@ pub fn routes() -> Router<SharedState> {
         .route("/api/sync/hub/disable", post(hub_disable))
         .route("/api/sync/invite", post(invite))
         .route("/api/sync/join", post(join))
+        .route("/api/sync/join/preview", post(join_preview))
         .route("/api/devices", get(list_devices))
         .route("/api/devices/browser-invite", post(browser_invite))
         .route(
@@ -234,13 +235,22 @@ async fn stop_service(state: &SharedState) {
 }
 
 /// Persist a role change: config.toml, the in-memory config and this
-/// machine's (replicated) row.
-async fn set_role(state: &SharedState, role: MachineRole, hub: Option<String>) -> ApiResult<()> {
+/// machine's (replicated) row. `allow_hub_control`, when given, is written
+/// in the same config update (join, leave).
+async fn set_role(
+    state: &SharedState,
+    role: MachineRole,
+    hub: Option<String>,
+    allow_hub_control: Option<bool>,
+) -> ApiResult<()> {
     let st = state.clone();
     blocking(move || {
         let mut cfg = st.config();
         cfg.sync.role = role;
         cfg.sync.hub = hub;
+        if let Some(allow) = allow_hub_control {
+            cfg.sync.allow_hub_control = allow;
+        }
         cfg.save(&st.paths.config_file())
             .map_err(|e| ApiError::internal("writing config.toml", e))?;
         st.set_config(cfg);
@@ -344,9 +354,9 @@ async fn hub_enable(State(s): State<SharedState>, _: Admin) -> ApiResult<Json<Sy
         }
         MachineRole::Hub if s.sync.service().is_some() => {}
         _ => {
-            set_role(&s, MachineRole::Hub, None).await?;
+            set_role(&s, MachineRole::Hub, None, None).await?;
             if let Err(e) = start_service(&s).await {
-                set_role(&s, MachineRole::Standalone, None).await?;
+                set_role(&s, MachineRole::Standalone, None, None).await?;
                 return Err(e);
             }
         }
@@ -365,7 +375,7 @@ async fn hub_disable(State(s): State<SharedState>, _: Admin) -> ApiResult<Json<S
     }
     stop_service(&s).await;
     crate::portal::stop(&s).await;
-    set_role(&s, MachineRole::Standalone, None).await?;
+    set_role(&s, MachineRole::Standalone, None, None).await?;
     emit_status(&s);
     status(&s).await.map(Json)
 }
@@ -394,6 +404,7 @@ async fn join(
     ApiJson(body): ApiJson<JoinHub>,
 ) -> ApiResult<Json<SyncStatus>> {
     let _guard = s.sync.transition.lock().await;
+    let body_allow_hub_control = body.allow_hub_control;
     let config = s.config();
     if config.sync.role != MachineRole::Standalone {
         return Err(ApiError::conflict(
@@ -430,10 +441,37 @@ async fn join(
         .map_err(|e| ApiError::internal("saving hub address", e))?;
     let store = s.store.clone();
     blocking(move || Ok(store.set_setting(HUB_ADDR_KEY, &addr)?)).await?;
-    set_role(&s, MachineRole::Node, Some(hub_id.clone())).await?;
+    set_role(
+        &s,
+        MachineRole::Node,
+        Some(hub_id.clone()),
+        body_allow_hub_control,
+    )
+    .await?;
     tracing::info!(hub = %hub_id, name = %joined.hub_meta.name, "paired with hub");
     start_service(&s).await?;
     status(&s).await.map(Json)
+}
+
+/// `POST /api/sync/join/preview`: the hub an invite points at, read from
+/// the invite alone. Pairing verifies that the hub holds this id's key. Its
+/// name is sent only after the pairing code is proven (§10), so it cannot
+/// be shown before joining without spending one of the code's attempts.
+async fn join_preview(
+    _: Admin,
+    ApiJson(body): ApiJson<JoinPreviewRequest>,
+) -> ApiResult<Json<JoinPreview>> {
+    let invite = blirp_sync::pair::parse_join_uri(&body.invite)
+        .map(|(i, _)| i)
+        .unwrap_or(body.invite);
+    let invite = invite.trim();
+    if invite.is_empty() {
+        return Ok(Json(JoinPreview { hub_id: None }));
+    }
+    let ticket = Ticket::decode(invite).map_err(pair_error)?;
+    Ok(Json(JoinPreview {
+        hub_id: Some(ticket.addr.id.to_string()),
+    }))
 }
 
 async fn list_devices(State(s): State<SharedState>) -> ApiResult<Json<Vec<Device>>> {
@@ -569,7 +607,8 @@ async fn revoke_machine(
                 )]))?)
             })
             .await?;
-            set_role(&s, MachineRole::Standalone, None).await?;
+            // A consent for this hub, not for the next one joined.
+            set_role(&s, MachineRole::Standalone, None, Some(false)).await?;
             emit_status(&s);
         }
         _ => {
@@ -590,8 +629,11 @@ pub fn connection_shutdown(
     state: &SharedState,
     principal: &Principal,
 ) -> tokio::sync::watch::Receiver<bool> {
-    let Some(device) = principal.device.clone() else {
-        return state.shutdown.clone();
+    let device = match (&principal.device, principal.admin) {
+        (Some(d), _) => d.clone(),
+        // Relayed by the sync proxy: its rights follow `sync.allow_hub_control`.
+        (None, false) => PROXIED.to_string(),
+        (None, true) => return state.shutdown.clone(),
     };
     let (tx, rx) = tokio::sync::watch::channel(*state.shutdown.borrow());
     let mut global = state.shutdown.clone();
@@ -616,6 +658,15 @@ pub fn connection_shutdown(
 fn device_changed(s: &SharedState, id: &str) {
     // No live connections is fine.
     let _ = s.sync.device_changes.send(id.to_string());
+}
+
+/// `device_changes` key of connections relayed by the sync proxy.
+const PROXIED: &str = "proxied";
+
+/// `sync.allow_hub_control` changed: relayed connections (terminals, event
+/// streams) close and reopen with the new rights.
+pub(crate) fn proxied_rights_changed(s: &SharedState) {
+    device_changed(s, PROXIED);
 }
 
 /// The machine a session runs on, when that is another machine.

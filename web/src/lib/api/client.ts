@@ -15,6 +15,7 @@ import type {
   Health,
   Injection,
   JoinHub,
+  JoinPreview,
   LaunchSession,
   Machine,
   OpenTarget,
@@ -26,6 +27,7 @@ import type {
   PutWikiPage,
   Record as MemoryRecord,
   Resource,
+  RevertBrief,
   SearchHitKind,
   SearchResults,
   Session,
@@ -40,7 +42,9 @@ import type {
   SyncStatus,
   UpdateStatus,
   WikiPage,
+  WsTicket,
 } from './types.gen';
+import { authToken } from './token';
 
 export class ApiError extends Error {
   constructor(
@@ -104,9 +108,13 @@ async function errorFrom(res: Response): Promise<ApiError> {
 }
 
 export async function request<T>(method: Method, path: string, body?: unknown, query?: Query): Promise<T> {
-  const init: RequestInit = { method, credentials: 'same-origin', headers: { Accept: 'application/json' } };
+  const headers: Record<string, string> = { Accept: 'application/json' };
+  // Local pages carry the runtime token; portal pages rely on their same-origin device cookie.
+  const token = authToken();
+  if (token !== null) headers.Authorization = `Bearer ${token}`;
+  const init: RequestInit = { method, credentials: 'same-origin', headers };
   if (body !== undefined) {
-    init.headers = { Accept: 'application/json', 'Content-Type': 'application/json' };
+    headers['Content-Type'] = 'application/json';
     init.body = JSON.stringify(body);
   }
   let res: Response;
@@ -185,7 +193,8 @@ export const api = {
     memory: (id: string) => request<ProjectMemory>('GET', `${p(id)}/memory`),
     putBrief: (id: string, body_md: string) => request<Brief>('PUT', `${p(id)}/brief`, { body_md }),
     briefHistory: (id: string) => request<Brief[]>('GET', `${p(id)}/brief/history`),
-    revertBrief: (id: string, version: number) => request<Brief>('POST', `${p(id)}/brief/revert`, { version }),
+    /** Prefer the history entry's `id`: versions written on another machine can shift the numbers. */
+    revertBrief: (id: string, target: RevertBrief) => request<Brief>('POST', `${p(id)}/brief/revert`, target),
     records: (id: string) => request<MemoryRecord[]>('GET', `${p(id)}/records`),
     createRecord: (id: string, r: CreateRecord) => request<MemoryRecord>('POST', `${p(id)}/records`, r),
     updateRecord: (id: string, rid: string, r: PatchRecord) =>
@@ -252,6 +261,8 @@ export const api = {
     invite: () => request<SyncInvite>('POST', '/api/sync/invite'),
     /** `invite` may be a `blirp://join` URI, or empty to find the hub on the local network. */
     join: (body: JoinHub) => request<SyncStatus>('POST', '/api/sync/join', body),
+    /** The hub an invite points at, read from the invite alone (nothing is contacted). */
+    previewJoin: (invite: string) => request<JoinPreview>('POST', '/api/sync/join/preview', { invite }),
   },
   devices: {
     list: () => request<Device[]>('GET', '/api/devices'),
@@ -266,6 +277,18 @@ export const api = {
 /** Absolute ws:// or wss:// URL for a same-origin path. */
 export function wsUrl(path: string, loc: Pick<Location, 'protocol' | 'host'> = location): string {
   return `${loc.protocol === 'https:' ? 'wss:' : 'ws:'}//${loc.host}${path}`;
+}
+
+/**
+ * URL to open a same-origin WebSocket with. A WebSocket cannot carry `Authorization`, so a
+ * signed-in local page first trades its token for a single-use ticket bound to this path (valid
+ * 30 s); portal pages send their device cookie with the upgrade instead.
+ */
+export async function socketUrl(path: string, loc: Pick<Location, 'protocol' | 'host'> = location): Promise<string> {
+  const url = wsUrl(path, loc);
+  if (authToken() === null) return url;
+  const { ticket } = await request<WsTicket>('POST', '/api/ws-ticket', { path });
+  return `${url}?ticket=${enc(ticket)}`;
 }
 
 export const terminalWsPath = (id: string): string => `/api/terminals/${enc(id)}/ws`;

@@ -582,7 +582,46 @@ export type JoinHub = {
 /**
  * Invite from the hub; an empty string finds the hub on the local network.
  */
-invite: string, code: string, };
+invite: string, code: string, 
+/**
+ * Sets `sync.allow_hub_control` together with the pairing; left out,
+ * the configured value stays (off by default).
+ */
+allow_hub_control?: boolean, };
+
+/**
+ * `POST /api/sync/join/preview`: what an invite says about its hub,
+ * without contacting it.
+ */
+export type JoinPreviewRequest = { 
+/**
+ * Invite or `blirp://join/...` link; empty for a LAN join by code.
+ */
+invite: string, };
+
+export type JoinPreview = { 
+/**
+ * The hub's machine id (its endpoint id, verified by the connection
+ * when pairing); null when the hub is found on the LAN by code alone.
+ */
+hub_id: string | null, };
+
+/**
+ * `POST /api/ws-ticket` (loopback listener): browsers cannot send
+ * `Authorization` on a WebSocket, so they trade the bearer token for a
+ * single-use ticket bound to one path and pass it as `?ticket=`.
+ */
+export type WsTicketRequest = { 
+/**
+ * WebSocket path, e.g. `/api/events/ws`.
+ */
+path: string, };
+
+export type WsTicket = { 
+/**
+ * Valid for 30 s, once, for the requested path only.
+ */
+ticket: string, };
 
 /**
  * `POST /api/devices/browser-invite`: one-time login link for a browser (5 min).
@@ -618,7 +657,9 @@ export type Config = { daemon: DaemonConfig, machine: MachineConfig, agents: Age
 
 export type DaemonConfig = { 
 /**
- * Preferred local API port; falls back to an ephemeral port when taken.
+ * Local API port on 127.0.0.1. The daemon refuses to start when it is
+ * taken (another program could otherwise answer at the well-known
+ * address); `0` explicitly picks a free port each start.
  */
 port: number, };
 

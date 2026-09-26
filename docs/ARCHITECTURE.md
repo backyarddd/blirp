@@ -49,7 +49,7 @@ Data dir `BLIRP_HOME`, default `~/.blirp` on every OS (Windows: `%USERPROFILE%\.
   distill/run-*/                   summarizer scratch dirs (§9), removed after each run
 ```
 
-`runtime.json` + the token authenticate every local client (Tauri shell, hooks, MCP stdio shim, CLI). The daemon binds `127.0.0.1:<port>` (default 47770, falls back to an ephemeral port if taken; the actual port is in runtime.json).
+`runtime.json` + the token authenticate every local client (Tauri shell, hooks, MCP stdio shim, CLI). The daemon binds `127.0.0.1:<port>` (default 47770). A taken port fails the start with an error naming the program that holds it when the OS tells (never a silent move to another port, which would leave the known address to whoever holds it); `daemon.port = 0` explicitly picks a free port. The actual port is in runtime.json.
 
 ## 4. Processes
 
@@ -57,7 +57,7 @@ Data dir `BLIRP_HOME`, default `~/.blirp` on every OS (Windows: `%USERPROFILE%\.
 - `blirp hook <agent> <event>` - short-lived; reads hook JSON from stdin, POSTs to daemon, prints injection output where the agent supports it. Always exits 0.
 - `blirp mcp` - stdio MCP server spawned by agents. Reads the local SQLite directly in read-only mode for queries; writes (e.g. `mem_record`) go through the daemon API.
 - `blirp <cli>` - `status`, `worktrees list|prune` (see `POST /api/sessions/:id/worktree/remove`), `stop` (graceful `POST /api/daemon/shutdown`; if the daemon still holds `daemon.lock` after 15 s, or does not answer, the pid from runtime.json is killed; the lock, not the pid, decides whether a daemon runs), `logs [-n N] [-f]` (end of the newest `logs/blirpd.<date>.log`; `-f` follows it across the daily rotation), `open` (opens UI/portal in browser with a login link), `mem search|brief|show`, `sessions`, `pair`, `hub enable|disable|invite|status`, `devices list|revoke`, `service install|uninstall|status`, `hooks install|uninstall|status`, `doctor`, `update [--check] [--version X]` and `uninstall [--purge] [--yes]` (§17), and `app` (also `blirp` with no command: `daemon --detach`, then open the desktop app if installed, else the browser login link; in an SSH session (`SSH_CONNECTION`/`SSH_TTY`) or on Linux without `DISPLAY`/`WAYLAND_DISPLAY` it only prints the URL, a login link for a port forward and the portal hint).
-- Desktop app - on launch ensures the daemon is running (spawns sidecar `blirp daemon --detach` if not), reads runtime.json, opens a window at `http://127.0.0.1:<port>/auth?token=...` which sets an HttpOnly cookie and redirects to `/`. Closing the window does not stop the daemon or sessions.
+- Desktop app - on launch ensures the daemon is running (spawns sidecar `blirp daemon --detach` if not), reads runtime.json, opens a window at `http://127.0.0.1:<port>/#token=...`; the SPA stores the token for its origin and removes it from the URL (§11). Closing the window does not stop the daemon or sessions.
 
 Autostart: `blirp service install` registers per-user autostart: macOS LaunchAgent `~/Library/LaunchAgents/dev.blirp.daemon.plist` (`blirp daemon`, `KeepAlive.SuccessfulExit=false`), Linux `systemd --user` unit `blirp.service` (`Restart=on-failure`, `enable --now`; headless hubs also need `loginctl enable-linger`), Windows `HKCU\Software\Microsoft\Windows\CurrentVersion\Run` value `blirp` = `conhost.exe --headless "<blirp.exe>" daemon --detach` (no console window). The unit records the absolute binary path and, on macOS/Linux, the installing shell's `PATH` and an explicit `BLIRP_HOME`. Install is idempotent (an existing daemon is left running and the service takes over at next login); uninstall removes exactly that entry; on Windows and Linux a running daemon keeps running, on macOS unloading the LaunchAgent (`launchctl bootout`) stops the daemon it started, and the command says which happened. Never a system service (it would not see the user's agent logins).
 
@@ -371,7 +371,7 @@ Revocation (`DELETE /api/machines/:id` or `DELETE /api/devices/:id` on the hub):
 
 ## 11. HTTP API (daemon, axum)
 
-Auth: local clients send `Authorization: Bearer <runtime token>` or the `blirp_session` cookie set by `/auth?token=`. LAN/portal browser devices use device cookies (§13). All JSON; validation errors (malformed or mistyped JSON bodies, query strings and path parameters) return 400 `{error:{code,message}}` with code `invalid_request`; only a missing JSON content type (415) and an oversized body (413) keep their own status.
+Auth: local clients send `Authorization: Bearer <runtime token>`. The loopback listener takes no cookies: a cookie for 127.0.0.1 is sent to every server on that host whatever its port, so another local program could collect it. The SPA gets the token in the URL fragment (`/#token=<token>`, never sent to a server), keeps it in `localStorage` (per origin, so per port), strips it with `history.replaceState` and sends it as bearer; WebSockets, which cannot carry headers, use single-use tickets (`POST /api/ws-ticket {path}` -> `{ticket}`, valid 30 s for that path, `?ticket=` on the upgrade). `GET /auth?token=` only redirects old links to `/#token=`; a request still carrying the old `blirp_session` cookie gets it expired (`Max-Age=0`). LAN/portal browser devices use device cookies (§13). All JSON; validation errors (malformed or mistyped JSON bodies, query strings and path parameters) return 400 `{error:{code,message}}` with code `invalid_request`; only a missing JSON content type (415) and an oversized body (413) keep their own status.
 
 ```
 GET  /api/health                         {version, machine, role, capabilities: {admin, control_terminals, local}}
@@ -437,7 +437,11 @@ GET  /api/sync/status                    SyncStatus {role, machine_id, hub, conn
                                          portal_url, portal_cert_fingerprint}
 POST /api/sync/hub/enable | /hub/disable SyncStatus (admin); enable fails with 409 `paired_node` on a node
 POST /api/sync/invite                    SyncInvite {invite, code, uri, expires_at} (admin, hub)
-POST /api/sync/join {invite, code}       SyncStatus (admin); invite may be a join URI, or "" to find the hub on the LAN
+POST /api/sync/join {invite, code, allow_hub_control?}   SyncStatus (admin); invite may be a join URI, or "" to find
+                                         the hub on the LAN; allow_hub_control is written with the node role
+POST /api/sync/join/preview {invite}     JoinPreview {hub_id} (admin): the hub id from the invite, nothing contacted
+                                         (null for a LAN join). The hub's name is exchanged only after the code is
+                                         proven (§10), so the UI shows the id and asks before pairing
 GET  /api/devices                        Device[] ; DELETE /api/devices/:id (admin, revoke)
 PATCH /api/devices/:id {can_control_terminals}   Device (admin)
 POST /api/devices/browser-invite         BrowserInvite {url, expires_at}: one-time login link/QR for a browser (hub portal)
@@ -445,13 +449,14 @@ GET  /api/events/ws                      server push: session status changes, ne
 POST /api/daemon/shutdown                202; graceful stop, same as SIGTERM (desktop tray Quit, `blirp stop`;
                                          the detached Windows daemon has no console to signal). Loopback
                                          listener + local token only: not mounted on the portal or proxy
+POST /api/ws-ticket {path}               {ticket}: single-use, 30 s, bound to that WebSocket path (loopback only)
 GET  /mcp                                MCP Streamable HTTP
 GET  /*                                  embedded SPA
 ```
 
 Request/response DTOs are defined in `blirp-core::model` and exported to `web/src/lib/api/types.gen.ts` (`cargo test -p blirp-core export_bindings`). `/api/events/ws` pushes JSON `ServerEvent` frames: `session_created`, `session_updated`, `session_deleted {session_id}`, `project_updated`, `memory_updated {project_id, part}`, `sync_updated {status}` (role, connection or portal changed), and `resync` when the client fell behind and must refetch.
 
-Every authenticated request carries a principal: local clients (runtime token or `blirp_session` cookie) have `control` and `admin`; portal browser devices have `control = can_control_terminals` and no `admin`; requests relayed by the sync proxy have the proxied `control` and no `admin`. Rights are checked before the request body is read (extractors `Control` / `Admin`), so a caller without them always gets 403:
+Every authenticated request carries a principal: local clients (runtime token or WebSocket ticket) have `control` and `admin`; portal browser devices have `control = can_control_terminals` and no `admin`; requests relayed by the sync proxy have the proxied `control` and no `admin`. Rights are checked before the request body is read (extractors `Control` / `Admin`), so a caller without them always gets 403:
 - `admin` (403 `admin_only`): `PATCH /api/settings` (config.toml, settings values), hub enable/disable, invite, join, browser invites, device and machine revoke/patch, hook ingress, global integration install/uninstall, `POST /api/sessions/:id/open`, `POST /api/daemon/shutdown`.
 - `control` (403 `control_not_allowed`): every other mutation: launch, resume, stop, distill, rename or delete sessions, worktree removal, project register/rename/delete/merge, brief, records, wiki, resources and suggestions; plus terminal input and resize.
 - Reads (every `GET`, the event stream, viewing a terminal) need authentication only.
@@ -464,7 +469,7 @@ The loopback listener answers only requests whose `Host` is `127.0.0.1:<port>`, 
 ## 12. Config (`~/.blirp/config.toml`, validated at startup; unknown keys are an error with a clear message)
 
 ```toml
-[daemon]   port = 47770
+[daemon]   port = 47770         # taken: startup fails; 0 = a free port each start
 [machine]  name = "<hostname>"
 [agents]   default = "claude"
            [[agents.custom]] name = "..." command = "..." args = [] 
@@ -481,7 +486,9 @@ The loopback listener answers only requests whose `Host` is `127.0.0.1:<port>`, 
 [sync]     role = "standalone" | "hub" | "node"
            hub = "<node id>"
            relay = "default" | "disabled" | "<url>"
-           allow_hub_control = false   # node: accept control relayed by the hub
+           allow_hub_control = false   # node: accept control relayed by the hub; set by the join dialog
+                                       # (unchecked by default) or Settings; reset when leaving the hub;
+                                       # changing it closes relayed WebSockets so they reopen with the new rights
 [portal]   lan = false          # hub: serve portal on LAN with HTTPS
            lan_port = 47771
 [update]   check = true         # GET /api/update may ask GitHub for the latest release
@@ -489,10 +496,10 @@ The loopback listener answers only requests whose `Host` is `127.0.0.1:<port>`, 
 
 ## 13. Portal and remote browser access
 
-- Local desktop and `blirp open`: localhost + token cookie.
+- Local desktop and `blirp open`: `http://127.0.0.1:<port>/#token=...`, bearer token from the SPA's origin storage, WebSocket tickets (§11). No cookie on the loopback listener. The portal's device cookie is scoped to the portal's host and never accepted by the loopback listener; the portal never accepts the runtime token.
 - Hub with `portal.lan = true`: axum-server with rustls (ring, TLS 1.2/1.3, ALPN `http/1.1` so WebSockets upgrade) on `0.0.0.0:lan_port`, serving the same router; self-signed cert generated with `rcgen` (SANs localhost, 127.0.0.1, LAN IP) and persisted in `~/.blirp/tls/`; SHA-256 fingerprint (`AA:BB:...`) in `GET /api/sync/status`. The portal runs while the role is hub and `portal.lan` is set, on `portal.lan_port`; this is applied at daemon start, on hub enable (also when already a hub) and disable, and live on `PATCH /api/settings` (a changed port restarts the listener). A portal that cannot start (port taken) answers 409 `portal_failed`; the saved config is kept. Browser devices log in by opening a one-time link/QR `https://<lan ip>:<port>/device-login?invite=<128-bit token>` (5 min, single use, stored hashed, redemption rate-limited to 10 attempts per minute per client IP) created with `POST /api/devices/browser-invite` on an already-authenticated screen; it creates a `devices` row (kind `browser`, no terminal control) and sets `blirp_device=<random 256-bit token>; HttpOnly; Secure; SameSite=Strict; Path=/; Max-Age=400 days` (stored as SHA-256), then redirects to `/`. The portal accepts only device cookies (not the runtime token). Devices are listed and revocable in Settings > Machines & Sync > Devices; revoking or changing a device closes its open WebSockets. Terminal control from a browser device requires `can_control_terminals`.
 - Users with Tailscale can instead run `tailscale serve` in front of the portal port (docs/portal.md); the loopback listener only accepts the runtime token, so it is not a target for browser devices.
-- Security headers: CSP (scripts self only, no inline scripts; `style-src 'self' 'unsafe-inline'` for xterm.js; `img-src 'self' data:`; `connect-src 'self' ws://<host> wss://<host>`), `X-Frame-Options: DENY`, `SameSite=Strict` cookies, CSRF protection via same-site cookie + `Origin` check on mutations and WS upgrades.
+- Security headers: CSP (scripts self only, no inline scripts; `style-src 'self' 'unsafe-inline'` for xterm.js; `img-src 'self' data:`; `connect-src 'self' ws://<host> wss://<host>`), `X-Frame-Options: DENY`, `SameSite=Strict` device cookies, CSRF protection via bearer tokens (local), same-site cookies (portal) and the `Origin` check on mutations and WS upgrades.
 
 ## 14. Web UI (Svelte 5, TypeScript strict)
 
@@ -511,9 +518,9 @@ Layout mirrors the reference (Xirp-style):
 ## 15. Desktop shell (Tauri 2)
 
 - Crate `app/src-tauri` (`blirp-desktop`), bundle product `blirp`, identifier `dev.blirp.desktop`. Its only frontend is a bundled loading/error page (`app/src`); everything else is the daemon's SPA.
-- Sidecar `blirp` binary (externalBin, next to the app executable in every bundle). On start: probe runtime.json + `/api/health`; if not healthy run `blirp daemon --detach` (stderr captured to `logs/desktop-daemon-start.log`, 40 s timeout), then navigate the main window to `http://127.0.0.1:<port>/auth?token=...`. On failure the loading page shows the error, the log folder, Retry and Open log folder. On macOS/Linux the daemon is started with the login shell's `PATH` (`$SHELL -ilc`) so agent CLIs are found when the app was launched from the Dock or a launcher. Debug builds (`tauri dev`, clippy, tests) use `target/<profile>/blirp`; `build.rs` drops the sidecar config for them and requires it for release builds.
+- Sidecar `blirp` binary (externalBin, next to the app executable in every bundle). On start: probe runtime.json + `/api/health`; if not healthy run `blirp daemon --detach` (stderr captured to `logs/desktop-daemon-start.log`, 40 s timeout), then navigate the main window to `http://127.0.0.1:<port>/#token=...`. On failure the loading page shows the error, the log folder, Retry and Open log folder. On macOS/Linux the daemon is started with the login shell's `PATH` (`$SHELL -ilc`) so agent CLIs are found when the app was launched from the Dock or a launcher. Debug builds (`tauri dev`, clippy, tests) use `target/<profile>/blirp`; `build.rs` drops the sidecar config for them and requires it for release builds.
 - IPC: only the bundled page (local origin) may call the app commands `startup_state`, `retry`, `open_logs` (`capabilities/main.json`); the daemon origin gets no capabilities. Navigation is limited to the bundled page and the daemon origin; other http(s)/mailto links and `window.open` go to the default browser.
-- Plugins: single instance (a second launch focuses the window and forwards deep links), window state (size/position, not visibility), deep link `blirp://join/<ticket>#<code>` -> SPA route `/settings/sync?join=<ticket>&code=<code>` (queued until the UI is logged in), dialog, opener. On Linux and Windows the app registers `blirp://` for its own executable at startup (script installs have no installer to do it); macOS uses the bundle's Info.plist.
+- Plugins: single instance (a second launch focuses the window and forwards deep links), window state (size/position, not visibility), deep link `blirp://join/<ticket>#<code>` -> SPA route `/settings/sync?join=<ticket>&code=<code>` (queued until the UI is logged in). Any web page can open such a link, so it only prefills the join form; pairing always needs the confirmation dialog (hub id from `POST /api/sync/join/preview`, what the hub may do, an unchecked "Allow this hub to start and control terminals on this machine" box that sets `sync.allow_hub_control`), dialog, opener. On Linux and Windows the app registers `blirp://` for its own executable at startup (script installs have no installer to do it); macOS uses the bundle's Info.plist.
 - No updater: the one update path is `blirp update` (§17), which also replaces the app; the web UI's Settings > About shows when a release is available.
 - Window close hides the window; daemon, sessions and tray keep running. Tray: Open blirp (restarts the daemon if it died), status line, "Close window (sessions keep running)", "Quit blirp (stop daemon and sessions)" (confirm dialog, then `POST /api/daemon/shutdown` and exit).
 - Windows bundles ship `conpty.dll` and `x64\OpenConsole.exe` (NuGet `Microsoft.Windows.Console.ConPTY`, pinned) next to `blirp.exe`. portable-pty loads `conpty.dll` by name, which resolves from the executable's directory first, and that `conpty.dll` launches `<its dir>\x64\OpenConsole.exe`; without them the inbox ConPTY is used. The standalone Windows zip and the portable app zip have the same layout.

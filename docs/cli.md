@@ -54,7 +54,7 @@ Prints version, pid, URL, machine name and id, sync role and data directory. Exi
 
 ## blirp open
 
-Opens `http://127.0.0.1:<port>/auth?token=...` in the default browser, which logs the browser in and shows the UI.
+Opens `http://127.0.0.1:<port>/#token=...` in the default browser. The UI stores the token for its origin, removes it from the address bar and shows the workspace. The fragment is never sent to the daemon or any other server.
 
 ## blirp sessions
 

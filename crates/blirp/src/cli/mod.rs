@@ -347,11 +347,9 @@ fn open_browser(url: &str) -> std::io::Result<()> {
 
 async fn open(paths: &Paths) -> anyhow::Result<ExitCode> {
     let client = Client::connect(paths).await?;
-    let url = format!(
-        "{}/auth?token={}",
-        client.info.base_url(),
-        client.info.token
-    );
+    // The token rides in the fragment, which the browser never sends to a
+    // server; the UI stores it and removes it from the address bar.
+    let url = format!("{}/#token={}", client.info.base_url(), client.info.token);
     open_browser(&url).context("launch browser")?;
     println!("Opened {} in your browser", client.info.base_url());
     Ok(ExitCode::SUCCESS)

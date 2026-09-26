@@ -1,7 +1,8 @@
 //! blirp desktop shell (§15): a thin Tauri window around the web UI served by
 //! the daemon. It starts the daemon (bundled `blirp` sidecar) when needed,
-//! logs the window in via `/auth?token=`, forwards `blirp://join/...` deep
-//! links and keeps a tray icon. Updates are `blirp update` (the web UI's
+//! logs the window in via `/#token=` (the SPA keeps the token in its own
+//! origin's storage), forwards `blirp://join/...` deep links and keeps a
+//! tray icon. Updates are `blirp update` (the web UI's
 //! Settings > About says when one is available); the app has no updater.
 //!
 //! The remote UI gets no Tauri IPC: only the bundled loading page may call
@@ -124,7 +125,7 @@ fn start(app: AppHandle) {
             Ok(info) => {
                 *lock(&shell.origin) = Some(info.base_url());
                 shell.set_phase(Phase::Ready);
-                let url = format!("{}/auth?token={}", info.base_url(), info.token);
+                let url = format!("{}/#token={}", info.base_url(), info.token);
                 navigate(&app, &url);
             }
             Err(e) => {
@@ -196,6 +197,8 @@ fn reopen(app: &AppHandle) {
 // -------------------------------------------------------------- deep links
 
 /// `blirp://join/<ticket>#<code>` -> the SPA's pairing screen, prefilled.
+/// Any web page can open such a link, so the SPA never pairs from it on its
+/// own: the user confirms the hub's id and its rights first.
 fn join_route(url: &Url) -> Option<String> {
     if url.scheme() != "blirp" || url.host_str() != Some("join") {
         return None;
@@ -233,7 +236,7 @@ fn handle_deep_links(app: &AppHandle, urls: Vec<Url>) {
             .and_then(|w| w.url().ok())
             .is_some_and(|u| shell.is_daemon_url(&u));
         match origin {
-            // Already logged in: the session cookie is set, go straight there.
+            // Already logged in: the UI holds the token, go straight there.
             Some(o) if on_ui => navigate(app, &format!("{o}{route}")),
             _ => *lock(&shell.pending_route) = Some(route),
         }

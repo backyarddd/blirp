@@ -8,11 +8,13 @@ Conventions: JSON bodies; ids are UUIDv7 strings (machine ids are hex endpoint i
 
 | Listener | Address | Accepts |
 |---|---|---|
-| Local | `http://127.0.0.1:<port>` (default 47770; actual port in `~/.blirp/runtime.json`) | `Authorization: Bearer <token>` with the `token` from `runtime.json`, or the `blirp_session` cookie set by `GET /auth?token=<token>` |
+| Local | `http://127.0.0.1:<port>` (default 47770; actual port in `~/.blirp/runtime.json`) | `Authorization: Bearer <token>` with the `token` from `runtime.json`; WebSocket upgrades may instead carry `?ticket=` from `POST /api/ws-ticket`. No cookies. |
 | LAN portal (hub with `portal.lan`) | `https://<LAN IP>:<lan_port>` | only the `blirp_device` cookie set by `GET /device-login?invite=<token>` ([portal.md](portal.md)) |
 | Sync proxy | requests relayed from paired machines over the hub | authenticated by the machine's key; no credentials are forwarded |
 
 The runtime token is 256 random bits, compared in constant time, and regenerated at every daemon start.
+
+The local listener accepts no cookies: a cookie for `127.0.0.1` is sent to every server on that host, whatever its port. The web UI is opened as `http://127.0.0.1:<port>/#token=<token>` (`blirp open`, the desktop app); the fragment never reaches a server. The UI keeps the token in its origin's `localStorage`, removes it from the address bar and sends it as a bearer token. Browsers cannot set headers on a WebSocket, so the UI first calls `POST /api/ws-ticket` with `{path}` and opens `<path>?ticket=<ticket>`: a ticket is valid once, for 30 seconds, for that path only. `GET /auth?token=` from older versions redirects to `/#token=` and sets no cookie; an old `blirp_session` cookie is expired on any request that still sends it.
 
 ```sh
 TOKEN=$(jq -r .token ~/.blirp/runtime.json); PORT=$(jq -r .port ~/.blirp/runtime.json)
@@ -23,7 +25,7 @@ Every request runs as a principal:
 
 | Principal | `control` | `admin` |
 |---|---|---|
-| local client (token or `blirp_session` cookie) | yes | yes |
+| local client (token or WebSocket ticket) | yes | yes |
 | portal browser device | its **Terminal control** setting | no |
 | request relayed from another machine | that machine's terminal control (as set on the hub) | no |
 
@@ -44,7 +46,7 @@ CSRF protection: a mutating request or WebSocket upgrade that carries an `Origin
 | 403 | `forbidden_origin`, `control_not_allowed`, `admin_only` |
 | 404 | `not_found`, `terminal_not_found`, `not_git` (git endpoints on a plain folder) |
 | 405 | `method_not_allowed` |
-| 409 | `conflict`, `not_running`, `already_running`, `nothing_to_distill`, `remote_session`, `machine_unreachable`, `machine_offline`, `paired_node`, `not_hub`, `already_synced`, `portal_disabled` |
+| 409 | `conflict`, `session_live`, `not_running`, `already_running`, `nothing_to_distill`, `remote_session`, `machine_unreachable`, `machine_offline`, `paired_node`, `not_hub`, `already_synced`, `portal_disabled` |
 | 422 | `agent_not_installed`, `worktree_failed`, `spawn_failed`, global hooks install failures |
 | 429 | `rate_limited` (device login) |
 | 500 | `internal` (details only in the daemon log) |
@@ -136,19 +138,21 @@ Text fields are limited to 256 KiB.
 | `POST /api/sync/hub/enable` | admin. Become the hub (starts the portal if `portal.lan`); `SyncStatus`. 409 `paired_node`. |
 | `POST /api/sync/hub/disable` | admin. Back to standalone; `SyncStatus`. 409 `not_hub`. |
 | `POST /api/sync/invite` | admin, hub. `{invite, code, uri, expires_at}` |
-| `POST /api/sync/join` | admin. `{invite, code}`; `invite` may be a `blirp://join/...` link (its code is used when `code` is empty) or `""` to find the hub on the LAN. `SyncStatus`. 409 `already_synced`. |
+| `POST /api/sync/join/preview` | admin. `{invite}` (invite, join link or `""`) -> `JoinPreview {hub_id}`: the hub's machine id read from the invite, nothing contacted; `null` for a LAN join. The hub's name is only exchanged after the code is verified. |
+| `POST /api/sync/join` | admin. `{invite, code, allow_hub_control?}`; `invite` may be a `blirp://join/...` link (its code is used when `code` is empty) or `""` to find the hub on the LAN. `allow_hub_control` sets `sync.allow_hub_control` with the new role (left out: unchanged). `SyncStatus`. 409 `already_synced`. |
 | `GET /api/devices` | `Device[]`: `{id, name, kind (machine\|browser), node_id, created_at, last_seen, revoked, can_control_terminals}` |
 | `PATCH /api/devices/:id` | admin. `{can_control_terminals}`; closes the device's connections so they reopen with the new rights |
 | `DELETE /api/devices/:id` | admin. Revoke; 204 |
 | `POST /api/devices/browser-invite` | `{url, expires_at}`: one-time portal login link (5 minutes). 409 `portal_disabled` when the portal is not running. |
 | `GET /device-login?invite=` | portal listener only: redeem a login link, set the device cookie, redirect to `/` |
-| `GET /auth?token=` | local listener: exchange the runtime token for the `blirp_session` cookie, redirect to `/` |
+| `POST /api/ws-ticket` | local listener only. `{path}` (a WebSocket path under `/api/`) -> `{ticket}`: single use, 30 s, that path only |
+| `GET /auth?token=` | local listener: old login links; redirects to `/#token=<token>`, sets no cookie |
 
 ## WebSockets
 
 ### Terminal: `GET /api/terminals/:id/ws`
 
-Attach to a live terminal (`:id` is the session id). 404 `terminal_not_found` when the session has no live process; use the session's events instead. Sessions on another machine are relayed through the hub. Several clients may attach.
+Attach to a live terminal (`:id` is the session id). Browsers authenticate the upgrade with `?ticket=` (see [Listeners and authentication](#listeners-and-authentication)). 404 `terminal_not_found` when the session has no live process; use the session's events instead. Sessions on another machine are relayed through the hub. Several clients may attach.
 
 Server to client:
 

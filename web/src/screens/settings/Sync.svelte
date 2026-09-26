@@ -11,6 +11,7 @@
   import Loadable from '../../lib/components/Loadable.svelte';
   import QrCode from '../../lib/components/QrCode.svelte';
   import Expiry from '../../lib/components/Expiry.svelte';
+  import Modal from '../../lib/components/Modal.svelte';
   import Portal from './Portal.svelte';
 
   let { settings, onsaved }: { settings: SettingsView; onsaved: (s: SettingsView) => void } = $props();
@@ -42,8 +43,9 @@
   let joinCode = $state('');
   let deepLink = $state(false);
 
-  // Desktop deep links land on /settings/sync?join=<invite>&code=<code>. Prefill the join form,
-  // then drop the query so the pairing code does not stay in the address bar or history.
+  // Desktop deep links land on /settings/sync?join=<invite>&code=<code>. Any web page can open such
+  // a link, so it only prefills the form: pairing always goes through the confirmation below. The
+  // query is dropped so the pairing code does not stay in the address bar or history.
   onMount(() => {
     const q = new URLSearchParams(location.search);
     const join = q.get('join');
@@ -105,6 +107,20 @@
   const CODE = /^[A-Z0-9]{4}-?[A-Z0-9]{4}$/;
   let joining = $state(false);
   let joinError: string | null = $state(null);
+
+  /** The join the user is asked to confirm; `hubId` is null for a LAN join by code alone. */
+  interface PendingJoin {
+    invite: string;
+    code: string;
+    hubId: string | null;
+  }
+  let pending: PendingJoin | null = $state.raw(null);
+  /** Unchecked by default: control is a separate, explicit decision (`sync.allow_hub_control`). */
+  let allowControl = $state(false);
+
+  const fingerprint = (id: string): string => id.match(/.{1,4}/g)?.join(' ') ?? id;
+
+  // Step 1: read the hub's id from the invite (nothing is contacted) and ask for confirmation.
   async function join(e: SubmitEvent): Promise<void> {
     e.preventDefault();
     joinError = null;
@@ -113,20 +129,60 @@
       joinError = 'The pairing code looks like XXXX-XXXX.';
       return;
     }
+    const invite = joinInvite.trim();
     joining = true;
     try {
-      app.setSync(await api.sync.join({ invite: joinInvite.trim(), code }));
-      joinInvite = '';
-      joinCode = '';
-      deepLink = false;
-      app.toast('Paired with the hub. Memory syncs in the background.', 'info');
-      void app.refreshHealth();
+      const preview = await api.sync.previewJoin(invite);
+      allowControl = false;
+      pending = { invite, code, hubId: preview.hub_id };
     } catch (err) {
       app.noteForbidden(err);
       joinError = errorMessage(err);
     } finally {
       joining = false;
     }
+  }
+
+  // Step 2: pair; the control choice is written together with the new role.
+  async function confirmJoin(): Promise<void> {
+    const j = pending;
+    if (!j) return;
+    joining = true;
+    try {
+      app.setSync(await api.sync.join({ invite: j.invite, code: j.code, allow_hub_control: allowControl }));
+      pending = null;
+      joinInvite = '';
+      joinCode = '';
+      deepLink = false;
+      app.toast('Paired with the hub. Memory syncs in the background.', 'info');
+      void app.refreshHealth();
+      onsaved(await api.settings.get());
+    } catch (err) {
+      pending = null;
+      app.noteForbidden(err);
+      joinError = errorMessage(err);
+    } finally {
+      joining = false;
+    }
+  }
+
+  // Node only: whether the hub (and machines paired with it) may control this machine.
+  let savingControl = $state(false);
+  async function setHubControl(on: boolean, input: HTMLInputElement): Promise<void> {
+    const warning =
+      'Allow the hub to control this machine? The hub and every machine paired with it could start agents and shells here and type into them, which means running any command as you.';
+    if (on && !confirm(warning)) {
+      input.checked = false;
+      return;
+    }
+    savingControl = true;
+    const s = await app.saveSettings(
+      { config: { ...settings.config, sync: { ...settings.config.sync, allow_hub_control: on } } },
+      on ? 'The hub may now control this machine' : 'The hub can no longer control this machine',
+    );
+    savingControl = false;
+    if (s) onsaved(s);
+    else input.checked = settings.config.sync.allow_hub_control;
   }
 
   async function copy(text: string, what: string): Promise<void> {
@@ -198,6 +254,24 @@
           <dd>{status.pending_outbox}</dd>
         {/if}
       </dl>
+      {#if status.role === 'node'}
+        <div class="gap">
+          <label class="check">
+            <input
+              type="checkbox"
+              checked={settings.config.sync.allow_hub_control}
+              disabled={!app.admin || savingControl}
+              onchange={(e) => setHubControl(e.currentTarget.checked, e.currentTarget)}
+            />
+            Allow the hub to control this machine
+          </label>
+          <p class="small muted">
+            When on, the hub and machines paired with it can start and stop agents and shells here, type into terminals and
+            change sessions and memory, so they can run any command as you. When off they can still read synced history,
+            project files and live terminals, and edit shared memory.
+          </p>
+        </div>
+      {/if}
       {#if app.admin && status.role === 'hub'}
         <button type="button" class="btn sm danger gap" onclick={disableHub} disabled={busy}>Disable hub</button>
       {:else if app.admin && status.role === 'node'}
@@ -343,6 +417,48 @@
   </section>
 {/if}
 
+<Modal open={pending !== null} title="Pair with this hub?" onclose={() => (pending = null)}>
+  {#if pending}
+    {#if deepLink}
+      <p class="warn" role="alert">
+        This pairing link was opened from outside blirp (a web page, a QR code or another app). Only continue if you just
+        created this invite on your own hub.
+      </p>
+    {/if}
+    {#if pending.hubId}
+      <p class="small muted">Hub machine id</p>
+      <p class="mono fp" data-testid="hub-fingerprint">{fingerprint(pending.hubId)}</p>
+      <p class="small">
+        Compare it with the <strong>Machine id</strong> shown on the hub in Settings &gt; Machines &amp; Sync. Pairing checks
+        that the hub holds this id's key. The hub's name is only exchanged once the code is verified.
+      </p>
+    {:else}
+      <p class="warn">
+        No invite: the hub is found on this network by its pairing code, so its id cannot be shown in advance. Only continue
+        if you just created this code on your own hub.
+      </p>
+    {/if}
+    <p class="small"><strong>Once paired, the hub</strong> and every machine paired with it:</p>
+    <ul class="small rights">
+      <li>receive this machine's synced history: projects and folder paths, redacted session transcripts, summaries and memory;</li>
+      <li>can read project files, git status and diffs here, and watch live terminals;</li>
+      <li>can edit shared memory (brief, records, wiki, resources), which agents you start here are given.</li>
+    </ul>
+    <label class="check">
+      <input type="checkbox" bind:checked={allowControl} />
+      Allow this hub to start and control terminals on this machine
+    </label>
+    <p class="small muted">
+      Also lets them stop and resume sessions, type into terminals and change sessions and memory here, which means running
+      any command as you. You can change this later in Settings &gt; Machines &amp; Sync.
+    </p>
+  {/if}
+  {#snippet footer()}
+    <button type="button" class="btn" onclick={() => (pending = null)}>Cancel</button>
+    <button type="button" class="btn primary" onclick={confirmJoin} disabled={joining}>{joining ? 'Pairing…' : 'Pair with hub'}</button>
+  {/snippet}
+</Modal>
+
 {#if role === 'hub' || settings.config.portal.lan}
   <Portal {settings} {onsaved} />
 {/if}
@@ -444,5 +560,15 @@
   }
   .err {
     color: var(--danger);
+  }
+  .fp {
+    font-size: 15px;
+    letter-spacing: 0.04em;
+    word-break: break-all;
+    margin: 2px 0 8px;
+  }
+  .rights {
+    margin: 4px 0 12px;
+    padding-left: 18px;
   }
 </style>

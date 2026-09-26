@@ -925,6 +925,43 @@ pub struct JoinHub {
     /// Invite from the hub; an empty string finds the hub on the local network.
     pub invite: String,
     pub code: String,
+    /// Sets `sync.allow_hub_control` together with the pairing; left out,
+    /// the configured value stays (off by default).
+    #[serde(default)]
+    #[ts(optional)]
+    pub allow_hub_control: Option<bool>,
+}
+
+/// `POST /api/sync/join/preview`: what an invite says about its hub,
+/// without contacting it.
+#[derive(Debug, Clone, Serialize, Deserialize, TS)]
+#[serde(deny_unknown_fields)]
+pub struct JoinPreviewRequest {
+    /// Invite or `blirp://join/...` link; empty for a LAN join by code.
+    pub invite: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, TS)]
+pub struct JoinPreview {
+    /// The hub's machine id (its endpoint id, verified by the connection
+    /// when pairing); null when the hub is found on the LAN by code alone.
+    pub hub_id: Option<String>,
+}
+
+/// `POST /api/ws-ticket` (loopback listener): browsers cannot send
+/// `Authorization` on a WebSocket, so they trade the bearer token for a
+/// single-use ticket bound to one path and pass it as `?ticket=`.
+#[derive(Debug, Clone, Serialize, Deserialize, TS)]
+#[serde(deny_unknown_fields)]
+pub struct WsTicketRequest {
+    /// WebSocket path, e.g. `/api/events/ws`.
+    pub path: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, TS)]
+pub struct WsTicket {
+    /// Valid for 30 s, once, for the requested path only.
+    pub ticket: String,
 }
 
 /// `POST /api/devices/browser-invite`: one-time login link for a browser (5 min).
@@ -1043,7 +1080,7 @@ mod tests {
             GitStatusEntry, GitStatus, GitDiff, FileEntry, DirListing, FileContent, SessionsPage, SessionDetail,
             LaunchSession, PatchSession, RemoveWorktree, OpenTarget, OpenSession, EventsPage, SearchHit, SearchResults, AgentInfo,
             AgentIntegration, Injection, SummaryItem, DistillFailure, SessionSummary,
-            SettingsView, SettingsPatch, Capabilities, DistillStatus, DistillPause, SyncStatus, SyncInvite, JoinHub, BrowserInvite, PatchDevice,
+            SettingsView, SettingsPatch, Capabilities, DistillStatus, DistillPause, SyncStatus, SyncInvite, JoinHub, JoinPreviewRequest, JoinPreview, WsTicketRequest, WsTicket, BrowserInvite, PatchDevice,
             ServerEvent, TerminalServerMessage, TerminalClientMessage,
             Config, DaemonConfig, MachineConfig, AgentsConfig, CustomAgent, SessionsConfig,
             Summarizer, BriefMode, MemoryConfig, SyncConfig, PortalConfig, UpdateConfig,

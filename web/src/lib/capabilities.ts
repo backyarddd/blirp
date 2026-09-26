@@ -36,3 +36,21 @@ export function denyFor(code: string, denied: Denied): Denied {
   if (code === 'control_not_allowed') return { ...denied, control: true };
   return denied;
 }
+
+/**
+ * Why another machine refused an action on its session (the daemon forwards stop, resume and
+ * delete to the machine that owns the session), or null for other errors. Such a 403 is that
+ * machine's decision, not a change of this client's rights.
+ */
+export function remoteRefusal(code: string, machine: string): string | null {
+  switch (code) {
+    case 'machine_unreachable':
+      return `${machine} is offline or not connected to the hub. Try again when it is online.`;
+    case 'control_not_allowed':
+      return `${machine} does not accept changes from other machines. Allow them there under Settings > Machines & Sync: "Allow the hub to control this machine" on a paired machine, Terminal control for this machine's device on the hub.`;
+    case 'proxy_failed':
+      return `${machine} did not answer. Try again later.`;
+    default:
+      return null;
+  }
+}

@@ -314,16 +314,6 @@ async fn api_auth_projects_memory_files() {
             .unwrap()
             .contains("default-src 'self'")
     );
-    let r = h
-        .http
-        .get(h.url(&format!("/auth?token={}", h.token)))
-        .send()
-        .await
-        .unwrap();
-    // reqwest follows the redirect to `/`; the cookie was set on the 303.
-    assert_eq!(r.status(), 200);
-    let r = h.http.get(h.url("/auth?token=wrong")).send().await.unwrap();
-    assert_eq!(r.status(), 401);
 
     // Folders must be absolute: relative ones would resolve against the
     // daemon's working directory (`src` exists relative to this test's).
@@ -653,6 +643,7 @@ const MUTATING_ROUTES: &[(&str, &str, Need)] = &[
     ("POST", "/api/sync/hub/disable", Need::Admin),
     ("POST", "/api/sync/invite", Need::Admin),
     ("POST", "/api/sync/join", Need::Admin),
+    ("POST", "/api/sync/join/preview", Need::Admin),
     ("POST", "/api/devices/browser-invite", Need::Admin),
     ("PATCH", "/api/devices/d1", Need::Admin),
     ("DELETE", "/api/devices/d1", Need::Admin),
@@ -771,8 +762,27 @@ async fn portal_devices_get_only_their_rights() {
         }
     }
     // Loopback-only routes do not exist on the portal.
-    let (status, _) = portal_call(&app, "POST", "/api/daemon/shutdown", &controller).await;
-    assert_eq!(status, 404);
+    for path in ["/api/daemon/shutdown", "/api/ws-ticket"] {
+        let (status, _) = portal_call(&app, "POST", path, &controller).await;
+        assert_eq!(status, 404, "{path}");
+    }
+    // The runtime token is no credential on the portal.
+    let (status, _) = portal_call(&app, "GET", "/api/health", "").await;
+    assert_eq!(status, 401);
+    let r = {
+        use tower::ServiceExt as _;
+        app.clone()
+            .oneshot(
+                axum::http::Request::builder()
+                    .uri("/api/health")
+                    .header("authorization", format!("Bearer {}", h.token))
+                    .body(axum::body::Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap()
+    };
+    assert_eq!(r.status(), 401);
 
     // Health tells each client what it may do.
     for (cookie, control) in [(&viewer, false), (&controller, true)] {
@@ -1023,4 +1033,161 @@ async fn worktrees_are_removed_only_when_clean_or_forced() {
     let r = h.send(reqwest::Method::POST, &remove, json!({})).await;
     assert_eq!(code(r).await, (409, Some("no_worktree".into())));
     h.daemon.shutdown().await.unwrap();
+}
+
+/// Loopback listener auth (§11): bearer token or a WebSocket ticket, never
+/// a cookie (cookies ignore ports, so every local server would get it).
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn local_auth_takes_no_cookies() {
+    let h = Harness::start().await;
+    let no_redirect = reqwest::Client::builder()
+        .redirect(reqwest::redirect::Policy::none())
+        .build()
+        .unwrap();
+
+    // Old login links move the token into the fragment and set no cookie.
+    let r = no_redirect
+        .get(h.url(&format!("/auth?token={}", h.token)))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(r.status(), 303);
+    assert_eq!(r.headers()["location"], format!("/#token={}", h.token));
+    assert!(r.headers().get("set-cookie").is_none());
+    let r = no_redirect
+        .get(h.url("/auth?token=wrong"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(r.status(), 401);
+
+    // The cookie of older versions is refused, and cleared wherever it shows up.
+    let legacy = format!("blirp_session={}", h.token);
+    for path in ["/api/health", "/", "/auth?token=wrong"] {
+        let r = no_redirect
+            .get(h.url(path))
+            .header("Cookie", &legacy)
+            .send()
+            .await
+            .unwrap();
+        if path.starts_with("/api/") {
+            assert_eq!(r.status(), 401, "{path}");
+        }
+        let cleared = r
+            .headers()
+            .get_all("set-cookie")
+            .iter()
+            .any(|v| v.to_str().unwrap().starts_with("blirp_session=; Max-Age=0"));
+        assert!(cleared, "{path}: legacy cookie not cleared");
+    }
+    let r = no_redirect.get(h.url("/")).send().await.unwrap();
+    assert!(r.headers().get("set-cookie").is_none());
+    // The portal's device cookie means nothing here.
+    let r = no_redirect
+        .get(h.url("/api/health"))
+        .header("Cookie", format!("blirp_device={}", h.token))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(r.status(), 401);
+
+    // WebSocket tickets: minted with the bearer token, one path, once.
+    let hr = &h;
+    let ticket = |path: &'static str| async move {
+        let r = hr
+            .send(
+                reqwest::Method::POST,
+                "/api/ws-ticket",
+                json!({ "path": path }),
+            )
+            .await;
+        assert_eq!(r.status(), 200, "{path}");
+        r.json::<serde_json::Value>().await.unwrap()["ticket"]
+            .as_str()
+            .unwrap()
+            .to_string()
+    };
+    let ws_url = |path: &str, t: &str| format!("ws://127.0.0.1:{}{path}?ticket={t}", h.daemon.port);
+    let refused = |url: String| async move {
+        match tokio_tungstenite::connect_async(url).await {
+            Err(tokio_tungstenite::tungstenite::Error::Http(r)) => r.status().as_u16(),
+            Err(e) => panic!("unexpected error {e}"),
+            Ok(_) => panic!("upgrade must be refused"),
+        }
+    };
+    let events = "/api/events/ws";
+    let t = ticket(events).await;
+    let (mut ws, _) = tokio_tungstenite::connect_async(ws_url(events, &t))
+        .await
+        .unwrap();
+    ws.close(None).await.unwrap();
+    assert_eq!(refused(ws_url(events, &t)).await, 401, "reused ticket");
+    let t = ticket("/api/terminals/s1/ws").await;
+    assert_eq!(refused(ws_url(events, &t)).await, 401, "other path");
+    assert_eq!(refused(ws_url(events, "0".repeat(32).as_str())).await, 401);
+    assert_eq!(
+        refused(format!("ws://127.0.0.1:{}{events}", h.daemon.port)).await,
+        401
+    );
+    // A ticket is no credential for plain requests.
+    let t = ticket(events).await;
+    let r = no_redirect
+        .get(h.url(&format!("/api/health?ticket={t}")))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(r.status(), 401);
+    // Minting needs the token, and only WebSocket paths are accepted.
+    let r = no_redirect
+        .post(h.url("/api/ws-ticket"))
+        .json(&json!({ "path": events }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(r.status(), 401);
+    let r = h
+        .send(
+            reqwest::Method::POST,
+            "/api/ws-ticket",
+            json!({ "path": "/api/health" }),
+        )
+        .await;
+    assert_eq!(r.status(), 400);
+    // The DNS-rebinding check still comes first.
+    let r = h
+        .http
+        .post(h.url("/api/ws-ticket"))
+        .bearer_auth(&h.token)
+        .header("Host", format!("rebind.example:{}", h.daemon.port))
+        .json(&json!({ "path": events }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(r.status(), 403);
+    h.daemon.shutdown().await.unwrap();
+}
+
+// A taken port fails the start instead of moving to another port that
+// clients do not know (and leaving the known one to whoever holds it).
+#[tokio::test]
+async fn taken_port_fails_startup() {
+    let squatter = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = squatter.local_addr().unwrap().port();
+    let home = tempfile::tempdir().unwrap();
+    let err = Daemon::start(DaemonOptions {
+        paths: Paths::at(home.path()),
+        port: Some(port),
+        ingest: None,
+    })
+    .await
+    .err()
+    .expect("start must fail");
+    let msg = format!("{err:#}");
+    assert!(
+        msg.contains(&format!("port {port} on 127.0.0.1 is already in use")),
+        "{msg}"
+    );
+    assert!(msg.contains("config.toml"), "{msg}");
+    assert!(!home.path().join("runtime.json").exists());
+    drop(squatter);
 }
