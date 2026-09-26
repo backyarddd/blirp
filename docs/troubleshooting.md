@@ -18,6 +18,14 @@ The CLI folder is not on your `PATH` yet.
 - macOS/Linux: `install.sh` prints the line to add unless `~/.local/bin` (or `BLIRP_INSTALL_DIR`) is already on `PATH`. Add it to your shell startup file (`echo 'export PATH="$HOME/.local/bin:$PATH"' >> ~/.zshrc`, or `~/.bashrc` / `~/.bash_profile`), or re-run the installer with `--modify-path`, then open a new terminal. Meanwhile run `~/.local/bin/blirp` directly.
 - Windows: `install.ps1` adds `%LOCALAPPDATA%\Programs\blirp` to your user `Path`. Terminals that were already open keep the old `Path`; open a new one (in some setups sign out and in, so Explorer picks it up). Check with `[Environment]::GetEnvironmentVariable('Path', 'User')`.
 
+### `GLIBC_2.xx not found` (Linux)
+
+`blirp: /lib/x86_64-linux-gnu/libc.so.6: version 'GLIBC_2.3x' not found` means the distribution's C library is older than the one the release was built against: the Linux builds need glibc 2.35 or newer (Ubuntu 22.04, Debian 12, Fedora 36, RHEL 10 or later; check with `ldd --version`). On an older system, or a musl one such as Alpine, build from source ([install.md](install.md#build-from-source)).
+
+### Windows: the desktop app does not open (WebView2)
+
+The desktop app draws its window with the Microsoft Edge WebView2 Runtime. Windows 11 and up-to-date Windows 10 ship it, and the NSIS/MSI installers add it when it is missing, but `install.ps1` and the portable zip do not. When `blirp-desktop.exe` exits right away or reports that WebView2 is missing, install the runtime (`winget install Microsoft.EdgeWebView2Runtime`, or the Evergreen installer from [developer.microsoft.com/microsoft-edge/webview2](https://developer.microsoft.com/microsoft-edge/webview2/)) and start blirp again. Meanwhile `blirp open` uses your browser; the CLI and daemon do not need WebView2.
+
 ### Antivirus or Defender flags blirp
 
 blirp is not code signed, and new unsigned programs that download files and start processes are sometimes flagged by heuristics (false positives). Verify the file first: its SHA-256 must match the release's `SHA256SUMS.txt` (the install scripts and `blirp update` already did this, and `SHA256SUMS.txt.sig` proves the sums come from the blirp release key, see [install.md](install.md#manual-download)). Then restore the file from quarantine or add an exclusion for the install folder, and please report the false positive to the vendor (Microsoft: [submit a file](https://www.microsoft.com/en-us/wdsi/filesubmission)) and in an issue. Windows Defender may also block `blirp.exe` while an update replaces it; run `blirp update` again.
@@ -180,6 +188,7 @@ The portal does not start although it is enabled: it runs only on a hub, and a c
 
 ## Linux desktop
 
+- The AppImage does not start (`dlopen(): error loading libfuse.so.2`, `fusermount: not found` or `fuse: device not found`): it mounts itself with FUSE. Install it (Ubuntu 22.04: `sudo apt install libfuse2`; Ubuntu 24.04 and later: `sudo apt install libfuse2t64`; Fedora: `sudo dnf install fuse fuse-libs`; Arch: `sudo pacman -S fuse2`). Where FUSE is unavailable (containers, some minimal installs), run it with `APPIMAGE_EXTRACT_AND_RUN=1` in the environment, or use the `.deb`/`.rpm`.
 - No tray icon on GNOME: install the "AppIndicator and KStatusNotifierItem Support" extension. Without it, closing the window still keeps the daemon running; launch blirp again to get the window back.
 - The desktop AppImage runs `blirp` from a temporary mount that is gone once the app exits. Autostart (`blirp service install`) and the global agent integration (Settings > Agents, `blirp hooks install`) therefore record the installed CLI (from the install script, or `blirp` on `PATH`) and refuse with "runs from a temporary location" when there is none: install the CLI (see [install.md](install.md)) and try again. The daemon the app starts also runs from the CLI the install script put there when it is the app's version; otherwise the daemon runs from the mount, and sessions still running after the app is gone lose memory capture.
 

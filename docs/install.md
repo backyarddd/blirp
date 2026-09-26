@@ -7,6 +7,14 @@ blirp is one program in two parts, installed together:
 
 All data lives in `~/.blirp` (`%USERPROFILE%\.blirp` on Windows; override with `BLIRP_HOME`). Installing, updating and uninstalling never touch it, except `blirp uninstall --purge`.
 
+## System requirements
+
+| | CLI | Desktop app |
+|---|---|---|
+| Linux | x86_64 or arm64 with glibc 2.35 or newer (the release is built on Ubuntu 22.04): Ubuntu 22.04+, Debian 12+, Fedora 36+, RHEL/Rocky/Alma 10+. Not RHEL 9 (glibc 2.34) or musl distributions such as Alpine; build from source there. | the same, plus a desktop session. The AppImage needs FUSE to mount itself ([troubleshooting](troubleshooting.md#linux-desktop)); the `.deb`/`.rpm` pull in WebKitGTK 4.1 and GTK 3 as dependencies. |
+| macOS | 11 Big Sur or newer, Apple silicon or Intel | the same |
+| Windows | 10 version 1809 or newer, or 11; x64 (on ARM64 the x64 build runs under emulation) | the same, plus the Microsoft Edge WebView2 Runtime. Windows 11 and up-to-date Windows 10 have it. The NSIS and MSI installers install it when it is missing; `install.ps1` and the portable zip do not ([troubleshooting](troubleshooting.md#windows-the-desktop-app-does-not-open-webview2)). |
+
 ## Install (recommended)
 
 macOS and Linux (x86_64 or arm64):
@@ -175,4 +183,4 @@ Installed with a classic installer instead: `blirp service uninstall` and `blirp
 
 ## Troubleshooting
 
-See [troubleshooting.md](troubleshooting.md): `blirp` not found after installing (PATH), antivirus warnings, Windows Firewall, "blirp is damaged", the daemon does not start, agents not detected.
+See [troubleshooting.md](troubleshooting.md): `blirp` not found after installing (PATH), `GLIBC_2.xx not found`, the Windows app not opening (WebView2), the AppImage not starting (FUSE), antivirus warnings, Windows Firewall, "blirp is damaged", the daemon does not start, agents not detected.
