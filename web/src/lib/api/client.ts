@@ -40,7 +40,9 @@ import type {
   SyncStatus,
   UpdateStatus,
   WikiPage,
+  WsTicket,
 } from './types.gen';
+import { authToken } from './token';
 
 export class ApiError extends Error {
   constructor(
@@ -104,9 +106,13 @@ async function errorFrom(res: Response): Promise<ApiError> {
 }
 
 export async function request<T>(method: Method, path: string, body?: unknown, query?: Query): Promise<T> {
-  const init: RequestInit = { method, credentials: 'same-origin', headers: { Accept: 'application/json' } };
+  const headers: Record<string, string> = { Accept: 'application/json' };
+  // Local pages carry the runtime token; portal pages rely on their same-origin device cookie.
+  const token = authToken();
+  if (token !== null) headers.Authorization = `Bearer ${token}`;
+  const init: RequestInit = { method, credentials: 'same-origin', headers };
   if (body !== undefined) {
-    init.headers = { Accept: 'application/json', 'Content-Type': 'application/json' };
+    headers['Content-Type'] = 'application/json';
     init.body = JSON.stringify(body);
   }
   let res: Response;
@@ -266,6 +272,18 @@ export const api = {
 /** Absolute ws:// or wss:// URL for a same-origin path. */
 export function wsUrl(path: string, loc: Pick<Location, 'protocol' | 'host'> = location): string {
   return `${loc.protocol === 'https:' ? 'wss:' : 'ws:'}//${loc.host}${path}`;
+}
+
+/**
+ * URL to open a same-origin WebSocket with. A WebSocket cannot carry `Authorization`, so a
+ * signed-in local page first trades its token for a single-use ticket bound to this path (valid
+ * 30 s); portal pages send their device cookie with the upgrade instead.
+ */
+export async function socketUrl(path: string, loc: Pick<Location, 'protocol' | 'host'> = location): Promise<string> {
+  const url = wsUrl(path, loc);
+  if (authToken() === null) return url;
+  const { ticket } = await request<WsTicket>('POST', '/api/ws-ticket', { path });
+  return `${url}?ticket=${enc(ticket)}`;
 }
 
 export const terminalWsPath = (id: string): string => `/api/terminals/${enc(id)}/ws`;

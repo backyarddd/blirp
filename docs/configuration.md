@@ -51,7 +51,7 @@ check = true
 
 | Key | Type | Default | Description |
 |---|---|---|---|
-| `port` | integer 0-65535 | `47770` | Preferred port of the local API/UI on `127.0.0.1`. If it is taken, the daemon uses a free port and records it in `runtime.json`. `blirp daemon --port` overrides it; `0` always picks a free port. |
+| `port` | integer 0-65535 | `47770` | Port of the local API/UI on `127.0.0.1`. If it is taken, the daemon does not start and names the program holding it when it can (see [troubleshooting](troubleshooting.md#port-in-use)). `0` picks a free port at every start; clients find it in `runtime.json`. `blirp daemon --port` overrides it. |
 
 ### `[machine]`
 

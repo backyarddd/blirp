@@ -124,8 +124,8 @@
       {:else if app.auth === 'unauthorized'}
         <h1>Sign in required</h1>
         <p>
-          Open blirp from the desktop app or run <code>blirp open</code> in a terminal. Both sign this browser in with a
-          one-time link.
+          Open blirp from the desktop app or run <code>blirp open</code> in a terminal. Both sign this browser in; the
+          sign-in ends when the daemon restarts.
         </p>
         <p class="muted small">On another device, scan the login QR code from Settings &gt; Machines &amp; Sync on an already signed-in screen.</p>
         <button class="btn" type="button" onclick={() => app.boot()}>Try again</button>

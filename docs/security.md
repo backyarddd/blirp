@@ -9,10 +9,10 @@ blirp runs as your user account and starts coding agents that can already read a
 | Actor | Trust | What protects you |
 |---|---|---|
 | Your user account on the machine | trusted | - |
-| Other local user accounts | untrusted | data dir `0700` and `runtime.json`/`identity.key` `0600` (macOS/Linux); Windows profile ACL; daemon bound to `127.0.0.1` and token-authenticated |
-| Web pages open in your browser | untrusted | token auth (never in a URL a page can guess), `SameSite=Strict` HttpOnly cookies, same-origin check on mutations and WebSocket upgrades, CSP, `X-Frame-Options: DENY`; the loopback listener answers only requests addressed to `127.0.0.1`, `localhost` or `[::1]` with its port, so a DNS-rebinding page is refused |
+| Other local user accounts and local programs you did not start | untrusted | data dir `0700` and `runtime.json`/`identity.key` `0600` (macOS/Linux); Windows profile ACL; daemon bound to `127.0.0.1` and token-authenticated; no cookie on the loopback listener (cookies ignore ports, so any other server on `127.0.0.1` a page of yours talks to would receive it); the daemon refuses to start when its port is taken instead of moving, so a squatter cannot keep the well-known address |
+| Web pages open in your browser | untrusted | bearer token kept in the UI origin's storage (per port; handed over in a URL fragment, which is never sent to a server), single-use path-bound WebSocket tickets, same-origin check on mutations and WebSocket upgrades, CSP, `X-Frame-Options: DENY`; the loopback listener answers only requests addressed to `127.0.0.1`, `localhost` or `[::1]` with its port, so a DNS-rebinding page is refused |
 | Devices on your LAN | untrusted | nothing listens on the LAN unless you run a hub with `portal.lan = true`; then TLS, one-time login links, hashed device tokens, per-device permissions, revocation |
-| Paired machines | trusted with your data | they receive all synced (redacted) history and shared memory (records, briefs, wiki, resources); they write only their own folders, sessions and transcripts (checked by the hub and again by every node); they control a node only when it set `sync.allow_hub_control`, and the hub unless you turn it off per machine |
+| Paired machines | trusted with your data | they receive all synced (redacted) history and shared memory (records, briefs, wiki, resources); they write only their own folders, sessions and transcripts (checked by the hub and again by every node); they control a node only when it set `sync.allow_hub_control` (an unchecked box when joining, a toggle in Settings), and the hub unless you turn it off per machine |
 | Portal browser devices | partly trusted | read all synced data, edit memory and settings; terminals only with **Terminal control** ([portal.md](portal.md#what-a-browser-device-may-do)) |
 | Relay and discovery servers (sync) | untrusted | end-to-end encryption and key authentication; they see endpoint ids and IP addresses only; can be disabled |
 | Summarizer provider | as trusted as your agent's provider | receives redacted transcript excerpts only if you use `claude`/`codex` summarizers (`codex` only when chosen explicitly); `ollama` or `none` keep everything local |
@@ -45,13 +45,20 @@ Terminal output (the live screen) is not stored in the database and not redacted
 
 ## Authentication
 
-- **Local clients** (desktop app, CLI, hooks, `blirp open`) use the 256-bit random runtime token from `runtime.json`, as `Authorization: Bearer` or exchanged once at `/auth?token=` for an HttpOnly `SameSite=Strict` cookie. Comparison is constant time.
+- **Local clients** (desktop app, CLI, hooks, `blirp open`) use the 256-bit random runtime token from `runtime.json` as `Authorization: Bearer`. Comparison is constant time. The desktop app and `blirp open` hand it to the web UI in the URL fragment (`/#token=`); the UI keeps it in `localStorage` for its own origin (scheme, host and port: other local servers cannot read it) and removes it from the address bar. WebSockets use single-use tickets (30 s, bound to one path) minted with the token. The loopback listener accepts no cookie; the `blirp_session` cookie of older versions is refused and expired.
+- **Joining a hub** always goes through a confirmation that shows the hub's machine id from the invite (compare it with the hub's Settings > Machines & Sync), lists what the hub receives and may do, and has an unchecked box for terminal control. `blirp://join` links, which any web page can open, only prefill this form.
 - **Portal browser devices** use a device cookie (`HttpOnly; Secure; SameSite=Strict`, 400 days) obtained by redeeming a one-time link (5 minutes, single use, 128-bit, stored hashed; 10 attempts per minute per client IP). The portal does not accept the runtime token.
 - **Machines** authenticate with their Ed25519 keys (QUIC TLS). Pairing uses an 8-character one-time code (40 bits, 10 minutes, single use, 5 attempts) in a SPAKE2 exchange with key confirmation bound to both machine keys and the invite, so neither a stolen invite nor a man in the middle can pair. After pairing only known, non-revoked machine keys are accepted.
 
 ## Authorization
 
 Requests run with `control` and `admin` rights ([api.md](api.md#listeners-and-authentication)). Only this machine's own local clients have `admin`: pairing, hub and device management, global hooks install, opening folders or editors on the machine, and stopping the daemon. `control` (launch/stop/resume sessions, distill, terminal input) is granted to local clients, to browser devices with **Terminal control**, to paired machines on the hub unless turned off there, and to the hub and other machines on a node only when the node set `sync.allow_hub_control = true`. Replicated rows are checked for ownership: a machine's folders, sessions and transcript events are written only by that machine, and ids are checked before anything is stored or used as a file name. Shared memory (records, briefs, wiki pages, resources, project names) can be edited by every paired machine by design; it is injected into agents, so a compromised machine can plant [prompt injection](#memory-is-context-not-instructions) there. The MCP endpoint and daemon shutdown exist only on the loopback listener.
+
+### Limits
+
+- The token in `localStorage` is readable by script running in the UI's origin; the CSP allows only the UI's own scripts, and the UI renders memory and transcripts as sanitized text.
+- The portal's device cookie is a cookie: any other HTTPS server on the hub's address (another port on the same host) that a signed-in browser visits receives it. Run nothing else on the hub's LAN address that you do not trust, and revoke devices you no longer use.
+- The hub's name cannot be shown before pairing: pairing reveals machine names only after the code is proven. Verify the machine id instead.
 
 ## Network exposure
 

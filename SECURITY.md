@@ -26,7 +26,7 @@ Out of scope: attacks that require an already compromised user account on the ma
 
 Summary; the full threat model, storage, network exposure and limits are in [docs/security.md](docs/security.md).
 
-- The daemon binds `127.0.0.1` only. Clients authenticate with a random 256-bit token stored in `~/.blirp/runtime.json` (mode 0600 inside a 0700 data directory on macOS/Linux; the profile ACL on Windows), regenerated at every start. Browsers get it as an HttpOnly, `SameSite=Strict` cookie via an `/auth?token=` link opened by the CLI or the desktop app.
+- The daemon binds `127.0.0.1` only. Clients authenticate with a random 256-bit token stored in `~/.blirp/runtime.json` (mode 0600 inside a 0700 data directory on macOS/Linux; the profile ACL on Windows), regenerated at every start. The CLI and the desktop app hand it to the web UI in a URL fragment (`/#token=`, never sent to a server); the UI keeps it in its own origin's storage and sends it as a bearer token, and WebSockets use single-use tickets. The loopback listener accepts no cookies, and the daemon does not start when its port is taken.
 - Mutating requests and WebSocket upgrades from browsers must come from the same origin; responses carry a strict Content-Security-Policy, `X-Frame-Options: DENY` and `nosniff`.
 - Transcript text is redacted (gitleaks-style rules) before it is stored, synced or summarized. Logs never contain transcript text or secrets.
 - Nothing listens on the network unless you make a machine a hub (QUIC sync endpoint) and enable its LAN portal (HTTPS, one-time device login links, per-device permissions).

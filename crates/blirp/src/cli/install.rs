@@ -492,7 +492,7 @@ fn headless() -> bool {
 pub async fn launch(paths: &Paths) -> anyhow::Result<ExitCode> {
     let info = crate::daemon::detach(paths, None).await?;
     let base = info.base_url();
-    let login = format!("{base}/auth?token={}", info.token);
+    let login = format!("{base}/#token={}", info.token);
     if headless() {
         println!("blirp daemon running at {base} (no display here, so nothing was opened)");
         println!(

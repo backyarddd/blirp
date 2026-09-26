@@ -59,11 +59,18 @@ These appear only for files downloaded with a browser: macOS quarantines them an
 
 ## Port in use
 
-If port 47770 is taken, the daemon logs `port in use; falling back to an ephemeral port` and uses a free port; `blirp status`, the desktop app and the CLI find it through `runtime.json`. To pin a port, set `[daemon] port` or run `blirp daemon --port <n>`. The LAN portal port (47771) has no fallback: if it is taken, enabling the hub fails with `bind 0.0.0.0:47771 for the LAN portal`; pick another `portal.lan_port`.
+If port 47770 is taken, the daemon does not start: `port 47770 on 127.0.0.1 is already in use by <program> (pid N)` (the program is named when the OS shows it; other users' processes usually are not). blirp does not move to another port on its own, because whatever holds the port would then answer at the address the desktop app, `blirp open` and your bookmarks use. Stop that program, or set another port in `config.toml`:
+
+```toml
+[daemon]
+port = 47790   # or 0: a free port at every start
+```
+
+`blirp status`, the desktop app and the CLI find the actual port through `runtime.json`. `blirp daemon --port <n>` overrides the setting for one run. To see who holds the port yourself: `netstat -ano | findstr :47770` (Windows), `lsof -nP -iTCP:47770 -sTCP:LISTEN` (macOS/Linux) or `ss -ltnp 'sport = :47770'` (Linux). The LAN portal port (47771) has no fallback: if it is taken, enabling the hub fails with `bind 0.0.0.0:47771 for the LAN portal`; pick another `portal.lan_port`.
 
 ## "unauthorized" / blank UI in the browser after a restart
 
-The runtime token changes at every daemon start, so a browser tab opened with `blirp open` loses its login when the daemon restarts. Run `blirp open` again. The desktop app logs in again by itself.
+The runtime token changes at every daemon start, so a browser tab opened with `blirp open` loses its login when the daemon restarts. Run `blirp open` again. The desktop app logs in again by itself. Bookmarks of `http://127.0.0.1:<port>/` keep working after that: the UI keeps the token in the browser's storage for that address. If your browser blocks site storage for `127.0.0.1`, the login lasts only for the open tab.
 
 ## Windows: ConPTY and terminals
 

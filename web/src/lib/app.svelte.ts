@@ -1,5 +1,5 @@
 import { SvelteSet } from 'svelte/reactivity';
-import { ApiError, api, errorMessage, eventsWsPath, onUnauthorized, wsUrl } from './api/client';
+import { ApiError, api, errorMessage, eventsWsPath, onUnauthorized, socketUrl } from './api/client';
 import type {
   AgentInfo,
   Health,
@@ -108,6 +108,8 @@ class AppState {
   #attempt = 0;
   #timer: ReturnType<typeof setTimeout> | undefined;
   #stopped = true;
+  /** Bumped by stopStream so a connect still waiting for its ticket gives up. */
+  #gen = 0;
   #toastId = 0;
 
   async boot(): Promise<void> {
@@ -371,6 +373,7 @@ class AppState {
 
   stopStream(): void {
     this.#stopped = true;
+    this.#gen++;
     clearTimeout(this.#timer);
     this.#ws?.close(1000);
     this.#ws = null;
@@ -379,7 +382,29 @@ class AppState {
   #connect(): void {
     const reconnecting = this.#attempt > 0;
     this.conn = reconnecting ? 'reconnecting' : 'connecting';
-    const ws = new WebSocket(wsUrl(eventsWsPath));
+    const gen = this.#gen;
+    const current = (): boolean => gen === this.#gen && !this.#stopped;
+    // A failed ticket request retries like a dropped socket; a 401 already stopped the stream.
+    socketUrl(eventsWsPath).then(
+      (url) => {
+        if (current()) this.#open(url, reconnecting);
+      },
+      () => {
+        if (current()) this.#retry();
+      },
+    );
+  }
+
+  #retry(): void {
+    this.conn = 'reconnecting';
+    // A failed upgrade is indistinguishable from a network drop; an authenticated
+    // request tells us whether the login expired (triggers the 401 screen).
+    if (this.#attempt === 1) void this.refreshProjects();
+    this.#timer = setTimeout(() => this.#connect(), backoffDelay(this.#attempt++));
+  }
+
+  #open(url: string, reconnecting: boolean): void {
+    const ws = new WebSocket(url);
     this.#ws = ws;
     ws.onopen = () => {
       this.conn = 'open';
@@ -396,11 +421,7 @@ class AppState {
     ws.onclose = () => {
       if (this.#ws !== ws || this.#stopped) return;
       this.#ws = null;
-      this.conn = 'reconnecting';
-      // A failed upgrade is indistinguishable from a network drop; an authenticated
-      // request tells us whether the login expired (triggers the 401 screen).
-      if (this.#attempt === 1) void this.refreshProjects();
-      this.#timer = setTimeout(() => this.#connect(), backoffDelay(this.#attempt++));
+      this.#retry();
     };
   }
 

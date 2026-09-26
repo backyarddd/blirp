@@ -34,6 +34,8 @@ pub struct AppState {
     ingest: RwLock<Arc<dyn IngestTrigger>>,
     /// Machine sync, remote proxy and LAN portal (§10, §13).
     pub sync: crate::sync::SyncState,
+    /// Single-use WebSocket tickets of the loopback listener (§11).
+    pub ws_tickets: crate::api::ticket::WsTickets,
 }
 
 impl AppState {
@@ -62,6 +64,7 @@ impl AppState {
             distiller: Distiller::default(),
             ingest: RwLock::new(Arc::new(NoopIngest)),
             sync: crate::sync::SyncState::default(),
+            ws_tickets: crate::api::ticket::WsTickets::default(),
         }
     }
 

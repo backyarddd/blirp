@@ -4,8 +4,8 @@ The blirp UI is a web app served by the daemon. The desktop app shows it in a na
 
 ## Local access
 
-- The daemon listens on `127.0.0.1:<port>` only (default 47770; if taken, a free port; the real port is in `~/.blirp/runtime.json` and `blirp status`).
-- `blirp open` opens `http://127.0.0.1:<port>/auth?token=<runtime token>`, which sets an HttpOnly, `SameSite=Strict` cookie and redirects to the UI. The desktop app does the same inside its window.
+- The daemon listens on `127.0.0.1:<port>` only (default 47770; it does not start when that port is taken; the real port is in `~/.blirp/runtime.json` and `blirp status`).
+- `blirp open` opens `http://127.0.0.1:<port>/#token=<runtime token>`. The fragment never reaches a server; the UI stores the token for its own origin, removes it from the address bar and sends it as a bearer token (WebSockets use single-use tickets). No cookie is set: a cookie for `127.0.0.1` would go to every other local server too. The desktop app does the same inside its window.
 - The runtime token is regenerated at every daemon start, so after a daemon restart run `blirp open` again (the desktop app re-authenticates by itself).
 
 ## LAN portal (hub only)

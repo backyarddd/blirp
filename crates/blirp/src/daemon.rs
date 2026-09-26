@@ -21,7 +21,8 @@ const SHUTDOWN_GRACE: Duration = Duration::from_secs(5);
 
 pub struct DaemonOptions {
     pub paths: Paths,
-    /// Overrides `daemon.port`; `Some(0)` binds an ephemeral port.
+    /// Overrides `daemon.port`; `Some(0)` binds an ephemeral port. A taken
+    /// port fails the start.
     pub port: Option<u16>,
     /// Where transcript ingest (§8) looks for agent stores; `None` disables
     /// ingest (tests that must not read the real user's agent stores).
@@ -89,16 +90,101 @@ fn load_machine(store: &Store, config: &Config, id: String) -> anyhow::Result<Ma
     Ok(machine)
 }
 
-async fn bind(port: u16) -> anyhow::Result<TcpListener> {
+/// Bind the loopback listener. A taken port is an error, never a silent
+/// move to another port: whoever holds it would otherwise answer at the
+/// address clients and bookmarks know. `0` asks for a free port.
+async fn bind(port: u16, config_file: &std::path::Path) -> anyhow::Result<TcpListener> {
     let addr = SocketAddr::from((Ipv4Addr::LOCALHOST, port));
     match TcpListener::bind(addr).await {
         Ok(l) => Ok(l),
         Err(e) if port != 0 && e.kind() == std::io::ErrorKind::AddrInUse => {
-            tracing::warn!(port, "port in use; falling back to an ephemeral port");
-            Ok(TcpListener::bind(SocketAddr::from((Ipv4Addr::LOCALHOST, 0))).await?)
+            let owner = tokio::task::spawn_blocking(move || port_owner(port))
+                .await
+                .ok()
+                .flatten();
+            let by = owner.map(|o| format!(" by {o}")).unwrap_or_default();
+            bail!(
+                "port {port} on 127.0.0.1 is already in use{by}. Stop that program, or set \
+                 another port under [daemon] in {} (`port = 0` picks a free port at every \
+                 start; clients find it in runtime.json)",
+                config_file.display()
+            )
         }
         Err(e) => Err(e).with_context(|| format!("bind 127.0.0.1:{port}")),
     }
+}
+
+/// Best effort: the program listening on TCP `port`, as `name (pid N)`.
+/// Other users' processes are usually not visible; then `None`.
+fn port_owner(port: u16) -> Option<String> {
+    use blirp_core::process::{command, run};
+    let text = |cmd| {
+        run(cmd, Duration::from_secs(3), 1 << 20)
+            .ok()
+            .filter(|o| o.success())
+            .map(|o| String::from_utf8_lossy(&o.stdout).into_owned())
+    };
+    if cfg!(windows) {
+        let mut ns = command("netstat");
+        ns.args(["-ano", "-p", "TCP"]);
+        let pid = netstat_listener(&text(ns)?, port)?;
+        let mut tl = command("tasklist");
+        tl.args(["/FI", &format!("PID eq {pid}"), "/FO", "CSV", "/NH"]);
+        return Some(match text(tl).and_then(|t| tasklist_name(&t)) {
+            Some(n) => format!("{n} (pid {pid})"),
+            None => format!("pid {pid}"),
+        });
+    }
+    let mut lsof = command("lsof");
+    lsof.args(["-nP", &format!("-iTCP:{port}"), "-sTCP:LISTEN", "-Fpc"]);
+    if let Some(o) = text(lsof).and_then(|t| lsof_owner(&t)) {
+        return Some(o);
+    }
+    let mut ss = command("ss");
+    ss.args(["-Hltnp", &format!("sport = :{port}")]);
+    text(ss).and_then(|t| ss_owner(&t))
+}
+
+/// Pid of the socket listening on `port` (127.0.0.1 or all interfaces) in
+/// `netstat -ano -p TCP` output. Listening sockets have the foreign address
+/// `0.0.0.0:0`; the state column is localized, so it is not read.
+fn netstat_listener(out: &str, port: u16) -> Option<u32> {
+    let local = [format!("127.0.0.1:{port}"), format!("0.0.0.0:{port}")];
+    out.lines().find_map(|l| {
+        let cols: Vec<&str> = l.split_whitespace().collect();
+        match cols.as_slice() {
+            [proto, addr, "0.0.0.0:0", .., pid]
+                if proto.eq_ignore_ascii_case("tcp") && local.iter().any(|a| a == addr) =>
+            {
+                pid.parse().ok()
+            }
+            _ => None,
+        }
+    })
+}
+
+/// Image name from `tasklist /FO CSV /NH`: `"name.exe","1234",...`.
+fn tasklist_name(out: &str) -> Option<String> {
+    let line = out.lines().next()?.trim();
+    let name = line.strip_prefix('"')?.split('"').next()?;
+    (!name.is_empty()).then(|| name.to_string())
+}
+
+/// `lsof -Fpc`: `p<pid>` and `c<command>` lines.
+fn lsof_owner(out: &str) -> Option<String> {
+    let pid = out.lines().find_map(|l| l.strip_prefix('p'))?;
+    Some(match out.lines().find_map(|l| l.strip_prefix('c')) {
+        Some(n) => format!("{n} (pid {pid})"),
+        None => format!("pid {pid}"),
+    })
+}
+
+/// `ss -Hltnp`: `... users:(("name",pid=1234,fd=3))`.
+fn ss_owner(out: &str) -> Option<String> {
+    let users = out.split_once("users:((\"")?.1;
+    let (name, rest) = users.split_once('"')?;
+    let pid = rest.split_once("pid=")?.1.split([',', ')']).next()?;
+    Some(format!("{name} (pid {pid})"))
 }
 
 impl Daemon {
@@ -117,7 +203,11 @@ impl Daemon {
         let identity = blirp_sync::identity::load_or_create(&paths.identity_key())?;
         let machine = load_machine(&store, &config, blirp_sync::identity::machine_id(&identity))?;
         let token = blirp_core::random_hex::<32>().context("generate token")?;
-        let listener = bind(opts.port.unwrap_or(config.daemon.port)).await?;
+        let listener = bind(
+            opts.port.unwrap_or(config.daemon.port),
+            &paths.config_file(),
+        )
+        .await?;
         let port = listener.local_addr()?.port();
 
         let (shutdown_tx, shutdown_rx) = watch::channel(false);
@@ -561,4 +651,39 @@ pub fn init_logging(paths: &Paths) -> anyhow::Result<tracing_appender::non_block
         .try_init()
         .context("install log subscriber")?;
     Ok(guard)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn finds_port_owners() {
+        let netstat = "\r\nActive Connections\r\n\r\n  Proto  Local Address          Foreign Address        State           PID\r\n\
+            \x20 TCP    127.0.0.1:47770        127.0.0.1:50000        ESTABLISHED     11\r\n\
+            \x20 TCP    0.0.0.0:4777           0.0.0.0:0              LISTENING       12\r\n\
+            \x20 TCP    127.0.0.1:47770        0.0.0.0:0              ABHÖREN         4242\r\n";
+        assert_eq!(netstat_listener(netstat, 47770), Some(4242));
+        assert_eq!(netstat_listener(netstat, 4777), Some(12));
+        assert_eq!(netstat_listener(netstat, 1), None);
+        assert_eq!(
+            tasklist_name("\"node.exe\",\"4242\",\"Console\",\"1\",\"50,000 K\"\r\n").as_deref(),
+            Some("node.exe")
+        );
+        assert_eq!(
+            tasklist_name("INFO: No tasks are running which match the specified criteria.\r\n"),
+            None
+        );
+        assert_eq!(
+            lsof_owner("p4242\ncnode\nf20\n").as_deref(),
+            Some("node (pid 4242)")
+        );
+        assert_eq!(lsof_owner(""), None);
+        assert_eq!(
+            ss_owner("LISTEN 0 511 127.0.0.1:47770 0.0.0.0:* users:((\"node\",pid=4242,fd=20))\n")
+                .as_deref(),
+            Some("node (pid 4242)")
+        );
+        assert_eq!(ss_owner("LISTEN 0 511 127.0.0.1:47770 0.0.0.0:*\n"), None);
+    }
 }

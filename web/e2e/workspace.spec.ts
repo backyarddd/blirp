@@ -10,6 +10,8 @@ import { e2eEnv } from './env';
 const env = e2eEnv();
 const isWindows = process.platform === 'win32';
 const STOPPED = 'Stopped';
+/** The daemon's loopback API takes the runtime token as a bearer token only (no cookies). */
+const AUTH = { Authorization: `Bearer ${env.token}` };
 
 test.describe.configure({ mode: 'serial' });
 
@@ -25,12 +27,23 @@ interface Snapshot {
   data: string;
 }
 
-/** Attach a second client to the session's terminal and return the daemon's screen snapshot. */
+/**
+ * Attach a second client to the session's terminal and return the daemon's screen snapshot. Like
+ * the UI, it trades the stored token for a single-use WebSocket ticket first.
+ */
 function snapshot(id: string): Promise<Snapshot> {
   return page.evaluate(
-    (sid) =>
-      new Promise<Snapshot>((resolve, reject) => {
-        const ws = new WebSocket(`ws://${location.host}/api/terminals/${sid}/ws`);
+    async (sid) => {
+      const path = `/api/terminals/${sid}/ws`;
+      const res = await fetch('/api/ws-ticket', {
+        method: 'POST',
+        headers: { Authorization: `Bearer ${localStorage.getItem('blirp.token') ?? ''}`, 'Content-Type': 'application/json' },
+        body: JSON.stringify({ path }),
+      });
+      if (!res.ok) throw new Error(`ws-ticket: ${res.status}`);
+      const { ticket } = (await res.json()) as { ticket: string };
+      return new Promise<Snapshot>((resolve, reject) => {
+        const ws = new WebSocket(`ws://${location.host}${path}?ticket=${ticket}`);
         const timer = setTimeout(() => reject(new Error('no snapshot within 10 s')), 10_000);
         ws.onmessage = (ev) => {
           if (typeof ev.data !== 'string') return;
@@ -41,7 +54,8 @@ function snapshot(id: string): Promise<Snapshot> {
           resolve({ cols: m.cols, rows: m.rows, data: m.data });
         };
         ws.onerror = () => reject(new Error('terminal websocket failed'));
-      }),
+      });
+    },
     id,
   );
 }
@@ -91,12 +105,19 @@ test.afterAll(async () => {
   await page?.context().close();
 });
 
-test('rejects a missing login, then signs in with /auth?token=', async () => {
+test('rejects a missing login, then signs in with /#token= and keeps no cookie', async () => {
   await page.goto(`${env.url}/`);
   await expect(page.getByRole('heading', { name: 'Sign in required' })).toBeVisible();
+  // An old `/auth?token=` link still works: it forwards to the fragment and sets no cookie.
   await page.goto(`${env.url}/auth?token=${env.token}`);
-  await expect(page).toHaveURL(`${env.url}/`);
+  await expect(page).toHaveURL(`${env.url}/`); // fragment read and stripped
   await expect(page.getByRole('heading', { name: 'Pick a session' })).toBeVisible();
+  await page.evaluate(() => localStorage.clear());
+  await page.goto(`${env.url}/sessions#token=${env.token}`);
+  await expect(page).toHaveURL(`${env.url}/sessions`);
+  await expect(page.getByRole('heading', { name: 'Pick a session' })).toBeVisible();
+  expect(await page.evaluate(() => localStorage.getItem('blirp.token'))).toBe(env.token);
+  expect(await page.context().cookies()).toEqual([]);
   consoleErrors.length = 0; // the 401 before signing in is expected
   const csp = (await page.request.get(`${env.url}/`)).headers()['content-security-policy'] ?? '';
   expect(csp).toContain("script-src 'self';");
@@ -177,7 +198,7 @@ test('stops the session and shows the exit state in the pane', async () => {
   // `open` validates its target (the happy path would pop a window on this desktop).
   const bad = await page.request.post(`${env.url}/api/sessions/${sessionId}/open`, {
     data: { target: 'browser' },
-    headers: { Origin: env.url },
+    headers: { Origin: env.url, ...AUTH },
   });
   expect(bad.status()).toBe(400);
   expect(((await bad.json()) as { error: { code: string } }).error.code).toBe('invalid_request');
@@ -336,15 +357,15 @@ test('settings load and save (full config replace)', async () => {
   await page.reload();
   await expect(page.getByRole('checkbox', { name: /new worktree by default/ })).toBeChecked();
   // The earlier memory change survived the second full-config write.
-  const res = await page.request.get(`${env.url}/api/settings`);
+  const res = await page.request.get(`${env.url}/api/settings`, { headers: AUTH });
   const view = (await res.json()) as { config: { memory: { distill_idle_secs: number }; sessions: { worktree_default: boolean } } };
   expect(view.config.memory.distill_idle_secs).toBe(600);
   expect(view.config.sessions.worktree_default).toBe(true);
 });
 
-/** Authenticated API call with the page's session cookie; fails the test on a non-2xx answer. */
+/** Authenticated API call with the runtime token; fails the test on a non-2xx answer. */
 async function apiCall<T>(method: 'GET' | 'POST' | 'DELETE', path: string, data?: unknown): Promise<T> {
-  const res = await page.request.fetch(`${env.url}${path}`, { method, data, headers: { Origin: env.url } });
+  const res = await page.request.fetch(`${env.url}${path}`, { method, data, headers: { Origin: env.url, ...AUTH } });
   const text = await res.text();
   expect(res.ok(), `${method} ${path}: ${res.status()} ${text}`).toBe(true);
   return (text ? JSON.parse(text) : undefined) as T;
@@ -551,7 +572,7 @@ test('deletes an ended session here, and follows a delete made by another client
   await expect(page.getByText('Session deleted')).toBeVisible();
   await expect(page).toHaveURL(`${env.url}/sessions`);
   await expect(sidebar.locator(`a[href="/sessions/${mine.id}"]`)).toHaveCount(0);
-  expect((await page.request.get(`${env.url}/api/sessions/${mine.id}`)).status()).toBe(404);
+  expect((await page.request.get(`${env.url}/api/sessions/${mine.id}`, { headers: AUTH })).status()).toBe(404);
 
   // Another client deletes: the `session_deleted` event removes the card here.
   await apiCall('DELETE', `/api/sessions/${other.id}`);

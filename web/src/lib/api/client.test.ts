@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { ApiError, api, buildUrl, onUnauthorized, request, wsUrl } from './client';
+import { ApiError, api, buildUrl, onUnauthorized, request, socketUrl, wsUrl } from './client';
 
 function mockFetch(impl: (url: string, init: RequestInit) => Promise<Response>): ReturnType<typeof vi.fn> {
   const fn = vi.fn(impl);
@@ -86,5 +86,50 @@ describe('wsUrl', () => {
   it('follows the page protocol', () => {
     expect(wsUrl('/api/events/ws', { protocol: 'http:', host: '127.0.0.1:47770' })).toBe('ws://127.0.0.1:47770/api/events/ws');
     expect(wsUrl('/x', { protocol: 'https:', host: 'hub.local:47771' })).toBe('wss://hub.local:47771/x');
+  });
+});
+
+describe('authentication', () => {
+  const TOKEN = '12'.repeat(32);
+  const signedIn = (): void => {
+    const store = new Map([['blirp.token', TOKEN]]);
+    vi.stubGlobal('window', { localStorage: { getItem: (k: string) => store.get(k) ?? null } });
+  };
+
+  it('sends the stored token as a bearer token', async () => {
+    signedIn();
+    const f = mockFetch(async () => new Response('{}', { status: 200 }));
+    await request('POST', '/api/p', { a: 1 });
+    const headers = (f.mock.calls[0]?.[1] as RequestInit).headers as Record<string, string>;
+    expect(headers.Authorization).toBe(`Bearer ${TOKEN}`);
+    expect(headers['Content-Type']).toBe('application/json');
+  });
+
+  it('sends no Authorization without a token (portal pages use their cookie)', async () => {
+    const f = mockFetch(async () => new Response('{}', { status: 200 }));
+    await request('GET', '/api/health');
+    const headers = (f.mock.calls[0]?.[1] as RequestInit).headers as Record<string, string>;
+    expect(headers.Authorization).toBeUndefined();
+  });
+
+  it('opens signed-in sockets with a single-use ticket for that path', async () => {
+    signedIn();
+    const f = mockFetch(async () => new Response('{"ticket":"t 1"}', { status: 200 }));
+    const loc = { protocol: 'http:', host: '127.0.0.1:47770' };
+    await expect(socketUrl('/api/terminals/s1/ws', loc)).resolves.toBe('ws://127.0.0.1:47770/api/terminals/s1/ws?ticket=t%201');
+    expect(f.mock.calls[0]?.[0]).toBe('/api/ws-ticket');
+    expect((f.mock.calls[0]?.[1] as RequestInit).body).toBe('{"path":"/api/terminals/s1/ws"}');
+  });
+
+  it('opens portal sockets without a ticket', async () => {
+    const f = mockFetch(async () => new Response('{}', { status: 200 }));
+    await expect(socketUrl('/api/events/ws', { protocol: 'https:', host: 'hub:47771' })).resolves.toBe('wss://hub:47771/api/events/ws');
+    expect(f).not.toHaveBeenCalled();
+  });
+
+  it('fails the socket when no ticket can be had', async () => {
+    signedIn();
+    mockFetch(async () => new Response('{"error":{"code":"unauthorized","message":"no"}}', { status: 401 }));
+    await expect(socketUrl('/api/events/ws', { protocol: 'http:', host: 'h:1' })).rejects.toMatchObject({ status: 401 });
   });
 });

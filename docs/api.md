@@ -8,11 +8,13 @@ Conventions: JSON bodies; ids are UUIDv7 strings (machine ids are hex endpoint i
 
 | Listener | Address | Accepts |
 |---|---|---|
-| Local | `http://127.0.0.1:<port>` (default 47770; actual port in `~/.blirp/runtime.json`) | `Authorization: Bearer <token>` with the `token` from `runtime.json`, or the `blirp_session` cookie set by `GET /auth?token=<token>` |
+| Local | `http://127.0.0.1:<port>` (default 47770; actual port in `~/.blirp/runtime.json`) | `Authorization: Bearer <token>` with the `token` from `runtime.json`; WebSocket upgrades may instead carry `?ticket=` from `POST /api/ws-ticket`. No cookies. |
 | LAN portal (hub with `portal.lan`) | `https://<LAN IP>:<lan_port>` | only the `blirp_device` cookie set by `GET /device-login?invite=<token>` ([portal.md](portal.md)) |
 | Sync proxy | requests relayed from paired machines over the hub | authenticated by the machine's key; no credentials are forwarded |
 
 The runtime token is 256 random bits, compared in constant time, and regenerated at every daemon start.
+
+The local listener accepts no cookies: a cookie for `127.0.0.1` is sent to every server on that host, whatever its port. The web UI is opened as `http://127.0.0.1:<port>/#token=<token>` (`blirp open`, the desktop app); the fragment never reaches a server. The UI keeps the token in its origin's `localStorage`, removes it from the address bar and sends it as a bearer token. Browsers cannot set headers on a WebSocket, so the UI first calls `POST /api/ws-ticket` with `{path}` and opens `<path>?ticket=<ticket>`: a ticket is valid once, for 30 seconds, for that path only. `GET /auth?token=` from older versions redirects to `/#token=` and sets no cookie; an old `blirp_session` cookie is expired on any request that still sends it.
 
 ```sh
 TOKEN=$(jq -r .token ~/.blirp/runtime.json); PORT=$(jq -r .port ~/.blirp/runtime.json)
@@ -23,7 +25,7 @@ Every request runs as a principal:
 
 | Principal | `control` | `admin` |
 |---|---|---|
-| local client (token or `blirp_session` cookie) | yes | yes |
+| local client (token or WebSocket ticket) | yes | yes |
 | portal browser device | its **Terminal control** setting | no |
 | request relayed from another machine | that machine's terminal control (as set on the hub) | no |
 

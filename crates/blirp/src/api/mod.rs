@@ -8,6 +8,7 @@ mod open;
 mod projects;
 mod sessions;
 mod terminal;
+pub(crate) mod ticket;
 mod update;
 
 use crate::state::SharedState;
@@ -15,13 +16,17 @@ use axum::extract::{FromRequest, FromRequestParts, Query, Request, State};
 use axum::http::{HeaderMap, HeaderValue, Method, StatusCode, header};
 use axum::middleware::{self, Next};
 use axum::response::{IntoResponse, Redirect, Response};
-use axum::routing::{any, get};
+use axum::routing::{any, get, post};
 use axum::{Json, Router};
 use blirp_core::model::{Capabilities, ErrorBody, ErrorDetail};
 use blirp_core::store::StoreError;
 use serde::Deserialize;
 
-pub const COOKIE: &str = "blirp_session";
+/// Session cookie of older versions on the loopback listener. It is no
+/// longer accepted: cookies ignore ports, so one set for 127.0.0.1 reached
+/// every other local server. Requests still carrying it get it cleared.
+const LEGACY_COOKIE: &str = "blirp_session";
+const CLEAR_LEGACY_COOKIE: &str = "blirp_session=; Max-Age=0; Path=/; HttpOnly; SameSite=Strict";
 /// Long-lived browser device cookie on the LAN portal (§13).
 pub const DEVICE_COOKIE: &str = "blirp_device";
 
@@ -346,7 +351,8 @@ fn build(state: SharedState, listener: Listener) -> Router {
     if listener == Listener::Local {
         api = api
             .merge(integration::mcp_routes(&state))
-            .merge(misc::local_routes());
+            .merge(misc::local_routes())
+            .route("/api/ws-ticket", post(ticket::issue));
     }
     let api = api
         .route("/api/{*rest}", any(api_not_found))
@@ -357,19 +363,17 @@ fn build(state: SharedState, listener: Listener) -> Router {
         Listener::Portal => Router::new()
             .merge(api)
             .route("/device-login", get(crate::portal::device_login)),
-        Listener::Local | Listener::Proxy => {
-            Router::new().merge(api).route("/auth", get(auth_login))
-        }
+        Listener::Local => Router::new().merge(api).route("/auth", get(auth_login)),
+        Listener::Proxy => Router::new().merge(api),
     };
     let mut app = app
         .fallback(crate::static_files::serve)
         .layer(middleware::from_fn(check_origin))
         .layer(middleware::from_fn(security_headers));
     if listener == Listener::Local {
-        app = app.layer(middleware::from_fn_with_state(
-            state.clone(),
-            check_local_host,
-        ));
+        app = app.layer(middleware::from_fn(clear_legacy_cookie)).layer(
+            middleware::from_fn_with_state(state.clone(), check_local_host),
+        );
     }
     let app = app.with_state(state);
     if listener == Listener::Portal {
@@ -441,12 +445,27 @@ fn cookie_value<'a>(headers: &'a HeaderMap, name: &str) -> Option<&'a str> {
         .map(|(_, v)| v)
 }
 
-fn request_token(headers: &HeaderMap) -> Option<&str> {
+fn bearer_token(headers: &HeaderMap) -> Option<&str> {
     headers
         .get(header::AUTHORIZATION)
         .and_then(|v| v.to_str().ok())
         .and_then(|v| v.strip_prefix("Bearer "))
-        .or_else(|| cookie_value(headers, COOKIE))
+}
+
+/// Loopback listener credentials (§11): the runtime token as bearer, or a
+/// single-use ticket on a WebSocket upgrade. Never a cookie.
+fn local_authenticated(state: &SharedState, req: &Request) -> bool {
+    match bearer_token(req.headers()) {
+        Some(t) => token_eq(t.trim(), &state.token),
+        None => {
+            is_ws_upgrade(req.headers())
+                && ticket::from_query(req.uri().query()).is_some_and(|t| {
+                    state
+                        .ws_tickets
+                        .redeem(t, req.uri().path(), std::time::Instant::now())
+                })
+        }
+    }
 }
 
 fn unauthorized() -> Response {
@@ -464,13 +483,11 @@ async fn require_auth(State(state): State<SharedState>, mut req: Request, next: 
         return next.run(req).await;
     }
     if req.extensions().get::<PortalListener>().is_none() {
-        return match request_token(req.headers()) {
-            Some(t) if token_eq(t.trim(), &state.token) => {
-                req.extensions_mut().insert(Principal::local());
-                next.run(req).await
-            }
-            _ => unauthorized(),
-        };
+        if !local_authenticated(&state, &req) {
+            return unauthorized();
+        }
+        req.extensions_mut().insert(Principal::local());
+        return next.run(req).await;
     }
     // LAN portal: browser device cookie only.
     let Some(token) = cookie_value(req.headers(), DEVICE_COOKIE).map(str::to_string) else {
@@ -491,25 +508,16 @@ struct AuthQuery {
     token: String,
 }
 
-/// `/auth?token=` exchanges the runtime token for an HttpOnly session cookie.
+/// `/auth?token=`, the login link of older versions (bookmarks, old
+/// desktop apps): redirects to `/#token=`, which the SPA reads and strips.
+/// A fragment never reaches a server or its logs. No cookie is set.
 async fn auth_login(
     State(state): State<SharedState>,
     q: Result<Query<AuthQuery>, axum::extract::rejection::QueryRejection>,
 ) -> Response {
     match q {
         Ok(Query(q)) if token_eq(&q.token, &state.token) => {
-            let cookie = format!(
-                "{COOKIE}={}; HttpOnly; SameSite=Strict; Path=/",
-                state.token
-            );
-            let mut resp = Redirect::to("/").into_response();
-            match HeaderValue::from_str(&cookie) {
-                Ok(v) => {
-                    resp.headers_mut().insert(header::SET_COOKIE, v);
-                    resp
-                }
-                Err(e) => ApiError::internal("building session cookie", e).into_response(),
-            }
+            Redirect::to(&format!("/#token={}", state.token)).into_response()
         }
         _ => ApiError::new(
             StatusCode::UNAUTHORIZED,
@@ -518,6 +526,19 @@ async fn auth_login(
         )
         .into_response(),
     }
+}
+
+/// Expire the cookie of older versions on any request that still sends it.
+async fn clear_legacy_cookie(req: Request, next: Next) -> Response {
+    let legacy = cookie_value(req.headers(), LEGACY_COOKIE).is_some();
+    let mut resp = next.run(req).await;
+    if legacy {
+        resp.headers_mut().append(
+            header::SET_COOKIE,
+            HeaderValue::from_static(CLEAR_LEGACY_COOKIE),
+        );
+    }
+    resp
 }
 
 fn is_ws_upgrade(headers: &HeaderMap) -> bool {
@@ -657,17 +678,18 @@ mod tests {
     }
 
     #[test]
-    fn token_from_bearer_or_cookie() {
+    fn token_from_bearer_only() {
         let mut h = HeaderMap::new();
         h.insert(
             header::COOKIE,
             HeaderValue::from_static("a=1; blirp_session=tok; b=2"),
         );
-        assert_eq!(request_token(&h), Some("tok"));
+        assert_eq!(bearer_token(&h), None);
+        assert_eq!(cookie_value(&h, LEGACY_COOKIE), Some("tok"));
         h.insert(
             header::AUTHORIZATION,
             HeaderValue::from_static("Bearer bear"),
         );
-        assert_eq!(request_token(&h), Some("bear"));
+        assert_eq!(bearer_token(&h), Some("bear"));
     }
 }

@@ -6,7 +6,7 @@
   import { WebLinksAddon } from '@xterm/addon-web-links';
   import { Unicode11Addon } from '@xterm/addon-unicode11';
   import '@xterm/xterm/css/xterm.css';
-  import { terminalWsPath, wsUrl } from '../api/client';
+  import { socketUrl, terminalWsPath } from '../api/client';
   import { theme } from '../theme.svelte';
   import { isMac } from '../prefs';
   import { matchShortcut } from '../shortcuts';
@@ -165,10 +165,33 @@
       }
     };
 
+    const retry = (): void => {
+      // The daemon uses no close codes (see protocol.ts). A refused upgrade or a drop looks the
+      // same, so keep retrying only while the daemon still reports the session as live.
+      const s = app.sessionById.get(id);
+      if (s && !hasTerminal(s)) {
+        conn = 'ended';
+        return;
+      }
+      conn = 'reconnecting';
+      timer = setTimeout(connect, backoffDelay(attempt++));
+    };
+
     const connect = (): void => {
       conn = attempt === 0 ? 'connecting' : 'reconnecting';
       readonlyFrame = false; // access may have changed (the daemon closes with 1001 then)
-      const sock = new WebSocket(wsUrl(terminalWsPath(id)));
+      socketUrl(terminalWsPath(id)).then(
+        (url) => {
+          if (!disposed) open(url);
+        },
+        () => {
+          if (!disposed) retry();
+        },
+      );
+    };
+
+    const open = (url: string): void => {
+      const sock = new WebSocket(url);
       sock.binaryType = 'arraybuffer';
       ws = sock;
       sock.onopen = () => {
@@ -216,15 +239,7 @@
         if (disposed || ws !== sock) return;
         ws = null;
         if (conn === 'exited') return;
-        // The daemon uses no close codes (see protocol.ts). A refused upgrade or a drop looks the
-        // same, so keep retrying only while the daemon still reports the session as live.
-        const s = app.sessionById.get(id);
-        if (s && !hasTerminal(s)) {
-          conn = 'ended';
-          return;
-        }
-        conn = 'reconnecting';
-        timer = setTimeout(connect, backoffDelay(attempt++));
+        retry();
       };
     };
 
