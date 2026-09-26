@@ -748,3 +748,73 @@ async fn portal_follows_settings_live() {
     assert_eq!(view["config"]["portal"]["lan_port"], busy);
     a.daemon.shutdown().await.unwrap();
 }
+
+async fn set_lan_discovery(n: &Node, on: bool) -> reqwest::Response {
+    let mut view: Value = n.get("/api/settings").await;
+    view["config"]["sync"]["lan_discovery"] = json!(on);
+    n.req(
+        Method::PATCH,
+        "/api/settings",
+        Some(json!({"config": view["config"]})),
+    )
+    .await
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn lan_discovery_follows_settings_live() {
+    let tmp = tempfile::tempdir().unwrap();
+
+    // Standalone: saved, no endpoint started; a join without an invite
+    // needs discovery and is refused before anything is contacted.
+    let s = Node::start(&tmp.path().join("s"), "solo", None).await;
+    assert!(set_lan_discovery(&s, false).await.status().is_success());
+    assert!(s.daemon.state.sync.service().is_none());
+    let view: Value = s.get("/api/settings").await;
+    assert_eq!(view["config"]["sync"]["lan_discovery"], false);
+    let r = s
+        .req(
+            Method::POST,
+            "/api/sync/join",
+            Some(json!({"invite": "", "code": "ABCD-EFGH"})),
+        )
+        .await;
+    assert_eq!(r.status(), 400);
+    assert_eq!(
+        r.json::<ErrorBody>().await.unwrap().error.code,
+        "invite_required"
+    );
+    assert_eq!(sync_status(&s).await.role.as_str(), "standalone");
+    s.daemon.shutdown().await.unwrap();
+
+    // Hub: the running endpoint restarts with the new setting, same role.
+    let h = Node::start(&tmp.path().join("h"), "hub-h", None).await;
+    let _: SyncStatus = h.ok(Method::POST, "/api/sync/hub/enable", None).await;
+    let before = h.daemon.state.sync.service().unwrap();
+    // A save that does not change it leaves the endpoint alone.
+    assert!(set_lan_discovery(&h, true).await.status().is_success());
+    assert!(Arc::ptr_eq(
+        &before,
+        &h.daemon.state.sync.service().unwrap()
+    ));
+    assert!(set_lan_discovery(&h, false).await.status().is_success());
+    let after = h.daemon.state.sync.service().unwrap();
+    assert!(!Arc::ptr_eq(&before, &after), "endpoint was not restarted");
+    assert!(after.is_hub());
+    assert_eq!(after.id(), h.id());
+    let st = sync_status(&h).await;
+    assert_eq!(st.role.as_str(), "hub");
+    assert!(st.connected);
+    // Invites still work without discovery.
+    let _: SyncInvite = h.ok(Method::POST, "/api/sync/invite", None).await;
+    let view: Value = h.get("/api/settings").await;
+    assert_eq!(view["config"]["sync"]["lan_discovery"], false);
+    assert_eq!(view["config"]["sync"]["role"], "hub");
+    // And back on.
+    assert!(set_lan_discovery(&h, true).await.status().is_success());
+    assert!(!Arc::ptr_eq(
+        &after,
+        &h.daemon.state.sync.service().unwrap()
+    ));
+    assert!(sync_status(&h).await.connected);
+    h.daemon.shutdown().await.unwrap();
+}

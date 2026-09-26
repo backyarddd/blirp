@@ -105,7 +105,7 @@ Normally managed by `blirp hub enable|disable`, `blirp pair` and **Settings > Ma
 | `hub` | string | unset | Endpoint id of the paired hub; required when `role = "node"`. |
 | `relay` | `"default"` \| `"disabled"` \| `http(s)://` URL | `"default"` | How machines find and reach each other: n0 public relays and DNS discovery, direct/LAN only, or only your own iroh relay. See [sync-and-hub.md](sync-and-hub.md#network-relay-and-privacy). |
 | `allow_hub_control` | bool | `false` | Node only: let the hub and other paired machines launch, stop, resume and delete sessions, type into terminals and change memory on this machine. Off: they can only read it. Takes effect immediately. |
-| `lan_discovery` | bool | `true` | Find and announce machines on the local network with mDNS (hub and node). Off: `blirp pair <code>` without an invite does not work, and peers connect through the relay or the addresses they already know. On macOS it needs the Local Network permission ([troubleshooting.md](troubleshooting.md#error-sending-mdns-no-route-to-host-in-the-log-macos)). Also in **Settings > Machines & Sync**; takes effect immediately (a running sync endpoint restarts). |
+| `lan_discovery` | bool | `true` | Find and announce machines on the local network with mDNS (hub and node). Off: `blirp pair <code>` without an invite does not work, and peers connect through the relay or the addresses they already know. On macOS it needs the Local Network permission ([troubleshooting.md](troubleshooting.md#error-sending-mdns-no-route-to-host-in-the-log-macos)). Also in **Settings > Machines & Sync**; takes effect immediately (a running sync endpoint restarts; if it cannot, the setting is still saved and the save answers `sync_failed`). |
 
 ### `[portal]`
 

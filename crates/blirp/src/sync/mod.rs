@@ -116,18 +116,24 @@ pub(crate) async fn apply_portal_config(s: &SharedState) -> ApiResult<()> {
 }
 
 /// `sync.lan_discovery` changed: restart a running sync endpoint so mDNS
-/// starts or stops now, not at the next daemon start. Like at daemon start,
-/// a failure is logged and shows in the sync status; the config is kept.
-pub(crate) async fn apply_discovery_config(s: &SharedState) {
+/// starts or stops now, not at the next daemon start. A failed restart
+/// leaves sync stopped (shown in the sync status) and answers 502
+/// `sync_failed`; the saved config is kept.
+pub(crate) async fn apply_discovery_config(s: &SharedState) -> ApiResult<()> {
     let _guard = s.sync.transition.lock().await;
     if s.sync.service().is_none() {
-        return;
+        return Ok(());
     }
     stop_service(s).await;
-    if let Err(e) = start_service(s).await {
+    start_service(s).await.map_err(|e| {
         tracing::error!(error = %e.message, "sync did not restart");
         emit_status(s);
-    }
+        ApiError::new(
+            StatusCode::BAD_GATEWAY,
+            "sync_failed",
+            format!("sync could not restart: {}", e.message),
+        )
+    })
 }
 
 /// The LAN portal could not start (port taken, certificate); the config

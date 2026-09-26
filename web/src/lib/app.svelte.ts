@@ -347,8 +347,9 @@ class AppState {
 
   /**
    * `PATCH /api/settings` (admin). Every write re-applies the LAN portal config, and a portal
-   * that cannot start answers 409 `portal_failed` with the config already saved (§13): the
-   * saved settings are reloaded and the reason shown.
+   * that cannot start answers 409 `portal_failed`, and a sync endpoint that does not restart after
+   * a `sync.lan_discovery` change 502 `sync_failed`, both with the config already saved: the saved
+   * settings are reloaded and the reason shown.
    */
   async saveSettings(patch: SettingsPatch, success: string): Promise<SettingsView | undefined> {
     try {
@@ -356,12 +357,16 @@ class AppState {
       this.toast(success, 'info');
       return s;
     } catch (e) {
-      if (!(e instanceof ApiError && e.code === 'portal_failed')) {
+      if (!(e instanceof ApiError && (e.code === 'portal_failed' || e.code === 'sync_failed'))) {
         this.noteForbidden(e);
         this.toast(errorMessage(e));
         return undefined;
       }
-      this.toast(`Settings saved, but ${e.message}. Pick another port under Settings > Machines & Sync > LAN portal.`);
+      this.toast(
+        e.code === 'portal_failed'
+          ? `Settings saved, but ${e.message}. Pick another port under Settings > Machines & Sync > LAN portal.`
+          : `Settings saved, but ${e.message}. See blirp logs.`,
+      );
       void this.refreshSync();
       try {
         return await api.settings.get();

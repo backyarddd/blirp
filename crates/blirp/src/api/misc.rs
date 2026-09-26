@@ -134,11 +134,14 @@ async fn patch_settings(
     if after.allow_hub_control != before.allow_hub_control {
         crate::sync::proxied_rights_changed(&s);
     }
-    if after.lan_discovery != before.lan_discovery {
-        crate::sync::apply_discovery_config(&s).await;
-    }
+    let discovery = if after.lan_discovery != before.lan_discovery {
+        crate::sync::apply_discovery_config(&s).await
+    } else {
+        Ok(())
+    };
     // Apply portal changes (portal.lan, lan_port) now, not at the next start.
     crate::sync::apply_portal_config(&s).await?;
+    discovery?;
     get_settings(State(s)).await
 }
 
