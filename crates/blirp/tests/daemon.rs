@@ -603,6 +603,31 @@ async fn subagent_children_are_filtered_and_counted() {
     assert_eq!(ids(h.get("/api/sessions?parent=top").await), ["sub"]);
     let d: SessionDetail = h.get("/api/sessions/top").await;
     assert_eq!((d.session.id.as_str(), d.children_count), ("top", 1));
+
+    // Deleting takes the subagents along; the fork stays, unlinked.
+    let r = h
+        .send(reqwest::Method::DELETE, "/api/sessions/top", json!({}))
+        .await;
+    assert_eq!(r.status(), 204);
+    let r = h
+        .send(reqwest::Method::DELETE, "/api/sessions/top", json!({}))
+        .await;
+    assert_eq!(r.status(), 404);
+    assert_eq!(
+        ids(h.get("/api/sessions?include_children=true").await),
+        ["fork"]
+    );
+    // A running session is refused.
+    store
+        .insert_session(&Session {
+            status: SessionStatus::Working,
+            ..mk("live", None, SessionOrigin::External, 4)
+        })
+        .unwrap();
+    let r = h
+        .send(reqwest::Method::DELETE, "/api/sessions/live", json!({}))
+        .await;
+    assert_eq!(r.status(), 409);
     h.daemon.shutdown().await.unwrap();
 }
 
@@ -623,6 +648,7 @@ const MUTATING_ROUTES: &[(&str, &str, Need)] = &[
     ("POST", "/api/hooks/claude/Stop", Need::Admin),
     ("POST", "/api/sessions/s1/open", Need::Admin),
     ("POST", "/api/sessions", Need::Control),
+    ("DELETE", "/api/sessions/s1", Need::Control),
     ("PATCH", "/api/sessions/s1", Need::Control),
     ("POST", "/api/sessions/s1/stop", Need::Control),
     ("POST", "/api/sessions/s1/resume", Need::Control),

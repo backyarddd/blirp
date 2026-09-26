@@ -72,6 +72,13 @@ pub enum Change {
         path: String,
     },
     Session(Session),
+    /// Deletes a session with its events (and their full-text rows) and its
+    /// ingested subagent sessions; records and suggestions it produced stay
+    /// with `source_session_id` cleared, and continue/fork sessions lose
+    /// their parent link.
+    DeleteSession {
+        id: String,
+    },
     /// Append-only; a duplicate `(session_id, seq)` is ignored.
     Event(Event),
     Record(Record),
@@ -100,6 +107,7 @@ impl Change {
                 ("project_paths", "delete", format!("{machine_id}\n{path}"))
             }
             Change::Session(s) => ("sessions", "upsert", s.id.clone()),
+            Change::DeleteSession { id } => ("sessions", "delete", id.clone()),
             Change::Event(e) => ("events", "insert", format!("{}\n{}", e.session_id, e.seq)),
             Change::Record(r) => ("records", "upsert", r.id.clone()),
             Change::DeleteRecord { id } => ("records", "delete", id.clone()),
@@ -348,6 +356,39 @@ fn write_row(tx: &Transaction<'_>, change: &Change) -> Result<usize> {
                 s.tokens_in, s.tokens_out, s.cost_usd, s.parent_session_id, s.stopped_by_user
             ],
         )?,
+        Change::DeleteSession { id } => {
+            // The session and its ingested subagents (§8).
+            const DOOMED: &str = "SELECT id FROM sessions WHERE id = ?1
+                 OR (parent_session_id = ?1 AND origin = 'external')";
+            // The FTS triggers drop the events' full-text rows.
+            tx.execute(
+                &format!("DELETE FROM events WHERE session_id IN ({DOOMED})"),
+                params![id],
+            )?;
+            for table in ["records", "suggestions"] {
+                tx.execute(
+                    &format!(
+                        "UPDATE {table} SET source_session_id = NULL WHERE source_session_id IN ({DOOMED})"
+                    ),
+                    params![id],
+                )?;
+            }
+            tx.execute(
+                "UPDATE sessions SET parent_session_id = NULL
+                 WHERE parent_session_id = ?1 AND origin <> 'external'",
+                params![id],
+            )?;
+            tx.execute(
+                &format!(
+                    "DELETE FROM outbox_deferred WHERE entity = 'sessions' AND key IN ({DOOMED})"
+                ),
+                params![id],
+            )?;
+            tx.execute(
+                "DELETE FROM sessions WHERE id = ?1 OR (parent_session_id = ?1 AND origin = 'external')",
+                params![id],
+            )?
+        }
         Change::Event(e) => tx.execute(
             "INSERT INTO events(session_id, seq, ts, kind, text, meta_json) VALUES (?1,?2,?3,?4,?5,?6)
              ON CONFLICT(session_id, seq) DO NOTHING",

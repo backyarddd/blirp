@@ -368,7 +368,10 @@ GET  /api/health                         {version, machine, role, capabilities: 
 GET  /api/machines                       list; DELETE /api/machines/:id (revoke)
 GET  /api/projects                       list with path(s), git flag, session counts, last activity; GET /api/projects/:id one
 POST /api/projects                       {path, name?} register folder (absolute path, else 400)
-PATCH/DELETE /api/projects/:id           rename / soft delete; POST /api/projects/:id/merge {into}
+PATCH/DELETE /api/projects/:id           rename / soft delete: the project is hidden (`deleted = 1`) and its folders are
+                                         unregistered on every machine; its sessions, events and memory stay in the
+                                         database (a later session in such a folder registers a new project);
+                                         POST /api/projects/:id/merge {into}
 GET  /api/projects/:id/memory            brief, records, recent sessions
 PUT  /api/projects/:id/brief             {body_md}; GET .../brief/history; POST .../brief/revert {version}
 CRUD /api/projects/:id/records[/:rid]
@@ -388,6 +391,13 @@ GET  /api/sessions/:id                   SessionDetail: the session incl. summar
                                          subagent sessions); GET .../events?after=&limit=
 POST /api/sessions/:id/stop | /resume | /distill   (distill: 202 queued, 409 nothing_to_distill | remote_session)
 PATCH /api/sessions/:id                  {title}
+DELETE /api/sessions/:id                 204; only when not running (409 `session_live`). Deletes the session, its events
+                                         (and their full-text rows), its ingested subagent sessions and its launch files;
+                                         records/suggestions it produced stay with `source_session_id` cleared, and
+                                         continue/fork sessions lose their parent link. Replicated as a `sessions` delete
+                                         (`Change::DeleteSession`); emits `session_deleted`. Retention is otherwise
+                                         permanent (§8): an ingested session whose transcript grows later comes back
+                                         with only the new events.
 POST /api/sessions/:id/open              {target: "folder"|"editor"}: session folder in the OS file manager, or in
                                          $VISUAL / $EDITOR / `code` (first on PATH), else the OS default; 204
 GET  /api/terminals/:id/ws               terminal attach (§6)
@@ -414,7 +424,7 @@ GET  /mcp                                MCP Streamable HTTP
 GET  /*                                  embedded SPA
 ```
 
-Request/response DTOs are defined in `blirp-core::model` and exported to `web/src/lib/api/types.gen.ts` (`cargo test -p blirp-core export_bindings`). `/api/events/ws` pushes JSON `ServerEvent` frames: `session_created`, `session_updated`, `project_updated`, `memory_updated {project_id, part}`, `sync_updated {status}` (role, connection or portal changed), and `resync` when the client fell behind and must refetch.
+Request/response DTOs are defined in `blirp-core::model` and exported to `web/src/lib/api/types.gen.ts` (`cargo test -p blirp-core export_bindings`). `/api/events/ws` pushes JSON `ServerEvent` frames: `session_created`, `session_updated`, `session_deleted {session_id}`, `project_updated`, `memory_updated {project_id, part}`, `sync_updated {status}` (role, connection or portal changed), and `resync` when the client fell behind and must refetch.
 
 Every authenticated request carries a principal: local clients (runtime token or `blirp_session` cookie) have `control` and `admin`; portal browser devices have `control = can_control_terminals` and no `admin`; requests relayed by the sync proxy have the proxied `control` and no `admin`. Rights are checked before the request body is read (extractors `Control` / `Admin`), so a caller without them always gets 403:
 - `admin` (403 `admin_only`): `PATCH /api/settings` (config.toml, settings values), hub enable/disable, invite, join, browser invites, device and machine revoke/patch, hook ingress, global integration install/uninstall, `POST /api/sessions/:id/open`, `POST /api/daemon/shutdown`.

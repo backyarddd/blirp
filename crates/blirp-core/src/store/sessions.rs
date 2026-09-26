@@ -166,6 +166,27 @@ impl Store {
         })
     }
 
+    /// Delete a session that is not running (see [`Change::DeleteSession`]).
+    /// Returns the deleted session.
+    pub fn delete_session(&self, id: &str) -> Result<Session> {
+        self.write(|tx| {
+            let s = one(
+                tx,
+                "SELECT * FROM sessions WHERE id = ?1",
+                params![id],
+                session_row,
+            )?
+            .ok_or(StoreError::NotFound("session"))?;
+            if s.status.is_live() {
+                return Err(StoreError::Conflict(
+                    "the session is running; stop it first".into(),
+                ));
+            }
+            apply_in(tx, &Change::DeleteSession { id: id.to_string() })?;
+            Ok(s)
+        })
+    }
+
     /// Queue the current row of every coalesced session write due by `now`
     /// (the daemon's status tick calls this). Returns how many were queued.
     pub fn flush_deferred(&self, now: i64) -> Result<usize> {
@@ -610,6 +631,79 @@ mod tests {
             .modify_session("s", |s| s.title = Some("renamed".into()))
             .unwrap();
         assert_eq!(queued(&store).len(), 4);
+    }
+
+    #[test]
+    fn deleting_a_session_takes_its_events_and_subagents() {
+        let (_d, store) = temp_store();
+        let mut top = session("top", "p", 100);
+        top.status = SessionStatus::Completed;
+        store.insert_session(&top).unwrap();
+        let mut sub = session("sub", "p", 101);
+        sub.origin = SessionOrigin::External;
+        sub.parent_session_id = Some("top".into());
+        store.insert_session(&sub).unwrap();
+        let mut fork = session("fork", "p", 102);
+        fork.parent_session_id = Some("top".into());
+        store.insert_session(&fork).unwrap();
+        for (sid, seq) in [("top", 1), ("sub", 1), ("fork", 1)] {
+            store
+                .insert_event(Event {
+                    session_id: sid.into(),
+                    seq,
+                    ts: 1,
+                    kind: EventKind::User,
+                    text: format!("zebra crossing {sid}"),
+                    meta: None,
+                })
+                .unwrap();
+        }
+        let rec = Record {
+            id: "r1".into(),
+            project_id: "p".into(),
+            kind: RecordKind::Decision,
+            title: "keep".into(),
+            body: "".into(),
+            status: RecordStatus::Active,
+            pinned: false,
+            source_session_id: Some("top".into()),
+            created_at: 1,
+            updated_at: 1,
+            updated_by: "distiller".into(),
+        };
+        store.apply(Change::Record(rec)).unwrap();
+
+        // A running session cannot be deleted.
+        assert!(matches!(
+            store.delete_session("fork"),
+            Err(StoreError::Conflict(_))
+        ));
+        store.delete_session("top").unwrap();
+        assert!(store.get_session("top").unwrap().is_none());
+        assert!(store.get_session("sub").unwrap().is_none());
+        let fork = store.get_session("fork").unwrap().unwrap();
+        assert_eq!(fork.parent_session_id, None);
+        let hits = store.search("zebra", None, None, 10).unwrap();
+        let sessions: Vec<_> = hits
+            .iter()
+            .filter_map(|h| h.session_id.as_deref())
+            .collect();
+        assert_eq!(
+            sessions,
+            ["fork"],
+            "full-text rows of deleted events remain"
+        );
+        let r = store.get_record("r1").unwrap().unwrap();
+        assert_eq!(r.source_session_id, None);
+        let last = store.outbox_after(0, 100).unwrap().pop().unwrap();
+        assert_eq!(
+            (last.entity.as_str(), last.op.as_str(), last.key.as_str()),
+            ("sessions", "delete", "top")
+        );
+        assert!(matches!(
+            store.delete_session("top"),
+            Err(StoreError::NotFound(_))
+        ));
     }
 
     #[test]

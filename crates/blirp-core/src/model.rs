@@ -887,6 +887,10 @@ pub enum ServerEvent {
     SessionUpdated {
         session: Session,
     },
+    /// The session (and its subagent sessions) was deleted.
+    SessionDeleted {
+        session_id: String,
+    },
     ProjectUpdated {
         project_id: String,
     },

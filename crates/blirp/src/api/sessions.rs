@@ -17,7 +17,10 @@ use serde::Deserialize;
 pub fn routes() -> Router<SharedState> {
     Router::new()
         .route("/api/sessions", get(list).post(launch))
-        .route("/api/sessions/{id}", get(detail).patch(patch))
+        .route(
+            "/api/sessions/{id}",
+            get(detail).patch(patch).delete(remove),
+        )
         .route("/api/sessions/{id}/events", get(events))
         .route("/api/sessions/{id}/stop", post(stop))
         .route("/api/sessions/{id}/resume", post(resume))
@@ -155,6 +158,39 @@ async fn resume(
     }
     let session = crate::sessions::resume(&s, &id).await?;
     Ok(axum::response::IntoResponse::into_response(Json(session)))
+}
+
+/// DELETE /api/sessions/:id: a session that is not running, with its
+/// events and subagent sessions (replicated as a delete, §5).
+async fn remove(
+    State(s): State<SharedState>,
+    _: Control,
+    ApiPath(id): ApiPath<String>,
+) -> ApiResult<StatusCode> {
+    if s.terminals.get(&id).is_some() {
+        return Err(ApiError::conflict(
+            "session_live",
+            "the session is running; stop it first",
+        ));
+    }
+    let (store, paths, sid) = (s.store.clone(), s.paths.clone(), id.clone());
+    blocking(move || {
+        store.delete_session(&sid).map_err(|e| match e {
+            blirp_core::store::StoreError::Conflict(m) => ApiError::conflict("session_live", m),
+            other => other.into(),
+        })?;
+        // Launch files (memory, handoff) of this machine's launch.
+        let dir = paths.launch_dir(&sid);
+        if let Err(e) = std::fs::remove_dir_all(&dir)
+            && e.kind() != std::io::ErrorKind::NotFound
+        {
+            tracing::warn!(session = %sid, error = %e, "removing launch files failed");
+        }
+        Ok(())
+    })
+    .await?;
+    s.emit(ServerEvent::SessionDeleted { session_id: id });
+    Ok(StatusCode::NO_CONTENT)
 }
 
 async fn patch(

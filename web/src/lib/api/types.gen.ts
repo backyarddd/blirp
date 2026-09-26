@@ -510,7 +510,7 @@ export type PatchDevice = { can_control_terminals: boolean, };
 /**
  * Frames pushed on `/api/events/ws`.
  */
-export type ServerEvent = { "type": "session_created", session: Session, } | { "type": "session_updated", session: Session, } | { "type": "project_updated", project_id: string, } | { "type": "memory_updated", project_id: string, part: MemoryPart, } | { "type": "sync_updated", status: SyncStatus, } | { "type": "resync" };
+export type ServerEvent = { "type": "session_created", session: Session, } | { "type": "session_updated", session: Session, } | { "type": "session_deleted", session_id: string, } | { "type": "project_updated", project_id: string, } | { "type": "memory_updated", project_id: string, part: MemoryPart, } | { "type": "sync_updated", status: SyncStatus, } | { "type": "resync" };
 
 /**
  * Text frames sent by the server on `/api/terminals/:id/ws` (§6). Raw
