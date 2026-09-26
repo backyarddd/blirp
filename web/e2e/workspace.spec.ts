@@ -1,11 +1,16 @@
 // Drives the built SPA against the real daemon: auth, projects (git and plain folder),
 // a live shell session, memory, wiki, resources, files, git, search, settings, palette,
 // mobile layout, and no CSP violations along the way. Tests share one page and run in order.
+import { randomUUID } from 'node:crypto';
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { join } from 'node:path';
 import { expect, test, type Page } from '@playwright/test';
 import { e2eEnv } from './env';
 
 const env = e2eEnv();
 const isWindows = process.platform === 'win32';
+// A user's Stop reads "Stopped" on daemons that report `stopped_by_user`, "Completed" before.
+const STOPPED = /Completed|Stopped/;
 
 test.describe.configure({ mode: 'serial' });
 
@@ -166,9 +171,9 @@ test('stops the session and shows the exit state in the pane', async () => {
   await page.getByRole('button', { name: 'Stop' }).click();
   const exit = page.getByTestId('terminal-exit');
   await expect(exit).toContainText('Process exited');
-  await expect(exit).toContainText('Completed');
+  await expect(exit).toContainText(STOPPED);
   const card = page.getByRole('complementary', { name: 'Sessions' }).locator(`a[href="/sessions/${sessionId}"]`);
-  await expect(card.locator('.chip')).toHaveText('Completed');
+  await expect(card.locator('.chip')).toHaveText(STOPPED);
   await expect(page.getByRole('button', { name: 'Resume' })).toBeVisible();
   // `open` validates its target (the happy path would pop a window on this desktop).
   const bad = await page.request.post(`${env.url}/api/sessions/${sessionId}/open`, {
@@ -185,11 +190,11 @@ test('stops the session and shows the exit state in the pane', async () => {
   await runInTerminal(sessionId, isWindows ? "Write-Output ('again-' + (6*7))" : 'echo again-$((6*7))', 'again-42');
   await confirmNextDialog();
   await page.getByRole('button', { name: 'Stop' }).click();
-  await expect(exit).toContainText('Completed');
+  await expect(exit).toContainText(STOPPED);
 
   await exit.getByRole('button', { name: 'Show details' }).click();
   await expect(page.getByRole('heading', { name: 'Transcript' })).toBeVisible();
-  await expect(page.locator('.detail .chip')).toHaveText('Completed');
+  await expect(page.locator('.detail .chip')).toHaveText(STOPPED);
   // A reload lands on the detail view directly, since the terminal is gone.
   await page.reload();
   await expect(page.getByRole('heading', { name: 'Transcript' })).toBeVisible();
@@ -325,7 +330,7 @@ test('settings load and save (full config replace)', async () => {
 
   await page.goto(`${env.url}/settings/agents`);
   await expect(page.getByRole('heading', { name: 'Detected agents' })).toBeVisible();
-  await expect(page.locator('li.agent', { hasText: 'Shell' })).toBeVisible();
+  await expect(page.locator('li.agent[data-agent="shell"]')).toContainText('Shell');
   const worktree = page.getByRole('checkbox', { name: /new worktree by default/ });
   await worktree.check();
   await expect(page.getByText('Saved', { exact: true })).toBeVisible();
@@ -336,6 +341,142 @@ test('settings load and save (full config replace)', async () => {
   const view = (await res.json()) as { config: { memory: { distill_idle_secs: number }; sessions: { worktree_default: boolean } } };
   expect(view.config.memory.distill_idle_secs).toBe(600);
   expect(view.config.sessions.worktree_default).toBe(true);
+});
+
+/** Authenticated API call with the page's session cookie; fails the test on a non-2xx answer. */
+async function apiCall<T>(method: 'GET' | 'POST', path: string, data?: unknown): Promise<T> {
+  const res = await page.request.fetch(`${env.url}${path}`, { method, data, headers: { Origin: env.url } });
+  const text = await res.text();
+  expect(res.ok(), `${method} ${path}: ${res.status()} ${text}`).toBe(true);
+  return (text ? JSON.parse(text) : undefined) as T;
+}
+
+interface SessionRow {
+  id: string;
+  agent_session_id: string | null;
+  parent_session_id: string | null;
+}
+
+test('memory panel shows the memory a shell session was given', async () => {
+  const projectId = plainProjectUrl.split('/').pop() ?? '';
+  await apiCall('POST', `/api/projects/${projectId}/records`, {
+    kind: 'open_thread',
+    title: 'E2E seeded thread',
+    body: 'Seeded before the launch.',
+  });
+  const s = await apiCall<SessionRow>('POST', '/api/sessions', { project_id: projectId, agent: 'shell' });
+  await page.goto(`${env.url}/sessions/${s.id}`);
+  const toggle = page.getByRole('button', { name: 'Memory panel', exact: true });
+  await expect(toggle).toBeVisible();
+  if ((await toggle.getAttribute('aria-pressed')) !== 'true') await toggle.click();
+  const panel = page.getByRole('complementary', { name: 'Memory' });
+  const injected = panel.locator('details.inj');
+  await injected.locator('summary').click();
+  await expect(injected).toContainText('blirp memory: Plain Folder');
+  await expect(injected).toContainText('E2E seeded thread');
+  await expect(panel.locator('article.rec', { hasText: 'E2E seeded thread' })).toBeVisible();
+  await apiCall('POST', `/api/sessions/${s.id}/stop`);
+});
+
+test('distill with the none summarizer explains the failure; subagents sit under their parent', async () => {
+  // A Claude Code transcript with one subagent, as ingest finds it under CLAUDE_CONFIG_DIR.
+  const sid = randomUUID();
+  const start = Date.now() - 60 * 60_000;
+  const common = { cwd: env.plain, sessionId: sid, version: '2.0.0', userType: 'external', entrypoint: 'cli' };
+  const usage = { input_tokens: 5, cache_creation_input_tokens: 0, cache_read_input_tokens: 0, output_tokens: 3 };
+  const turn = (uuid: string, parent: string | null, at: number, role: 'user' | 'assistant', text: string, side?: string): string =>
+    JSON.stringify({
+      parentUuid: parent,
+      isSidechain: side !== undefined,
+      ...(side ? { agentId: side } : {}),
+      type: role,
+      message:
+        role === 'user'
+          ? { role, content: text }
+          : { model: 'claude-haiku-4-5', id: `msg_${uuid}`, type: 'message', role, content: [{ type: 'text', text }], usage },
+      uuid,
+      timestamp: new Date(start + at).toISOString(),
+      ...common,
+    });
+  const dir = join(env.userHome, '.claude', 'projects', 'e2e-plain');
+  mkdirSync(join(dir, sid, 'subagents'), { recursive: true });
+  writeFileSync(
+    join(dir, sid, 'subagents', 'agent-e2e1.jsonl'),
+    `${turn('su1', null, 2000, 'user', 'Find the notes file', 'e2e1')}\n${turn('sa1', 'su1', 3000, 'assistant', 'Found notes.txt', 'e2e1')}\n`,
+  );
+  writeFileSync(
+    join(dir, `${sid}.jsonl`),
+    `${turn('u1', null, 1000, 'user', 'Explain the notes file')}\n${turn('a1', 'u1', 4000, 'assistant', 'It holds two lines.')}\n`,
+  );
+  const findParent = async (): Promise<SessionRow | undefined> =>
+    (await apiCall<{ items: SessionRow[] }>('GET', '/api/sessions?agent=claude&limit=200')).items.find(
+      (x) => x.agent_session_id === sid,
+    );
+  await expect.poll(findParent, { timeout: 30_000 }).toBeTruthy();
+  const parent = await findParent();
+  if (!parent) throw new Error('the ingested session disappeared');
+
+  await page.goto(`${env.url}/sessions/${parent.id}`);
+  const sidebar = page.getByRole('complementary', { name: 'Sessions' });
+  await expect(sidebar.locator(`a[href="/sessions/${parent.id}"]`)).toBeVisible();
+  const expander = sidebar.getByRole('button', { name: '1 subagent' });
+  await expect(expander).toBeVisible();
+  await expander.click();
+  const child = sidebar.locator('a.child');
+  await expect(child).toHaveCount(1);
+
+  const toggle = page.getByRole('button', { name: 'Memory panel', exact: true });
+  if ((await toggle.getAttribute('aria-pressed')) !== 'true') await toggle.click();
+  const panel = page.getByRole('complementary', { name: 'Memory' });
+  await panel.getByRole('button', { name: 'Distill now' }).click();
+  await expect(page.getByText('Distill queued')).toBeVisible();
+  await expect(panel.getByTestId('distill-error')).toContainText('memory.summarizer = "none"');
+});
+
+test('sync: a join deep link prefills the form; enabling the hub gives an invite with QR', async () => {
+  await page.goto(`${env.url}/settings/sync?join=blirp1-e2eticket&code=ABCD-EFGH`);
+  const joinForm = page.getByRole('form', { name: 'Join a hub' });
+  await expect(joinForm.getByLabel(/^Invite/)).toHaveValue('blirp1-e2eticket');
+  await expect(joinForm.getByLabel('Pairing code')).toHaveValue('ABCD-EFGH');
+  await expect(page).toHaveURL(`${env.url}/settings/sync`); // the code does not stay in history
+
+  await confirmNextDialog();
+  await page.getByRole('button', { name: 'Enable hub' }).click();
+  await expect(page.getByTestId('sync-role')).toHaveText('hub');
+  await page.getByRole('button', { name: 'Create invite' }).click();
+  await expect(page.getByTestId('pairing-code')).toHaveText(/^[2-9A-HJ-NP-Z]{4}-[2-9A-HJ-NP-Z]{4}$/);
+  await expect(page.getByRole('img', { name: 'Pairing QR code' }).locator('canvas')).toBeVisible();
+  await expect(page.getByLabel('Invite', { exact: true })).toHaveValue(/^blirp1-/);
+  await expect(page.getByLabel('Join link', { exact: true })).toHaveValue(/^blirp:\/\/join\//);
+  await expect(page.getByTestId('expiry')).toContainText(/Expires in (9|10)m/);
+
+  await confirmNextDialog();
+  await page.getByRole('button', { name: 'Disable hub' }).click();
+  await expect(page.getByTestId('sync-role')).toHaveText('standalone');
+});
+
+test('agents: integration rows, and install/uninstall round trip in the temp home', async () => {
+  await page.goto(`${env.url}/settings/agents`);
+  await expect(page.locator('li.agent[data-agent="shell"]').getByTestId('hooks-state')).toHaveText('not supported');
+  const claude = page.locator('li.agent[data-agent="claude"]');
+  await expect(claude.getByTestId('hooks-state')).toHaveText('not installed');
+  await expect(claude.getByTestId('mcp-state')).toHaveText('not installed');
+
+  await claude.getByRole('button', { name: 'Install', exact: true }).click();
+  const dialog = page.getByRole('dialog', { name: 'Install global integration' });
+  await expect(dialog).toContainText('~/.claude/settings.json');
+  await dialog.getByRole('button', { name: 'Install', exact: true }).click();
+  await expect(claude.getByTestId('hooks-state')).toHaveText('installed');
+  await expect(claude.getByTestId('mcp-state')).toHaveText('installed');
+  // The daemon runs with CLAUDE_CONFIG_DIR in the temp home (global-setup.ts).
+  const settingsFile = join(env.userHome, '.claude', 'settings.json');
+  expect(readFileSync(settingsFile, 'utf8')).toContain('hook claude');
+
+  await confirmNextDialog();
+  await claude.getByRole('button', { name: 'Uninstall' }).click();
+  await expect(claude.getByTestId('hooks-state')).toHaveText('not installed');
+  await expect(claude.getByTestId('mcp-state')).toHaveText('not installed');
+  if (existsSync(settingsFile)) expect(readFileSync(settingsFile, 'utf8')).not.toContain('hook claude');
 });
 
 test('command palette jumps to a project', async () => {
@@ -358,7 +499,7 @@ test('mobile width (390px) keeps sessions and project pages inside the viewport'
   await expect(page.getByRole('heading', { name: 'Transcript' })).toBeVisible();
   expect(await overflow()).toBeLessThanOrEqual(0);
   await page.getByRole('button', { name: 'Show sessions list' }).click();
-  await expect(page.getByRole('complementary', { name: 'Sessions' }).getByText('Shell in Plain Folder')).toBeInViewport();
+  await expect(page.getByRole('complementary', { name: 'Sessions' }).locator(`a[href="/sessions/${sessionId}"]`)).toBeInViewport();
   await page.getByRole('button', { name: 'Close sessions list' }).click();
 
   for (const path of [plainProjectUrl, `${plainProjectUrl}/memory`, `${repoProjectUrl}/git`, '/projects', '/settings/memory']) {
@@ -372,7 +513,5 @@ test('mobile width (390px) keeps sessions and project pages inside the viewport'
 test('no CSP violations or unexpected console errors', async () => {
   const csp = await page.evaluate(() => (window as unknown as { __csp: string[] }).__csp);
   expect(csp).toEqual([]);
-  // 501s are endpoints owned by later phases (e.g. /api/inject in the memory panel).
-  const unexpected = consoleErrors.filter((e) => !/status of 501/.test(e));
-  expect(unexpected).toEqual([]);
+  expect(consoleErrors).toEqual([]);
 });

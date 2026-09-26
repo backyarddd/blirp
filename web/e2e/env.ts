@@ -8,6 +8,11 @@ export interface E2eEnv {
   repo: string;
   /** Temp dir holding everything, including `daemon.log`. */
   root: string;
+  /**
+   * The daemon's HOME/USERPROFILE (and CLAUDE_CONFIG_DIR, CODEX_HOME, XDG dirs under it):
+   * ingest reads and global integration writes only here, never the real user's config.
+   */
+  userHome: string;
 }
 
 export function e2eEnv(): E2eEnv {

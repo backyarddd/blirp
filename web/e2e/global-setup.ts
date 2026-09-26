@@ -40,9 +40,15 @@ export default async function globalSetup(): Promise<() => Promise<void>> {
 
   const root = mkdtempSync(join(tmpdir(), 'blirp-e2e-'));
   const home = join(root, 'home');
+  const userHome = join(root, 'user');
   const plain = join(root, 'Plain Folder');
   const repo = join(root, 'git-repo');
   mkdirSync(home);
+  // The tests drop agent transcripts here; ingest watches roots that exist at startup.
+  mkdirSync(join(userHome, '.claude', 'projects'), { recursive: true });
+  // No summarizer (manual distill records a clear failure) and no relay traffic when the
+  // suite turns this machine into a hub.
+  writeFileSync(join(home, 'config.toml'), '[memory]\nsummarizer = "none"\n\n[sync]\nrelay = "disabled"\n');
   mkdirSync(join(plain, 'sub'), { recursive: true });
   writeFileSync(join(plain, 'notes.txt'), 'hello from a plain folder\nsecond line\n');
   writeFileSync(join(plain, 'sub', 'inner.txt'), 'nested\n');
@@ -60,7 +66,18 @@ export default async function globalSetup(): Promise<() => Promise<void>> {
   const log = createWriteStream(join(root, 'daemon.log'));
   const daemon = spawn(bin, ['daemon', '--port', '0'], {
     cwd: repoRoot,
-    env: { ...process.env, BLIRP_HOME: home, RUST_LOG: process.env.RUST_LOG ?? 'info' },
+    env: {
+      ...process.env,
+      BLIRP_HOME: home,
+      HOME: userHome,
+      USERPROFILE: userHome,
+      CLAUDE_CONFIG_DIR: join(userHome, '.claude'),
+      CODEX_HOME: join(userHome, '.codex'),
+      XDG_CONFIG_HOME: join(userHome, '.config'),
+      XDG_DATA_HOME: join(userHome, '.local', 'share'),
+      APPDATA: join(userHome, 'AppData', 'Roaming'),
+      RUST_LOG: process.env.RUST_LOG ?? 'info',
+    },
     stdio: ['ignore', 'pipe', 'pipe'],
   });
   daemon.stdout.pipe(log);
@@ -80,7 +97,7 @@ export default async function globalSetup(): Promise<() => Promise<void>> {
     return res.ok ? true : undefined;
   });
 
-  const env: E2eEnv = { url, token: runtime.token, plain, repo, root };
+  const env: E2eEnv = { url, token: runtime.token, plain, repo, root, userHome };
   process.env.BLIRP_E2E = JSON.stringify(env);
 
   return async () => {
