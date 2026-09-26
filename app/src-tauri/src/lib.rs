@@ -330,7 +330,7 @@ fn handle_deep_links(app: &AppHandle, urls: Vec<Url>) {
 
 fn on_page_loaded(win: &WebviewWindow, url: &Url) {
     let shell = win.state::<Arc<Shell>>().inner().clone();
-    if !shell.is_daemon_url(url) || url.path() == "/auth" {
+    if !shell.is_daemon_url(url) {
         return;
     }
     tracing::info!(path = url.path(), "ui loaded");
