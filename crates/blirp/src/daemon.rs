@@ -378,31 +378,30 @@ struct Background {
 
 impl Background {
     /// `Some(exit status)` once the process has ended.
+    #[cfg(unix)]
     fn exited(&mut self) -> std::io::Result<Option<String>> {
-        #[cfg(unix)]
-        {
-            Ok(self.child.try_wait()?.map(|s| s.to_string()))
-        }
-        #[cfg(windows)]
-        #[allow(unsafe_code)]
-        {
-            use std::os::windows::io::AsRawHandle as _;
-            use windows_sys::Win32::Foundation::WAIT_OBJECT_0;
-            use windows_sys::Win32::System::Threading::{GetExitCodeProcess, WaitForSingleObject};
-            let h = self.process.as_raw_handle();
-            // SAFETY: `h` is our open process handle (owned by `self`); a
-            // zero timeout only polls, and the exit code is written to a
-            // local.
-            unsafe {
-                if WaitForSingleObject(h, 0) != WAIT_OBJECT_0 {
-                    return Ok(None);
-                }
-                let mut code = 0u32;
-                if GetExitCodeProcess(h, &mut code) == 0 {
-                    return Err(std::io::Error::last_os_error());
-                }
-                Ok(Some(format!("exit code {code}")))
+        Ok(self.child.try_wait()?.map(|s| s.to_string()))
+    }
+
+    /// `Some(exit status)` once the process has ended.
+    #[cfg(windows)]
+    #[allow(unsafe_code)]
+    fn exited(&mut self) -> std::io::Result<Option<String>> {
+        use std::os::windows::io::AsRawHandle as _;
+        use windows_sys::Win32::Foundation::WAIT_OBJECT_0;
+        use windows_sys::Win32::System::Threading::{GetExitCodeProcess, WaitForSingleObject};
+        let h = self.process.as_raw_handle();
+        // SAFETY: `h` is our open process handle (owned by `self`); a zero
+        // timeout only polls, and the exit code is written to a local.
+        unsafe {
+            if WaitForSingleObject(h, 0) != WAIT_OBJECT_0 {
+                return Ok(None);
             }
+            let mut code = 0u32;
+            if GetExitCodeProcess(h, &mut code) == 0 {
+                return Err(std::io::Error::last_os_error());
+            }
+            Ok(Some(format!("exit code {code}")))
         }
     }
 }
