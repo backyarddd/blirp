@@ -1,6 +1,6 @@
 //! Brief, records, wiki, resources and suggestions of a project.
 
-use super::{ApiError, ApiJson, ApiPath, ApiQuery, ApiResult, blocking};
+use super::{ApiError, ApiJson, ApiPath, ApiQuery, ApiResult, Control, blocking};
 use crate::state::SharedState;
 use axum::extract::State;
 use axum::http::StatusCode;
@@ -84,6 +84,7 @@ async fn project_op<T: Send + 'static>(
 
 async fn put_brief(
     State(s): State<SharedState>,
+    _: Control,
     ApiPath(id): ApiPath<String>,
     ApiJson(b): ApiJson<PutBrief>,
 ) -> ApiResult<Json<Brief>> {
@@ -106,6 +107,7 @@ async fn brief_history(
 
 async fn revert_brief(
     State(s): State<SharedState>,
+    _: Control,
     ApiPath(id): ApiPath<String>,
     ApiJson(b): ApiJson<RevertBrief>,
 ) -> ApiResult<Json<Brief>> {
@@ -152,6 +154,7 @@ fn owned_record(st: &Store, pid: &str, rid: &str) -> ApiResult<Record> {
 
 async fn create_record(
     State(s): State<SharedState>,
+    _: Control,
     ApiPath(id): ApiPath<String>,
     ApiJson(b): ApiJson<CreateRecord>,
 ) -> ApiResult<(StatusCode, Json<Record>)> {
@@ -188,6 +191,7 @@ async fn get_record(
 
 async fn patch_record(
     State(s): State<SharedState>,
+    _: Control,
     ApiPath((id, rid)): ApiPath<(String, String)>,
     ApiJson(p): ApiJson<PatchRecord>,
 ) -> ApiResult<Json<Record>> {
@@ -223,6 +227,7 @@ async fn patch_record(
 
 async fn delete_record(
     State(s): State<SharedState>,
+    _: Control,
     ApiPath((id, rid)): ApiPath<(String, String)>,
 ) -> ApiResult<StatusCode> {
     project_op(&s, id, Some(MemoryPart::Records), move |st, pid| {
@@ -246,6 +251,7 @@ async fn list_wiki(
 
 async fn create_wiki(
     State(s): State<SharedState>,
+    _: Control,
     ApiPath(id): ApiPath<String>,
     ApiJson(b): ApiJson<CreateWikiPage>,
 ) -> ApiResult<(StatusCode, Json<WikiPage>)> {
@@ -271,6 +277,7 @@ async fn get_wiki(
 
 async fn put_wiki(
     State(s): State<SharedState>,
+    _: Control,
     ApiPath((id, slug)): ApiPath<(String, String)>,
     ApiJson(b): ApiJson<PutWikiPage>,
 ) -> ApiResult<Json<WikiPage>> {
@@ -284,6 +291,7 @@ async fn put_wiki(
 
 async fn delete_wiki(
     State(s): State<SharedState>,
+    _: Control,
     ApiPath((id, slug)): ApiPath<(String, String)>,
 ) -> ApiResult<StatusCode> {
     project_op(&s, id, Some(MemoryPart::Wiki), move |st, pid| {
@@ -322,6 +330,7 @@ async fn list_resources(
 
 async fn create_resource(
     State(s): State<SharedState>,
+    _: Control,
     ApiPath(id): ApiPath<String>,
     ApiJson(b): ApiJson<CreateResource>,
 ) -> ApiResult<(StatusCode, Json<Resource>)> {
@@ -353,6 +362,7 @@ async fn get_resource(
 
 async fn patch_resource(
     State(s): State<SharedState>,
+    _: Control,
     ApiPath((id, rid)): ApiPath<(String, String)>,
     ApiJson(p): ApiJson<PatchResource>,
 ) -> ApiResult<Json<Resource>> {
@@ -382,6 +392,7 @@ async fn patch_resource(
 
 async fn delete_resource(
     State(s): State<SharedState>,
+    _: Control,
     ApiPath((id, rid)): ApiPath<(String, String)>,
 ) -> ApiResult<StatusCode> {
     project_op(&s, id, Some(MemoryPart::Resources), move |st, pid| {
@@ -415,6 +426,7 @@ async fn list_suggestions(
 
 async fn decide_suggestion(
     State(s): State<SharedState>,
+    _: Control,
     ApiPath((id, action)): ApiPath<(String, String)>,
 ) -> ApiResult<Json<Suggestion>> {
     let decision = match action.as_str() {

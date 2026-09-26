@@ -108,7 +108,11 @@ export type ErrorDetail = {
  */
 code: string, message: string, };
 
-export type Health = { version: string, machine: Machine, role: MachineRole, };
+export type Health = { version: string, machine: Machine, role: MachineRole, 
+/**
+ * What the calling client may do here.
+ */
+capabilities: Capabilities, };
 
 export type ProjectPathInfo = { machine_id: string, path: string, git_remote: string | null, 
 /**
@@ -410,6 +414,27 @@ config?: Config,
  * Keys to set; a null value deletes the key.
  */
 values?: { [key in string]: JsonValue | null }, };
+
+/**
+ * Rights of the calling client (§11), so a UI can hide what the daemon
+ * would refuse.
+ */
+export type Capabilities = { 
+/**
+ * Configuration, sync, devices, agent integration, invites, open,
+ * shutdown: local clients (runtime token) only.
+ */
+admin: boolean, 
+/**
+ * Launch/resume/stop sessions, type into terminals, change memory:
+ * local clients, browser devices allowed to control terminals, and
+ * requests relayed from a machine allowed to.
+ */
+control_terminals: boolean, 
+/**
+ * The client authenticated with this machine's runtime token.
+ */
+local: boolean, };
 
 /**
  * `GET /api/sync/status` (§10).

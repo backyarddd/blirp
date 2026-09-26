@@ -605,3 +605,156 @@ async fn subagent_children_are_filtered_and_counted() {
     assert_eq!((d.session.id.as_str(), d.children_count), ("top", 1));
     h.daemon.shutdown().await.unwrap();
 }
+
+/// Every mutating route with the right it needs (§11). A route missing
+/// here is a route nobody checked.
+const MUTATING_ROUTES: &[(&str, &str, Need)] = &[
+    ("PATCH", "/api/settings", Need::Admin),
+    ("POST", "/api/sync/hub/enable", Need::Admin),
+    ("POST", "/api/sync/hub/disable", Need::Admin),
+    ("POST", "/api/sync/invite", Need::Admin),
+    ("POST", "/api/sync/join", Need::Admin),
+    ("POST", "/api/devices/browser-invite", Need::Admin),
+    ("PATCH", "/api/devices/d1", Need::Admin),
+    ("DELETE", "/api/devices/d1", Need::Admin),
+    ("DELETE", "/api/machines/m1", Need::Admin),
+    ("POST", "/api/agents/claude/hooks/install", Need::Admin),
+    ("POST", "/api/agents/claude/hooks/uninstall", Need::Admin),
+    ("POST", "/api/hooks/claude/Stop", Need::Admin),
+    ("POST", "/api/sessions/s1/open", Need::Admin),
+    ("POST", "/api/sessions", Need::Control),
+    ("PATCH", "/api/sessions/s1", Need::Control),
+    ("POST", "/api/sessions/s1/stop", Need::Control),
+    ("POST", "/api/sessions/s1/resume", Need::Control),
+    ("POST", "/api/sessions/s1/distill", Need::Control),
+    ("POST", "/api/projects", Need::Control),
+    ("PATCH", "/api/projects/p1", Need::Control),
+    ("DELETE", "/api/projects/p1", Need::Control),
+    ("POST", "/api/projects/p1/merge", Need::Control),
+    ("PUT", "/api/projects/p1/brief", Need::Control),
+    ("POST", "/api/projects/p1/brief/revert", Need::Control),
+    ("POST", "/api/projects/p1/records", Need::Control),
+    ("PATCH", "/api/projects/p1/records/r1", Need::Control),
+    ("DELETE", "/api/projects/p1/records/r1", Need::Control),
+    ("POST", "/api/projects/p1/wiki", Need::Control),
+    ("PUT", "/api/projects/p1/wiki/w1", Need::Control),
+    ("DELETE", "/api/projects/p1/wiki/w1", Need::Control),
+    ("POST", "/api/projects/p1/resources", Need::Control),
+    ("PATCH", "/api/projects/p1/resources/r1", Need::Control),
+    ("DELETE", "/api/projects/p1/resources/r1", Need::Control),
+    ("POST", "/api/suggestions/x1/accept", Need::Control),
+];
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+enum Need {
+    Admin,
+    Control,
+}
+
+/// A LAN portal browser device (never admin) and its cookie.
+fn portal_device(h: &Harness, control: bool) -> String {
+    use sha2::Digest as _;
+    let token = format!("{:064x}", u128::from(control) + 7);
+    let now = blirp_core::now_ms();
+    h.daemon
+        .state
+        .store
+        .upsert_device(&blirp_core::model::Device {
+            id: format!("dev-{control}"),
+            name: "phone".into(),
+            kind: blirp_core::model::DeviceKind::Browser,
+            token_hash: Some(hex::encode(sha2::Sha256::digest(token.as_bytes()))),
+            node_id: None,
+            created_at: now,
+            last_seen: now,
+            revoked: false,
+            can_control_terminals: control,
+        })
+        .unwrap();
+    format!("blirp_device={token}")
+}
+
+async fn portal_call(
+    app: &axum::Router,
+    method: &str,
+    path: &str,
+    cookie: &str,
+) -> (u16, serde_json::Value) {
+    use tower::ServiceExt as _;
+    let req = axum::http::Request::builder()
+        .method(method)
+        .uri(path)
+        .header("cookie", cookie)
+        .header("content-type", "application/json")
+        .body(axum::body::Body::from("{}"))
+        .unwrap();
+    let resp = app.clone().oneshot(req).await.unwrap();
+    let status = resp.status().as_u16();
+    let bytes = axum::body::to_bytes(resp.into_body(), 1 << 20)
+        .await
+        .unwrap();
+    (
+        status,
+        serde_json::from_slice(&bytes).unwrap_or(serde_json::Value::Null),
+    )
+}
+
+// Portal devices are never admins; without terminal control they are
+// read-only. Every mutating route refuses them before looking at the body.
+#[tokio::test]
+async fn portal_devices_get_only_their_rights() {
+    let h = Harness::start().await;
+    let app = blirp::api::portal_router(h.daemon.state.clone());
+    let viewer = portal_device(&h, false);
+    let controller = portal_device(&h, true);
+
+    for (method, path, need) in MUTATING_ROUTES {
+        let (status, body) = portal_call(&app, method, path, &viewer).await;
+        assert_eq!(status, 403, "viewer {method} {path}: {body}");
+        let want = if *need == Need::Admin {
+            "admin_only"
+        } else {
+            "control_not_allowed"
+        };
+        assert_eq!(body["error"]["code"], want, "viewer {method} {path}");
+
+        let (status, body) = portal_call(&app, method, path, &controller).await;
+        if *need == Need::Admin {
+            assert_eq!(status, 403, "controller {method} {path}: {body}");
+            assert_eq!(body["error"]["code"], "admin_only", "{method} {path}");
+        } else {
+            assert!(
+                status != 403 && status != 401,
+                "controller {method} {path}: {status} {body}"
+            );
+        }
+    }
+    // Loopback-only routes do not exist on the portal.
+    let (status, _) = portal_call(&app, "POST", "/api/daemon/shutdown", &controller).await;
+    assert_eq!(status, 404);
+
+    // Health tells each client what it may do.
+    for (cookie, control) in [(&viewer, false), (&controller, true)] {
+        let (status, body) = portal_call(&app, "GET", "/api/health", cookie).await;
+        assert_eq!(status, 200);
+        assert_eq!(
+            body["capabilities"],
+            json!({"admin": false, "control_terminals": control, "local": false})
+        );
+    }
+    let local: Health = h.get("/api/health").await;
+    assert_eq!(
+        local.capabilities,
+        blirp_core::model::Capabilities {
+            admin: true,
+            control_terminals: true,
+            local: true
+        }
+    );
+    // The local client passes the admin checks.
+    let r = h
+        .send(reqwest::Method::PATCH, "/api/settings", json!({}))
+        .await;
+    assert_eq!(r.status(), 200);
+    h.daemon.shutdown().await.unwrap();
+}

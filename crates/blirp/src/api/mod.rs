@@ -16,7 +16,7 @@ use axum::middleware::{self, Next};
 use axum::response::{IntoResponse, Redirect, Response};
 use axum::routing::{any, get};
 use axum::{Json, Router};
-use blirp_core::model::{ErrorBody, ErrorDetail};
+use blirp_core::model::{Capabilities, ErrorBody, ErrorDetail};
 use blirp_core::store::StoreError;
 use serde::Deserialize;
 
@@ -46,6 +46,16 @@ impl Principal {
             admin: true,
             device: None,
             label: "local".into(),
+        }
+    }
+
+    /// Only local clients (runtime token) are admins; neither portal devices
+    /// nor relayed requests are.
+    pub fn capabilities(&self) -> Capabilities {
+        Capabilities {
+            admin: self.admin,
+            control_terminals: self.control,
+            local: self.admin && self.device.is_none(),
         }
     }
 
@@ -87,6 +97,40 @@ impl<S: Send + Sync> FromRequestParts<S> for Principal {
                 "not authenticated",
             )
         })
+    }
+}
+
+/// Extractor for routes that change sessions or memory (§11): the caller
+/// needs `control`. It rejects before the body is read, so a caller without
+/// the right always gets 403, whatever it sent.
+pub struct Control(pub Principal);
+
+impl<S: Send + Sync> FromRequestParts<S> for Control {
+    type Rejection = ApiError;
+    async fn from_request_parts(
+        parts: &mut axum::http::request::Parts,
+        state: &S,
+    ) -> Result<Self, Self::Rejection> {
+        let p = Principal::from_request_parts(parts, state).await?;
+        p.require_control()?;
+        Ok(Self(p))
+    }
+}
+
+/// Extractor for routes that change this machine's configuration, sync,
+/// devices or agent integration, mint invites, or act on its desktop (§11):
+/// the caller needs `admin` (local clients only).
+pub struct Admin(pub Principal);
+
+impl<S: Send + Sync> FromRequestParts<S> for Admin {
+    type Rejection = ApiError;
+    async fn from_request_parts(
+        parts: &mut axum::http::request::Parts,
+        state: &S,
+    ) -> Result<Self, Self::Rejection> {
+        let p = Principal::from_request_parts(parts, state).await?;
+        p.require_admin()?;
+        Ok(Self(p))
     }
 }
 

@@ -1,7 +1,7 @@
 //! Memory-engine endpoints (§11): hook ingress, rendered injection, manual
 //! distill, global integration install/uninstall and MCP over HTTP.
 
-use super::{ApiError, ApiJson, ApiPath, ApiQuery, ApiResult, Principal, blocking};
+use super::{Admin, ApiError, ApiJson, ApiPath, ApiQuery, ApiResult, Control, blocking};
 use crate::hooks::{HookIngress, HookReply};
 use crate::memory::launch::MEMORY_FILE;
 use crate::memory::render::render_injection;
@@ -36,12 +36,11 @@ pub fn mcp_routes(state: &SharedState) -> Router<SharedState> {
 
 async fn hook(
     State(s): State<SharedState>,
-    principal: Principal,
+    _: Admin,
     ApiPath((agent, event)): ApiPath<(String, String)>,
     ApiJson(body): ApiJson<HookIngress>,
 ) -> ApiResult<Json<HookReply>> {
     // Only `blirp hook` on this machine (runtime token) reports agent events.
-    principal.require_admin()?;
     let st = s.clone();
     blocking(move || crate::hooks::handle(&st, &agent, &event, body))
         .await
@@ -95,11 +94,10 @@ async fn inject(
 
 async fn distill(
     State(s): State<SharedState>,
-    principal: Principal,
+    _: Control,
     ApiPath(id): ApiPath<String>,
 ) -> ApiResult<StatusCode> {
     // Runs the summarizer agent on this machine.
-    principal.require_control()?;
     let store = s.store.clone();
     let sid = id.clone();
     let (session, events) = blocking(move || {
@@ -128,11 +126,10 @@ async fn distill(
 
 async fn agent_hooks(
     State(s): State<SharedState>,
-    principal: Principal,
+    _: Admin,
     ApiPath((id, action)): ApiPath<(String, String)>,
 ) -> ApiResult<Json<AgentInfo>> {
     // Writes the user's global agent configuration.
-    principal.require_admin()?;
     let install = match action.as_str() {
         "install" => true,
         "uninstall" => false,

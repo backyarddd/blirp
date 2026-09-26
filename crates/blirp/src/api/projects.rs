@@ -1,6 +1,6 @@
 //! Projects: list, register, rename, delete, merge, memory view.
 
-use super::{ApiError, ApiJson, ApiPath, ApiResult, blocking};
+use super::{ApiError, ApiJson, ApiPath, ApiResult, Control, blocking};
 use crate::state::SharedState;
 use axum::extract::State;
 use axum::http::StatusCode;
@@ -42,6 +42,7 @@ async fn get_one(
 
 async fn create(
     State(s): State<SharedState>,
+    _: Control,
     ApiJson(body): ApiJson<CreateProject>,
 ) -> ApiResult<(StatusCode, Json<ProjectSummary>)> {
     // A relative folder would resolve against the daemon's own directory.
@@ -66,6 +67,7 @@ async fn create(
 
 async fn rename(
     State(s): State<SharedState>,
+    _: Control,
     ApiPath(id): ApiPath<String>,
     ApiJson(body): ApiJson<PatchProject>,
 ) -> ApiResult<Json<ProjectSummary>> {
@@ -83,6 +85,7 @@ async fn rename(
 
 async fn remove(
     State(s): State<SharedState>,
+    _: Control,
     ApiPath(id): ApiPath<String>,
 ) -> ApiResult<StatusCode> {
     let store = s.store.clone();
@@ -94,6 +97,7 @@ async fn remove(
 
 async fn merge(
     State(s): State<SharedState>,
+    _: Control,
     ApiPath(id): ApiPath<String>,
     ApiJson(body): ApiJson<MergeProject>,
 ) -> ApiResult<Json<ProjectSummary>> {

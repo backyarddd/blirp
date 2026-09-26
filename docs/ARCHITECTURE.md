@@ -360,7 +360,8 @@ Revocation (`DELETE /api/machines/:id` or `DELETE /api/devices/:id` on the hub):
 Auth: local clients send `Authorization: Bearer <runtime token>` or the `blirp_session` cookie set by `/auth?token=`. LAN/portal browser devices use device cookies (§13). All JSON; validation errors (malformed or mistyped JSON bodies, query strings and path parameters) return 400 `{error:{code,message}}` with code `invalid_request`; only a missing JSON content type (415) and an oversized body (413) keep their own status.
 
 ```
-GET  /api/health                         {version, machine, role}
+GET  /api/health                         {version, machine, role, capabilities: {admin, control_terminals, local}}
+                                         (the calling client's rights)
 GET  /api/machines                       list; DELETE /api/machines/:id (revoke)
 GET  /api/projects                       list with path(s), git flag, session counts, last activity; GET /api/projects/:id one
 POST /api/projects                       {path, name?} register folder (absolute path, else 400)
@@ -412,7 +413,11 @@ GET  /*                                  embedded SPA
 
 Request/response DTOs are defined in `blirp-core::model` and exported to `web/src/lib/api/types.gen.ts` (`cargo test -p blirp-core export_bindings`). `/api/events/ws` pushes JSON `ServerEvent` frames: `session_created`, `session_updated`, `project_updated`, `memory_updated {project_id, part}`, `sync_updated {status}` (role, connection or portal changed), and `resync` when the client fell behind and must refetch.
 
-Every authenticated request carries a principal: local clients (runtime token or `blirp_session` cookie) have `control` and `admin`; portal browser devices have `control = can_control_terminals` and no `admin`; requests relayed by the sync proxy have the proxied `control` and no `admin`. `control` is required to launch, resume or stop sessions, to distill a session (403 `control_not_allowed`) and to send terminal input; `admin` is required for hub/pairing/device management, hook ingress, global integration install/uninstall, `POST /api/sessions/:id/open` and `POST /api/daemon/shutdown` (403 `admin_only`).
+Every authenticated request carries a principal: local clients (runtime token or `blirp_session` cookie) have `control` and `admin`; portal browser devices have `control = can_control_terminals` and no `admin`; requests relayed by the sync proxy have the proxied `control` and no `admin`. Rights are checked before the request body is read (extractors `Control` / `Admin`), so a caller without them always gets 403:
+- `admin` (403 `admin_only`): `PATCH /api/settings` (config.toml, settings values), hub enable/disable, invite, join, browser invites, device and machine revoke/patch, hook ingress, global integration install/uninstall, `POST /api/sessions/:id/open`, `POST /api/daemon/shutdown`.
+- `control` (403 `control_not_allowed`): every other mutation: launch, resume, stop, distill, rename or delete sessions, worktree removal, project register/rename/delete/merge, brief, records, wiki, resources and suggestions; plus terminal input and resize.
+- Reads (every `GET`, the event stream, viewing a terminal) need authentication only.
+A portal browser device without terminal control is therefore read-only. `tests/daemon.rs` keeps a table of every mutating route and checks it against a viewer and a controlling portal device.
 
 `/mcp` is local-only: it is mounted on the loopback listener alone (runtime token, loopback `Host`), not on the LAN portal and not for requests relayed by the sync proxy, where it falls through to the SPA. Remote MCP would need device-authenticated access and is not offered yet. `POST /api/daemon/shutdown` is mounted the same way (loopback listener only, 404 elsewhere): only this machine's own clients may stop its daemon.
 

@@ -1,6 +1,6 @@
 //! Health, machines, search, settings, agents and the server event stream.
 
-use super::{ApiError, ApiJson, ApiQuery, ApiResult, Principal, blocking};
+use super::{Admin, ApiError, ApiJson, ApiQuery, ApiResult, Principal, blocking};
 use crate::state::SharedState;
 use axum::Json;
 use axum::Router;
@@ -35,14 +35,13 @@ pub fn local_routes() -> Router<SharedState> {
 
 /// Graceful stop for clients without a signal path to the daemon (the
 /// detached Windows daemon has no console): same as SIGTERM / Ctrl+C.
-async fn shutdown(State(s): State<SharedState>, principal: Principal) -> ApiResult<StatusCode> {
-    principal.require_admin()?;
+async fn shutdown(State(s): State<SharedState>, _: Admin) -> ApiResult<StatusCode> {
     tracing::info!("shutdown requested over the API");
     s.stop_requested.notify_one();
     Ok(StatusCode::ACCEPTED)
 }
 
-async fn health(State(s): State<SharedState>) -> Json<Health> {
+async fn health(State(s): State<SharedState>, principal: Principal) -> Json<Health> {
     // The role changes at runtime (hub enable, pairing); the config is current.
     let role = s.config().sync.role;
     Json(Health {
@@ -52,6 +51,7 @@ async fn health(State(s): State<SharedState>) -> Json<Health> {
             role,
             ..s.machine.clone()
         },
+        capabilities: principal.capabilities(),
     })
 }
 
@@ -92,6 +92,7 @@ async fn get_settings(State(s): State<SharedState>) -> ApiResult<Json<SettingsVi
 
 async fn patch_settings(
     State(s): State<SharedState>,
+    _: Admin,
     ApiJson(patch): ApiJson<SettingsPatch>,
 ) -> ApiResult<Json<SettingsView>> {
     let state = s.clone();

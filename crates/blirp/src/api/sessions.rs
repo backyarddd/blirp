@@ -1,6 +1,6 @@
 //! Sessions: list, launch, detail, events, stop, resume, rename.
 
-use super::{ApiError, ApiJson, ApiPath, ApiQuery, ApiResult, Principal, blocking};
+use super::{ApiError, ApiJson, ApiPath, ApiQuery, ApiResult, Control, blocking};
 use crate::state::SharedState;
 use axum::extract::State;
 use axum::http::StatusCode;
@@ -60,10 +60,9 @@ async fn list(
 
 async fn launch(
     State(s): State<SharedState>,
-    principal: Principal,
+    Control(principal): Control,
     ApiJson(body): ApiJson<LaunchSession>,
 ) -> ApiResult<Response> {
-    principal.require_control()?;
     if let Some(m) = body.machine.clone()
         && m != s.machine.id
     {
@@ -131,9 +130,8 @@ async fn events(
 async fn stop(
     State(s): State<SharedState>,
     ApiPath(id): ApiPath<String>,
-    principal: Principal,
+    Control(principal): Control,
 ) -> ApiResult<Response> {
-    principal.require_control()?;
     if let Some(m) = remote_machine(&s, &id).await? {
         let path = format!("/api/sessions/{id}/stop");
         return crate::sync::forward(&s, &m, &principal, axum::http::Method::POST, &path, None)
@@ -148,9 +146,8 @@ async fn stop(
 async fn resume(
     State(s): State<SharedState>,
     ApiPath(id): ApiPath<String>,
-    principal: Principal,
+    Control(principal): Control,
 ) -> ApiResult<Response> {
-    principal.require_control()?;
     if let Some(m) = remote_machine(&s, &id).await? {
         let path = format!("/api/sessions/{id}/resume");
         return crate::sync::forward(&s, &m, &principal, axum::http::Method::POST, &path, None)
@@ -162,6 +159,7 @@ async fn resume(
 
 async fn patch(
     State(s): State<SharedState>,
+    _: Control,
     ApiPath(id): ApiPath<String>,
     ApiJson(body): ApiJson<PatchSession>,
 ) -> ApiResult<Json<Session>> {

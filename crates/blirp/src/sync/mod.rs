@@ -6,7 +6,7 @@ mod proxy;
 
 pub use proxy::{connect_terminal, forward, launch_remote, relay_terminal};
 
-use crate::api::{ApiError, ApiJson, ApiPath, ApiResult, Principal, blocking};
+use crate::api::{Admin, ApiError, ApiJson, ApiPath, ApiResult, Principal, blocking};
 use crate::state::SharedState;
 use axum::Json;
 use axum::Router;
@@ -303,11 +303,7 @@ async fn get_status(State(s): State<SharedState>) -> ApiResult<Json<SyncStatus>>
     status(&s).await.map(Json)
 }
 
-async fn hub_enable(
-    State(s): State<SharedState>,
-    principal: Principal,
-) -> ApiResult<Json<SyncStatus>> {
-    principal.require_admin()?;
+async fn hub_enable(State(s): State<SharedState>, _: Admin) -> ApiResult<Json<SyncStatus>> {
     let _guard = s.sync.transition.lock().await;
     match s.config().sync.role {
         MachineRole::Node => {
@@ -331,11 +327,7 @@ async fn hub_enable(
     status(&s).await.map(Json)
 }
 
-async fn hub_disable(
-    State(s): State<SharedState>,
-    principal: Principal,
-) -> ApiResult<Json<SyncStatus>> {
-    principal.require_admin()?;
+async fn hub_disable(State(s): State<SharedState>, _: Admin) -> ApiResult<Json<SyncStatus>> {
     let _guard = s.sync.transition.lock().await;
     if s.config().sync.role != MachineRole::Hub {
         return Err(ApiError::conflict("not_hub", "this machine is not a hub"));
@@ -347,8 +339,7 @@ async fn hub_disable(
     status(&s).await.map(Json)
 }
 
-async fn invite(State(s): State<SharedState>, principal: Principal) -> ApiResult<Json<SyncInvite>> {
-    principal.require_admin()?;
+async fn invite(State(s): State<SharedState>, _: Admin) -> ApiResult<Json<SyncInvite>> {
     let svc = s
         .sync
         .service()
@@ -368,10 +359,9 @@ async fn invite(State(s): State<SharedState>, principal: Principal) -> ApiResult
 
 async fn join(
     State(s): State<SharedState>,
-    principal: Principal,
+    _: Admin,
     ApiJson(body): ApiJson<JoinHub>,
 ) -> ApiResult<Json<SyncStatus>> {
-    principal.require_admin()?;
     let _guard = s.sync.transition.lock().await;
     let config = s.config();
     if config.sync.role != MachineRole::Standalone {
@@ -420,10 +410,7 @@ async fn list_devices(State(s): State<SharedState>) -> ApiResult<Json<Vec<Device
     Ok(Json(blocking(move || Ok(store.list_devices()?)).await?))
 }
 
-async fn browser_invite(
-    State(s): State<SharedState>,
-    _principal: Principal,
-) -> ApiResult<Json<BrowserInvite>> {
+async fn browser_invite(State(s): State<SharedState>, _: Admin) -> ApiResult<Json<BrowserInvite>> {
     crate::portal::create_invite(&s).map(Json)
 }
 
@@ -459,9 +446,8 @@ async fn revoke_node(s: &SharedState, node_id: &str) -> ApiResult<()> {
 async fn revoke_device(
     State(s): State<SharedState>,
     ApiPath(id): ApiPath<String>,
-    principal: Principal,
+    _: Admin,
 ) -> ApiResult<StatusCode> {
-    principal.require_admin()?;
     let store = s.store.clone();
     let did = id.clone();
     let device = blocking(move || {
@@ -490,10 +476,9 @@ async fn revoke_device(
 async fn patch_device(
     State(s): State<SharedState>,
     ApiPath(id): ApiPath<String>,
-    principal: Principal,
+    _: Admin,
     ApiJson(body): ApiJson<PatchDevice>,
 ) -> ApiResult<Json<Device>> {
-    principal.require_admin()?;
     let store = s.store.clone();
     let did = id.clone();
     let device = blocking(move || {
@@ -523,9 +508,8 @@ async fn patch_device(
 async fn revoke_machine(
     State(s): State<SharedState>,
     ApiPath(id): ApiPath<String>,
-    principal: Principal,
+    _: Admin,
 ) -> ApiResult<StatusCode> {
-    principal.require_admin()?;
     let _guard = s.sync.transition.lock().await;
     let config = s.config();
     if id == s.machine.id {

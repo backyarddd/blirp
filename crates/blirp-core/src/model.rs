@@ -382,6 +382,25 @@ pub struct Health {
     pub version: String,
     pub machine: Machine,
     pub role: MachineRole,
+    /// What the calling client may do here.
+    // Default: older daemons do not send it.
+    #[serde(default)]
+    pub capabilities: Capabilities,
+}
+
+/// Rights of the calling client (§11), so a UI can hide what the daemon
+/// would refuse.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, TS)]
+pub struct Capabilities {
+    /// Configuration, sync, devices, agent integration, invites, open,
+    /// shutdown: local clients (runtime token) only.
+    pub admin: bool,
+    /// Launch/resume/stop sessions, type into terminals, change memory:
+    /// local clients, browser devices allowed to control terminals, and
+    /// requests relayed from a machine allowed to.
+    pub control_terminals: bool,
+    /// The client authenticated with this machine's runtime token.
+    pub local: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, TS)]
@@ -944,7 +963,7 @@ mod tests {
             GitStatusEntry, GitStatus, GitDiff, FileEntry, DirListing, FileContent, SessionsPage, SessionDetail,
             LaunchSession, PatchSession, OpenTarget, OpenSession, EventsPage, SearchHit, SearchResults, AgentInfo,
             AgentIntegration, Injection, SummaryItem, DistillFailure, SessionSummary,
-            SettingsView, SettingsPatch, SyncStatus, SyncInvite, JoinHub, BrowserInvite, PatchDevice,
+            SettingsView, SettingsPatch, Capabilities, SyncStatus, SyncInvite, JoinHub, BrowserInvite, PatchDevice,
             ServerEvent, TerminalServerMessage, TerminalClientMessage,
             Config, DaemonConfig, MachineConfig, AgentsConfig, CustomAgent, SessionsConfig,
             Summarizer, BriefMode, MemoryConfig, SyncConfig, PortalConfig,
