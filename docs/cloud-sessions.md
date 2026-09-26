@@ -67,7 +67,7 @@ While any session runs on a machine with `sessions.keep_awake = true`, blirp kee
 
 - macOS: `caffeinate -i -w <daemon pid>` (visible in `pmset -g assertions` as "caffeinate command-line tool"; it also ends if the daemon dies),
 - Windows: `SetThreadExecutionState(ES_CONTINUOUS | ES_SYSTEM_REQUIRED)`,
-- Linux: `systemd-inhibit --what=sleep`, when available.
+- Linux: `systemd-inhibit --what=sleep`, when it is installed and logind grants the lock. polkit refuses it on some systems to processes outside a login session (a daemon started over SSH or by a service may be one): blirp then logs `cannot keep this machine awake` with the reason, retries every minute, and the top bar shows nothing ([troubleshooting](troubleshooting.md#linux-desktop)).
 
 It is on by default for the hub and off for other machines ([configuration](configuration.md#sessions)). The top bar shows **Keeping <machine> awake** for this machine and, on a paired PC, for the hub. It does not stop a sleep you ask for (Apple menu > Sleep, closing a MacBook lid) and does not keep the display on.
 

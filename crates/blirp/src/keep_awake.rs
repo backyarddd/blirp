@@ -7,7 +7,12 @@
 //! - Windows: `SetThreadExecutionState(ES_CONTINUOUS | ES_SYSTEM_REQUIRED)`
 //!   on a dedicated thread (the state belongs to the thread that set it),
 //! - Linux: `systemd-inhibit --what=sleep` around a loop that ends with the
-//!   daemon, when `systemd-inhibit` exists.
+//!   daemon, when `systemd-inhibit` exists and logind grants the lock (polkit
+//!   refuses it to processes outside a login session on some systems).
+//!
+//! A helper that exits within its first moments failed to take the
+//! assertion: that is a failed acquire with the helper's own message, never
+//! a held assertion.
 
 use std::sync::{Mutex, MutexGuard, PoisonError};
 use std::time::{Duration, Instant};
@@ -104,10 +109,16 @@ struct Platform;
 #[cfg(unix)]
 mod helper {
     use super::Assertion;
+    use anyhow::Context as _;
     use blirp_core::proc_tree::ProcessTree;
+    use std::io::Read as _;
     use std::os::unix::process::CommandExt;
     use std::process::{Child, Command, Stdio};
-    use std::time::Duration;
+    use std::time::{Duration, Instant};
+
+    /// A helper still running after this long has taken the assertion
+    /// (systemd-inhibit and caffeinate fail at once when they cannot).
+    const SETTLE: Duration = Duration::from_millis(300);
 
     /// A helper process that holds the assertion for as long as it runs,
     /// in its own process group so release ends all of it.
@@ -120,10 +131,33 @@ mod helper {
         pub fn spawn(mut cmd: Command) -> anyhow::Result<Self> {
             cmd.stdin(Stdio::null())
                 .stdout(Stdio::null())
-                .stderr(Stdio::null())
+                .stderr(Stdio::piped())
                 .process_group(0);
-            let child = cmd.spawn()?;
+            let mut child = cmd.spawn()?;
             let tree = ProcessTree::for_process_group(child.id());
+            let deadline = Instant::now() + SETTLE;
+            loop {
+                if let Some(status) = child.try_wait().context("wait for the sleep helper")? {
+                    // End anything left in its group, which could hold the
+                    // pipe open, so the read below reaches end of file.
+                    tree.terminate();
+                    let mut msg = String::new();
+                    if let Some(mut err) = child.stderr.take() {
+                        let _ = err.read_to_string(&mut msg);
+                    }
+                    let msg = msg.trim();
+                    if msg.is_empty() {
+                        anyhow::bail!("the helper exited at once ({status})");
+                    }
+                    anyhow::bail!("{msg} ({status})");
+                }
+                if Instant::now() >= deadline {
+                    break;
+                }
+                std::thread::sleep(Duration::from_millis(20));
+            }
+            // Neither helper writes anything while it holds the assertion.
+            drop(child.stderr.take());
             Ok(Self { child, tree })
         }
     }
@@ -371,5 +405,21 @@ mod tests {
         let mut a = Platform.acquire().unwrap();
         assert!(a.alive());
         drop(a);
+    }
+
+    // A helper that exits at once (systemd-inhibit: "Failed to inhibit:
+    // Access denied") is a failed acquire carrying its message.
+    #[cfg(unix)]
+    #[test]
+    fn helper_that_exits_at_once_is_a_failed_acquire() {
+        let mut cmd = blirp_core::process::command("sh");
+        cmd.args(["-c", "echo 'Failed to inhibit: Access denied' >&2; exit 1"]);
+        let err = helper::Helper::spawn(cmd).err().unwrap();
+        assert!(format!("{err:#}").contains("Access denied"), "{err:#}");
+
+        let mut cmd = blirp_core::process::command("sh");
+        cmd.args(["-c", "sleep 30"]);
+        let mut held = helper::Helper::spawn(cmd).unwrap();
+        assert!(held.alive());
     }
 }

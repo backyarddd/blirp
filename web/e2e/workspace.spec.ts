@@ -2,7 +2,7 @@
 // a live shell session, memory, wiki, resources, files, git, search, settings, palette,
 // mobile layout, and no CSP violations along the way. Tests share one page and run in order.
 import { randomUUID } from 'node:crypto';
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, readdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { expect, test, type Page } from '@playwright/test';
 import { e2eEnv } from './env';
@@ -176,10 +176,29 @@ test('types into the terminal and sees the output', async () => {
   await runInTerminal(sessionId, isWindows ? "Write-Output ('e2e-' + (6*7))" : 'echo e2e-$((6*7))', 'e2e-42');
 });
 
+/** The daemon's own log (`BLIRP_HOME/logs/blirpd.<date>.log`), all days. */
+function daemonLog(): string {
+  const dir = join(env.root, 'home', 'logs');
+  if (!existsSync(dir)) return '';
+  return readdirSync(dir)
+    .filter((f) => f.startsWith('blirpd'))
+    .map((f) => readFileSync(join(dir, f), 'utf8'))
+    .join('\n');
+}
+
 test('reopening the app restores the open session, reattached, and shows keep-awake', async () => {
   await page.goto(`${env.url}/`);
   await expect(page).toHaveURL(`${env.url}/sessions/${sessionId}`);
-  await expect(page.getByTestId('keep-awake')).toBeVisible();
+  // macOS and Windows always grant the assertion. On Linux logind may refuse
+  // systemd-inhibit (polkit, outside a login session as on CI runners): then
+  // the daemon must say why and the top bar must not claim it.
+  const refused = /cannot keep this machine awake/;
+  if (process.platform === 'linux' && !(await apiCall<{ keep_awake: boolean }>('GET', '/api/health')).keep_awake) {
+    await expect.poll(daemonLog, { timeout: 15_000 }).toMatch(refused);
+    await expect(page.getByTestId('keep-awake')).toHaveCount(0);
+  } else {
+    await expect(page.getByTestId('keep-awake')).toBeVisible();
+  }
   // The snapshot of the reattached pane still holds the earlier output.
   expect((await snapshot(sessionId)).data).toContain('e2e-42');
   await runInTerminal(sessionId, isWindows ? "Write-Output ('back-' + (6*7))" : 'echo back-$((6*7))', 'back-42');
