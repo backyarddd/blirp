@@ -166,13 +166,15 @@ Launch (`POST /api/sessions`): body `{project_id | cwd, agent, prompt?, worktree
 3. Render memory injection (§9) to `~/.blirp/launch/<id>/memory.md`.
 4. Build argv/env per agent:
    - claude: `claude --session-id <new uuid> --settings <launch/settings.json> --mcp-config <launch/mcp.json>` (settings contains blirp hooks for SessionStart, UserPromptSubmit, Stop, Notification, SessionEnd, PreCompact). Store the uuid as `agent_session_id` immediately.
-   - codex: `codex -c mcp_servers.blirp.command=... -c mcp_servers.blirp.args=[...]` plus the best available context mechanism for the installed version (SessionStart hook for >= 0.155.1, else developer instructions / experimental instructions file override via `-c`); verify against `codex --help` of the installed version at runtime and degrade gracefully.
+   - codex: `codex -c developer_instructions=<user's own developer_instructions + memory> -c mcp_servers.blirp.command=... -c mcp_servers.blirp.args=["mcp"] -c mcp_servers.blirp.env={...}` placed before any `resume` subcommand. Codex 0.153 has SessionStart hooks, but non-managed hooks only run after the user trusts their exact definition, so launch-time context uses `developer_instructions` (verified with `codex debug prompt-input`).
    - opencode, pi, gemini, cursor, amp, aider, dsh: per §9 table.
-   - Env always: `BLIRP_SESSION_ID`, `BLIRP_PROJECT_ID`, `BLIRP_HOME`, `BLIRP_MEMORY_FILE`, plus `TERM=xterm-256color`, `COLORTERM=truecolor`. Parent-agent markers (`CLAUDECODE`, `CLAUDE_CODE_ENTRYPOINT`, `CODEX_SANDBOX`) are removed so a daemon started from inside an agent does not leak them.
+   - Windows npm `.cmd` shims (`codex.cmd`, `gemini.cmd`, ...) are unwrapped to `node <script>` so arguments never pass through `cmd.exe` quoting; other `.cmd/.bat` still run via `cmd /d /c`.
+   - Launch integration failures (render, file writes) are logged and the agent starts without memory.
+   - Env always: `BLIRP_SESSION_ID`, `BLIRP_PROJECT_ID`, `BLIRP_HOME`, `BLIRP_MEMORY_FILE`, plus `TERM=xterm-256color`, `COLORTERM=truecolor`. Parent-agent markers (`CLAUDECODE`, `CLAUDE_CODE_*` session/child/messaging vars, `CLAUDE_PID`, `CLAUDE_EFFORT`, `CODEX_SANDBOX`) are removed so a daemon started from inside an agent does not leak them.
    - shell: `$SHELL` (unix, else `/bin/sh`); Windows `pwsh`, else `powershell`, else `%ComSpec%`.
    - Binaries resolve on PATH; on Windows only `.exe/.com/.cmd/.bat/.ps1` count (npm's extensionless shims are skipped), `.cmd/.bat` run via `cmd /d /c`, `.ps1` via PowerShell `-File`.
    - Resume (`POST /api/sessions/:id/resume`, same session row) with `agent_session_id`: claude `--resume <id>`, codex `resume <id>`, opencode `--session <id>`, gemini `--resume <id>`, cursor `--resume <id>`, amp `threads continue <id>`; pi, aider, dsh, shell and custom agents (or no known id) relaunch fresh in the session folder.
-5. Spawn PTY; if `prompt` given, type it after the agent is ready (first output idle for 1.5 s, at most 60 s) followed by Enter. The prompt is sent as a bracketed paste when the application enabled bracketed paste mode.
+5. Spawn PTY; if `prompt` given, type it after the agent is ready (first output idle for 1.5 s, at most 60 s) followed by Enter. The prompt is sent as a bracketed paste when the application enabled bracketed paste mode. While a folder-trust dialog is on screen (claude "trust this folder", codex "trust the contents of this directory", ...) the prompt waits for the user to answer it (up to 10 min), because typing into the dialog would answer it.
 
 Status:
 - From hooks when available (claude: UserPromptSubmit -> working, Stop -> idle, Notification(permission/idle prompt) -> waiting, SessionEnd -> completed).
@@ -181,7 +183,7 @@ Status:
 - Heuristics never overwrite `waiting` (hook-owned) or a final status.
 - On daemon restart, sessions whose process is gone become `detached`; UI offers Resume (agent resume flag with `agent_session_id`).
 
-Continue in / fork: `continue_from` builds a handoff pack (§9) from the source session and passes it as the initial context of a new session with any agent; `parent_session_id` records lineage.
+Continue in / fork: `continue_from` builds a handoff pack (§9) from the source session and passes it as the initial context of a new session with any agent; `parent_session_id` records lineage. Without `project_id`/`cwd` the new session starts in the source session's folder (or its project when that folder is not on this machine). Fork is `continue_from` with the same agent.
 
 ## 8. Ingest (`blirp::ingest`)
 
@@ -225,13 +227,19 @@ Unknown or changed formats must never crash the daemon: log once per source, ski
 Applied to every event text and meta before storage, sync or summarization. Rule set: gitleaks-compatible regexes compiled once (AWS, GCP, Azure, GitHub, GitLab, Slack, Stripe, OpenAI, Anthropic, generic `api_key|secret|token|password` assignments with high-entropy values, private key blocks, JWTs, connection strings with credentials, `.env`-style lines). Replacement `[REDACTED:<kind>]`. Unit tests for every rule with positive and negative cases.
 
 ### Distill
-Trigger: session `idle` for `memory.distill_idle_secs` (default 300) with new events past `distilled_through_seq`, or session ended. One job at a time; daily budget `memory.daily_distill_limit` (default 40 jobs).
+Trigger: session `idle` for `memory.distill_idle_secs` (default 300) with new events past `distilled_through_seq`, or session ended (process exit or `SessionEnd` hook enqueue immediately; a scheduler scans every 30 s). Only sessions active in the last 7 days are auto-distilled, so freshly ingested old history does not eat the budget. One job at a time (in-process queue, deduplicated per session); daily budget `memory.daily_distill_limit` (default 40 jobs, counted per UTC day in the `settings` key `memory.distill_budget`; manual `POST /api/sessions/:id/distill` counts too and answers 409 `nothing_to_distill` when the session has no events).
 
-Summarizer backends (config `memory.summarizer`, default `auto`): `claude` (`claude -p --model haiku --output-format json`), `codex` (`codex exec --json`), `ollama` (HTTP `localhost:11434`, model configurable), `none`. `auto` picks the first available in that order. The summarizer process runs in an empty scratch dir with `BLIRP_DISTILLING=1` (blirp hooks exit immediately when set) and `--strict-mcp-config`/equivalent so repo hooks and MCP servers do not run.
+Summarizer backends (config `memory.summarizer`, default `auto`), all with a 180 s timeout that kills the whole process tree:
+- `claude`: `claude -p --model haiku --output-format json --safe-mode --strict-mcp-config --no-session-persistence --tools ""`, prompt on stdin. `--safe-mode` disables hooks, plugins, CLAUDE.md and MCP; `--no-session-persistence` keeps the run out of `~/.claude/projects` (so ingest never sees it); `--tools ""` removes all tools. Reply: the `result` field of the JSON envelope (`is_error` -> failure).
+- `codex`: `codex exec --json --ephemeral --skip-git-repo-check --sandbox read-only --disable hooks -c mcp_servers={} --output-last-message <tmp>`, prompt on stdin; the reply is the last-message file, else the last `item.completed` `agent_message` of the JSONL stream (`error`/`turn.failed` events are reported).
+- `ollama`: `POST $OLLAMA_HOST|http://127.0.0.1:11434/api/chat` with `format: "json"`, `stream: false`, model `memory.ollama_model`.
+- `none`: never distill.
 
-Input: redacted, compacted transcript (user prompts verbatim; assistant text; tool calls as one-line `tool(args preview)`; tool results truncated), capped at `memory.distill_max_chars` (default 60 000, keep head 20% + tail 80%), plus the current brief and active records of the project.
+`auto` picks the first available: claude on PATH, codex on PATH, ollama answering `/api/tags`. Every summarizer runs in an empty temp dir with `BLIRP_DISTILLING=1` (blirp hooks exit immediately when set) and without `BLIRP_SESSION_ID`/`CLAUDECODE`-style env.
 
-Output (strict JSON, validated with serde; one retry on invalid, then mark failed):
+Input: redacted, compacted transcript (user prompts verbatim; assistant text; tool calls as one-line `TOOL: ...` (<= 300 chars); tool results `RESULT: ...` (<= 400 chars); file edits and system lines one-line), capped at `memory.distill_max_chars` (default 60 000, keep head 20% + tail 80% around a `[... N characters omitted ...]` marker), plus the current brief and active records (with ids) of the project.
+
+Output (strict JSON, `deny_unknown_fields`, validated; one retry with the validation error on invalid output, then the attempt fails):
 ```json
 { "title": "short session title",
   "summary": "3-6 sentences",
@@ -242,46 +250,68 @@ Output (strict JSON, validated with serde; one retry on invalid, then mark faile
   "files": ["relative/paths"],
   "brief_md": "full replacement brief, <= 1500 tokens" }
 ```
-Apply: session title (if unset) + summary_json; new records; resolve records; brief: if `memory.brief_mode = auto` (default) write new version to `briefs` (history kept, user can revert); if `review`, create a `suggestion` instead. Records edited by the user (`updated_by = user`) are never modified by the distiller, only suggested.
+Validation: title and summary non-empty (title <= 200 chars), item titles non-empty, <= 20 items per list, unknown record ids dropped, `brief_md` <= 12 000 chars (`""` = no change). The JSON object may be wrapped in prose or code fences. Backend failures (process error, timeout, auth) are not retried.
+
+Apply (`Store::apply_distill`, one transaction): session title (if unset) + `summary_json` (`SessionSummary`: title, summary, decisions, open_threads, gotchas, resolved_record_ids, files, backend, distilled_at, through_seq, error) + `distilled_through_seq`; new records (`updated_by = distiller`, `source_session_id` set; skipped when an active record of the same kind and title exists); resolve records; brief: if `memory.brief_mode = auto` (default) write a new version (history kept, user can revert); if `review`, create a `suggestion` instead. Records edited by the user (`updated_by = user`) are never modified by the distiller; resolving one creates a record suggestion. A failed attempt keeps any earlier summary and sets `summary_json.error = {message, at, through_seq}`; the session is retried only after newer events arrive (or on a manual distill).
 
 ### Inject
-`render_injection(project, agent, session?) -> String` (markdown, hard cap `memory.inject_max_chars`, default 8000):
+`render_injection(project, exclude_session?) -> String` (markdown, hard cap `memory.inject_max_chars`, default 8000):
 ```
 # blirp memory: <project name>
-<brief>
-## Open threads      (active open_thread records, pinned first, max 10)
+<brief, at most half the budget; "_No project brief yet._" when empty>
+## Open threads      (active open_thread records, pinned first, then most recently updated, max 10)
 ## Recent decisions  (max 8)
 ## Gotchas           (max 5)
-## Recent sessions   (last 3: date, agent, machine, title, summary)
+## Recent sessions   (last 3 titled or summarized, excluding the session being started: date, agent, machine, title: summary)
 Tools: search older history with the blirp MCP tools (mem_search, mem_session, mem_recent, mem_record) or `blirp mem search "<query>"`.
 ```
-The section order is stable and content changes only when memory changes, so agent prompt caches keep hitting.
+Records sort by pinned, then `updated_at` desc, then id; list items are one line (<= 400 chars); empty sections are omitted; sections are filled in the order above until the budget is used, and the Tools line is always kept. Dates are UTC `YYYY-MM-DD`. Nothing depends on the current time, so the text changes only when memory changes and agent prompt caches keep hitting. At launch the rendered text (plus a handoff pack, if any) is written to `~/.blirp/launch/<session>/memory.md`; `GET /api/inject?session=` returns exactly that file, `?cwd=` renders for the folder's project.
 
-| Agent | Session-start injection | On-demand |
+Per-agent integration (launch-time never edits user files; "verified" = checked against the installed CLI on the reference machine, "docs" = from official docs only):
+
+| Agent | Session-start injection (launch) | On-demand | Status source | Verified |
+|---|---|---|---|---|
+| claude | `--settings launch/settings.json` with blirp hooks (SessionStart matcher `startup\|resume\|clear\|compact`, UserPromptSubmit, Stop, Notification, SessionEnd, PreCompact); SessionStart -> `hookSpecificOutput.additionalContext`. `--settings` hooks merge with the user's own hooks (both fire). | MCP via `--mcp-config launch/mcp.json` | hooks | verified (2.1.283) |
+| codex | `-c developer_instructions=...` (user's own value kept first) | MCP via `-c mcp_servers.blirp.*` | PTY heuristics (global hooks when installed and trusted) | verified (0.153.2, `codex debug prompt-input`) |
+| opencode | `OPENCODE_CONFIG_CONTENT` merged with any existing value: `instructions += [memory.md]` (arrays concatenate with other config layers), `mcp.blirp` local server | MCP | heuristics | verified (1.18.25, `opencode debug config`) |
+| gemini | `GEMINI_CLI_SYSTEM_DEFAULTS_PATH=launch/gemini-system-defaults.json` (copy of any existing system defaults + blirp hooks + `mcpServers.blirp`; lowest settings layer, user settings still win) | MCP | hooks | docs (not installed) |
+| cursor | none at launch (no per-launch config override); `BLIRP_MEMORY_FILE` env; global `sessionStart` hook `additional_context` when installed | MCP when installed globally | global hooks | docs (not installed) |
+| pi | `--append-system-prompt <memory.md>` | CLI | heuristics | docs (not installed) |
+| amp | `--settings-file launch/amp-settings.json` (copy of the user's settings with `amp.systemPrompt` += memory and `amp.mcpServers.blirp`; unreadable user settings -> no injection) | MCP | heuristics | docs (not installed) |
+| aider | `--read <memory.md>` | none | heuristics | docs (not installed) |
+| dsh | none documented; `BLIRP_MEMORY_FILE` env only | none | heuristics | docs (no mechanism found) |
+| shell, custom | `BLIRP_MEMORY_FILE` env only | CLI | heuristics | - |
+
+`GET /api/agents` reports per agent `integration: {global_hooks, mcp: "installed"|"not_installed"|"unsupported", inject: "hook"|"instructions"|"flag"|"none", detail}`.
+
+### Hooks (`blirp hook <agent> <event> [--global]`)
+Reads the agent's hook JSON from stdin (at most 400 ms), exits immediately when `BLIRP_DISTILLING=1`, POSTs `{blirp_session_id, cwd, global, payload}` to `/api/hooks/:agent/:event` using runtime.json (1.5 s cap), prints the agent-specific output and always exits 0; a watchdog ends the process at 1.8 s. Output: claude/codex/gemini SessionStart `{"hookSpecificOutput":{"hookEventName":"SessionStart","additionalContext":...}}`; gemini other events `{}`; cursor `sessionStart` `{"additional_context":...}`, `beforeSubmitPrompt` `{"continue":true}`, others `{}`. When the daemon is down, SessionStart falls back to `launch/<BLIRP_SESSION_ID>/memory.md`, else renders from the database opened read-only for the payload's folder.
+
+Daemon side: events are normalized (claude/codex `UserPromptSubmit`, gemini `BeforeAgent`/`AfterAgent`/`PreCompress`, cursor camelCase names). The session is found by `BLIRP_SESSION_ID`, else `(agent, agent_session_id)`; unknown sessions with an id and a folder become new `external` sessions (project resolved from the folder). Hooks link `agent_session_id` and `transcript_path` and hand the transcript path to the ingest subsystem (`IngestTrigger::transcript_hint`, a no-op until ingest installs one). Status: PromptSubmit -> working, Stop -> idle, Notification -> waiting, SessionEnd -> completed (not for `reason = clear`, and not while blirp still owns a live PTY; the exit sets the final status), SessionStart makes a resumed external session live again. SessionEnd enqueues a distill. SessionStart returns the launch `memory.md` on a blirp session's first start (it may carry a handoff pack), else a fresh render. A `--global` entry firing inside a blirp launch that has its own hooks (claude, gemini) is ignored; for codex it updates status but injects nothing (developer instructions already did).
+
+### Global integration (`blirp hooks install|uninstall|status [--agent X]`, `POST /api/agents/:id/hooks/install|uninstall`)
+Opt-in, for sessions started outside blirp. Entries are marker-identified (hook commands `<blirp> hook <agent> <event> --global`; MCP server named `blirp` running `blirp mcp`), idempotent, preserve every foreign entry (e.g. other-hooks, other-memory), back the original file up once to `<file>.blirp-backup`, and replace files atomically (temp + rename); JSON key order is preserved and TOML is edited with `toml_edit` (comments and layout kept). Files with comments (JSONC) or invalid syntax are never rewritten; the command reports it instead. `uninstall` removes exactly those entries.
+
+| Agent | Hooks | MCP |
 |---|---|---|
-| claude | SessionStart hook -> `hookSpecificOutput.additionalContext` (sources startup/resume/clear/compact) | MCP |
-| codex | SessionStart hook if supported by installed version, else instructions override via `-c` | MCP |
-| gemini | SessionStart hook additionalContext | MCP |
-| cursor | `sessionStart` hook `additional_context` | MCP |
-| opencode | `instructions` entry pointing at `BLIRP_MEMORY_FILE` via `OPENCODE_CONFIG_CONTENT`/config override | MCP |
-| pi | `--append-system-prompt`-equivalent / APPEND_SYSTEM.md in launch dir via `PI_CODING_AGENT_DIR` overlay if supported; else extension | CLI |
-| amp | AGENTS.md is not touched; pass memory file per its CLI options if available | MCP |
-| aider | `--read <memory.md>` | none |
-| dsh | AGENTS-style instructions if supported; else none | MCP |
-
-Launch-time integration (inside blirp) never edits user files. Global integration for sessions started outside blirp is opt-in (`blirp hooks install`, onboarding checkbox): it writes clearly marked entries (`"command": "blirp hook ..."`) into the agent's user config, is idempotent, and `blirp hooks uninstall` removes exactly those entries. Existing hooks (e.g. other-memory) are preserved.
+| claude | `$CLAUDE_CONFIG_DIR\|~/.claude/settings.json` (same events as launch) | `~/.claude.json` (`$CLAUDE_CONFIG_DIR/.claude.json`) `mcpServers.blirp` |
+| codex | `$CODEX_HOME\|~/.codex/hooks.json` (SessionStart, UserPromptSubmit, Stop, PreCompact, SessionEnd); Codex requires trusting them once via `/hooks` | `config.toml` `[mcp_servers.blirp]` |
+| gemini | `~/.gemini/settings.json` (SessionStart, BeforeAgent, AfterAgent, Notification, SessionEnd, PreCompress) | same file, `mcpServers.blirp` |
+| cursor | `~/.cursor/hooks.json` (version 1; sessionStart, beforeSubmitPrompt, stop, sessionEnd, preCompact) | `~/.cursor/mcp.json` |
+| opencode | unsupported (no shell hooks) | `$XDG_CONFIG_HOME\|~/.config/opencode/opencode.json` `mcp.blirp` |
+| others | unsupported | unsupported |
 
 ### Handoff pack (continue in / fork)
-Brief + the source session's summary + its last N (default 12) user/assistant turns + files touched + open threads, capped at 12 000 chars, delivered as the new session's injected context plus an initial prompt "Continue the work described in the blirp handoff above."
+Header (source title, agent, date, folder) + the source session's summary + the project brief + its last N (default 12) user/assistant turns (each <= 1 500 chars) + files touched (distilled `files` plus `file_edit` events) + open threads, capped at 12 000 chars (oldest turns are dropped first, then the brief is cut). It is appended to the new session's injected memory (`memory.md`) and saved as `launch/<id>/handoff.md`; the initial prompt (unless the request gives one) is "Continue the work described in the blirp handoff above.", or for agents without injection "Read the blirp handoff in <handoff.md> and continue the work described there." (none for `shell`).
 
 ### MCP server (`blirp mcp`, stdio; also Streamable HTTP at `/mcp` on the daemon)
-Built with the official Rust SDK `rmcp`. Tools:
-- `mem_search {query, project?: "current"|"all"|id, kinds?, limit?}` -> ranked hits (events + records) with session id, date, agent, snippet.
-- `mem_session {session_id, from_seq?, limit?}` -> session summary + events page.
+Built with the official Rust SDK `rmcp` (3.4). Tools (replies are plain text written for models):
+- `mem_search {query, project?: "current"|"all"|id, kinds?: ["record"|"event"], limit?}` -> ranked hits (records and transcript events) with session id, seq, date, agent and snippet (matches in `**bold**`).
+- `mem_session {session_id, from_seq?, limit?}` -> session header, summary, files and a page of events (`from_seq` pagination hint).
 - `mem_recent {project?, limit?}` -> recent sessions with summaries.
-- `mem_brief {project?}` -> current brief + records.
-- `mem_record {kind, title, body}` -> create a record in the current project (via daemon API).
-Current project = resolved from `BLIRP_PROJECT_ID` env or the MCP client's cwd.
+- `mem_brief {project?}` -> current brief + all active records grouped by kind.
+- `mem_record {kind, title, body}` -> create a record in the current project (stdio: via the daemon API; errors clearly when the daemon is down).
+Current project = `BLIRP_PROJECT_ID` env, else the registered project containing the server's working directory (read-only lookup, nothing is registered), else (HTTP) the `?project=` query parameter of the `/mcp` URL. stdio opens the database read-only. `/mcp` sits behind the normal bearer/cookie auth and only accepts loopback `Host` headers.
 
 ## 10. Sync (`blirp-sync`)
 
@@ -324,13 +354,14 @@ GET  /api/projects/:id/files?path=       directory listing (read-only) ; GET ...
 GET  /api/sessions?project=&status=&agent=&machine=&q=&cursor=
 POST /api/sessions                       launch (§7)
 GET  /api/sessions/:id                   detail incl. summary; GET .../events?after=&limit=
-POST /api/sessions/:id/stop | /resume | /distill
+POST /api/sessions/:id/stop | /resume | /distill   (distill: 202 queued, 409 nothing_to_distill)
 PATCH /api/sessions/:id                  {title}
 GET  /api/terminals/:id/ws               terminal attach (§6)
 GET  /api/search?q=&project=&kind=       FTS over events + records
 GET  /api/agents                         detected agents + versions + integration status
+POST /api/agents/:id/hooks/install|uninstall   global integration (§9); returns the AgentInfo
 POST /api/hooks/:agent/:event            hook ingress (from `blirp hook`)
-GET  /api/inject?session=&cwd=&agent=    rendered injection
+GET  /api/inject?session=&cwd=&agent=    {markdown}: the session's launch memory.md, else a render for the session's / folder's project
 GET  /api/settings ; PATCH /api/settings  {config: Config, values: {key: json}}; PATCH {config?: full Config
                                          (validated, written to config.toml), values?: {key: json|null}}
 POST /api/sync/hub/enable ; POST /api/sync/invite ; POST /api/sync/join {invite, code} ; GET /api/sync/status
@@ -340,7 +371,7 @@ GET  /mcp                                MCP Streamable HTTP
 GET  /*                                  embedded SPA
 ```
 
-Request/response DTOs are defined in `blirp-core::model` and exported to `web/src/lib/api/types.gen.ts` (`cargo test -p blirp-core export_bindings`). Endpoints owned by later phases (`/api/hooks/*`, `/api/inject`, `/api/sync/*`, `/api/devices/*`, `DELETE /api/machines/:id`, `POST /api/sessions/:id/distill`, `/mcp`, and `continue_from`/`machine` on launch) answer 501 `not_implemented` until implemented. `/api/events/ws` pushes JSON `ServerEvent` frames: `session_created`, `session_updated`, `project_updated`, `memory_updated {project_id, part}`, and `resync` when the client fell behind and must refetch.
+Request/response DTOs are defined in `blirp-core::model` and exported to `web/src/lib/api/types.gen.ts` (`cargo test -p blirp-core export_bindings`). Endpoints owned by later phases (`/api/sync/*`, `/api/devices/*`, `DELETE /api/machines/:id`, and `machine` on launch) answer 501 `not_implemented` until implemented. `/api/events/ws` pushes JSON `ServerEvent` frames: `session_created`, `session_updated`, `project_updated`, `memory_updated {project_id, part}`, and `resync` when the client fell behind and must refetch.
 
 ## 12. Config (`~/.blirp/config.toml`, validated at startup; unknown keys are an error with a clear message)
 
