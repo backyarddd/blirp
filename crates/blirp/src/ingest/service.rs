@@ -189,12 +189,13 @@ async fn run(
                 let started = std::time::Instant::now();
                 let stats = e.run(&work);
                 let ingested: usize = stats.values().map(|s| s.ingested).sum();
-                if ingested > 0 {
-                    tracing::info!(
-                        sources = ingested,
-                        ms = started.elapsed().as_millis() as u64,
-                        "ingested transcripts"
-                    );
+                let ms = started.elapsed().as_millis() as u64;
+                // Full scans (start, 5 min rescan) are news; passes for
+                // changed files run about once a second while an agent works.
+                if ingested > 0 && !work.full.is_empty() {
+                    tracing::info!(sources = ingested, ms, "ingested transcripts");
+                } else if ingested > 0 {
+                    tracing::debug!(sources = ingested, ms, "ingested transcripts");
                 }
                 let _ = done.send(());
             });
