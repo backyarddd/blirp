@@ -4,6 +4,7 @@ mod lifecycle;
 mod mem;
 pub mod service;
 mod sync;
+mod worktrees;
 
 use anyhow::{Context as _, bail};
 use blirp_core::model::{Health, SessionsPage};
@@ -94,6 +95,9 @@ enum Command {
         #[command(subcommand)]
         action: sync::DevicesAction,
     },
+    /// Git worktrees blirp created for sessions.
+    #[command(subcommand)]
+    Worktrees(worktrees::WorktreesCommand),
     /// Install or remove autostart of the daemon at login.
     Service {
         #[command(subcommand)]
@@ -125,6 +129,7 @@ pub fn main() -> ExitCode {
     match cli.command {
         Command::Mem(cmd) => report(mem::run_mem(&paths, cmd)),
         Command::Logs { lines, follow } => report(lifecycle::logs(&paths, lines, follow)),
+        Command::Worktrees(worktrees::WorktreesCommand::List) => report(worktrees::list(&paths)),
         Command::Hooks(cmd) => report(mem::run_hooks(cmd)),
         command => run_async(command, paths),
     }
@@ -196,10 +201,13 @@ async fn run(cmd: Command, paths: Paths) -> anyhow::Result<ExitCode> {
         Command::Hub { action } => sync::hub(&Client::connect(&paths).await?, action).await,
         Command::Devices { action } => sync::devices(&Client::connect(&paths).await?, action).await,
         Command::Service { cmd } => service::run(&cmd, &paths).await,
+        Command::Worktrees(worktrees::WorktreesCommand::Prune) => worktrees::prune(&paths).await,
         // Dispatched synchronously in `main` before the runtime starts.
-        Command::Hook { .. } | Command::Mem(_) | Command::Hooks(_) | Command::Logs { .. } => {
-            Ok(ExitCode::from(2))
-        }
+        Command::Hook { .. }
+        | Command::Mem(_)
+        | Command::Hooks(_)
+        | Command::Logs { .. }
+        | Command::Worktrees(worktrees::WorktreesCommand::List) => Ok(ExitCode::from(2)),
     }
 }
 

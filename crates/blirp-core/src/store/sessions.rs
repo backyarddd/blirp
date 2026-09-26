@@ -166,6 +166,19 @@ impl Store {
         })
     }
 
+    /// This machine's sessions that have a worktree.
+    pub fn sessions_with_worktree(&self, machine_id: &str) -> Result<Vec<Session>> {
+        self.read(|c| {
+            all(
+                c,
+                "SELECT * FROM sessions WHERE machine_id = ?1 AND worktree IS NOT NULL
+                 ORDER BY started_at DESC, id DESC",
+                params![machine_id],
+                session_row,
+            )
+        })
+    }
+
     /// Delete a session that is not running (see [`Change::DeleteSession`]).
     /// Returns the deleted session.
     pub fn delete_session(&self, id: &str) -> Result<Session> {

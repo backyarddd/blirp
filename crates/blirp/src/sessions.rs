@@ -197,7 +197,12 @@ fn prepare(state: &SharedState, req: &LaunchSession) -> ApiResult<Prepared> {
     })?;
     // Keep the same subfolder inside the new worktree.
     let sub = cwd.strip_prefix(&repo.toplevel).unwrap_or(Path::new(""));
-    let session_cwd = wt.join(sub);
+    // `join("")` would add a trailing separator.
+    let session_cwd = if sub.as_os_str().is_empty() {
+        wt.clone()
+    } else {
+        wt.join(sub)
+    };
     Ok(Prepared {
         project_id,
         cwd: if session_cwd.is_dir() {
@@ -579,6 +584,85 @@ async fn mark_failed(state: &SharedState, id: &str) -> ApiResult<()> {
     .await?;
     state.emit(ServerEvent::SessionUpdated { session: failed });
     Ok(())
+}
+
+/// `POST /api/sessions/:id/worktree/remove` (blocking): remove the session's
+/// git worktree once the session has ended. Uncommitted changes or untracked
+/// files make it refuse (409 `worktree_dirty`) unless `force`; the branch is
+/// kept either way. Only folders under `BLIRP_HOME/worktrees` are touched,
+/// whatever a (replicated) row says.
+pub fn remove_worktree(state: &SharedState, id: &str, force: bool) -> ApiResult<Session> {
+    let session = state
+        .store
+        .get_session(id)?
+        .ok_or_else(|| ApiError::not_found("session"))?;
+    if session.machine_id != state.machine.id {
+        return Err(ApiError::bad_request(
+            "the worktree is on another machine; remove it there",
+        ));
+    }
+    let wt = session
+        .worktree
+        .clone()
+        .ok_or_else(|| ApiError::conflict("no_worktree", "the session has no worktree"))?;
+    if session.status.is_live() || state.terminals.get(id).is_some() {
+        return Err(ApiError::conflict(
+            "session_live",
+            "the session is running; stop it first",
+        ));
+    }
+    let wt = PathBuf::from(wt);
+    let root = dunce::canonicalize(state.paths.worktrees_dir())
+        .map_err(|e| ApiError::internal("locating the worktrees folder", e))?;
+    if wt.is_dir() {
+        let wt =
+            dunce::canonicalize(&wt).map_err(|e| ApiError::internal("locating the worktree", e))?;
+        if !wt.starts_with(&root) || wt == root {
+            return Err(ApiError::bad_request(format!(
+                "{} is not a blirp worktree",
+                wt.display()
+            )));
+        }
+        let info = git::repo_info(&wt)
+            .map_err(|e| ApiError::internal("inspecting the worktree", e))?
+            .ok_or_else(|| ApiError::conflict("not_git", "the worktree is not a git work tree"))?;
+        if !force {
+            let changes = git::status(&wt)
+                .map_err(|e| ApiError::internal("reading worktree status", e))?
+                .entries
+                .len();
+            if changes > 0 {
+                return Err(ApiError::conflict(
+                    "worktree_dirty",
+                    format!(
+                        "the worktree has {changes} uncommitted change(s); commit them or remove with force"
+                    ),
+                ));
+            }
+        }
+        git::worktree_remove(&info.main_root, &wt, force).map_err(|e| {
+            ApiError::new(
+                StatusCode::CONFLICT,
+                "worktree_remove_failed",
+                format!("git worktree remove failed: {e}"),
+            )
+        })?;
+    } else {
+        // Already gone: let git forget it.
+        for repo in state
+            .store
+            .local_roots(&session.project_id, &state.machine.id)?
+        {
+            if let Err(e) = git::worktree_prune(&repo) {
+                tracing::debug!(repo = %repo.display(), error = %e, "git worktree prune failed");
+            }
+        }
+    }
+    let updated = state.store.modify_session(id, |s| s.worktree = None)?;
+    state.emit(ServerEvent::SessionUpdated {
+        session: updated.clone(),
+    });
+    Ok(updated)
 }
 
 /// Type `prompt` once the agent's output has settled, then press Enter.

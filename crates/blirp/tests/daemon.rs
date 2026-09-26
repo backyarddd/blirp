@@ -649,6 +649,7 @@ const MUTATING_ROUTES: &[(&str, &str, Need)] = &[
     ("POST", "/api/sessions/s1/open", Need::Admin),
     ("POST", "/api/sessions", Need::Control),
     ("DELETE", "/api/sessions/s1", Need::Control),
+    ("POST", "/api/sessions/s1/worktree/remove", Need::Control),
     ("PATCH", "/api/sessions/s1", Need::Control),
     ("POST", "/api/sessions/s1/stop", Need::Control),
     ("POST", "/api/sessions/s1/resume", Need::Control),
@@ -877,5 +878,83 @@ async fn terminal_socket_protocol() {
     let close = close.expect("close frame without code");
     assert_eq!(u16::from(close.code), 1000);
     assert_eq!(close.reason.as_str(), "exited");
+    h.daemon.shutdown().await.unwrap();
+}
+
+fn git(dir: &std::path::Path, args: &[&str]) {
+    let st = std::process::Command::new("git")
+        .arg("-C")
+        .arg(dir)
+        .args([
+            "-c",
+            "user.name=t",
+            "-c",
+            "user.email=t@t",
+            "-c",
+            "init.defaultBranch=main",
+        ])
+        .args(args)
+        .output()
+        .unwrap();
+    assert!(st.status.success(), "git {args:?}: {st:?}");
+}
+
+// A session's worktree is removed on request once the session ended, never
+// with uncommitted work unless forced.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn worktrees_are_removed_only_when_clean_or_forced() {
+    let h = Harness::start().await;
+    let repo = h._home.path().join("repo");
+    std::fs::create_dir(&repo).unwrap();
+    git(&repo, &["init"]);
+    std::fs::write(repo.join("a.txt"), "a\n").unwrap();
+    git(&repo, &["add", "."]);
+    git(&repo, &["commit", "-m", "init"]);
+    let r = h
+        .send(
+            reqwest::Method::POST,
+            "/api/sessions",
+            json!({"cwd": repo, "agent": "shell", "worktree": true}),
+        )
+        .await;
+    assert_eq!(r.status(), 201, "{:?}", r.text().await);
+    let s: Session = r.json().await.unwrap();
+    let wt = std::path::PathBuf::from(s.worktree.clone().expect("worktree"));
+    assert!(wt.join("a.txt").is_file());
+    let remove = format!("/api/sessions/{}/worktree/remove", s.id);
+    let code = |r: reqwest::Response| async move {
+        let status = r.status().as_u16();
+        (
+            status,
+            r.json::<ErrorBody>().await.map(|e| e.error.code).ok(),
+        )
+    };
+
+    let r = h.send(reqwest::Method::POST, &remove, json!({})).await;
+    assert_eq!(code(r).await, (409, Some("session_live".into())));
+    let stop = format!("/api/sessions/{}/stop", s.id);
+    assert_eq!(
+        h.send(reqwest::Method::POST, &stop, json!({}))
+            .await
+            .status(),
+        202
+    );
+    wait_status(&h, &s.id, SessionStatus::Completed).await;
+    wait_no_terminal(&h, &s.id).await;
+
+    std::fs::write(wt.join("scratch.txt"), "work\n").unwrap();
+    let r = h.send(reqwest::Method::POST, &remove, json!({})).await;
+    assert_eq!(code(r).await, (409, Some("worktree_dirty".into())));
+    assert!(wt.is_dir());
+
+    let r = h
+        .send(reqwest::Method::POST, &remove, json!({"force": true}))
+        .await;
+    assert_eq!(r.status(), 200, "{:?}", r.text().await);
+    let s: Session = h.get(&format!("/api/sessions/{}", s.id)).await;
+    assert_eq!(s.worktree, None);
+    assert!(!wt.exists());
+    let r = h.send(reqwest::Method::POST, &remove, json!({})).await;
+    assert_eq!(code(r).await, (409, Some("no_worktree".into())));
     h.daemon.shutdown().await.unwrap();
 }

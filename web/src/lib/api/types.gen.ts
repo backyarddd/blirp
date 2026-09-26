@@ -293,6 +293,15 @@ export type PatchSession = {
 title: string | null, };
 
 /**
+ * `POST /api/sessions/:id/worktree/remove`.
+ */
+export type RemoveWorktree = { 
+/**
+ * Also discard uncommitted changes and untracked files.
+ */
+force?: boolean, };
+
+/**
  * Where `POST /api/sessions/:id/open` shows the session folder.
  */
 export type OpenTarget = "folder" | "editor";

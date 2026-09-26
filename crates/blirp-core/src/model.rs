@@ -674,6 +674,16 @@ pub struct PatchSession {
     pub title: Option<String>,
 }
 
+/// `POST /api/sessions/:id/worktree/remove`.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, TS)]
+#[serde(deny_unknown_fields)]
+pub struct RemoveWorktree {
+    /// Also discard uncommitted changes and untracked files.
+    #[serde(default)]
+    #[ts(optional)]
+    pub force: Option<bool>,
+}
+
 /// Where `POST /api/sessions/:id/open` shows the session folder.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS)]
 #[serde(rename_all = "lowercase")]
@@ -969,7 +979,7 @@ mod tests {
             PatchProject, MergeProject, ProjectMemory, PutBrief, RevertBrief, CreateRecord,
             PatchRecord, CreateWikiPage, PutWikiPage, CreateResource, PatchResource,
             GitStatusEntry, GitStatus, GitDiff, FileEntry, DirListing, FileContent, SessionsPage, SessionDetail,
-            LaunchSession, PatchSession, OpenTarget, OpenSession, EventsPage, SearchHit, SearchResults, AgentInfo,
+            LaunchSession, PatchSession, RemoveWorktree, OpenTarget, OpenSession, EventsPage, SearchHit, SearchResults, AgentInfo,
             AgentIntegration, Injection, SummaryItem, DistillFailure, SessionSummary,
             SettingsView, SettingsPatch, Capabilities, SyncStatus, SyncInvite, JoinHub, BrowserInvite, PatchDevice,
             ServerEvent, TerminalServerMessage, TerminalClientMessage,

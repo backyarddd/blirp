@@ -8,8 +8,8 @@ use axum::response::Response;
 use axum::routing::{get, post};
 use axum::{Json, Router};
 use blirp_core::model::{
-    EventsPage, LaunchSession, PatchSession, ServerEvent, Session, SessionDetail, SessionStatus,
-    SessionsPage,
+    EventsPage, LaunchSession, PatchSession, RemoveWorktree, ServerEvent, Session, SessionDetail,
+    SessionStatus, SessionsPage,
 };
 use blirp_core::store::SessionFilter;
 use serde::Deserialize;
@@ -24,6 +24,7 @@ pub fn routes() -> Router<SharedState> {
         .route("/api/sessions/{id}/events", get(events))
         .route("/api/sessions/{id}/stop", post(stop))
         .route("/api/sessions/{id}/resume", post(resume))
+        .route("/api/sessions/{id}/worktree/remove", post(remove_worktree))
 }
 
 #[derive(Deserialize)]
@@ -158,6 +159,18 @@ async fn resume(
     }
     let session = crate::sessions::resume(&s, &id).await?;
     Ok(axum::response::IntoResponse::into_response(Json(session)))
+}
+
+async fn remove_worktree(
+    State(s): State<SharedState>,
+    _: Control,
+    ApiPath(id): ApiPath<String>,
+    ApiJson(body): ApiJson<RemoveWorktree>,
+) -> ApiResult<Json<Session>> {
+    let force = body.force.unwrap_or(false);
+    let st = s.clone();
+    let session = blocking(move || crate::sessions::remove_worktree(&st, &id, force)).await?;
+    Ok(Json(session))
 }
 
 /// DELETE /api/sessions/:id: a session that is not running, with its
