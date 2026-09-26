@@ -457,7 +457,10 @@ mod tests {
         assert_redacted(concat!("sk_", "live_4eC39HqLyjWDarjtT1zdp7dc"), "stripe");
         assert_redacted(concat!("rk_", "test_4eC39HqLyjWDarjtT1zdp7dc"), "stripe");
         assert_redacted("whsec_abcdefghijklmnopqrstuvwxyz012345", "stripe");
-        assert_clean(concat!("pk_", "live_4eC39HqLyjWDarjtT1zdp7dc is publishable"));
+        assert_clean(concat!(
+            "pk_",
+            "live_4eC39HqLyjWDarjtT1zdp7dc is publishable"
+        ));
     }
 
     #[test]
@@ -511,7 +514,10 @@ mod tests {
         // Member paths are code; dotted random tokens are not.
         assert_clean("apiKey = settings.OPENAI_API_KEY_V2");
         assert_redacted(
-            concat!("bot_token = MTk4NjIyNDgzNDcxOTI1MjQ4", ".Cl2FMQ.ZnCjm1XVW7vRze4b7Cq4se7kKWs"),
+            concat!(
+                "bot_token = MTk4NjIyNDgzNDcxOTI1MjQ4",
+                ".Cl2FMQ.ZnCjm1XVW7vRze4b7Cq4se7kKWs"
+            ),
             "generic_secret",
         );
     }
