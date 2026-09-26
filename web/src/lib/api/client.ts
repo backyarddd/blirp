@@ -38,6 +38,7 @@ import type {
   SuggestionStatus,
   SyncInvite,
   SyncStatus,
+  UpdateStatus,
   WikiPage,
 } from './types.gen';
 
@@ -168,6 +169,8 @@ export interface Rooted {
 
 export const api = {
   health: () => request<Health>('GET', '/api/health'),
+  /** Asks GitHub at most once a day; updating is `blirp update` in a terminal. */
+  update: () => request<UpdateStatus>('GET', '/api/update'),
   machines: {
     list: () => request<Machine[]>('GET', '/api/machines'),
     revoke: (id: string) => request<void>('DELETE', `/api/machines/${enc(id)}`),

@@ -114,6 +114,27 @@ export type Health = { version: string, machine: Machine, role: MachineRole,
  */
 capabilities: Capabilities, };
 
+/**
+ * `GET /api/update`: whether a newer release than the daemon exists.
+ */
+export type UpdateStatus = { 
+/**
+ * This daemon's version.
+ */
+current: string, 
+/**
+ * Newest published release; null when checks are off or failed.
+ */
+latest: string | null, available: boolean, 
+/**
+ * Release notes of `latest`.
+ */
+notes_url: string | null, 
+/**
+ * `[update] check` in config.toml.
+ */
+enabled: boolean, };
+
 export type ProjectPathInfo = { machine_id: string, path: string, git_remote: string | null, 
 /**
  * Folder is inside a git work tree (only known for this machine's paths).
@@ -564,7 +585,7 @@ export type TerminalClientMessage = { "type": "input", data: string, } | { "type
 /**
  * User configuration. Every section and key is optional; missing values take defaults.
  */
-export type Config = { daemon: DaemonConfig, machine: MachineConfig, agents: AgentsConfig, sessions: SessionsConfig, memory: MemoryConfig, sync: SyncConfig, portal: PortalConfig, };
+export type Config = { daemon: DaemonConfig, machine: MachineConfig, agents: AgentsConfig, sessions: SessionsConfig, memory: MemoryConfig, sync: SyncConfig, portal: PortalConfig, update: UpdateConfig, };
 
 export type DaemonConfig = { 
 /**
@@ -611,3 +632,9 @@ hub?: string,
 relay: string, };
 
 export type PortalConfig = { lan: boolean, lan_port: number, };
+
+export type UpdateConfig = { 
+/**
+ * Ask GitHub once a day whether a newer release exists (`GET /api/update`).
+ */
+check: boolean, };

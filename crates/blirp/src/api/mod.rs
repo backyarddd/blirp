@@ -8,6 +8,7 @@ mod open;
 mod projects;
 mod sessions;
 mod terminal;
+mod update;
 
 use crate::state::SharedState;
 use axum::extract::{FromRequest, FromRequestParts, Query, Request, State};
@@ -340,6 +341,7 @@ fn build(state: SharedState, listener: Listener) -> Router {
         .merge(open::routes())
         .merge(integration::routes())
         .merge(crate::sync::routes())
+        .merge(update::routes())
         .route("/api/terminals/{id}/ws", get(terminal::attach));
     if listener == Listener::Local {
         api = api

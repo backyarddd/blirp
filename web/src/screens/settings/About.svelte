@@ -1,8 +1,18 @@
 <script lang="ts">
-  import { api } from '../../lib/api/client';
+  import { api, errorMessage } from '../../lib/api/client';
+  import type { UpdateStatus } from '../../lib/api/types.gen';
   import { app } from '../../lib/app.svelte';
 
   let stopping = $state(false);
+  let update: UpdateStatus | null = $state.raw(null);
+  let updateError: string | null = $state(null);
+
+  $effect(() => {
+    api.update().then(
+      (u) => (update = u),
+      (e: unknown) => (updateError = errorMessage(e)),
+    );
+  });
 
   async function shutdown(): Promise<void> {
     if (!confirm('Stop the blirp daemon? Every running session on this machine ends, and this page disconnects.')) return;
@@ -31,7 +41,31 @@
     <dt>Sync role</dt>
     <dd>{app.health?.role ?? 'unknown'}</dd>
   </dl>
-  <p class="hint">The desktop app checks for updates on launch. From a terminal, <code>blirp doctor</code> reports the health of every integration.</p>
+  <p class="hint">From a terminal, <code>blirp doctor</code> reports the health of every integration.</p>
+</section>
+
+<section class="card panel-pad" aria-live="polite">
+  <h2 class="h">Updates</h2>
+  {#if updateError}
+    <p class="hint">Could not ask the daemon about updates: {updateError}</p>
+  {:else if !update}
+    <p class="hint">Checking for updates…</p>
+  {:else if !update.enabled}
+    <p class="hint">Update checks are off (<code>[update] check = false</code> in config.toml).</p>
+  {:else if update.available}
+    <p>
+      <strong>blirp {update.latest} is available</strong> (this machine runs {update.current}).
+      {#if update.notes_url}<a href={update.notes_url} target="_blank" rel="noreferrer">Release notes</a>{/if}
+    </p>
+    <p class="hint">
+      Run <code>blirp update</code> in a terminal. It stops the daemon (running sessions end), replaces blirp and the desktop app, and starts
+      the daemon again.
+    </p>
+  {:else if update.latest}
+    <p class="hint">blirp {update.current} is up to date.</p>
+  {:else}
+    <p class="hint">Could not reach GitHub to check for updates; the daemon tries again within an hour.</p>
+  {/if}
 </section>
 
 {#if app.local}

@@ -31,6 +31,7 @@ pub struct Config {
     pub memory: MemoryConfig,
     pub sync: SyncConfig,
     pub portal: PortalConfig,
+    pub update: UpdateConfig,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
@@ -187,6 +188,19 @@ impl Default for PortalConfig {
             lan: false,
             lan_port: 47771,
         }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
+#[serde(default, deny_unknown_fields)]
+pub struct UpdateConfig {
+    /// Ask GitHub once a day whether a newer release exists (`GET /api/update`).
+    pub check: bool,
+}
+
+impl Default for UpdateConfig {
+    fn default() -> Self {
+        Self { check: true }
     }
 }
 
@@ -364,6 +378,8 @@ relay = "https://relay.example"
 [portal]
 lan = true
 lan_port = 9000
+[update]
+check = false
 "#,
         )
         .unwrap();
@@ -378,6 +394,8 @@ lan_port = 9000
         assert!(!off.memory.inject_enabled("claude"));
         assert_eq!(c.sync.role, MachineRole::Node);
         assert!(c.portal.lan);
+        assert!(!c.update.check);
+        assert!(Config::default().update.check);
     }
 
     #[test]
