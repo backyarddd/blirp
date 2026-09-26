@@ -53,6 +53,9 @@ env:
   # (its minisign signature by the author was verified when it was pinned).
   MINISIGN_URL: https://github.com/jedisct1/minisign/releases/download/0.12/minisign-0.12-linux.tar.gz
   MINISIGN_SHA256: 9a599b48ba6eb7b1e80f12f36b94ceca7c00b7a5173c95c3efc88d9822957e73
+  # cargo-about renders the Rust licenses for THIRD_PARTY_NOTICES (same pin in ci.yml).
+  CARGO_ABOUT_URL: https://github.com/EmbarkStudios/cargo-about/releases/download/0.9.2/cargo-about-0.9.2-x86_64-unknown-linux-musl.tar.gz
+  CARGO_ABOUT_SHA256: 9099a59e820c38a68b9d65f300662a567d56562f9a10f6aa4c7e86c17c2566af
 
 jobs:
   draft:
@@ -88,9 +91,45 @@ jobs:
           fi
           echo "id=$(gh release view "$GITHUB_REF_NAME" --json databaseId --jq .databaseId)" >> "$GITHUB_OUTPUT"
 
+  # THIRD_PARTY_NOTICES goes into every archive and installer.
+  notices:
+    name: Third-party notices
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+      - name: Rust toolchain from rust-toolchain.toml
+        run: |
+          channel=$(sed -n 's/^channel = "\([^"]*\)".*/\1/p' rust-toolchain.toml)
+          rustup toolchain install "$channel" --profile minimal
+      - name: Install cargo-about
+        run: |
+          curl -fsSL --retry 3 -o "$RUNNER_TEMP/cargo-about.tar.gz" "$CARGO_ABOUT_URL"
+          echo "$CARGO_ABOUT_SHA256  $RUNNER_TEMP/cargo-about.tar.gz" | sha256sum -c -
+          mkdir "$RUNNER_TEMP/cargo-about"
+          tar -xzf "$RUNNER_TEMP/cargo-about.tar.gz" -C "$RUNNER_TEMP/cargo-about" --strip-components 1
+          echo "$RUNNER_TEMP/cargo-about" >> "$GITHUB_PATH"
+      - uses: pnpm/action-setup@fc06bc1257f339d1d5d8b3a19a8cae5388b55320 # v4.4.0
+        with:
+          version: ${{ env.PNPM_VERSION }}
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: 22
+      - run: |
+          pnpm -C web install --frozen-lockfile --ignore-scripts
+          pnpm -C app install --frozen-lockfile --ignore-scripts
+      - run: sh scripts/third-party-notices.sh THIRD_PARTY_NOTICES
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: third-party-notices
+          path: THIRD_PARTY_NOTICES
+          if-no-files-found: error
+
   cli:
     name: CLI ${{ matrix.target }}
-    needs: draft
+    needs: [draft, notices]
     strategy:
       fail-fast: false
       matrix:
@@ -109,6 +148,10 @@ jobs:
       TARGET: ${{ matrix.target }}
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: third-party-notices
+          path: app/src-tauri/binaries
       # No caches (cargo or pnpm) here: release assets are built from a clean tree.
       - name: Rust toolchain from rust-toolchain.toml
         shell: bash
@@ -206,7 +249,7 @@ jobs:
           name="blirp-$VERSION-$TARGET"
           mkdir -p "dist/$name"
           cp "app/src-tauri/binaries/blirp-$TARGET" "dist/$name/blirp"
-          cp LICENSE README.md "dist/$name/"
+          cp LICENSE README.md app/src-tauri/binaries/THIRD_PARTY_NOTICES "dist/$name/"
           cd dist
           tar -czf "$name.tar.gz" "$name"
           shasum -a 256 "$name.tar.gz" > "$name.tar.gz.sha256"
@@ -221,7 +264,7 @@ jobs:
           Copy-Item "app/src-tauri/binaries/blirp-$env:TARGET.exe" "$dir/blirp.exe"
           Copy-Item app/src-tauri/binaries/conpty/conpty.dll "$dir/"
           Copy-Item app/src-tauri/binaries/conpty/x64/OpenConsole.exe "$dir/x64/"
-          Copy-Item LICENSE, README.md "$dir/"
+          Copy-Item LICENSE, README.md, app/src-tauri/binaries/THIRD_PARTY_NOTICES "$dir/"
           Compress-Archive -Path $dir -DestinationPath "dist/$name.zip"
           $hash = (Get-FileHash "dist/$name.zip" -Algorithm SHA256).Hash.ToLower()
           Set-Content -Path "dist/$name.zip.sha256" -Value "$hash  $name.zip" -Encoding ascii
@@ -243,7 +286,7 @@ jobs:
 
   desktop:
     name: Desktop ${{ matrix.target }}
-    needs: draft
+    needs: [draft, notices]
     strategy:
       fail-fast: false
       matrix:
@@ -262,6 +305,10 @@ jobs:
       TARGET: ${{ matrix.target }}
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: third-party-notices
+          path: app/src-tauri/binaries
 
       - name: Install Linux build dependencies
         if: runner.os == 'Linux'
@@ -399,6 +446,7 @@ jobs:
           Copy-Item "app/src-tauri/binaries/blirp-$env:TARGET.exe" "$dir/blirp.exe"
           Copy-Item app/src-tauri/binaries/conpty/conpty.dll "$dir/"
           Copy-Item app/src-tauri/binaries/conpty/x64/OpenConsole.exe "$dir/x64/"
+          Copy-Item LICENSE, app/src-tauri/binaries/THIRD_PARTY_NOTICES "$dir/"
           Compress-Archive -Path $dir -DestinationPath "dist/$name.zip"
           Remove-Item -Recurse -Force $dir
           $bundle = "target/$env:TARGET/release/bundle"

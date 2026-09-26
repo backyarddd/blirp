@@ -20,7 +20,9 @@ param(
 $ErrorActionPreference = 'Stop'
 $root = Split-Path -Parent $PSScriptRoot
 
-# Pinned so bundles are reproducible; bump both together.
+# Pinned so bundles are reproducible; bump both together, and refresh
+# packaging/licenses/microsoft-terminal-* (THIRD_PARTY_NOTICES) from the
+# matching microsoft/terminal release.
 $ConPtyVersion = '1.24.260710001'
 $ConPtySha256 = '175640566A3B59C4B132070EE96C2C77E5AB7EDD2E92732A5EB3610BBF63D90E'
 

@@ -1,0 +1,28 @@
+# cargo-about: renders the Rust part of THIRD_PARTY_NOTICES for the release
+# (scripts/third-party-notices.sh). `accepted` is the same license set as
+# deny.toml; change both together.
+accepted = [
+  "Apache-2.0",
+  "Apache-2.0 WITH LLVM-exception",
+  "BSD-2-Clause",
+  "BSD-3-Clause",
+  "CC0-1.0",
+  "CDLA-Permissive-2.0",
+  "ISC",
+  "MIT",
+  "MPL-2.0",
+  "Unicode-3.0",
+  "Unlicense",
+  "Zlib",
+]
+# The release targets, as in deny.toml.
+targets = [
+  "x86_64-unknown-linux-gnu",
+  "aarch64-unknown-linux-gnu",
+  "x86_64-apple-darwin",
+  "aarch64-apple-darwin",
+  "x86_64-pc-windows-msvc",
+]
+ignore-dev-dependencies = true
+ignore-build-dependencies = true
+private = { ignore = true }

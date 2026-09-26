@@ -12,7 +12,7 @@ Read [ARCHITECTURE.md](ARCHITECTURE.md) first: it is the design contract, and a 
 | `crates/blirp/tests` | integration tests: `daemon.rs` (real daemon + PTY + WebSocket), `ingest.rs` (fixtures per agent), `memory.rs`, `sync.rs`; `fixtures/<agent>/` synthetic transcripts |
 | `web/` | Svelte 5 + Vite + TypeScript SPA (desktop UI and portal), built to `web/dist` and embedded into `blirp`; `web/e2e/` Playwright suite |
 | `app/` | Tauri 2 desktop shell (`src-tauri/`); `app/src` is only the loading/error page |
-| `scripts/` | `build-sidecar.{sh,ps1}` (stage `blirp` and ConPTY as the Tauri sidecar), `render-packaging.sh` |
+| `scripts/` | `build-sidecar.{sh,ps1}` (stage `blirp` and ConPTY as the Tauri sidecar), `render-packaging.sh`, `third-party-notices.sh` (`THIRD_PARTY_NOTICES` from `about.toml` + `packaging/about.hbs`, npm licenses and `packaging/licenses/`) |
 | `install.sh`, `install.ps1` | the one-line installers ([install.md](install.md)); `crates/blirp/src/update/` is the matching `blirp update` / `uninstall` side |
 | `packaging/` | Homebrew formula and cask, winget manifest templates, `minisign.pub` (release signing public key, built into `blirp update`) |
 | `.github/workflows/` | `ci.yml` (every push and PR), `release.yml` (tags `v*`) |
@@ -84,7 +84,7 @@ pnpm -C app install
 pnpm -C app tauri dev     # builds and uses target/debug/blirp as the daemon
 ```
 
-Debug builds of the app run `target/<profile>/blirp`; release builds need the sidecar staged by `scripts/build-sidecar.sh` (or `.ps1`) at `app/src-tauri/binaries/blirp-<target-triple>[.exe]`, plus on Windows `binaries/conpty/conpty.dll` and `binaries/conpty/x64/OpenConsole.exe` (NuGet `Microsoft.Windows.Console.ConPTY`, version and SHA-256 pinned in `build-sidecar.ps1`; bump both together).
+Debug builds of the app run `target/<profile>/blirp`; release builds need the sidecar staged by `scripts/build-sidecar.sh` (or `.ps1`) at `app/src-tauri/binaries/blirp-<target-triple>[.exe]`, plus on Windows `binaries/conpty/conpty.dll` and `binaries/conpty/x64/OpenConsole.exe` (NuGet `Microsoft.Windows.Console.ConPTY`, version and SHA-256 pinned in `build-sidecar.ps1`; bump both together, and refresh `packaging/licenses/microsoft-terminal-*` from the matching microsoft/terminal release). Every bundle also carries `binaries/THIRD_PARTY_NOTICES`: `scripts/third-party-notices.sh app/src-tauri/binaries/THIRD_PARTY_NOTICES` makes it (needs [cargo-about](https://github.com/EmbarkStudios/cargo-about) 0.9.2 and `pnpm install` in `web/` and `app/`).
 
 ```sh
 scripts/build-sidecar.sh
@@ -121,7 +121,7 @@ A new agent touches these places. Look at an existing agent with the same shape 
 1. Bump `version` in `[workspace.package]` of the root `Cargo.toml` (app, CLI and installers take it from there), run `cargo check` to update `Cargo.lock`, commit `chore(release): vX.Y.Z`.
 2. Tag and push: `git tag vX.Y.Z && git push origin vX.Y.Z`.
 3. `release.yml` creates a **draft** GitHub release with:
-   - CLI archives `blirp-<ver>-<target>.tar.gz` (Linux x64/arm64, macOS arm64/x64) and `.zip` (Windows x64, with ConPTY), each with a `.sha256`;
+   - CLI archives `blirp-<ver>-<target>.tar.gz` (Linux x64/arm64, macOS arm64/x64) and `.zip` (Windows x64, with ConPTY), each with a `.sha256`; every archive and installer includes `THIRD_PARTY_NOTICES` (made once by the `notices` job; a dependency under a license missing from `about.toml` fails it);
    - the desktop app as portable assets for the install scripts and `blirp update`: `blirp_<ver>_<aarch64|x64>.app.tar.gz`, `blirp_<ver>_<amd64|aarch64>.AppImage`, `blirp_<ver>_x64-portable.zip` (`blirp-desktop.exe`, `blirp.exe`, `conpty.dll`, `x64/OpenConsole.exe`);
    - the classic installers (NSIS + MSI, DMG, deb + rpm) as extras;
    - `SHA256SUMS.txt` over the expected assets (an explicit list in the `checksums` job; a missing or unexpected asset fails the run, so add new asset names there) and `SHA256SUMS.txt.sig`, its minisign signature (made by the `sign` job, which alone sees the key: no checkout, no token, no package installs, a minisign release binary pinned by SHA-256; the `packaging` job checks it against `packaging/minisign.pub` before uploading);

@@ -88,6 +88,8 @@ Every release on [GitHub Releases](https://github.com/backyarddd/blirp/releases)
 | `blirp_<version>_x64-setup.exe`, `.msi`, `.dmg`, `.deb`, `.rpm` | classic installers (optional; unsigned, so the OS warns, see below) |
 | `SHA256SUMS.txt`, `SHA256SUMS.txt.sig` | checksums of every asset, and their minisign signature |
 
+Every archive and installer includes `THIRD_PARTY_NOTICES`, the licenses of the Rust crates, JavaScript packages and ConPTY that blirp ships (inside the app bundle on macOS: `blirp.app/Contents/Resources/`; Linux packages: `/usr/lib/blirp/`).
+
 Check a download:
 
 ```sh
