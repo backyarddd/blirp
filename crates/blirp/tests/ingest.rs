@@ -521,6 +521,74 @@ fn long_transcripts_are_filed_by_their_cwd() {
     );
 }
 
+/// One source holding two sessions: A's cwd is reported before any of its
+/// events, then a batch of B's events forces a mid-read flush, then A's
+/// event arrives.
+struct TwoSessions(PathBuf);
+
+impl blirp::ingest::Adapter for TwoSessions {
+    fn id(&self) -> &'static str {
+        "claude"
+    }
+    fn roots(&self) -> Vec<PathBuf> {
+        Vec::new()
+    }
+    fn scan(&self, _: &Store) -> blirp::ingest::Result<Vec<blirp::ingest::Source>> {
+        Ok(vec![blirp::ingest::Source {
+            key: "two".into(),
+            path: self.0.clone(),
+            fingerprint: "1".into(),
+            mtime_ms: 1,
+            item: None,
+        }])
+    }
+    fn ingest(
+        &self,
+        _: &blirp::ingest::Source,
+        _: Option<blirp::ingest::Cursor>,
+        sink: &mut dyn blirp::ingest::EventSink,
+    ) -> blirp::ingest::Result<blirp::ingest::Cursor> {
+        let meta = |cwd: &Path| blirp::ingest::SessionMeta {
+            cwd: Some(cwd.display().to_string()),
+            ..Default::default()
+        };
+        let ev = |seq: i64| blirp::ingest::NormEvent {
+            seq,
+            ts: Some(1),
+            kind: EventKind::User,
+            text: "hi".into(),
+            meta: None,
+        };
+        sink.session("a", meta(&self.0));
+        sink.session("b", meta(&self.0));
+        for seq in 0..1000 {
+            sink.event("b", ev(seq))?;
+        }
+        sink.event("a", ev(0))?;
+        blirp::ingest::Cursor::from_state(&json!({}))
+    }
+}
+
+// A cwd reported before the session's first event survives a mid-read
+// flush triggered by another session of the same source.
+#[test]
+fn early_cwd_survives_another_sessions_flush() {
+    let h = H::new();
+    let machine = h.store.list_machines().unwrap().remove(0);
+    let engine = Engine::with_adapters(
+        h.store.clone(),
+        machine,
+        IngestEnv::at_home(&h.home, &h.root.join("blirp")),
+        vec![Box::new(TwoSessions(h.cwd.clone()))],
+        Arc::new(|_| {}),
+    );
+    let stats = engine.run(&Work::all(1));
+    assert_eq!(stats["claude"].failed, 0, "{stats:?}");
+    for asid in ["a", "b"] {
+        assert_eq!(Path::new(&h.session("claude", asid).cwd), h.cwd, "{asid}");
+    }
+}
+
 // Rows filed under the home folder by the old mid-read flush are re-filed
 // once: the repair re-reads their transcripts from the start. A later
 // incremental read never moves a row (a `cd` is not a new start).
