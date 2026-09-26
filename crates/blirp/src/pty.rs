@@ -22,6 +22,11 @@ use std::time::{Duration, Instant};
 use tokio::sync::broadcast;
 
 pub const SCROLLBACK: usize = 10_000;
+/// Scrollback bytes replayed in one attach snapshot at most (oldest lines
+/// are left out beyond it); relayed terminals accept frames of
+/// [`SNAPSHOT_FRAME_MAX`], which leaves room for JSON escaping.
+const SNAPSHOT_SCROLLBACK_BYTES: usize = 16 << 20;
+pub const SNAPSHOT_FRAME_MAX: usize = 64 << 20;
 /// Output within this window means the agent is working (§7).
 pub const ACTIVE_WINDOW: Duration = Duration::from_secs(2);
 const KILL_GRACE: Duration = Duration::from_secs(3);
@@ -295,7 +300,7 @@ impl Terminal {
 
     fn on_output(&self, bytes: &[u8]) {
         let mut s = lock(&self.screen);
-        s.parser.process(bytes);
+        feed(&mut s.parser, bytes);
         s.last_output = Some(Instant::now());
         let replies = std::mem::take(&mut s.parser.callbacks_mut().replies);
         // Attached clients (xterm.js) answer queries themselves.
@@ -436,10 +441,48 @@ impl Terminal {
     }
 }
 
+/// Feed PTY output to the screen state. vt100 ignores `CSI 3 J` (erase
+/// saved lines), which TUIs such as Claude Code send before redrawing their
+/// whole history; xterm.js does clear its scrollback then, so without this a
+/// reattach would show the history twice. The screen is rebuilt without
+/// scrollback at that point. A sequence split across two reads is missed
+/// (the history then shows twice, nothing is lost).
+fn feed(parser: &mut vt100::Parser<Callbacks>, bytes: &[u8]) {
+    const ED3: &[u8] = b"\x1b[3J";
+    let mut rest = bytes;
+    while let Some(i) = rest.windows(ED3.len()).position(|w| w == ED3) {
+        let (head, tail) = rest.split_at(i + ED3.len());
+        parser.process(head);
+        clear_scrollback(parser);
+        rest = tail;
+    }
+    parser.process(rest);
+}
+
+fn clear_scrollback(parser: &mut vt100::Parser<Callbacks>) {
+    // The scrollback belongs to the normal screen, hidden behind the
+    // alternate one: an alternate-screen app has none to clear.
+    if parser.screen().alternate_screen() {
+        return;
+    }
+    let (rows, cols) = parser.screen().size();
+    let mut state = parser.screen().state_formatted();
+    state.extend(parser.screen().attributes_formatted());
+    let callbacks = std::mem::take(parser.callbacks_mut());
+    let mut fresh = vt100::Parser::new_with_callbacks(rows, cols, SCROLLBACK, callbacks);
+    fresh.process(&state);
+    *parser = fresh;
+}
+
 /// Bytes that make a fresh terminal look like `parser`'s: reset, scrollback
 /// lines (normal screen only), the visible screen with attributes and
 /// cursor, input modes and title.
 fn snapshot(parser: &mut vt100::Parser<Callbacks>) -> Snapshot {
+    snapshot_within(parser, SNAPSHOT_SCROLLBACK_BYTES)
+}
+
+/// [`snapshot`] replaying at most `budget` bytes of scrollback (newest lines).
+fn snapshot_within(parser: &mut vt100::Parser<Callbacks>, budget: usize) -> Snapshot {
     let (rows, cols) = parser.screen().size();
     let mut out: Vec<u8> = b"\x1bc".to_vec();
     if parser.screen().alternate_screen() {
@@ -457,6 +500,14 @@ fn snapshot(parser: &mut vt100::Parser<Callbacks>) -> Snapshot {
             offset -= take;
         }
         parser.screen_mut().set_scrollback(0);
+        // Beyond the budget the oldest lines go (a snapshot is one frame).
+        let mut size: usize = lines.iter().map(|l| l.len() + 5).sum();
+        let mut skip = 0;
+        while size > budget && skip < lines.len() {
+            size -= lines[skip].len() + 5;
+            skip += 1;
+        }
+        lines.drain(..skip);
         if !lines.is_empty() {
             lines.extend(parser.screen().rows_formatted(0, cols));
             for (i, line) in lines.iter().enumerate() {
@@ -711,6 +762,106 @@ mod tests {
             self.set_scrollback(0);
             n
         }
+    }
+
+    /// Every line a terminal holds, oldest first: scrollback then screen.
+    fn history<C: vt100::Callbacks>(p: &mut vt100::Parser<C>) -> Vec<String> {
+        let (rows, cols) = p.screen().size();
+        p.screen_mut().set_scrollback(usize::MAX);
+        let mut offset = p.screen().scrollback();
+        let mut out = Vec::new();
+        while offset > 0 {
+            p.screen_mut().set_scrollback(offset);
+            let take = offset.min(usize::from(rows));
+            out.extend(p.screen().rows(0, cols).take(take));
+            offset -= take;
+        }
+        p.screen_mut().set_scrollback(0);
+        out.extend(p.screen().rows(0, cols));
+        out
+    }
+
+    fn client_of(snap: &Snapshot) -> vt100::Parser {
+        let mut client = vt100::Parser::new(snap.rows, snap.cols, SCROLLBACK);
+        client.process(snap.data.as_bytes());
+        client
+    }
+
+    // A client attaching (e.g. the next morning) gets the full 10 000 lines
+    // of scrollback, not just the screen, so scrolling up shows everything
+    // the terminal still holds.
+    #[test]
+    fn reattach_restores_the_whole_scrollback() {
+        let mut p = vt100::Parser::new_with_callbacks(24, 80, SCROLLBACK, Callbacks::default());
+        for i in 0..12_000 {
+            feed(
+                &mut p,
+                format!("\x1b[3{}mline {i}\x1b[m\r\n", i % 7).as_bytes(),
+            );
+        }
+        feed(&mut p, b"$ ");
+        let want = history(&mut p);
+        assert_eq!(want.len(), SCROLLBACK + 24);
+        assert_eq!(want[0], "line 1977");
+        let snap = snapshot(&mut p);
+        let mut client = client_of(&snap);
+        assert_eq!(history(&mut client), want);
+        assert_eq!(
+            client.screen().cursor_position(),
+            p.screen().cursor_position()
+        );
+        // Colors survive too.
+        client.screen_mut().set_scrollback(SCROLLBACK);
+        assert_eq!(
+            client.screen().cell(0, 0).unwrap().fgcolor(),
+            vt100::Color::Idx((1977 % 7) as u8)
+        );
+    }
+
+    // Beyond the byte budget the oldest lines are left out; the screen is
+    // still exact.
+    #[test]
+    fn snapshot_budget_keeps_the_newest_lines() {
+        let mut p = vt100::Parser::new_with_callbacks(4, 20, SCROLLBACK, Callbacks::default());
+        for i in 0..100 {
+            feed(&mut p, format!("line {i}\r\n").as_bytes());
+        }
+        let snap = snapshot_within(&mut p, 200);
+        let mut client = client_of(&snap);
+        let got = history(&mut client);
+        assert!(got.len() < 40, "{}", got.len());
+        assert_eq!(client.screen().contents(), p.screen().contents());
+        assert!(got.contains(&"line 95".to_string()));
+        assert!(!got.contains(&"line 10".to_string()));
+    }
+
+    // `CSI 3 J` clears the scrollback like xterm.js does, so a TUI that
+    // redraws its history (Claude Code) does not show it twice on reattach.
+    #[test]
+    fn erase_saved_lines_clears_the_scrollback() {
+        let mut p = vt100::Parser::new_with_callbacks(4, 20, SCROLLBACK, Callbacks::default());
+        for i in 0..10 {
+            feed(&mut p, format!("old {i}\r\n").as_bytes());
+        }
+        feed(
+            &mut p,
+            b"\x1b]0;t\x07\x1b[2J\x1b[3J\x1b[H\x1b[1mnew 0\r\nnew 1\r\nnew 2\r\nnew 3\r\nnew 4",
+        );
+        let lines = history(&mut p);
+        assert!(!lines.iter().any(|l| l.starts_with("old")), "{lines:?}");
+        assert_eq!(lines[0], "new 0");
+        assert!(p.screen().bold(), "attributes survive the rebuild");
+        assert_eq!(p.callbacks().title.as_deref(), Some("t"));
+        let mut client = client_of(&snapshot(&mut p));
+        assert_eq!(history(&mut client), lines);
+
+        // Inside the alternate screen it touches nothing.
+        let mut p = vt100::Parser::new_with_callbacks(4, 20, SCROLLBACK, Callbacks::default());
+        for i in 0..10 {
+            feed(&mut p, format!("old {i}\r\n").as_bytes());
+        }
+        feed(&mut p, b"\x1b[?1049h\x1b[3Jtui\x1b[?1049l");
+        assert!(history(&mut p).iter().any(|l| l == "old 0"));
     }
 
     #[test]

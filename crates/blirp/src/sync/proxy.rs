@@ -18,8 +18,9 @@ use tokio_tungstenite::tungstenite::{self, client::IntoClientRequest};
 
 /// Largest proxied response body accepted.
 const MAX_BODY: usize = 16 << 20;
-/// Same cap as local terminal frames (§6).
-const MAX_WS_FRAME: usize = 1 << 20;
+/// Frames from a remote terminal: attach snapshots carry up to the whole
+/// scrollback (§6), far more than the 1 MiB input frames a client may send.
+const MAX_WS_FRAME: usize = crate::pty::SNAPSHOT_FRAME_MAX;
 
 pub type RemoteTerminal = WebSocketStream<ProxyStream>;
 
