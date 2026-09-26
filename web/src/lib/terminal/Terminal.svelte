@@ -273,7 +273,9 @@
     // Pasted images and files, and files dropped on the pane (paste.ts): saved on the machine that
     // runs the session, then their paths are pasted one by one, as a native terminal types a
     // dropped file, so an agent can attach each. Plain text pastes stay with xterm.
-    const uploadFiles = async (files: File[]): Promise<void> => {
+    const uploadFiles = async (files: File[], folders = 0): Promise<void> => {
+      if (folders > 0) app.toast(folders === 1 ? "Folders aren't supported; drop the files inside it." : "Folders aren't supported; drop the files inside them.");
+      if (files.length === 0) return;
       if (viewOnly) {
         app.toast('Read-only: this device may not control terminals, so files cannot be pasted here.');
         return;
@@ -285,21 +287,29 @@
       });
       if (fits.length === 0) return;
       app.toast(fits.length === 1 ? `Uploading ${fits[0]?.name ?? 'file'}…` : `Uploading ${fits.length} files…`, 'info');
-      const results = await Promise.allSettled(fits.map((f) => api.sessions.upload(id, f)));
-      if (disposed) return;
-      let typed = 0;
-      results.forEach((r, i) => {
-        if (r.status === 'rejected') {
-          app.toast(`Could not upload ${fits[i]?.name ?? 'file'}: ${errorMessage(r.reason)}`);
-          return;
+      // One at a time: the daemon holds each upload in memory, and the session's quota is checked
+      // per file.
+      const saved: string[] = [];
+      for (const f of fits) {
+        try {
+          saved.push((await api.sessions.upload(id, f)).quoted);
+        } catch (e) {
+          app.toast(`Could not upload ${f.name}: ${errorMessage(e)}`);
         }
-        if (typed++ > 0) send(encodeInput(' '));
-        t.paste(r.value.quoted);
-      });
-      if (typed > 0) {
-        send(encodeInput(' '));
-        t.focus();
+        if (disposed) return;
       }
+      if (saved.length === 0) return;
+      // Typing into a closed socket would drop the paths without a trace.
+      if (ws?.readyState !== WebSocket.OPEN) {
+        app.toast(`Saved ${saved.join(' ')}, but the terminal is not connected; paste the path yourself.`);
+        return;
+      }
+      saved.forEach((q, i) => {
+        if (i > 0) send(encodeInput(' '));
+        t.paste(q);
+      });
+      send(encodeInput(' '));
+      t.focus();
     };
     // Capture phase: runs before xterm's own paste listener, which would paste nothing for an image.
     const onPaste = (e: ClipboardEvent): void => {
@@ -307,7 +317,7 @@
       if (action.kind !== 'upload') return;
       e.preventDefault();
       e.stopPropagation();
-      void uploadFiles(action.files);
+      void uploadFiles(action.files, action.folders);
     };
     const onDragOver = (e: DragEvent): void => {
       if (!e.dataTransfer?.types.includes('Files')) return;
@@ -318,7 +328,7 @@
       const action = dropAction(e.dataTransfer);
       if (action.kind !== 'upload') return;
       e.preventDefault();
-      void uploadFiles(action.files);
+      void uploadFiles(action.files, action.folders);
     };
     el.addEventListener('paste', onPaste, true);
     el.addEventListener('dragover', onDragOver);

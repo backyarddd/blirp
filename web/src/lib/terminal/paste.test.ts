@@ -19,12 +19,12 @@ describe('pasteAction', () => {
 
   it('uploads a pasted screenshot', () => {
     const f = png();
-    expect(pasteAction(transfer([f]))).toEqual({ kind: 'upload', files: [f] });
+    expect(pasteAction(transfer([f]))).toEqual({ kind: 'upload', files: [f], folders: 0 });
   });
 
   it('finds images listed only as clipboard items', () => {
     const f = png();
-    expect(pasteAction(transfer([f], '', true))).toEqual({ kind: 'upload', files: [f] });
+    expect(pasteAction(transfer([f], '', true))).toEqual({ kind: 'upload', files: [f], folders: 0 });
   });
 
   it('prefers the image when the text is only its address or file name', () => {
@@ -36,14 +36,14 @@ describe('pasteAction', () => {
       '/home/user/Pictures/photo.jpg',
       '"C:\\Users\\user\\Pictures\\photo.jpg"',
     ]) {
-      expect(pasteAction(transfer([f], text)), text).toEqual({ kind: 'upload', files: [f] });
+      expect(pasteAction(transfer([f], text)), text).toEqual({ kind: 'upload', files: [f], folders: 0 });
     }
   });
 
   it('uploads every copied file', () => {
     const a = png('a.png');
     const b = new File(['x'], 'notes.txt');
-    expect(pasteAction(transfer([a, b], 'a.png\nnotes.txt'))).toEqual({ kind: 'upload', files: [a, b] });
+    expect(pasteAction(transfer([a, b], 'a.png\nnotes.txt'))).toEqual({ kind: 'upload', files: [a, b], folders: 0 });
   });
 
   it('keeps real text that comes with a rendered picture of it', () => {
@@ -55,8 +55,24 @@ describe('pasteAction', () => {
 describe('dropAction', () => {
   it('uploads dropped files and leaves dragged text alone', () => {
     const f = png();
-    expect(dropAction(transfer([f]))).toEqual({ kind: 'upload', files: [f] });
+    expect(dropAction(transfer([f]))).toEqual({ kind: 'upload', files: [f], folders: 0 });
     expect(dropAction(transfer([], 'some text'))).toEqual({ kind: 'text' });
     expect(dropAction(null)).toEqual({ kind: 'text' });
+  });
+
+  it('skips dropped folders and counts them', () => {
+    const f = png();
+    const folder = new File([], 'photos');
+    const dt: TransferLike = {
+      files: [f, folder],
+      items: [
+        { kind: 'file', getAsFile: () => f, webkitGetAsEntry: () => ({ isDirectory: false }) },
+        { kind: 'file', getAsFile: () => folder, webkitGetAsEntry: () => ({ isDirectory: true }) },
+      ],
+      getData: () => '',
+    };
+    expect(dropAction(dt)).toEqual({ kind: 'upload', files: [f], folders: 1 });
+    const onlyFolder: TransferLike = { ...dt, items: [dt.items?.[1] ?? { kind: 'string', getAsFile: () => null }] };
+    expect(dropAction(onlyFolder)).toEqual({ kind: 'upload', files: [], folders: 1 });
   });
 });

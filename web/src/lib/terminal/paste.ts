@@ -9,11 +9,16 @@ export const MAX_UPLOAD_BYTES = 25 * 1024 * 1024;
 /** The parts of `DataTransfer` the decision reads (a real one in the app, a stub in tests). */
 export interface TransferLike {
   readonly files: ArrayLike<File>;
-  readonly items?: ArrayLike<{ readonly kind: string; getAsFile(): File | null }>;
+  readonly items?: ArrayLike<{
+    readonly kind: string;
+    getAsFile(): File | null;
+    webkitGetAsEntry?(): { readonly isDirectory: boolean } | null;
+  }>;
   getData(format: string): string;
 }
 
-export type TransferAction = { kind: 'text' } | { kind: 'upload'; files: File[] };
+/** `folders`: dropped folders left out (only files are uploaded). */
+export type TransferAction = { kind: 'text' } | { kind: 'upload'; files: File[]; folders: number };
 
 function filesOf(dt: TransferLike): File[] {
   const files = Array.from(dt.files);
@@ -47,12 +52,33 @@ export function pasteAction(dt: TransferLike | null): TransferAction {
   if (!dt) return { kind: 'text' };
   const files = filesOf(dt);
   if (files.length === 0) return { kind: 'text' };
-  return textOnlyNamesFiles(dt.getData('text/plain').trim(), files) ? { kind: 'upload', files } : { kind: 'text' };
+  return textOnlyNamesFiles(dt.getData('text/plain').trim(), files)
+    ? { kind: 'upload', files, folders: 0 }
+    : { kind: 'text' };
 }
 
-/** A drop: files are uploaded; anything else (dragged text) is left to the browser. */
+/**
+ * A drop: files are uploaded, folders counted and skipped (browsers list a dropped folder as an
+ * empty `File`); anything else (dragged text) is left to the browser. Must run inside the drop
+ * event: its items are empty afterwards.
+ */
 export function dropAction(dt: TransferLike | null): TransferAction {
-  const files = dt ? filesOf(dt) : [];
-  return files.length > 0 ? { kind: 'upload', files } : { kind: 'text' };
+  if (!dt) return { kind: 'text' };
+  if (!dt.items) {
+    const files = Array.from(dt.files);
+    return files.length > 0 ? { kind: 'upload', files, folders: 0 } : { kind: 'text' };
+  }
+  const files: File[] = [];
+  let folders = 0;
+  for (const item of Array.from(dt.items)) {
+    if (item.kind !== 'file') continue;
+    if (item.webkitGetAsEntry?.()?.isDirectory) {
+      folders++;
+      continue;
+    }
+    const f = item.getAsFile();
+    if (f) files.push(f);
+  }
+  return files.length + folders > 0 ? { kind: 'upload', files, folders } : { kind: 'text' };
 }
 
