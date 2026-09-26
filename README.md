@@ -57,7 +57,7 @@ Windows (PowerShell):
 irm https://raw.githubusercontent.com/backyarddd/blirp/main/install.ps1 | iex
 ```
 
-This installs the `blirp` CLI (`~/.local/bin`, Windows `%LOCALAPPDATA%\Programs\blirp`) and the desktop app (macOS `~/Applications/blirp.app`, Linux an AppImage with a menu entry, Windows a Start Menu entry), after checking every download against the release's `SHA256SUMS.txt`. No admin rights, no code-signing prompts. Then run `blirp`. Update with `blirp update`, remove with `blirp uninstall`. Options (`--no-app`, `--service`, `--version X`, `--modify-path`), manual downloads with checksum verification, and every platform detail: [docs/install.md](docs/install.md).
+This installs the `blirp` CLI (`~/.local/bin`, Windows `%LOCALAPPDATA%\Programs\blirp`) and the desktop app (macOS `~/Applications/blirp.app`, Linux an AppImage with a menu entry, Windows a Start Menu entry), after checking every download against the release's `SHA256SUMS.txt` (and that against its signature when minisign or OpenSSL 3 is available). No admin rights, no code-signing prompts. Then run `blirp`. Update with `blirp update`, remove with `blirp uninstall`. Options (`--no-app`, `--service`, `--version X`, `--modify-path`), manual downloads with checksum verification, and every platform detail: [docs/install.md](docs/install.md).
 
 The desktop app is a window around the daemon's UI; the CLI is the same daemon, hook handler and MCP server in one file, for servers, hubs or browser-only use. To build from source, see [Building from source](#building-from-source).
 

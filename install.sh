@@ -7,12 +7,15 @@
 # Installs the `blirp` CLI into ${BLIRP_INSTALL_DIR:-~/.local/bin} and the
 # desktop app (macOS ~/Applications/blirp.app, Linux an AppImage in
 # ~/.local/share/blirp with a menu entry). Every download is checked against
-# the release's SHA256SUMS.txt. Running it again upgrades in place. Options:
-# see usage() below or `sh install.sh --help`. Docs: docs/install.md.
+# the release's SHA256SUMS.txt, and that against its minisign signature when
+# minisign or OpenSSL 3 is available. Running it again upgrades in place.
+# Options: see usage() below or `sh install.sh --help`. Docs: docs/install.md.
 
 set -eu
 
 RELEASES_API=https://api.github.com/repos/backyarddd/blirp/releases
+# The release signing key, packaging/minisign.pub.
+RELEASE_PUBKEY=RWQUGAux2LF3nsIhgzZsZL6OfhV6O3mpN1jUyApoyh04lnSVLsoZ2NX5
 MARKER="# added by the blirp installer"
 
 say() { printf 'blirp: %s\n' "$*"; }
@@ -38,6 +41,8 @@ Environment:
   BLIRP_INSTALL_DIR       where the CLI goes (default ~/.local/bin)
   GITHUB_TOKEN            token for a private repository or rate limits
   BLIRP_RELEASE_BASE_URL  releases API to use instead of GitHub (mirrors, tests)
+  BLIRP_REQUIRE_SIGNATURE=1  refuse to install when the release signature
+                          cannot be checked (needs minisign or OpenSSL 3)
 EOF
 }
 
@@ -45,6 +50,7 @@ version=${BLIRP_VERSION:-}
 no_app=${BLIRP_NO_APP:-}
 service=${BLIRP_SERVICE:-}
 modify_path=${BLIRP_MODIFY_PATH:-}
+require_signature=${BLIRP_REQUIRE_SIGNATURE:-}
 while [ $# -gt 0 ]; do
   case $1 in
     --version)
@@ -71,6 +77,7 @@ version=${version#v}
 case $no_app in 0 | false) no_app= ;; esac
 case $service in 0 | false) service= ;; esac
 case $modify_path in 0 | false) modify_path= ;; esac
+case $require_signature in 0 | false) require_signature= ;; esac
 
 # ------------------------------------------------------------------ platform
 
@@ -210,6 +217,82 @@ get_asset() {
 }
 
 get_asset SHA256SUMS.txt "$tmp/SHA256SUMS.txt" || die "download of SHA256SUMS.txt failed"
+get_asset SHA256SUMS.txt.sig "$tmp/SHA256SUMS.txt.sig" || die "download of SHA256SUMS.txt.sig failed"
+
+# ------------------------------------------------------------- signature
+
+# An OpenSSL that can check a minisign signature: BLAKE2b-512 and raw
+# Ed25519 verification (OpenSSL 1.1.1+/3; not LibreSSL, macOS's openssl).
+find_openssl() {
+  for _c in openssl /opt/homebrew/opt/openssl@3/bin/openssl /usr/local/opt/openssl@3/bin/openssl; do
+    if has "$_c" && "$_c" dgst -blake2b512 -binary /dev/null >/dev/null 2>&1 &&
+      "$_c" pkeyutl -help 2>&1 | grep -e -rawin >/dev/null; then
+      printf '%s\n' "$_c"
+      return 0
+    fi
+  done
+  return 1
+}
+
+# bytes FILE SKIP COUNT: COUNT bytes of FILE from offset SKIP, to stdout.
+bytes() { dd if="$1" bs=1 skip="$2" count="$3" 2>/dev/null; }
+
+# ossl_verify OPENSSL FILE SIG: check the minisign signature SIG of FILE
+# against RELEASE_PUBKEY. Format: the key is base64 of "Ed" + key id (8) +
+# Ed25519 key (32); the signature line base64 of the algorithm ("ED": over
+# BLAKE2b-512 of the file, "Ed": over the file) + key id (8) + signature
+# (64); the global signature covers that signature and the trusted comment.
+ossl_verify() {
+  _o=$1
+  _d=$tmp/sigcheck
+  mkdir -p "$_d"
+  printf '%s' "$RELEASE_PUBKEY" | "$_o" base64 -d -A >"$_d/pub" || return 1
+  sed -n 2p "$3" | tr -d '\r' | "$_o" base64 -d -A >"$_d/sig" || return 1
+  sed -n 4p "$3" | tr -d '\r' | "$_o" base64 -d -A >"$_d/global" || return 1
+  _comment=$(sed -n 3p "$3" | tr -d '\r')
+  case $_comment in
+    "trusted comment: "*) ;;
+    *) return 1 ;;
+  esac
+  [ "$(wc -c <"$_d/pub" | tr -d ' ')" = 42 ] && [ "$(wc -c <"$_d/sig" | tr -d ' ')" = 74 ] &&
+    [ "$(wc -c <"$_d/global" | tr -d ' ')" = 64 ] || return 1
+  [ "$(bytes "$_d/pub" 2 8 | od -An -tx1)" = "$(bytes "$_d/sig" 2 8 | od -An -tx1)" ] || return 1
+  # Ed25519 SubjectPublicKeyInfo: fixed DER prefix + the 32 key bytes.
+  printf '\060\052\060\005\006\003\053\145\160\003\041\000' >"$_d/key.der"
+  bytes "$_d/pub" 10 32 >>"$_d/key.der"
+  bytes "$_d/sig" 10 64 >"$_d/sig.raw"
+  case $(bytes "$_d/sig" 0 2) in
+    ED) "$_o" dgst -blake2b512 -binary -out "$_d/msg" "$2" || return 1 ;;
+    Ed) cp "$2" "$_d/msg" ;;
+    *) return 1 ;;
+  esac
+  "$_o" pkeyutl -verify -pubin -keyform DER -inkey "$_d/key.der" -rawin \
+    -in "$_d/msg" -sigfile "$_d/sig.raw" >/dev/null 2>&1 || return 1
+  cp "$_d/sig.raw" "$_d/global.msg"
+  printf '%s' "${_comment#trusted comment: }" >>"$_d/global.msg"
+  "$_o" pkeyutl -verify -pubin -keyform DER -inkey "$_d/key.der" -rawin \
+    -in "$_d/global.msg" -sigfile "$_d/global" >/dev/null 2>&1
+}
+
+# The checksums are only as trustworthy as their signature, so check it
+# with whatever can: minisign, else OpenSSL. Without either, the checksums
+# came over HTTPS from GitHub, like the script itself.
+sums=$tmp/SHA256SUMS.txt
+if has minisign; then
+  minisign -V -q -m "$sums" -x "$sums.sig" -P "$RELEASE_PUBKEY" >/dev/null 2>&1 ||
+    die "SHA256SUMS.txt of $tag is not signed by the blirp release key (checked with minisign); not installing"
+  say "release signature verified (minisign)"
+elif ossl=$(find_openssl); then
+  ossl_verify "$ossl" "$sums" "$sums.sig" ||
+    die "SHA256SUMS.txt of $tag is not signed by the blirp release key (checked with $ossl); not installing"
+  say "release signature verified ($ossl)"
+elif [ -n "$require_signature" ]; then
+  die "BLIRP_REQUIRE_SIGNATURE is set but nothing here can check a minisign signature (install minisign, or OpenSSL 3)"
+else
+  say "notice: the release signature was not checked (that needs minisign, or OpenSSL 3; macOS's LibreSSL cannot)."
+  say "notice: the downloads are checked against SHA256SUMS.txt fetched over HTTPS from GitHub, like this script."
+  say "notice: \`blirp update\` checks the signature itself. BLIRP_REQUIRE_SIGNATURE=1 refuses to install without it."
+fi
 
 # verified NAME OUT: download and check against SHA256SUMS.txt
 verified() {

@@ -6,14 +6,17 @@
   Installs blirp.exe (with conpty.dll and x64\OpenConsole.exe) and the desktop
   app into $env:BLIRP_INSTALL_DIR (default %LOCALAPPDATA%\Programs\blirp),
   adds that folder to your user Path, and creates a Start Menu shortcut.
-  Every download is checked against the release's SHA256SUMS.txt. Running it
-  again upgrades in place. No administrator rights are needed.
+  Every download is checked against the release's SHA256SUMS.txt, and that
+  against its minisign signature when minisign or an OpenSSL 3 (Git for
+  Windows ships one) is available. Running it again upgrades in place. No
+  administrator rights are needed.
 
   Options can also be set with environment variables, which is the only way
   when piping into iex: BLIRP_VERSION, BLIRP_NO_APP=1, BLIRP_SERVICE=1,
   BLIRP_NO_MODIFY_PATH=1, BLIRP_INSTALL_DIR, GITHUB_TOKEN (private repository
   or rate limits), BLIRP_RELEASE_BASE_URL (releases API of a mirror or test
-  server instead of GitHub).
+  server instead of GitHub), BLIRP_REQUIRE_SIGNATURE=1 (refuse to install
+  when the signature cannot be checked).
 
 .EXAMPLE
   irm https://raw.githubusercontent.com/backyarddd/blirp/main/install.ps1 | iex
@@ -50,6 +53,8 @@ param(
   [Net.ServicePointManager]::SecurityProtocol = [Net.ServicePointManager]::SecurityProtocol -bor [Net.SecurityProtocolType]::Tls12
 
   $ReleasesApi = 'https://api.github.com/repos/backyarddd/blirp/releases'
+  # The release signing key, packaging/minisign.pub.
+  $ReleasePubkey = 'RWQUGAux2LF3nsIhgzZsZL6OfhV6O3mpN1jUyApoyh04lnSVLsoZ2NX5'
   $Triple = 'x86_64-pc-windows-msvc'
   $CliFiles = @('blirp.exe', 'conpty.dll', 'x64\OpenConsole.exe')
   $DesktopExe = 'blirp-desktop.exe'
@@ -102,6 +107,101 @@ param(
       $out
     }
     $sumsFile = Save-Asset 'SHA256SUMS.txt'
+    $sigFile = Save-Asset 'SHA256SUMS.txt.sig'
+
+    # ------------------------------------------------------------ signature
+    # The checksums are only as trustworthy as their signature. .NET has
+    # neither Ed25519 nor BLAKE2b, so check it with minisign or an OpenSSL 3
+    # (on PATH, or the one Git for Windows ships); without either, the
+    # checksums came over HTTPS from GitHub, like this script.
+    function Invoke-Quiet([string]$exe, [string[]]$argv) {
+      # Native stderr must not become a terminating error here.
+      $ErrorActionPreference = 'Continue'
+      & $exe @argv 2>$null | Out-Null
+      $LASTEXITCODE -eq 0
+    }
+    function Find-OpenSsl {
+      $candidates = @()
+      $onPath = Get-Command openssl.exe -CommandType Application -ErrorAction SilentlyContinue | Select-Object -First 1
+      if ($onPath) { $candidates += $onPath.Source }
+      $git = Get-Command git.exe -CommandType Application -ErrorAction SilentlyContinue | Select-Object -First 1
+      if ($git) {
+        $gitRoot = Split-Path -Parent (Split-Path -Parent $git.Source)
+        $candidates += (Join-Path $gitRoot 'usr\bin\openssl.exe'), (Join-Path $gitRoot 'mingw64\bin\openssl.exe')
+      }
+      $probe = Join-Path $tmp 'probe.txt'
+      [IO.File]::WriteAllText($probe, '')
+      foreach ($c in $candidates) {
+        if (-not (Test-Path -LiteralPath $c -PathType Leaf)) { continue }
+        if (-not (Invoke-Quiet $c @('dgst', '-blake2b512', '-binary', '-out', (Join-Path $tmp 'probe.out'), $probe))) { continue }
+        $ErrorActionPreference = 'Continue'
+        $help = (& $c pkeyutl -help 2>&1 | Out-String)
+        if ($help -match '-rawin') { return $c }
+      }
+      $null
+    }
+    # Check the minisign signature $sig of $file with $ossl against $key:
+    # the key is base64 of "Ed" + key id (8) + Ed25519 key (32); the
+    # signature line base64 of the algorithm ("ED": over BLAKE2b-512 of the
+    # file, "Ed": over the file) + key id (8) + signature (64); the global
+    # signature covers that signature and the trusted comment.
+    function Test-MinisignWithOpenSsl([string]$ossl, [string]$file, [string]$sig, [string]$key) {
+      $prefix = 'trusted comment: '
+      try {
+        $pub = [Convert]::FromBase64String($key)
+        $lines = [IO.File]::ReadAllText($sig) -split "`r?`n"
+        if ($lines.Count -lt 4 -or -not $lines[2].StartsWith($prefix)) { return $false }
+        $s = [Convert]::FromBase64String($lines[1].Trim())
+        $global = [Convert]::FromBase64String($lines[3].Trim())
+      } catch {
+        return $false
+      }
+      if ($pub.Length -ne 42 -or $s.Length -ne 74 -or $global.Length -ne 64) { return $false }
+      for ($i = 2; $i -lt 10; $i++) { if ($pub[$i] -ne $s[$i]) { return $false } }
+      $d = Join-Path $tmp 'sigcheck'
+      New-Item -ItemType Directory -Force -Path $d | Out-Null
+      # Ed25519 SubjectPublicKeyInfo: fixed DER prefix + the 32 key bytes.
+      $der = [byte[]](0x30, 0x2a, 0x30, 0x05, 0x06, 0x03, 0x2b, 0x65, 0x70, 0x03, 0x21, 0x00) + $pub[10..41]
+      $keyFile = Join-Path $d 'key.der'
+      [IO.File]::WriteAllBytes($keyFile, [byte[]]$der)
+      $sigRaw = [byte[]]$s[10..73]
+      $sigPath = Join-Path $d 'sig.raw'
+      [IO.File]::WriteAllBytes($sigPath, $sigRaw)
+      $msg = Join-Path $d 'msg'
+      $alg = [Text.Encoding]::ASCII.GetString($s, 0, 2)
+      if ($alg -ceq 'ED') {
+        if (-not (Invoke-Quiet $ossl @('dgst', '-blake2b512', '-binary', '-out', $msg, $file))) { return $false }
+      } elseif ($alg -ceq 'Ed') {
+        Copy-Item -LiteralPath $file -Destination $msg -Force
+      } else {
+        return $false
+      }
+      $verify = @('pkeyutl', '-verify', '-pubin', '-keyform', 'DER', '-inkey', $keyFile, '-rawin')
+      if (-not (Invoke-Quiet $ossl ($verify + @('-in', $msg, '-sigfile', $sigPath)))) { return $false }
+      $comment = [Text.Encoding]::UTF8.GetBytes($lines[2].Substring($prefix.Length))
+      $globalMsg = Join-Path $d 'global.msg'
+      [IO.File]::WriteAllBytes($globalMsg, [byte[]]($sigRaw + $comment))
+      $globalSig = Join-Path $d 'global.sig'
+      [IO.File]::WriteAllBytes($globalSig, $global)
+      Invoke-Quiet $ossl ($verify + @('-in', $globalMsg, '-sigfile', $globalSig))
+    }
+    $notSigned = "SHA256SUMS.txt of $($release.tag_name) is not signed by the blirp release key"
+    $minisign = Get-Command minisign.exe -CommandType Application -ErrorAction SilentlyContinue | Select-Object -First 1
+    $ossl = if ($minisign) { $null } else { Find-OpenSsl }
+    if ($minisign) {
+      if (-not (Invoke-Quiet $minisign.Source @('-V', '-q', '-m', $sumsFile, '-x', $sigFile, '-P', $ReleasePubkey))) { throw "$notSigned (checked with minisign); not installing" }
+      Say 'release signature verified (minisign)'
+    } elseif ($ossl) {
+      if (-not (Test-MinisignWithOpenSsl -ossl $ossl -file $sumsFile -sig $sigFile -key $ReleasePubkey)) { throw "$notSigned (checked with $ossl); not installing" }
+      Say "release signature verified ($ossl)"
+    } elseif ($env:BLIRP_REQUIRE_SIGNATURE -and $env:BLIRP_REQUIRE_SIGNATURE -notin @('0', 'false')) {
+      throw 'BLIRP_REQUIRE_SIGNATURE is set but nothing here can check a minisign signature (install minisign, or Git for Windows / OpenSSL 3)'
+    } else {
+      Say 'notice: the release signature was not checked (that needs minisign, or an OpenSSL 3 such as the one in Git for Windows).'
+      Say 'notice: the downloads are checked against SHA256SUMS.txt fetched over HTTPS from GitHub, like this script.'
+      Say 'notice: `blirp update` checks the signature itself. $env:BLIRP_REQUIRE_SIGNATURE = ''1'' refuses to install without it.'
+    }
+
     $sums = @{}
     foreach ($line in [IO.File]::ReadAllLines($sumsFile)) {
       if ($line -match '^([0-9a-fA-F]{64})\s+\*?(.+?)\s*$') { $sums[$Matches[2]] = $Matches[1].ToLowerInvariant() }

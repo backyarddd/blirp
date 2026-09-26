@@ -62,7 +62,7 @@ Requests run with `control` and `admin` rights ([api.md](api.md#listeners-and-au
 | UDP (QUIC, iroh) and mDNS | hub or node | sync, pairing, remote terminals; standalone machines open no endpoint |
 | Outbound to n0 relays and DNS discovery | hub or node with `sync.relay = "default"` | connection setup and fallback relaying of encrypted traffic |
 | Outbound via your `claude`/`codex` CLI, or to Ollama | when distilling | redacted transcript excerpts |
-| Outbound to GitHub Releases | desktop app, at launch | update check; updates install only with a valid minisign signature and after you confirm |
+| Outbound to GitHub Releases | daemon (at most daily, unless `update.check = false`), `blirp update`, install scripts | release check; `blirp update` installs only a release whose `SHA256SUMS.txt` has a valid minisign signature, the install scripts check it when they can ([install.md](install.md#how-the-scripts-verify-downloads)) |
 
 Never expose the daemon port or the portal to the internet. For remote access use Tailscale ([portal.md](portal.md#tailscale)).
 
@@ -80,7 +80,7 @@ Injected memory is derived from earlier transcripts, which can contain text from
 
 ## Desktop app
 
-The window loads only its bundled loading page and the local daemon UI. The daemon origin gets no Tauri IPC capabilities; only the bundled page may call its three commands (startup state, retry, open logs). Navigation to other origins and `window.open` go to your default browser. Updates are downloaded from GitHub Releases and installed only when their minisign signature matches the public key built into the app, after you confirm.
+The window loads only its bundled loading page and the local daemon UI. The daemon origin gets no Tauri IPC capabilities; only the bundled page may call its three commands (startup state, retry, open logs). Navigation to other origins and `window.open` go to your default browser. The app has no updater of its own: `blirp update` replaces it, after verifying the release signature with the key built into `blirp`.
 
 ## Hardening checklist
 
