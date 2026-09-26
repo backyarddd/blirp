@@ -600,18 +600,25 @@ async fn pair_replicate_proxy_revoke_and_portal() {
         r.json::<ErrorBody>().await.unwrap().error.code,
         "control_not_allowed"
     );
-    // Nor paste files into its terminals.
+    // Nor paste files into its terminals, however large the upload.
     let resp = blirp::sync::forward_body(
         &a.daemon.state,
         &b.id(),
         &Principal::local(),
         Method::POST,
         "/api/sessions/any/uploads?name=a.png",
-        Some(("application/octet-stream", vec![1u8; 8].into())),
+        Some(("application/octet-stream", vec![1u8; 2 << 20].into())),
     )
     .await
     .unwrap();
+    // The node refuses before reading the 2 MiB body; its answer still
+    // comes back rather than a proxy error for the unread body.
     assert_eq!(resp.status(), 403);
+    let body = axum::body::to_bytes(resp.into_body(), 1 << 20)
+        .await
+        .unwrap();
+    let err: ErrorBody = serde_json::from_slice(&body).unwrap();
+    assert_eq!(err.error.code, "control_not_allowed");
     let resp = blirp::sync::forward(
         &a.daemon.state,
         &b.id(),

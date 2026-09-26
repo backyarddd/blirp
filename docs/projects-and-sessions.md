@@ -34,7 +34,7 @@ Paste a screenshot or a copied file into a terminal pane (Ctrl+V or Ctrl+Shift+V
 
 - Claude Code and Codex attach an image whose path is pasted like this, as they do for a file dropped onto a native terminal. For other files, and other agents, the path is there to use in your prompt ("read this log: <path>").
 - Files are saved as `~/.blirp/uploads/<session>/<time>-<name>` (name reduced to letters, digits, `.`, `-`, `_`) on that machine, readable only by your user. They are deleted when you delete the session and after 7 days, and are never synced.
-- At most 25 MB per file. Plain text pastes work exactly as before; when the clipboard holds both text and a picture of it (copying cells or paragraphs from an office app), the text is pasted.
+- At most 25 MB per file and 500 MB per session. Folders cannot be dropped, only files. Plain text pastes work exactly as before; when the clipboard holds both text and a picture of it (copying cells or paragraphs from an office app), the text is pasted.
 - On Linux (and macOS) plain Ctrl+V still goes to the program in the terminal, as in native terminals: Claude Code then reads the clipboard of the machine it runs on, which only works for sessions on this machine. On Windows plain Ctrl+V pastes, as in Windows Terminal (Claude Code's own image paste there is Alt+V, which still reaches it).
 - Needs **Terminal control** on portal devices, like typing.
 

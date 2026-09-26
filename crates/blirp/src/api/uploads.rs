@@ -48,7 +48,8 @@ async fn read_body(headers: &HeaderMap, body: Body) -> ApiResult<Bytes> {
         return Err(too_large());
     }
     let mut stream = body.into_data_stream();
-    let mut buf = Vec::with_capacity(declared.map_or(0, |n| n as usize));
+    // A declared length is only a hint: never reserve more than 1 MiB up front.
+    let mut buf = Vec::with_capacity(declared.map_or(0, |n| n.min(1 << 20) as usize));
     while let Some(chunk) = stream.next().await {
         let chunk =
             chunk.map_err(|e| ApiError::bad_request(format!("reading the upload failed: {e}")))?;
@@ -90,18 +91,33 @@ async fn upload(
         )
         .await;
     }
-    if s.terminals.get(&id).is_none() {
-        return Err(ApiError::new(
+    let not_running = || {
+        ApiError::new(
             StatusCode::NOT_FOUND,
             "terminal_not_found",
             "the session is not running",
-        ));
+        )
+    };
+    if s.terminals.get(&id).is_none() {
+        return Err(not_running());
     }
     let bytes = read_body(&headers, body).await?;
+    // Reading a large body takes a while; the session may have ended since.
+    if s.terminals.get(&id).is_none() {
+        return Err(not_running());
+    }
     let paths = s.paths.clone();
     let saved = blocking(move || {
-        let path = crate::uploads::save(&paths, &id, &name, &bytes, blirp_core::now_ms())
-            .map_err(|e| ApiError::internal("saving the upload", format!("{e:#}")))?;
+        let path = crate::uploads::save(&paths, &id, &name, &bytes, blirp_core::now_ms()).map_err(
+            |e| match e.downcast_ref::<crate::uploads::QuotaExceeded>() {
+                Some(q) => ApiError::new(
+                    StatusCode::PAYLOAD_TOO_LARGE,
+                    "upload_quota_exceeded",
+                    q.to_string(),
+                ),
+                None => ApiError::internal("saving the upload", format!("{e:#}")),
+            },
+        )?;
         let path = path.to_string_lossy().into_owned();
         Ok(UploadedFile {
             quoted: crate::uploads::quote_path(&path, cfg!(windows)),

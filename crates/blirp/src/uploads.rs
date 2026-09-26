@@ -12,6 +12,8 @@ use std::time::{Duration, SystemTime};
 
 /// Largest file accepted, enforced before anything is written.
 pub const MAX_BYTES: usize = 25 << 20;
+/// Most bytes one session's upload folder may hold.
+pub const SESSION_QUOTA: u64 = 500 << 20;
 /// Uploads older than this are deleted by the prune task.
 pub const RETENTION: Duration = Duration::from_secs(7 * 24 * 3600);
 const PRUNE_EVERY: Duration = Duration::from_secs(3600);
@@ -89,9 +91,15 @@ pub fn quote_path(path: &str, windows: bool) -> String {
     }
 }
 
+/// The session's upload folder is full (`SESSION_QUOTA`).
+#[derive(Debug, thiserror::Error)]
+#[error("this session's uploads would exceed {} MB; delete the session or wait for old uploads to expire", .0 >> 20)]
+pub struct QuotaExceeded(pub u64);
+
 /// Write `bytes` to a new owner-only file `uploads/<session>/<ms>-<name>`
 /// and return its absolute path. Never overwrites: a name taken in the same
-/// millisecond gets a counter.
+/// millisecond gets a counter. Refused with `QuotaExceeded` when the folder
+/// would hold more than `SESSION_QUOTA`.
 pub fn save(
     paths: &Paths,
     session: &str,
@@ -99,9 +107,26 @@ pub fn save(
     bytes: &[u8],
     now_ms: i64,
 ) -> anyhow::Result<PathBuf> {
+    save_within(paths, session, name, bytes, now_ms, SESSION_QUOTA)
+}
+
+fn save_within(
+    paths: &Paths,
+    session: &str,
+    name: &str,
+    bytes: &[u8],
+    now_ms: i64,
+    quota: u64,
+) -> anyhow::Result<PathBuf> {
     let dir = paths.session_uploads_dir(session)?;
     let name = sanitize_name(name);
     create_private_dir(&dir)?;
+    // ponytail: check then write, so concurrent uploads to one session can
+    // overshoot by the files in flight (the SPA uploads one at a time); a
+    // per-session lock if that ever matters.
+    if used_bytes(&dir)? + bytes.len() as u64 > quota {
+        return Err(QuotaExceeded(quota).into());
+    }
     let mut recreated = false;
     let mut n = 0u32;
     loop {
@@ -132,6 +157,20 @@ pub fn save(
             Err(e) => return Err(e).with_context(|| format!("create {}", path.display())),
         }
     }
+}
+
+/// Bytes in the regular files of `dir`.
+fn used_bytes(dir: &Path) -> anyhow::Result<u64> {
+    let mut used = 0;
+    for f in std::fs::read_dir(dir).with_context(|| format!("read {}", dir.display()))? {
+        let f = f.with_context(|| format!("read {}", dir.display()))?;
+        if let Ok(m) = f.metadata()
+            && m.is_file()
+        {
+            used += m.len();
+        }
+    }
+    Ok(used)
 }
 
 fn create_new_private(path: &Path) -> std::io::Result<std::fs::File> {
@@ -308,6 +347,24 @@ mod tests {
         }
         remove_session(&paths, "S1");
         assert!(!root.exists());
+    }
+
+    #[test]
+    fn a_full_session_folder_refuses_more() {
+        let tmp = tempfile::tempdir().unwrap();
+        let paths = Paths::at(tmp.path());
+        save_within(&paths, "S1", "a.bin", &[0; 60], 1, 100).unwrap();
+        let err = save_within(&paths, "S1", "b.bin", &[0; 41], 2, 100).unwrap_err();
+        assert!(err.downcast_ref::<QuotaExceeded>().is_some(), "{err:#}");
+        // Exactly full is fine; other sessions have their own quota.
+        save_within(&paths, "S1", "c.bin", &[0; 40], 3, 100).unwrap();
+        save_within(&paths, "S2", "d.bin", &[0; 100], 4, 100).unwrap();
+        assert_eq!(
+            std::fs::read_dir(paths.uploads_dir().join("S1"))
+                .unwrap()
+                .count(),
+            2
+        );
     }
 
     #[cfg(unix)]
