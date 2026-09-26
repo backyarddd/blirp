@@ -10,6 +10,11 @@ so every tag needs one.
 
 ## [Unreleased]
 
+### Fixed
+
+- The web UI header, sign-in screen and favicon show the same "b" logo as
+  the desktop app icon instead of an older mark.
+
 ## [0.1.0] - 2026-09-26
 
 First release: a desktop app and daemon that runs CLI coding agents in real

@@ -10,7 +10,13 @@
   <body>
     <main>
       <svg class="logo" viewBox="0 0 1024 1024" aria-hidden="true">
-        <rect x="64" y="64" width="896" height="896" rx="208" fill="#F26B1D" />
+        <defs>
+          <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1">
+            <stop offset="0" stop-color="#FF8A3D" />
+            <stop offset="1" stop-color="#EC5A14" />
+          </linearGradient>
+        </defs>
+        <rect x="64" y="64" width="896" height="896" rx="208" fill="url(#bg)" />
         <rect x="262" y="212" width="120" height="600" rx="60" fill="#fff" />
         <circle cx="512" cy="562" r="190" fill="none" stroke="#fff" stroke-width="120" />
       </svg>

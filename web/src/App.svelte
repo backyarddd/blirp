@@ -12,6 +12,7 @@
   import CommandPalette from './lib/components/CommandPalette.svelte';
   import NewSessionDialog from './lib/components/NewSessionDialog.svelte';
   import Toasts from './lib/components/Toasts.svelte';
+  import logo from './lib/assets/logo.svg';
   import SessionsView from './screens/SessionsView.svelte';
   import GridView from './screens/GridView.svelte';
   import ProjectsView from './screens/ProjectsView.svelte';
@@ -117,11 +118,7 @@
 {:else}
   <div class="gate">
     <div class="card gate-card">
-      <svg width="44" height="44" viewBox="0 0 32 32" aria-hidden="true">
-        <rect width="32" height="32" rx="9" fill="var(--accent)" />
-        <circle cx="12" cy="16" r="4.5" fill="#fff" />
-        <circle cx="21.5" cy="16" r="2.5" fill="#fff" />
-      </svg>
+      <img src={logo} width="48" height="48" alt="" />
       {#if app.auth === 'checking'}
         <h1>Connecting to blirp…</h1>
         <p class="muted" role="status">Talking to the local daemon.</p>

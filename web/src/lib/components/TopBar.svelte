@@ -5,6 +5,7 @@
   import Settings from '@lucide/svelte/icons/settings';
   import Search from '@lucide/svelte/icons/search';
   import Coffee from '@lucide/svelte/icons/coffee';
+  import logo from '../assets/logo.svg';
   import { app } from '../app.svelte';
   import { nav } from '../router.svelte';
   import { href } from '../router';
@@ -37,11 +38,7 @@
 
 <header class="topbar">
   <a class="logo" href={href.sessions()} aria-label="blirp home">
-    <svg width="26" height="26" viewBox="0 0 32 32" aria-hidden="true">
-      <rect width="32" height="32" rx="9" fill="var(--accent)" />
-      <circle cx="12" cy="16" r="4.5" fill="#fff" />
-      <circle cx="21.5" cy="16" r="2.5" fill="#fff" />
-    </svg>
+    <img src={logo} width="28" height="28" alt="" />
     <span>blirp</span>
   </a>
 
