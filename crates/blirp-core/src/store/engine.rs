@@ -196,6 +196,9 @@ impl Store {
     /// Sessions on `machine_id` due for distillation (§9 trigger): idle since
     /// `idle_before` or ended, active after `active_after`, with events past
     /// `distilled_through_seq`, and not already failed at the same point.
+    /// Ingested subagent children (external with a parent) are left out: the
+    /// parent's transcript already carries their task and result. Sessions of
+    /// other machines are distilled on their origin machine and replicated.
     /// Most recently active first.
     pub fn distill_candidates(
         &self,
@@ -209,6 +212,7 @@ impl Store {
                 c,
                 "SELECT s.* FROM sessions s
                  WHERE s.machine_id = ?1 AND s.last_activity_at >= ?3
+                   AND NOT (s.origin = 'external' AND s.parent_session_id IS NOT NULL)
                    AND ((s.status = 'idle' AND s.last_activity_at <= ?2)
                         OR s.status IN ('completed','failed','detached'))
                    AND EXISTS (SELECT 1 FROM events e WHERE e.session_id = s.id

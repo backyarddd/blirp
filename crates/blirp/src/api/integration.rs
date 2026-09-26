@@ -102,13 +102,20 @@ async fn distill(
     principal.require_control()?;
     let store = s.store.clone();
     let sid = id.clone();
-    let events = blocking(move || {
-        store
+    let (session, events) = blocking(move || {
+        let session = store
             .get_session(&sid)?
             .ok_or_else(|| ApiError::not_found("session"))?;
-        Ok(store.max_event_seq(&sid)?)
+        Ok((session, store.max_event_seq(&sid)?))
     })
     .await?;
+    if session.machine_id != s.machine.id {
+        // Distilled on its origin machine; the summary arrives by replication.
+        return Err(ApiError::conflict(
+            "remote_session",
+            "this session is distilled on the machine it ran on",
+        ));
+    }
     if events == 0 {
         return Err(ApiError::conflict(
             "nothing_to_distill",

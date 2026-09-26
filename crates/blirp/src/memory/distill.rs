@@ -6,8 +6,8 @@ use crate::memory::render::clip;
 use crate::state::SharedState;
 use blirp_core::config::{BriefMode, MemoryConfig, Summarizer};
 use blirp_core::model::{
-    Event, EventKind, MemoryPart, Record, RecordKind, RecordStatus, ServerEvent, SessionSummary,
-    SummaryItem,
+    Event, EventKind, MemoryPart, Record, RecordKind, RecordStatus, ServerEvent, Session,
+    SessionOrigin, SessionSummary, SummaryItem,
 };
 use blirp_core::process;
 use blirp_core::store::{BriefApply, DistillOutcome, DistillPlan, RecordFilter, Store, StoreError};
@@ -234,10 +234,11 @@ pub trait Summarize: Send + Sync {
     fn complete(&self, prompt: String) -> impl Future<Output = Result<String, String>> + Send;
 }
 
+/// `scratch` is the root for per-run working dirs (`BLIRP_HOME/distill`).
 #[derive(Debug, Clone)]
 pub enum Backend {
-    Claude(PathBuf),
-    Codex(PathBuf),
+    Claude { exe: PathBuf, scratch: PathBuf },
+    Codex { exe: PathBuf, scratch: PathBuf },
     Ollama { base: String, model: String },
 }
 
@@ -271,10 +272,21 @@ async fn ollama_up(base: &str) -> bool {
 }
 
 /// Resolve `memory.summarizer` to a runnable backend (`auto`: claude, codex,
-/// ollama in that order). `Ok(None)` for `none`.
-pub async fn select_backend(cfg: &MemoryConfig) -> Result<Option<Backend>, String> {
-    let claude = || process::which("claude").map(Backend::Claude);
-    let codex = || process::which("codex").map(Backend::Codex);
+/// ollama in that order). `Ok(None)` for `none`. CLI summarizers run in a
+/// fresh dir under `scratch`.
+pub async fn select_backend(cfg: &MemoryConfig, scratch: &Path) -> Result<Option<Backend>, String> {
+    let claude = || {
+        process::which("claude").map(|exe| Backend::Claude {
+            exe,
+            scratch: scratch.to_path_buf(),
+        })
+    };
+    let codex = || {
+        process::which("codex").map(|exe| Backend::Codex {
+            exe,
+            scratch: scratch.to_path_buf(),
+        })
+    };
     let base = ollama_base();
     let ollama = Backend::Ollama {
         base: base.clone(),
@@ -408,11 +420,23 @@ fn tail(s: &str) -> String {
     clip(&one_line(s), 300)
 }
 
+/// Fresh working dir for one summarizer run, inside `root`
+/// (`BLIRP_HOME/distill`). Ingest skips transcripts whose cwd is inside
+/// BLIRP_HOME outside `worktrees/` (§8), so a summarizer that does persist a
+/// session is never ingested and distilled in turn.
+fn scratch_dir(root: &Path) -> Result<tempfile::TempDir, String> {
+    std::fs::create_dir_all(root).map_err(|e| format!("scratch dir {}: {e}", root.display()))?;
+    tempfile::Builder::new()
+        .prefix("run-")
+        .tempdir_in(root)
+        .map_err(|e| format!("scratch dir {}: {e}", root.display()))
+}
+
 impl Backend {
     async fn run(&self, prompt: String, timeout: Duration) -> Result<String, String> {
         match self {
-            Backend::Claude(path) => {
-                let dir = tempfile::tempdir().map_err(|e| format!("scratch dir: {e}"))?;
+            Backend::Claude { exe: path, scratch } => {
+                let dir = scratch_dir(scratch)?;
                 let args: Vec<OsString> = [
                     "-p",
                     "--model",
@@ -433,8 +457,8 @@ impl Backend {
                     format!("{e} (exit {:?}; stderr: {})", out.code, tail(&out.stderr))
                 })
             }
-            Backend::Codex(path) => {
-                let dir = tempfile::tempdir().map_err(|e| format!("scratch dir: {e}"))?;
+            Backend::Codex { exe: path, scratch } => {
+                let dir = scratch_dir(scratch)?;
                 let last = dir.path().join("last-message.txt");
                 let mut args: Vec<OsString> = [
                     "exec",
@@ -502,8 +526,8 @@ impl Backend {
 impl Summarize for Backend {
     fn name(&self) -> &'static str {
         match self {
-            Backend::Claude(_) => "claude",
-            Backend::Codex(_) => "codex",
+            Backend::Claude { .. } => "claude",
+            Backend::Codex { .. } => "codex",
             Backend::Ollama { .. } => "ollama",
         }
     }
@@ -827,10 +851,44 @@ async fn schedule(state: &SharedState) {
     }
 }
 
+/// Why a queued job must not run (checked before it takes budget). Sessions
+/// of other machines are distilled on their origin machine and arrive by
+/// replication. Ingested subagent children (external with a parent) are
+/// covered by their parent: its transcript holds the subagent's task (tool
+/// call) and final report (tool result); they are distilled only on request.
+pub fn skip_reason(s: &Session, local_machine: &str, manual: bool) -> Option<&'static str> {
+    if s.machine_id != local_machine {
+        return Some("session belongs to another machine");
+    }
+    if !manual && s.origin == SessionOrigin::External && s.parent_session_id.is_some() {
+        return Some("subagent session (covered by its parent)");
+    }
+    None
+}
+
 async fn process(state: &SharedState, job: &Job) {
     let cfg = state.config().memory;
     if cfg.summarizer == Summarizer::None && !job.manual {
         return;
+    }
+    let store = state.store.clone();
+    let sid = job.session_id.clone();
+    match tokio::task::spawn_blocking(move || store.get_session(&sid)).await {
+        Ok(Ok(Some(s))) => {
+            if let Some(why) = skip_reason(&s, &state.machine.id, job.manual) {
+                tracing::debug!(session = %job.session_id, why, "not distilling");
+                return;
+            }
+        }
+        Ok(Ok(None)) => return,
+        Ok(Err(e)) => {
+            tracing::warn!(session = %job.session_id, error = %e, "loading session to distill failed");
+            return;
+        }
+        Err(e) => {
+            tracing::error!(error = %e, "distill session lookup task failed");
+            return;
+        }
     }
     let store = state.store.clone();
     let limit = cfg.daily_distill_limit;
@@ -849,7 +907,7 @@ async fn process(state: &SharedState, job: &Job) {
             return;
         }
     }
-    let result = match select_backend(&cfg).await {
+    let result = match select_backend(&cfg, &state.paths.distill_dir()).await {
         Ok(Some(b)) => run_distill(state.store.clone(), &job.session_id, &b, &cfg).await,
         Ok(None) => Err(DistillError::NoBackend(
             "memory.summarizer = \"none\"".into(),
@@ -1194,6 +1252,59 @@ mod tests {
         );
     }
 
+    #[test]
+    fn scheduling_ignores_subagents_and_remote_sessions() {
+        let (_d, store, pid) = project_store("S");
+        store
+            .upsert_machine(&blirp_core::model::Machine {
+                id: "other".into(),
+                name: "laptop".into(),
+                os: "linux".into(),
+                role: blirp_core::model::MachineRole::Node,
+                last_seen: 1,
+                revoked: false,
+            })
+            .unwrap();
+        let mut sessions = vec![session("top", &pid, 10)];
+        // A continue-in / fork session: blirp-launched with lineage, distilled.
+        let mut fork = session("fork", &pid, 10);
+        fork.parent_session_id = Some("top".into());
+        sessions.push(fork);
+        // An ingested subagent child.
+        let mut sub = session("sub", &pid, 10);
+        sub.origin = SessionOrigin::External;
+        sub.parent_session_id = Some("top".into());
+        sessions.push(sub);
+        // Replicated from another machine.
+        let mut remote = session("remote", &pid, 10);
+        remote.machine_id = "other".into();
+        remote.origin = SessionOrigin::External;
+        sessions.push(remote);
+        for s in &sessions {
+            store.insert_session(s).unwrap();
+            event(&store, &s.id, 1, EventKind::User, "hello");
+        }
+
+        let mut due: Vec<String> = store
+            .distill_candidates("m", i64::MAX, 0, 10)
+            .unwrap()
+            .into_iter()
+            .map(|s| s.id)
+            .collect();
+        due.sort();
+        assert_eq!(due, ["fork", "top"]);
+
+        let by_id = |id: &str| sessions.iter().find(|s| s.id == id).unwrap();
+        assert_eq!(skip_reason(by_id("top"), "m", false), None);
+        assert_eq!(skip_reason(by_id("fork"), "m", false), None);
+        // Queued subagents (SessionEnd hook, process exit) are skipped unless
+        // the user asks; remote sessions are never distilled here.
+        assert!(skip_reason(by_id("sub"), "m", false).is_some());
+        assert_eq!(skip_reason(by_id("sub"), "m", true), None);
+        assert!(skip_reason(by_id("remote"), "m", false).is_some());
+        assert!(skip_reason(by_id("remote"), "m", true).is_some());
+    }
+
     #[tokio::test]
     async fn backend_error_is_not_retried() {
         let (_d, store, _) = seed();
@@ -1229,7 +1340,10 @@ mod tests {
         let json_path = d.path().join("canned.json");
         std::fs::write(&json_path, canned.to_string()).unwrap();
         let script = fake_script(d.path(), "fake-claude", &json_path, false);
-        let backend = Backend::Claude(script);
+        let backend = Backend::Claude {
+            exe: script,
+            scratch: d.path().join("distill"),
+        };
         run_distill(store.clone(), "s", &backend, &cfg(BriefMode::Auto))
             .await
             .unwrap();
@@ -1241,10 +1355,13 @@ mod tests {
         let d = tempfile::tempdir().unwrap();
         let script = fake_script(d.path(), "slow", &d.path().join("x"), true);
         let begin = std::time::Instant::now();
-        let err = Backend::Claude(script)
-            .run("prompt".into(), Duration::from_secs(1))
-            .await
-            .unwrap_err();
+        let err = Backend::Claude {
+            exe: script,
+            scratch: d.path().join("distill"),
+        }
+        .run("prompt".into(), Duration::from_secs(1))
+        .await
+        .unwrap_err();
         assert!(err.contains("timed out"), "{err}");
         assert!(begin.elapsed() < Duration::from_secs(8));
     }

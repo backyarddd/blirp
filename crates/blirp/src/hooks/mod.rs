@@ -153,6 +153,14 @@ pub fn handle(
     {
         found = store.session_by_agent_id(agent, asid)?;
     }
+    // A replicated session of another machine (same agent id, e.g. a synced
+    // agent config dir): its origin machine owns status, memory and distill.
+    if found
+        .as_ref()
+        .is_some_and(|s| s.machine_id != state.machine.id)
+    {
+        return Ok(HookReply::default());
+    }
     let mut created = false;
     let session = match found {
         Some(s) => s,

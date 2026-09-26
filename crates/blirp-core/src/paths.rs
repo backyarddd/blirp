@@ -83,6 +83,11 @@ impl Paths {
     pub fn worktrees_dir(&self) -> PathBuf {
         self.home.join("worktrees")
     }
+    /// Summarizer scratch dirs (§9). Inside the data dir and outside
+    /// `worktrees/`, so ingest skips transcripts recorded there (§8).
+    pub fn distill_dir(&self) -> PathBuf {
+        self.home.join("distill")
+    }
     pub fn launch_dir(&self, session_id: &str) -> PathBuf {
         self.home.join("launch").join(session_id)
     }
