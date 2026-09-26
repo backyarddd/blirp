@@ -116,11 +116,6 @@ test('rejects a missing login, then signs in with /#token= and keeps no cookie',
   await expect(page.getByRole('heading', { name: 'Pick a session' })).toBeVisible();
   await expect(page).toHaveURL(`${env.url}/`);
   await page.evaluate(() => localStorage.clear());
-  // An old `/auth?token=` link still works: it forwards to the fragment and sets no cookie.
-  await page.goto(`${env.url}/auth?token=${env.token}`);
-  await expect(page).toHaveURL(`${env.url}/`); // fragment read and stripped
-  await expect(page.getByRole('heading', { name: 'Pick a session' })).toBeVisible();
-  await page.evaluate(() => localStorage.clear());
   await page.goto(`${env.url}/sessions#token=${env.token}`);
   await expect(page).toHaveURL(`${env.url}/sessions`);
   await expect(page.getByRole('heading', { name: 'Pick a session' })).toBeVisible();

@@ -23,7 +23,7 @@ export default defineConfig({
   define: { __APP_VERSION__: JSON.stringify(pkg.version) },
   server: {
     port: 5173,
-    proxy: { '/api': proxy, '/auth': proxy, '/mcp': proxy },
+    proxy: { '/api': proxy, '/mcp': proxy },
   },
   // One chunk (~230 KB gzip, mostly xterm) served from localhost or the LAN portal; splitting buys nothing.
   build: { outDir: 'dist', target: 'es2022', emptyOutDir: true, chunkSizeWarningLimit: 1024 },

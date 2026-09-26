@@ -1166,41 +1166,27 @@ async fn local_auth_takes_no_cookies() {
         .build()
         .unwrap();
 
-    // Old login links move the token into the fragment and set no cookie.
+    // The token is never taken from a query string or a cookie.
     let r = no_redirect
         .get(h.url(&format!("/auth?token={}", h.token)))
         .send()
         .await
         .unwrap();
-    assert_eq!(r.status(), 303);
-    assert_eq!(r.headers()["location"], format!("/#token={}", h.token));
+    assert!(!r.status().is_redirection(), "no login redirect route");
     assert!(r.headers().get("set-cookie").is_none());
     let r = no_redirect
-        .get(h.url("/auth?token=wrong"))
+        .get(h.url(&format!("/api/health?token={}", h.token)))
         .send()
         .await
         .unwrap();
     assert_eq!(r.status(), 401);
-
-    // The cookie of older versions is refused, and cleared wherever it shows up.
-    let legacy = format!("blirp_session={}", h.token);
-    for path in ["/api/health", "/", "/auth?token=wrong"] {
-        let r = no_redirect
-            .get(h.url(path))
-            .header("Cookie", &legacy)
-            .send()
-            .await
-            .unwrap();
-        if path.starts_with("/api/") {
-            assert_eq!(r.status(), 401, "{path}");
-        }
-        let cleared = r
-            .headers()
-            .get_all("set-cookie")
-            .iter()
-            .any(|v| v.to_str().unwrap().starts_with("blirp_session=; Max-Age=0"));
-        assert!(cleared, "{path}: legacy cookie not cleared");
-    }
+    let r = no_redirect
+        .get(h.url("/api/health"))
+        .header("Cookie", format!("blirp_session={}", h.token))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(r.status(), 401);
     let r = no_redirect.get(h.url("/")).send().await.unwrap();
     assert!(r.headers().get("set-cookie").is_none());
     // The portal's device cookie means nothing here.

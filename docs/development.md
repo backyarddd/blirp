@@ -69,7 +69,7 @@ cargo run -p blirp -- daemon --port 47770     # the Vite proxy expects 47770
 pnpm -C web dev                               # http://localhost:5173
 ```
 
-Log the Vite origin in once: open `http://localhost:5173/#token=<token from runtime.json>` (the UI keeps it in that origin's storage). Vite proxies `/api`, `/auth` and `/mcp` (with WebSockets) to the daemon and rewrites `Origin` so the daemon's same-origin check passes.
+Log the Vite origin in once: open `http://localhost:5173/#token=<token from runtime.json>` (the UI keeps it in that origin's storage). Vite proxies `/api` and `/mcp` (with WebSockets) to the daemon and rewrites `Origin` so the daemon's same-origin check passes.
 
 ### Desktop app
 

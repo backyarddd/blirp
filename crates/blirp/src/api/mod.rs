@@ -16,18 +16,12 @@ use crate::state::SharedState;
 use axum::extract::{FromRequest, FromRequestParts, Query, Request, State};
 use axum::http::{HeaderMap, HeaderValue, Method, StatusCode, header};
 use axum::middleware::{self, Next};
-use axum::response::{IntoResponse, Redirect, Response};
+use axum::response::{IntoResponse, Response};
 use axum::routing::{any, get, post};
 use axum::{Json, Router};
 use blirp_core::model::{Capabilities, ErrorBody, ErrorDetail};
 use blirp_core::store::StoreError;
-use serde::Deserialize;
 
-/// Session cookie of older versions on the loopback listener. It is no
-/// longer accepted: cookies ignore ports, so one set for 127.0.0.1 reached
-/// every other local server. Requests still carrying it get it cleared.
-const LEGACY_COOKIE: &str = "blirp_session";
-const CLEAR_LEGACY_COOKIE: &str = "blirp_session=; Max-Age=0; Path=/; HttpOnly; SameSite=Strict";
 /// Long-lived browser device cookie on the LAN portal (§13).
 pub const DEVICE_COOKIE: &str = "blirp_device";
 
@@ -174,9 +168,6 @@ impl ApiError {
     }
     pub fn conflict(code: &'static str, message: impl Into<String>) -> Self {
         Self::new(StatusCode::CONFLICT, code, message)
-    }
-    pub fn not_implemented(message: impl Into<String>) -> Self {
-        Self::new(StatusCode::NOT_IMPLEMENTED, "not_implemented", message)
     }
     /// Logs the real cause; clients get a generic message.
     pub fn internal(context: &str, err: impl std::fmt::Display) -> Self {
@@ -365,17 +356,17 @@ fn build(state: SharedState, listener: Listener) -> Router {
         Listener::Portal => Router::new()
             .merge(api)
             .route("/device-login", get(crate::portal::device_login)),
-        Listener::Local => Router::new().merge(api).route("/auth", get(auth_login)),
-        Listener::Proxy => Router::new().merge(api),
+        Listener::Local | Listener::Proxy => Router::new().merge(api),
     };
     let mut app = app
         .fallback(crate::static_files::serve)
         .layer(middleware::from_fn(check_origin))
         .layer(middleware::from_fn(security_headers));
     if listener == Listener::Local {
-        app = app.layer(middleware::from_fn(clear_legacy_cookie)).layer(
-            middleware::from_fn_with_state(state.clone(), check_local_host),
-        );
+        app = app.layer(middleware::from_fn_with_state(
+            state.clone(),
+            check_local_host,
+        ));
     }
     let app = app.with_state(state);
     if listener == Listener::Portal {
@@ -503,44 +494,6 @@ async fn require_auth(State(state): State<SharedState>, mut req: Request, next: 
         Ok(None) => unauthorized(),
         Err(e) => e.into_response(),
     }
-}
-
-#[derive(Deserialize)]
-struct AuthQuery {
-    token: String,
-}
-
-/// `/auth?token=`, the login link of older versions (bookmarks, old
-/// desktop apps): redirects to `/#token=`, which the SPA reads and strips.
-/// A fragment never reaches a server or its logs. No cookie is set.
-async fn auth_login(
-    State(state): State<SharedState>,
-    q: Result<Query<AuthQuery>, axum::extract::rejection::QueryRejection>,
-) -> Response {
-    match q {
-        Ok(Query(q)) if token_eq(&q.token, &state.token) => {
-            Redirect::to(&format!("/#token={}", state.token)).into_response()
-        }
-        _ => ApiError::new(
-            StatusCode::UNAUTHORIZED,
-            "unauthorized",
-            "invalid login link; run `blirp open` for a fresh one",
-        )
-        .into_response(),
-    }
-}
-
-/// Expire the cookie of older versions on any request that still sends it.
-async fn clear_legacy_cookie(req: Request, next: Next) -> Response {
-    let legacy = cookie_value(req.headers(), LEGACY_COOKIE).is_some();
-    let mut resp = next.run(req).await;
-    if legacy {
-        resp.headers_mut().append(
-            header::SET_COOKIE,
-            HeaderValue::from_static(CLEAR_LEGACY_COOKIE),
-        );
-    }
-    resp
 }
 
 fn is_ws_upgrade(headers: &HeaderMap) -> bool {
@@ -687,7 +640,7 @@ mod tests {
             HeaderValue::from_static("a=1; blirp_session=tok; b=2"),
         );
         assert_eq!(bearer_token(&h), None);
-        assert_eq!(cookie_value(&h, LEGACY_COOKIE), Some("tok"));
+        assert_eq!(cookie_value(&h, "blirp_session"), Some("tok"));
         h.insert(
             header::AUTHORIZATION,
             HeaderValue::from_static("Bearer bear"),

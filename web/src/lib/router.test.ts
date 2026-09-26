@@ -47,7 +47,7 @@ describe('isRouterClick', () => {
     expect(isRouterClick(ev, a('https://example.com/'), origin)).toBe(false);
     expect(isRouterClick(ev, a(`${origin}/x`, '_blank'), origin)).toBe(false);
     expect(isRouterClick(ev, a(`${origin}/api/health`), origin)).toBe(false);
-    expect(isRouterClick(ev, a(`${origin}/auth?token=x`), origin)).toBe(false);
+    expect(isRouterClick(ev, a(`${origin}/mcp`), origin)).toBe(false);
     expect(isRouterClick(ev, a(`${origin}/x`, '', ['download']), origin)).toBe(false);
   });
 });

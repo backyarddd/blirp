@@ -14,7 +14,7 @@ Conventions: JSON bodies; ids are UUIDv7 strings (machine ids are hex endpoint i
 
 The runtime token is 256 random bits, compared in constant time, and regenerated at every daemon start.
 
-The local listener accepts no cookies: a cookie for `127.0.0.1` is sent to every server on that host, whatever its port. The web UI is opened as `http://127.0.0.1:<port>/#token=<token>` (`blirp open`, the desktop app); the fragment never reaches a server. The UI keeps the token in its origin's `localStorage`, removes it from the address bar and sends it as a bearer token. Browsers cannot set headers on a WebSocket, so the UI first calls `POST /api/ws-ticket` with `{path}` and opens `<path>?ticket=<ticket>`: a ticket is valid once, for 30 seconds, for that path only. `GET /auth?token=` from older versions redirects to `/#token=` and sets no cookie; an old `blirp_session` cookie is expired on any request that still sends it.
+The local listener accepts no cookies: a cookie for `127.0.0.1` is sent to every server on that host, whatever its port. The web UI is opened as `http://127.0.0.1:<port>/#token=<token>` (`blirp open`, the desktop app); the fragment never reaches a server. The UI keeps the token in its origin's `localStorage`, removes it from the address bar and sends it as a bearer token. Browsers cannot set headers on a WebSocket, so the UI first calls `POST /api/ws-ticket` with `{path}` and opens `<path>?ticket=<ticket>`: a ticket is valid once, for 30 seconds, for that path only.
 
 ```sh
 TOKEN=$(jq -r .token ~/.blirp/runtime.json); PORT=$(jq -r .port ~/.blirp/runtime.json)
@@ -152,7 +152,6 @@ Text fields are limited to 256 KiB.
 | `POST /api/devices/browser-invite` | `{url, expires_at}`: one-time portal login link (5 minutes). 409 `portal_disabled` when the portal is not running. |
 | `GET /device-login?invite=` | portal listener only: redeem a login link, set the device cookie, redirect to `/` |
 | `POST /api/ws-ticket` | local listener only. `{path}` (a WebSocket path under `/api/`) -> `{ticket}`: single use, 30 s, that path only |
-| `GET /auth?token=` | local listener: old login links; redirects to `/#token=<token>`, sets no cookie |
 
 ## WebSockets
 

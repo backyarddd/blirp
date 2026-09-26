@@ -96,5 +96,5 @@ export function isRouterClick(
   }
   if (url.origin !== origin) return false;
   // Daemon-served paths must hit the server.
-  return !/^\/(api|auth|mcp)(\/|$)/.test(url.pathname);
+  return !/^\/(api|mcp)(\/|$)/.test(url.pathname);
 }
