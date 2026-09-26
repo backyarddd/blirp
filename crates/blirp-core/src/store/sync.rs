@@ -14,7 +14,7 @@ use super::projects::path_row;
 use super::sessions::session_row;
 use super::{Change, Result, Store, StoreError, all, check_ids, one, write_row};
 use crate::model::Session;
-use rusqlite::{Connection, Transaction, params};
+use rusqlite::{Connection, OptionalExtension, Transaction, params};
 use serde::{Deserialize, Serialize};
 
 /// Present while replication is off (standalone): nothing is queued.
@@ -380,8 +380,9 @@ fn flush_own_in(tx: &Transaction<'_>, own: &str) -> Result<usize> {
     let mut cur = cursors_in(tx, own)?;
     let n = tx.execute(
         "INSERT OR IGNORE INTO hub_log(origin_machine, origin_seq, entity, op, key, payload_json, ts)
-         SELECT ?1, origin_seq, entity, op, key, payload_json, ts FROM outbox
-         WHERE origin_seq > ?2 ORDER BY origin_seq",
+         SELECT ?1, origin_seq, entity, op, key,
+           CASE WHEN entity = 'events' THEN '' ELSE payload_json END, ts
+         FROM outbox WHERE origin_seq > ?2 ORDER BY origin_seq",
         params![own, cur.last_pushed_origin_seq],
     )?;
     let head: i64 = tx.query_row("SELECT coalesce(max(origin_seq), 0) FROM outbox", [], |r| {
@@ -395,6 +396,105 @@ fn flush_own_in(tx: &Transaction<'_>, own: &str) -> Result<usize> {
     // few seconds stay: session status coalescing looks at them).
     prune_in(tx, cur.last_pushed_origin_seq)?;
     Ok(n)
+}
+
+/// What one [`Store::compact_hub_log`] run did.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct Compacted {
+    /// Rows deleted.
+    pub removed: usize,
+    /// Rows reduced to a position marker.
+    pub stripped: usize,
+}
+
+/// Compacted entities and the SQL for the owner of their row `l`: an
+/// upsert by the owner rewrites every column, so it hides what came before.
+/// (A foreign write of a session or folder only changes some columns and
+/// needs the row to exist; it is kept when it follows the owner's last
+/// upsert.)
+const COMPACTED: [(&str, &str); 3] = [
+    ("machines", "l.key"),
+    (
+        "project_paths",
+        "substr(l.key, 1, instr(l.key, char(10)) - 1)",
+    ),
+    (
+        "sessions",
+        "CASE WHEN l.payload_json <> '' THEN json_extract(l.payload_json, '$.row.machine_id') END",
+    ),
+];
+
+/// One batch of [`Store::compact_hub_log`]: upserts of `entity` at or below
+/// `floor` after `pos` (key, hub_seq), in row order. Returns what it did
+/// and where the next batch starts (None: this entity is done).
+fn compact_batch_in(
+    tx: &Transaction<'_>,
+    entity: &str,
+    owner: &str,
+    floor: i64,
+    pos: &(String, i64),
+    batch: usize,
+) -> Result<(Compacted, Option<(String, i64)>)> {
+    let rows = all(
+        tx,
+        "SELECT hub_seq, key, origin_machine, origin_seq, payload_json = '' FROM hub_log
+         WHERE op = 'upsert' AND entity = ?1 AND (key, hub_seq) > (?2, ?3) AND hub_seq <= ?4
+         ORDER BY key, hub_seq LIMIT ?5",
+        params![entity, pos.0, pos.1, floor, batch as i64],
+        |r| {
+            Ok((
+                r.get::<_, i64>(0)?,
+                r.get::<_, String>(1)?,
+                r.get::<_, String>(2)?,
+                r.get::<_, i64>(3)?,
+                r.get::<_, bool>(4)?,
+            ))
+        },
+    )?;
+    let mut superseded = tx.prepare_cached(&format!(
+        "SELECT 1 FROM hub_log l
+         WHERE l.op = 'upsert' AND l.entity = ?1 AND l.key = ?2 AND l.hub_seq > ?3
+           AND l.hub_seq <= ?4 AND l.payload_json <> '' AND ({owner}) = l.origin_machine
+         LIMIT 1"
+    ))?;
+    // A later row of the same origin with a higher origin_seq keeps that
+    // origin's highest origin_seq at or below the floor in the log.
+    let mut outranked = tx.prepare_cached(
+        "SELECT 1 FROM hub_log WHERE origin_machine = ?1 AND hub_seq > ?2 AND hub_seq <= ?3
+           AND origin_seq > ?4
+         LIMIT 1",
+    )?;
+    // The first upsert of a row created it: a session's events are only
+    // accepted once it exists, so a replay needs it before them.
+    let mut first = tx.prepare_cached(
+        "SELECT 1 FROM hub_log
+         WHERE op = 'upsert' AND entity = ?1 AND key = ?2 AND hub_seq < ?3
+         LIMIT 1",
+    )?;
+    let mut done = Compacted::default();
+    for (hub_seq, key, origin, origin_seq, stripped) in &rows {
+        if !superseded.exists(params![entity, key, hub_seq, floor])?
+            || !first.exists(params![entity, key, hub_seq])?
+        {
+            continue;
+        }
+        if outranked.exists(params![origin, hub_seq, floor, origin_seq])? {
+            tx.execute("DELETE FROM hub_log WHERE hub_seq = ?1", params![hub_seq])?;
+            done.removed += 1;
+        } else if !stripped {
+            tx.execute(
+                "UPDATE hub_log SET payload_json = '' WHERE hub_seq = ?1",
+                params![hub_seq],
+            )?;
+            done.stripped += 1;
+        }
+    }
+    let next = if rows.len() < batch {
+        None
+    } else {
+        rows.last().map(|(h, k, ..)| (k.clone(), *h))
+    };
+    Ok((done, next))
 }
 
 impl Store {
@@ -651,8 +751,12 @@ impl Store {
                     }
                 };
                 // Logged as applied: other machines never see what the
-                // origin was not allowed to change.
-                let payload = payload.as_deref().unwrap_or(&e.payload_json);
+                // origin was not allowed to change. Events are logged
+                // without payload: pulls read them from `events`.
+                let payload = match change {
+                    Change::Event(_) => "",
+                    _ => payload.as_deref().unwrap_or(&e.payload_json),
+                };
                 let n = tx.execute(
                     "INSERT OR IGNORE INTO hub_log(origin_machine, origin_seq, entity, op, key, payload_json, ts)
                      VALUES (?1,?2,?3,?4,?5,?6,?7)",
@@ -681,6 +785,10 @@ impl Store {
 
     /// Hub: `hub_log` after `after` for `requester` (its own entries become
     /// markers), at most `max_entries` rows and about `max_bytes` of payload.
+    /// Events are read from `events` (logged without payload); one the hub
+    /// no longer has (its session was deleted) is left out. So is a
+    /// compacted row ([`Store::compact_hub_log`]), which only its origin
+    /// still gets, as a marker.
     pub fn hub_page(
         &self,
         requester: &str,
@@ -699,17 +807,21 @@ impl Store {
                 "SELECT hub_seq, origin_machine, origin_seq, entity, op, key, payload_json, ts
                  FROM hub_log WHERE hub_seq > ?1 ORDER BY hub_seq LIMIT ?2",
             )?;
+            let mut event =
+                c.prepare_cached("SELECT * FROM events WHERE session_id = ?1 AND seq = ?2")?;
             let limit = max_entries as i64 + 1;
             let mut rows = st.query(params![after, limit])?;
             let mut entries = Vec::new();
+            let mut scanned = 0;
             let mut bytes = 0;
             let mut up_to = after;
             let mut more = false;
             while let Some(r) = rows.next()? {
-                if entries.len() == max_entries {
+                if scanned == max_entries {
                     more = true;
                     break;
                 }
+                scanned += 1;
                 let hub_seq: i64 = r.get(0)?;
                 let origin_machine: String = r.get(1)?;
                 let origin_seq: i64 = r.get(2)?;
@@ -720,12 +832,32 @@ impl Store {
                         origin_seq,
                     }
                 } else {
+                    let entity: String = r.get(3)?;
+                    let key: String = r.get(5)?;
+                    let mut payload_json: String = r.get(6)?;
+                    if payload_json.is_empty() {
+                        let found = match (entity.as_str(), key.rsplit_once('\n')) {
+                            ("events", Some((session, seq))) => match seq.parse::<i64>() {
+                                Ok(seq) => event
+                                    .query_row(params![session, seq], super::sessions::event_row)
+                                    .optional()?,
+                                Err(_) => None,
+                            },
+                            _ => None,
+                        };
+                        let Some(e) = found else {
+                            // Nothing to send; the cursor still moves past it.
+                            up_to = hub_seq;
+                            continue;
+                        };
+                        payload_json = serde_json::to_string(&Change::Event(e))?;
+                    }
                     let entry = WireEntry {
                         origin_seq,
-                        entity: r.get(3)?,
+                        entity,
                         op: r.get(4)?,
-                        key: r.get(5)?,
-                        payload_json: r.get(6)?,
+                        key,
+                        payload_json,
                         ts: r.get(7)?,
                     };
                     bytes += entry.size() + origin_machine.len();
@@ -749,6 +881,70 @@ impl Store {
                 more,
             })
         })
+    }
+
+    /// Hub: `machine` asked for the log after `after`, so it has applied
+    /// everything up to there. Bounds compaction ([`Store::compact_hub_log`]).
+    pub fn hub_record_pull(&self, machine: &str, after: i64) -> Result<()> {
+        self.write(|tx| {
+            tx.execute(
+                "INSERT INTO hub_pulls(machine_id, after) VALUES (?1, ?2)
+                 ON CONFLICT(machine_id) DO UPDATE SET after = excluded.after
+                 WHERE after <> excluded.after",
+                params![machine, after],
+            )?;
+            Ok(())
+        })
+    }
+
+    /// Hub: drop superseded rows from `hub_log` at or below the compaction
+    /// floor, in write transactions of at most `batch` rows.
+    ///
+    /// The floor is the lowest pull position of the paired, non-revoked
+    /// machines (0 for one that has not pulled yet; the head when none is
+    /// paired): no active node reads below it again, so what is compacted
+    /// there changes nothing for them. A node whose cursor is below it is a
+    /// machine paired afresh or again: joining starts from standalone,
+    /// which empties its outbox, so all of its queued writes are newer than
+    /// anything it had logged and the rows compacted away cannot change what
+    /// it skips or applies.
+    ///
+    /// Compacted: upserts of machines, folders and sessions (last writer
+    /// wins by hub order) logged before a later upsert of the same row by
+    /// its owner, which rewrites the whole row, except the row's first
+    /// upsert (a session's events need the session to exist). Deletes, events (logged
+    /// without payload) and shared rows (newest version wins by content,
+    /// not by log order; brief upserts carry their history rows) are kept.
+    /// Each origin's row with its highest `origin_seq` at or below the floor
+    /// is stripped to a marker instead of removed, so `own_seen` in
+    /// [`Store::hub_page`] stays exact.
+    pub fn compact_hub_log(&self, batch: usize) -> Result<Compacted> {
+        let floor = self.read(|c| {
+            Ok(c.query_row(
+                "SELECT coalesce(
+                   (SELECT min(coalesce(p.after, 0)) FROM devices d
+                    LEFT JOIN hub_pulls p ON p.machine_id = d.node_id
+                    WHERE d.kind = 'machine' AND d.revoked = 0),
+                   (SELECT coalesce(max(hub_seq), 0) FROM hub_log))",
+                [],
+                |r| r.get::<_, i64>(0),
+            )?)
+        })?;
+        let mut done = Compacted::default();
+        for (entity, owner) in COMPACTED {
+            let mut pos = (String::new(), 0);
+            loop {
+                let (step, next) =
+                    self.write(|tx| compact_batch_in(tx, entity, owner, floor, &pos, batch))?;
+                done.removed += step.removed;
+                done.stripped += step.stripped;
+                match next {
+                    Some(p) => pos = p,
+                    None => break,
+                }
+            }
+        }
+        Ok(done)
     }
 
     /// Node: apply a pull page from `hub` and advance the pull cursor in the
@@ -973,6 +1169,7 @@ mod tests {
         let mut total = 0;
         loop {
             let after = node.sync_cursors(hub_id).unwrap().last_pulled_hub_seq;
+            hub.hub_record_pull(node_id, after).unwrap();
             let page = hub.hub_page(node_id, after, 2, 4 << 20).unwrap();
             total += node.node_apply_pull(hub_id, &page).unwrap();
             if !page.more {
@@ -1708,5 +1905,311 @@ mod tests {
         assert_eq!(store.get_session("s1").unwrap().unwrap().machine_id, "new");
         assert_eq!(store.local_roots(&r.id, "new").unwrap().len(), 1);
         assert!(store.local_roots(&r.id, "old").unwrap().is_empty());
+    }
+
+    fn machine_device(hub: &Store, node: &str, revoked: bool) {
+        hub.upsert_device(&crate::model::Device {
+            id: format!("d{node}"),
+            name: node.into(),
+            kind: crate::model::DeviceKind::Machine,
+            token_hash: None,
+            node_id: Some(node.into()),
+            created_at: 1,
+            last_seen: 1,
+            revoked,
+            can_control_terminals: true,
+        })
+        .unwrap();
+    }
+
+    fn event(session: &str, seq: i64) -> crate::model::Event {
+        crate::model::Event {
+            session_id: session.into(),
+            seq,
+            ts: seq,
+            kind: crate::model::EventKind::User,
+            text: format!("{session} event {seq}"),
+            meta: Some(serde_json::json!({"n": seq})),
+        }
+    }
+
+    fn events_of(s: &Store, session: &str) -> Vec<crate::model::Event> {
+        s.events_page(session, 0, 1000).unwrap().0
+    }
+
+    /// (hub_seq, entity, payload stripped) of every logged row.
+    fn log_rows(hub: &Store) -> Vec<(i64, String, bool)> {
+        hub.read(|c| {
+            all(
+                c,
+                "SELECT hub_seq, entity, payload_json = '' FROM hub_log ORDER BY hub_seq",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+            )
+        })
+        .unwrap()
+    }
+
+    // Events are logged once (in `events`) and still pulled in full;
+    // compacting superseded rows leaves every pull with the hub's state:
+    // a machine replaying from the start, deleted sessions, events exactly
+    // once, and each origin's `own_seen`.
+    #[test]
+    fn compacted_log_replays_to_the_hub_state() {
+        let (_h, hub) = temp_store();
+        let (_a, a) = temp_store();
+        let (_b, b) = temp_store();
+        machine_device(&hub, "A", false);
+        machine_device(&hub, "B", false);
+        a.apply(project("p", "shared")).unwrap();
+        let machine = |name: &str| {
+            Change::Machine(Machine {
+                id: "A".into(),
+                name: name.into(),
+                os: "linux".into(),
+                role: MachineRole::Node,
+                last_seen: 1,
+                revoked: false,
+            })
+        };
+        a.apply(machine("first")).unwrap();
+        let s1 = session_of("s1", "A");
+        for i in 0..4 {
+            a.apply(Change::Session(crate::model::Session {
+                title: Some(format!("t{i}")),
+                tokens_in: i,
+                ..s1.clone()
+            }))
+            .unwrap();
+        }
+        for seq in 1..=3 {
+            a.apply(Change::Event(event("s1", seq))).unwrap();
+        }
+        a.apply(Change::Session(crate::model::Session {
+            agent_session_id: Some("r2".into()),
+            ..session_of("s2", "A")
+        }))
+        .unwrap();
+        a.apply(Change::Event(event("s2", 1))).unwrap();
+        a.apply(machine("second")).unwrap();
+        push(&a, "A", &hub, "H");
+        // Event payloads are not stored twice.
+        let stored: Vec<bool> = log_rows(&hub)
+            .into_iter()
+            .filter(|(_, e, _)| e == "events")
+            .map(|(.., stripped)| stripped)
+            .collect();
+        assert_eq!(stored, [true; 4]);
+
+        pull(&b, "B", &hub, "H");
+        // A writes s1 once more and deletes s2; then B retitles s1 (a
+        // foreign write after A's last one).
+        a.apply(Change::Session(crate::model::Session {
+            title: Some("owner last".into()),
+            tokens_in: 9,
+            ..s1.clone()
+        }))
+        .unwrap();
+        a.delete_session("s2").unwrap();
+        push(&a, "A", &hub, "H");
+        pull(&b, "B", &hub, "H");
+        let seen = b.get_session("s1").unwrap().unwrap();
+        b.apply(Change::Session(crate::model::Session {
+            title: Some("from b".into()),
+            ..seen
+        }))
+        .unwrap();
+        push(&b, "B", &hub, "H");
+        pull(&a, "A", &hub, "H");
+        // A's last write hides B's retitle (B's only logged row: it stays
+        // as B's marker); the hub's retitle after it stays.
+        a.apply(Change::Session(crate::model::Session {
+            title: Some("owner final".into()),
+            ..a.get_session("s1").unwrap().unwrap()
+        }))
+        .unwrap();
+        push(&a, "A", &hub, "H");
+        hub.apply(Change::Session(crate::model::Session {
+            title: Some("from hub".into()),
+            ..hub.get_session("s1").unwrap().unwrap()
+        }))
+        .unwrap();
+        pull(&a, "A", &hub, "H");
+        pull(&b, "B", &hub, "H");
+        // Both nodes ask for the head once more: the floor is there.
+        pull(&a, "A", &hub, "H");
+        pull(&b, "B", &hub, "H");
+        let head = hub.hub_head().unwrap();
+        let own_seen = |who: &str| hub.hub_page(who, head, 10, 4 << 20).unwrap().own_seen;
+        let before = (own_seen("A"), own_seen("B"));
+        let rows = log_rows(&hub).len();
+
+        let done = hub.compact_hub_log(2).unwrap();
+        // s1's upserts between its first and A's last one. First upserts
+        // stay (s1's events need it; so does the first machine row), and
+        // s2's is followed by its delete, not by a newer upsert.
+        assert_eq!((done.removed, done.stripped), (4, 1), "{done:?}");
+        assert_eq!(log_rows(&hub).len(), rows - done.removed);
+        assert_eq!((own_seen("A"), own_seen("B")), before);
+        assert_eq!(hub.compact_hub_log(2).unwrap(), Compacted::default());
+
+        // A machine replaying from the start ends where the hub is.
+        let (_c, c) = temp_store();
+        let page = hub.hub_page("C", 0, 1000, 4 << 20).unwrap();
+        let events = page
+            .entries
+            .iter()
+            .filter(|e| matches!(e, PulledEntry::Remote { entry, .. } if entry.entity == "events"))
+            .count();
+        assert_eq!(events, 3, "s1's events once, none of deleted s2");
+        assert!(
+            !page.entries.iter().any(
+                |e| matches!(e, PulledEntry::Remote { origin_machine, .. } if origin_machine == "B")
+            ),
+            "B's compacted row is only B's marker"
+        );
+        let marker = hub.hub_page("B", 0, 1000, 4 << 20).unwrap();
+        assert!(
+            marker
+                .entries
+                .iter()
+                .any(|e| matches!(e, PulledEntry::Own { .. }))
+        );
+        pull(&c, "C", &hub, "H");
+        let s1_hub = hub.get_session("s1").unwrap().unwrap();
+        assert_eq!(s1_hub.title.as_deref(), Some("from hub"));
+        assert_eq!(s1_hub.tokens_in, 9);
+        for st in [&a, &b, &c] {
+            assert_eq!(st.get_session("s1").unwrap().unwrap(), s1_hub);
+            assert!(st.get_session("s2").unwrap().is_none());
+            assert!(events_of(st, "s2").is_empty());
+            assert_eq!(st.get_machine("A").unwrap().unwrap().name, "second");
+        }
+        assert_eq!(events_of(&c, "s1"), events_of(&hub, "s1"));
+        assert_eq!(events_of(&c, "s1").len(), 3);
+        assert_eq!(
+            events_of(&c, "s1")[2].meta,
+            Some(serde_json::json!({"n": 3}))
+        );
+    }
+
+    // Compaction stops at the lowest pull position of an active node, which
+    // still gets the latest state; a revoked node does not hold it back.
+    #[test]
+    fn compaction_floor_is_the_slowest_active_node() {
+        let (_h, hub) = temp_store();
+        let (_a, a) = temp_store();
+        let (_b, b) = temp_store();
+        machine_device(&hub, "A", false);
+        machine_device(&hub, "B", false);
+        hub.hub_record_pull("R", 0).unwrap();
+        machine_device(&hub, "R", true);
+        a.apply(project("p", "shared")).unwrap();
+        let s1 = session_of("s1", "A");
+        let title = |i: i64| {
+            Change::Session(crate::model::Session {
+                title: Some(format!("t{i}")),
+                ..s1.clone()
+            })
+        };
+        for i in 0..3 {
+            a.apply(title(i)).unwrap();
+        }
+        push(&a, "A", &hub, "H");
+        pull(&b, "B", &hub, "H");
+        pull(&b, "B", &hub, "H");
+        let slow = b.sync_cursors("H").unwrap().last_pulled_hub_seq;
+        for i in 3..6 {
+            a.apply(title(i)).unwrap();
+        }
+        push(&a, "A", &hub, "H");
+        pull(&a, "A", &hub, "H");
+        pull(&a, "A", &hub, "H");
+        let above = |hub: &Store| -> Vec<(i64, String, bool)> {
+            log_rows(hub)
+                .into_iter()
+                .filter(|(seq, ..)| *seq > slow)
+                .collect()
+        };
+        let untouched = above(&hub);
+
+        // Below B's position: t0 is the first upsert and t2 the latest
+        // there (both kept), t1 goes.
+        let done = hub.compact_hub_log(1000).unwrap();
+        assert_eq!(done.removed + done.stripped, 1, "{done:?}");
+        assert_eq!(above(&hub), untouched, "nothing past B was touched");
+        pull(&b, "B", &hub, "H");
+        assert_eq!(
+            b.get_session("s1").unwrap().unwrap().title.as_deref(),
+            Some("t5")
+        );
+
+        // B asked for the head: everything up to it compacts.
+        pull(&b, "B", &hub, "H");
+        let done = hub.compact_hub_log(1000).unwrap();
+        assert_eq!(done.removed + done.stripped, 3, "{done:?}");
+        let (_c, c) = temp_store();
+        pull(&c, "C", &hub, "H");
+        assert_eq!(
+            c.get_session("s1").unwrap().unwrap(),
+            hub.get_session("s1").unwrap().unwrap()
+        );
+
+        // A paired node that has not pulled yet holds compaction at 0.
+        machine_device(&hub, "N", false);
+        a.apply(title(6)).unwrap();
+        a.apply(title(7)).unwrap();
+        push(&a, "A", &hub, "H");
+        pull(&a, "A", &hub, "H");
+        pull(&b, "B", &hub, "H");
+        assert_eq!(hub.compact_hub_log(1000).unwrap(), Compacted::default());
+    }
+
+    // Hub databases from before migration 9 keep their logged events; the
+    // payload moves out of `hub_log` and pulls read it from `events`.
+    #[test]
+    fn migration_strips_logged_event_payloads() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("blirp.db");
+        let ev = event("s1", 1);
+        let change = Change::Event(ev.clone());
+        let proj = project("p", "shared");
+        {
+            let c = Connection::open(&path).unwrap();
+            for sql in &super::super::migrations::MIGRATIONS[..8] {
+                c.execute_batch(sql).unwrap();
+            }
+            c.pragma_update(None, "user_version", 8).unwrap();
+            c.execute(
+                "INSERT INTO events(session_id, seq, ts, kind, text, meta_json)
+                 VALUES ('s1', 1, 1, 'user', ?1, ?2)",
+                params![ev.text, r#"{"n":1}"#],
+            )
+            .unwrap();
+            for (seq, ch) in [(1, &proj), (2, &change)] {
+                let w = wire(seq, ch);
+                c.execute(
+                    "INSERT INTO hub_log(origin_machine, origin_seq, entity, op, key, payload_json, ts)
+                     VALUES ('A', ?1, ?2, ?3, ?4, ?5, 1)",
+                    params![w.origin_seq, w.entity, w.op, w.key, w.payload_json],
+                )
+                .unwrap();
+            }
+        }
+        let store = Store::open(&path).unwrap();
+        assert_eq!(
+            log_rows(&store),
+            [(1, "projects".into(), false), (2, "events".into(), true)]
+        );
+        let page = store.hub_page("B", 0, 100, 4 << 20).unwrap();
+        let changes: Vec<Change> = page
+            .entries
+            .iter()
+            .map(|e| match e {
+                PulledEntry::Remote { entry, .. } => entry.change().unwrap(),
+                PulledEntry::Own { .. } => panic!("no own entries"),
+            })
+            .collect();
+        assert_eq!(changes, [proj, change]);
     }
 }

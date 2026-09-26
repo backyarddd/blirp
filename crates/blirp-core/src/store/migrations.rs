@@ -4,7 +4,7 @@
 use rusqlite::Connection;
 
 /// Index `i` holds the migration that moves the schema from version `i` to `i + 1`.
-pub(crate) const MIGRATIONS: &[&str] = &[V1, V2, V3, V4, V5, V6, V7, V8];
+pub(crate) const MIGRATIONS: &[&str] = &[V1, V2, V3, V4, V5, V6, V7, V8, V9];
 
 /// Schema of §5. Note on the FTS tables: they are external-content tables keyed
 /// by the implicit rowid of `events`/`records`. blirp never runs `VACUUM`
@@ -298,6 +298,21 @@ UPDATE resources SET updated_at = created_at;
 CREATE TABLE deleted_records(
     id         TEXT PRIMARY KEY,
     deleted_at INTEGER NOT NULL
+);
+"#;
+
+/// Bounded hub log (§10). Events are logged without their payload: the hub
+/// has every event it logged in `events` (append-only), so a pull reads it
+/// from there instead of keeping a second copy. Superseded upserts are
+/// compacted (`Store::compact_hub_log`), found by row through the partial
+/// index. `hub_pulls` holds the pull position each node last asked for, which
+/// bounds compaction.
+const V9: &str = r#"
+UPDATE hub_log SET payload_json = '' WHERE entity = 'events';
+CREATE INDEX hub_log_row ON hub_log(entity, key, hub_seq) WHERE op = 'upsert';
+CREATE TABLE hub_pulls(
+    machine_id TEXT PRIMARY KEY,
+    after      INTEGER NOT NULL
 );
 "#;
 

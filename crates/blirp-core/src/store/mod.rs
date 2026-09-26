@@ -23,7 +23,7 @@ pub use memory::RecordFilter;
 pub use migrations::MigrationError;
 pub use projects::ResolvedProject;
 pub use sessions::SessionFilter;
-pub use sync::{HubPage, IngestOutcome, PulledEntry, SyncCursors, WireEntry};
+pub use sync::{Compacted, HubPage, IngestOutcome, PulledEntry, SyncCursors, WireEntry};
 
 use crate::model::{
     Brief, Event, Machine, Project, ProjectPath, Record, Resource, Session, WikiPage,

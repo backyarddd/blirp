@@ -250,6 +250,7 @@ impl SyncService {
         let mut tasks = vec![tokio::spawn(accept_loop(inner.clone()))];
         if hub {
             tasks.push(tokio::spawn(hub_log_loop(inner.clone())));
+            tasks.push(tokio::spawn(hub_compact_loop(inner.clone())));
         } else {
             tasks.push(tokio::spawn(node_loop(inner.clone())));
         }
@@ -870,6 +871,39 @@ async fn hub_log_loop(inner: Arc<Inner>) {
                 });
             }
             Err(e) => tracing::error!(error = %e, "logging local changes to hub_log failed"),
+        }
+    }
+}
+
+/// First `hub_log` compaction after the hub starts, then how often.
+const COMPACT_FIRST: Duration = Duration::from_secs(60);
+const COMPACT_EVERY: Duration = Duration::from_secs(60 * 60);
+/// Rows per compaction write transaction, so pushes and pulls wait at most
+/// one short batch for the writer.
+const COMPACT_BATCH: usize = 1_000;
+
+/// Hub: compact `hub_log` shortly after start, then hourly.
+async fn hub_compact_loop(inner: Arc<Inner>) {
+    let mut tick =
+        tokio::time::interval_at(tokio::time::Instant::now() + COMPACT_FIRST, COMPACT_EVERY);
+    tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+    let mut shutdown = inner.shutdown.clone();
+    loop {
+        tokio::select! {
+            _ = tick.tick() => {}
+            _ = shutdown.changed() => return,
+        }
+        let store = inner.store.clone();
+        match blocking(move || Ok(store.compact_hub_log(COMPACT_BATCH)?)).await {
+            Ok(c) if c.removed + c.stripped > 0 => {
+                tracing::info!(
+                    removed = c.removed,
+                    stripped = c.stripped,
+                    "compacted hub_log"
+                );
+            }
+            Ok(_) => {}
+            Err(e) => tracing::warn!(error = %e, "compacting hub_log failed"),
         }
     }
 }

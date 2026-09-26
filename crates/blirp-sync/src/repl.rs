@@ -164,6 +164,9 @@ pub async fn serve_hub(
                     let page = blocking(move || {
                         // Our own writes must be logged before we page.
                         st.hub_flush_own(&own)?;
+                        // The node has applied everything up to `after`:
+                        // compaction may go that far for it.
+                        st.hub_record_pull(&node, after)?;
                         Ok(st.hub_page(&node, after, MAX_BATCH_ENTRIES, MAX_BATCH_BYTES)?)
                     })
                     .await?;
