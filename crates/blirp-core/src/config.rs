@@ -256,14 +256,13 @@ impl Config {
         Ok(cfg)
     }
 
-    /// Validate and write atomically. Rewrites the whole file (comments are not kept).
+    /// Validate and write atomically. An existing file is edited in place:
+    /// only keys whose value changed are rewritten, so the user's comments
+    /// and layout survive UI saves.
     pub fn save(&self, path: &Path) -> Result<(), ConfigError> {
         self.validate()?;
         let body = toml::to_string_pretty(self)
             .map_err(|e| ConfigError::Invalid(format!("cannot serialize: {e}")))?;
-        let text =
-            format!("# blirp configuration. Reference: docs/ARCHITECTURE.md section 12.\n\n{body}");
-        let tmp = path.with_extension("toml.tmp");
         let io = |action| {
             move |source| ConfigError::Io {
                 action,
@@ -271,6 +270,20 @@ impl Config {
                 source,
             }
         };
+        let existing = match std::fs::read_to_string(path) {
+            Ok(text) => Some(text),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
+            Err(e) => return Err(io("read")(e)),
+        };
+        // A file that no longer parses (edited by hand meanwhile) is replaced.
+        let text = existing
+            .and_then(|old| edit_in_place(&old, &body))
+            .unwrap_or_else(|| {
+                format!(
+                    "# blirp configuration. Reference: docs/ARCHITECTURE.md section 12.\n\n{body}"
+                )
+            });
+        let tmp = path.with_extension("toml.tmp");
         std::fs::write(&tmp, text).map_err(io("write"))?;
         std::fs::rename(&tmp, path).map_err(io("replace"))
     }
@@ -350,6 +363,119 @@ impl Config {
             return bad("portal.lan_port must be > 0".into());
         }
         Ok(())
+    }
+}
+
+/// `old` (the file on disk) changed to hold the values of `fresh` (the
+/// serialized config): equal values keep their text, comments and position;
+/// changed values are replaced keeping their surrounding comments; keys
+/// `fresh` no longer has (unset options) are removed. None when `old` is not
+/// valid TOML.
+fn edit_in_place(old: &str, fresh: &str) -> Option<String> {
+    let mut doc: toml_edit::DocumentMut = old.parse().ok()?;
+    let fresh: toml_edit::DocumentMut = fresh.parse().ok()?;
+    merge_table(doc.as_table_mut(), fresh.as_table());
+    Some(doc.to_string())
+}
+
+fn merge_table(old: &mut dyn toml_edit::TableLike, new: &dyn toml_edit::TableLike) {
+    use toml_edit::Item;
+    let gone: Vec<String> = old
+        .iter()
+        .map(|(k, _)| k.to_string())
+        .filter(|k| !new.contains_key(k))
+        .collect();
+    for k in &gone {
+        old.remove(k);
+    }
+    for (key, n) in new.iter() {
+        let replace = match old.get_mut(key) {
+            None => true,
+            Some(Item::Value(ov)) if n.is_value() => {
+                if let Some(nv) = n.as_value()
+                    && !same_value(ov, nv)
+                {
+                    let decor = ov.decor().clone();
+                    *ov = nv.clone();
+                    *ov.decor_mut() = decor;
+                }
+                false
+            }
+            Some(o) if o.is_table_like() && n.is_table_like() => {
+                if let (Some(ot), Some(nt)) = (o.as_table_like_mut(), n.as_table_like()) {
+                    merge_table(ot, nt);
+                }
+                false
+            }
+            // Arrays of tables, or a value that became a table.
+            Some(o) => !same_item(o, n),
+        };
+        if replace {
+            let mut item = n.clone();
+            detach(&mut item);
+            old.insert(key, item);
+        }
+    }
+}
+
+/// Tables copied from another document drop their position there, so they
+/// are written after the table they are inserted into, a blank line apart.
+fn detach(item: &mut toml_edit::Item) {
+    use toml_edit::Item;
+    match item {
+        Item::Table(t) => {
+            t.set_position(None);
+            t.decor_mut().set_prefix("\n");
+            for (_, v) in t.iter_mut() {
+                detach(v);
+            }
+        }
+        Item::ArrayOfTables(a) => {
+            for t in a.iter_mut() {
+                t.set_position(None);
+                for (_, v) in t.iter_mut() {
+                    detach(v);
+                }
+            }
+        }
+        Item::None | Item::Value(_) => {}
+    }
+}
+
+fn same_item(a: &toml_edit::Item, b: &toml_edit::Item) -> bool {
+    use toml_edit::Item;
+    match (a, b) {
+        (Item::Value(x), Item::Value(y)) => same_value(x, y),
+        (Item::ArrayOfTables(x), Item::ArrayOfTables(y)) => {
+            x.len() == y.len() && x.iter().zip(y.iter()).all(|(p, q)| same_table(p, q))
+        }
+        _ => match (a.as_table_like(), b.as_table_like()) {
+            (Some(x), Some(y)) => same_table(x, y),
+            _ => false,
+        },
+    }
+}
+
+fn same_table(a: &dyn toml_edit::TableLike, b: &dyn toml_edit::TableLike) -> bool {
+    a.len() == b.len()
+        && a.iter()
+            .all(|(k, v)| b.get(k).is_some_and(|w| same_item(v, w)))
+}
+
+/// Equal as data, whatever the formatting (quotes, spacing, number style).
+fn same_value(a: &toml_edit::Value, b: &toml_edit::Value) -> bool {
+    use toml_edit::Value;
+    match (a, b) {
+        (Value::String(x), Value::String(y)) => x.value() == y.value(),
+        (Value::Integer(x), Value::Integer(y)) => x.value() == y.value(),
+        (Value::Float(x), Value::Float(y)) => x.value() == y.value(),
+        (Value::Boolean(x), Value::Boolean(y)) => x.value() == y.value(),
+        (Value::Datetime(x), Value::Datetime(y)) => x.value() == y.value(),
+        (Value::Array(x), Value::Array(y)) => {
+            x.len() == y.len() && x.iter().zip(y.iter()).all(|(p, q)| same_value(p, q))
+        }
+        (Value::InlineTable(x), Value::InlineTable(y)) => same_table(x, y),
+        _ => false,
     }
 }
 
@@ -473,6 +599,72 @@ check = false
             let err = parse(toml).unwrap_err().to_string();
             assert!(err.contains(needle), "{toml:?} -> {err}");
         }
+    }
+
+    #[test]
+    fn save_keeps_comments_and_layout_of_the_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        let original = r#"# my blirp setup
+[machine]
+name = 'box' # short name
+
+# memory tuning
+[memory]
+summarizer = "ollama"   # local only
+ollama_model = "llama3"
+inject_disabled_agents = [ "codex" ] # noisy
+
+[sessions]
+keep_awake = true # laptop on a dock
+
+[sync]
+relay = "disabled"
+"#;
+        std::fs::write(&path, original).unwrap();
+        let mut c = Config::load_or_init(&path).unwrap();
+
+        // Saving unchanged values leaves every comment and spelling alone.
+        c.save(&path).unwrap();
+        let text = std::fs::read_to_string(&path).unwrap();
+        for kept in [
+            "# my blirp setup",
+            "name = 'box' # short name",
+            "# memory tuning",
+            "summarizer = \"ollama\"   # local only",
+            "inject_disabled_agents = [ \"codex\" ] # noisy",
+            "keep_awake = true # laptop on a dock",
+        ] {
+            assert!(text.contains(kept), "{kept:?} lost:\n{text}");
+        }
+        assert_eq!(Config::load_or_init(&path).unwrap(), c);
+
+        // A changed value keeps its comment; an unset option disappears;
+        // new keys and sections are added.
+        c.machine.name = "desk".into();
+        c.memory.inject_disabled_agents = vec!["codex".into(), "gemini".into()];
+        c.sessions.keep_awake = None;
+        c.sync.role = MachineRole::Node;
+        c.sync.hub = Some("abc".into());
+        c.agents.custom.push(CustomAgent {
+            name: "mine".into(),
+            command: "my-agent".into(),
+            args: vec!["--fast".into()],
+        });
+        c.save(&path).unwrap();
+        let text = std::fs::read_to_string(&path).unwrap();
+        assert!(text.contains("name = \"desk\" # short name"), "{text}");
+        assert!(text.contains("# noisy") && text.contains("# memory tuning"));
+        assert!(
+            !text.contains("keep_awake") && !text.contains("# laptop"),
+            "{text}"
+        );
+        assert_eq!(Config::load_or_init(&path).unwrap(), c);
+
+        // A file that does not parse is replaced by a fresh one.
+        std::fs::write(&path, "[machine\nname = ").unwrap();
+        c.save(&path).unwrap();
+        assert_eq!(Config::load_or_init(&path).unwrap(), c);
     }
 
     #[test]
