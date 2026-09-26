@@ -463,6 +463,7 @@ pub async fn detach(paths: &Paths, port: Option<u16>) -> anyhow::Result<RuntimeI
         return Ok(info);
     }
     let exe = std::env::current_exe().context("locate blirp executable")?;
+    let exe = crate::memory::daemon_exe(exe);
     // It becomes the daemon's working directory, so it must exist first.
     paths.ensure_dirs()?;
     let mut args = vec!["daemon".to_string()];
