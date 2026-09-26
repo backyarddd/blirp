@@ -323,6 +323,64 @@ impl Store {
         })
     }
 
+    /// [`Store::resolve_project`] for ingested transcripts, whose folder may
+    /// no longer exist (their history is still permanent). A missing folder
+    /// matches registered paths by prefix; otherwise it becomes a non-git
+    /// project named after the folder, registered at the path as recorded.
+    pub fn resolve_project_lenient(
+        &self,
+        machine_id: &str,
+        machine_name: &str,
+        cwd: &Path,
+    ) -> Result<ResolvedProject> {
+        if cwd.is_dir() {
+            return self.resolve_project(machine_id, machine_name, cwd);
+        }
+        if !cwd.is_absolute() {
+            return Err(StoreError::Invalid(format!(
+                "{} is not an absolute path",
+                cwd.display()
+            )));
+        }
+        let home = crate::paths::user_home();
+        self.write(|tx| {
+            let paths = live_local_paths(tx, machine_id)?;
+            if let Some(pp) = longest_prefix(&paths, cwd) {
+                return Ok(ResolvedProject {
+                    project: live_project_in(tx, &pp.project_id)?,
+                    root: PathBuf::from(&pp.path),
+                    is_home: false,
+                    created: false,
+                });
+            }
+            if cwd.parent().is_none() || home.as_deref() == Some(cwd) {
+                return Ok(ResolvedProject {
+                    project: home_project(tx, machine_name)?,
+                    root: cwd.to_path_buf(),
+                    is_home: true,
+                    created: false,
+                });
+            }
+            let project = new_project(tx, &folder_name(cwd))?;
+            attach_path(tx, &project.id, machine_id, cwd, None)?;
+            Ok(ResolvedProject {
+                project,
+                root: cwd.to_path_buf(),
+                is_home: false,
+                created: true,
+            })
+        })
+    }
+
+    /// This machine's registered folders of live projects.
+    pub fn local_project_paths(&self, machine_id: &str) -> Result<Vec<PathBuf>> {
+        Ok(self
+            .read(|c| live_local_paths(c, machine_id))?
+            .into_iter()
+            .map(|p| PathBuf::from(p.path))
+            .collect())
+    }
+
     /// Explicitly register `path` as a new project (Projects > Add folder).
     pub fn register_project(
         &self,

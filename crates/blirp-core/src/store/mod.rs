@@ -5,12 +5,14 @@
 //! [`Store::apply_all`], which write the row and append to `outbox` in the
 //! same transaction. Typed helpers for non-replicated tables write directly.
 
+mod ingest;
 mod memory;
 mod migrations;
 mod misc;
 mod projects;
 mod sessions;
 
+pub use ingest::IngestTx;
 pub use memory::RecordFilter;
 pub use migrations::MigrationError;
 pub use projects::ResolvedProject;
