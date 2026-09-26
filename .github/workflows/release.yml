@@ -140,7 +140,7 @@ jobs:
           pnpm -C web install --frozen-lockfile --ignore-scripts
           pnpm -C app install --frozen-lockfile --ignore-scripts
       - run: sh scripts/third-party-notices.sh THIRD_PARTY_NOTICES
-      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: third-party-notices
           path: THIRD_PARTY_NOTICES
@@ -298,7 +298,7 @@ jobs:
         run: gh release upload "$GITHUB_REF_NAME" dist/blirp-"$VERSION"-"$TARGET".* --clobber
       - name: Keep the archive (dry run)
         if: github.event_name == 'workflow_dispatch'
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: dist-cli-${{ matrix.target }}
           path: dist/blirp-${{ env.VERSION }}-${{ matrix.target }}.*
@@ -484,7 +484,7 @@ jobs:
         run: gh release upload "$GITHUB_REF_NAME" dist/* --clobber
       - name: Keep the bundles (dry run)
         if: github.event_name == 'workflow_dispatch'
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: dist-desktop-${{ matrix.target }}
           path: dist/*
@@ -555,7 +555,7 @@ jobs:
       - name: Render the packaging manifests (dry run)
         if: github.event_name == 'workflow_dispatch'
         run: sh scripts/render-packaging.sh "$VERSION" assets packaging-out
-      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: sha256sums
           path: SHA256SUMS.txt
@@ -597,7 +597,7 @@ jobs:
           printf '%s' "$TAURI_SIGNING_PRIVATE_KEY" | base64 -d > "$key"
           printf '%s\n' "$TAURI_SIGNING_PRIVATE_KEY_PASSWORD" |
             "$RUNNER_TEMP/minisign-linux/x86_64/minisign" -S -s "$key" -m SHA256SUMS.txt -x SHA256SUMS.txt.sig
-      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: sha256sums-sig
           path: SHA256SUMS.txt.sig
