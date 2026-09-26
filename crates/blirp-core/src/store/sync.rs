@@ -398,7 +398,9 @@ impl Store {
             let mut own_seen = page.own_seen;
             let mut applied = 0;
             let mut later_own = tx.prepare_cached(
-                "SELECT 1 FROM outbox WHERE entity = ?1 AND key = ?2 AND origin_seq > ?3 LIMIT 1",
+                "SELECT 1 FROM outbox WHERE entity = ?1 AND key = ?2 AND origin_seq > ?3
+                 UNION ALL SELECT 1 FROM outbox_deferred WHERE entity = ?1 AND key = ?2
+                 LIMIT 1",
             )?;
             for pe in &page.entries {
                 match pe {

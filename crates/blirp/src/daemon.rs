@@ -159,6 +159,10 @@ impl Daemon {
                         match tokio::task::spawn_blocking(move || {
                             let mut owned = owned;
                             crate::sessions::refresh_statuses(&st, &mut owned);
+                            // Coalesced status writes whose window passed (§5).
+                            if let Err(e) = st.store.flush_deferred(blirp_core::now_ms()) {
+                                tracing::warn!(error = %e, "queueing coalesced session updates failed");
+                            }
                             owned
                         })
                         .await

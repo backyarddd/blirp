@@ -1,6 +1,6 @@
 //! Sessions, events and full-text search.
 
-use super::{Change, Result, Store, StoreError, all, apply_in, json_col, one};
+use super::{Change, Result, Store, StoreError, all, apply_in, json_col, one, write_row};
 use crate::model::{Event, SearchHit, SearchHitKind, Session, SessionStatus, SessionsPage};
 use rusqlite::{Row, params, params_from_iter, types::Value};
 
@@ -41,6 +41,20 @@ pub(super) fn event_row(r: &Row<'_>) -> rusqlite::Result<Event> {
         text: r.get("text")?,
         meta: json_col(r, "meta_json")?,
     })
+}
+
+/// At most one status-only outbox entry per session per window (ms).
+pub const STATUS_COALESCE_MS: i64 = 5_000;
+
+/// Only a live status (and the activity time with it) changed.
+fn status_only(before: &Session, after: &Session) -> bool {
+    if !before.status.is_live() || !after.status.is_live() {
+        return false;
+    }
+    let mut probe = after.clone();
+    probe.status = before.status;
+    probe.last_activity_at = before.last_activity_at;
+    probe == *before
 }
 
 #[derive(Debug, Clone, Default)]
@@ -108,6 +122,14 @@ impl Store {
     }
 
     /// Read-modify-write a session in one transaction.
+    ///
+    /// Live status flips (working/idle/waiting and the activity time that
+    /// goes with them) are coalesced for replication: when the session's
+    /// last outbox entry is younger than [`STATUS_COALESCE_MS`], the row is
+    /// written but its outbox entry is deferred until that window has passed
+    /// ([`Store::flush_deferred`] then queues the current row). Any other
+    /// change, including every move to a final status, is queued at once and
+    /// covers a deferred one, so the final state is never lost.
     pub fn modify_session(&self, id: &str, f: impl FnOnce(&mut Session)) -> Result<Session> {
         self.write(|tx| {
             let mut s = one(
@@ -119,10 +141,62 @@ impl Store {
             .ok_or(StoreError::NotFound("session"))?;
             let before = s.clone();
             f(&mut s);
-            if s != before {
-                apply_in(tx, &Change::Session(s.clone()))?;
+            if s == before {
+                return Ok(s);
             }
+            let change = Change::Session(s.clone());
+            if status_only(&before, &s) {
+                let last: Option<i64> = tx.query_row(
+                    "SELECT max(ts) FROM outbox WHERE entity = 'sessions' AND key = ?1",
+                    params![id],
+                    |r| r.get(0),
+                )?;
+                if let Some(last) = last.filter(|t| crate::now_ms() - t < STATUS_COALESCE_MS) {
+                    write_row(tx, &change)?;
+                    tx.execute(
+                        "INSERT INTO outbox_deferred(entity, key, due) VALUES ('sessions', ?1, ?2)
+                         ON CONFLICT(entity, key) DO NOTHING",
+                        params![id, last + STATUS_COALESCE_MS],
+                    )?;
+                    return Ok(s);
+                }
+            }
+            apply_in(tx, &change)?;
             Ok(s)
+        })
+    }
+
+    /// Queue the current row of every coalesced session write due by `now`
+    /// (the daemon's status tick calls this). Returns how many were queued.
+    pub fn flush_deferred(&self, now: i64) -> Result<usize> {
+        self.write(|tx| {
+            let due: Vec<String> = all(
+                tx,
+                "SELECT key FROM outbox_deferred WHERE entity = 'sessions' AND due <= ?1",
+                params![now],
+                |r| r.get(0),
+            )?;
+            let mut queued = 0;
+            for id in &due {
+                match one(
+                    tx,
+                    "SELECT * FROM sessions WHERE id = ?1",
+                    params![id],
+                    session_row,
+                )? {
+                    Some(s) => {
+                        apply_in(tx, &Change::Session(s))?;
+                        queued += 1;
+                    }
+                    None => {
+                        tx.execute(
+                            "DELETE FROM outbox_deferred WHERE entity = 'sessions' AND key = ?1",
+                            params![id],
+                        )?;
+                    }
+                }
+            }
+            Ok(queued)
         })
     }
 
@@ -473,6 +547,69 @@ mod tests {
         );
         assert_eq!(store.children_count("top").unwrap(), 2);
         assert_eq!(store.children_count("sub1").unwrap(), 0);
+    }
+
+    #[test]
+    fn status_flips_are_coalesced_without_losing_the_final_state() {
+        let (_d, store) = temp_store();
+        let queued = |store: &Store| -> Vec<Session> {
+            store
+                .outbox_after(0, 1000)
+                .unwrap()
+                .into_iter()
+                .filter(|e| e.entity == "sessions")
+                .map(|e| serde_json::from_value(e.payload["row"].clone()).unwrap())
+                .collect()
+        };
+        store.insert_session(&session("s", "p", 100)).unwrap();
+        assert_eq!(queued(&store).len(), 1);
+
+        // Flips right after the insert: the row changes, the outbox does not.
+        for st in [
+            SessionStatus::Idle,
+            SessionStatus::Working,
+            SessionStatus::Idle,
+        ] {
+            let s = store
+                .modify_session("s", |s| {
+                    s.status = st;
+                    s.last_activity_at += 1;
+                })
+                .unwrap();
+            assert_eq!(s.status, st);
+        }
+        assert_eq!(queued(&store).len(), 1);
+        assert_eq!(
+            store.get_session("s").unwrap().unwrap().status,
+            SessionStatus::Idle
+        );
+        // Not due yet; once due, the current row is queued exactly once.
+        assert_eq!(store.flush_deferred(crate::now_ms()).unwrap(), 0);
+        let later = crate::now_ms() + STATUS_COALESCE_MS;
+        assert_eq!(store.flush_deferred(later).unwrap(), 1);
+        assert_eq!(store.flush_deferred(later).unwrap(), 0);
+        let q = queued(&store);
+        assert_eq!(q.len(), 2);
+        assert_eq!(q[1].status, SessionStatus::Idle);
+
+        // A final status is queued at once and covers a deferred flip.
+        store
+            .modify_session("s", |s| s.status = SessionStatus::Working)
+            .unwrap();
+        assert_eq!(queued(&store).len(), 2);
+        store
+            .modify_session("s", |s| s.status = SessionStatus::Completed)
+            .unwrap();
+        let q = queued(&store);
+        assert_eq!(q.len(), 3);
+        assert_eq!(q[2].status, SessionStatus::Completed);
+        assert_eq!(store.flush_deferred(i64::MAX).unwrap(), 0);
+
+        // Changes other than the status are never deferred.
+        store
+            .modify_session("s", |s| s.title = Some("renamed".into()))
+            .unwrap();
+        assert_eq!(queued(&store).len(), 4);
     }
 
     #[test]

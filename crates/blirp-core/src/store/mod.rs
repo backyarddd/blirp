@@ -276,6 +276,13 @@ pub(crate) fn apply_in(tx: &Transaction<'_>, change: &Change) -> Result<bool> {
         return Ok(false);
     }
     let (entity, op, key) = change.describe();
+    if matches!(change, Change::Session(_)) {
+        // The full row is queued now; a deferred status write is covered.
+        tx.execute(
+            "DELETE FROM outbox_deferred WHERE entity = ?1 AND key = ?2",
+            params![entity, key],
+        )?;
+    }
     tx.execute(
         "INSERT INTO outbox(entity, op, key, payload_json, ts) VALUES (?1,?2,?3,?4,?5)",
         params![
