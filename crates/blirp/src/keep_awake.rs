@@ -21,6 +21,11 @@ use std::time::{Duration, Instant};
 pub trait Assertion: Send {
     /// Still in force (a helper process may have been killed).
     fn alive(&mut self) -> bool;
+
+    /// Why it ended, once `alive` returned false (a helper's own message).
+    fn ended_because(&mut self) -> Option<String> {
+        None
+    }
 }
 
 /// Takes the platform's sleep-prevention assertion.
@@ -77,7 +82,13 @@ impl KeepAwake {
             if a.alive() {
                 return;
             }
-            tracing::warn!("sleep prevention ended unexpectedly; retrying in a minute");
+            match a.ended_because() {
+                Some(why) => tracing::warn!(
+                    error = %why,
+                    "sleep prevention ended unexpectedly; retrying in a minute"
+                ),
+                None => tracing::warn!("sleep prevention ended unexpectedly; retrying in a minute"),
+            }
             st.held = None;
             st.retry_at = Some(now + RETRY_AFTER);
             return;
@@ -113,58 +124,105 @@ mod helper {
     use blirp_core::proc_tree::ProcessTree;
     use std::io::Read as _;
     use std::os::unix::process::CommandExt;
-    use std::process::{Child, Command, Stdio};
+    use std::process::{Child, ChildStderr, Command, ExitStatus, Stdio};
+    use std::sync::mpsc;
     use std::time::{Duration, Instant};
 
     /// A helper still running after this long has taken the assertion
     /// (systemd-inhibit and caffeinate fail at once when they cannot).
     const SETTLE: Duration = Duration::from_millis(300);
 
+    /// How long a stderr read may take once the helper's group is gone.
+    const READ_LIMIT: Duration = Duration::from_secs(1);
+
     /// A helper process that holds the assertion for as long as it runs,
     /// in its own process group so release ends all of it.
     pub struct Helper {
         child: Child,
         tree: ProcessTree,
+        /// Kept to report why the helper ended; neither helper writes to it
+        /// while it holds the assertion, so the pipe never fills.
+        stderr: Option<ChildStderr>,
     }
 
     impl Helper {
-        pub fn spawn(mut cmd: Command) -> anyhow::Result<Self> {
+        pub fn spawn(cmd: Command) -> anyhow::Result<Self> {
+            Self::spawn_with(cmd, SETTLE)
+        }
+
+        /// `spawn` with the time a helper must survive to count as holding.
+        pub fn spawn_with(mut cmd: Command, settle: Duration) -> anyhow::Result<Self> {
             cmd.stdin(Stdio::null())
                 .stdout(Stdio::null())
                 .stderr(Stdio::piped())
                 .process_group(0);
             let mut child = cmd.spawn()?;
             let tree = ProcessTree::for_process_group(child.id());
-            let deadline = Instant::now() + SETTLE;
+            let stderr = child.stderr.take();
+            let mut helper = Self {
+                child,
+                tree,
+                stderr,
+            };
+            let deadline = Instant::now() + settle;
             loop {
-                if let Some(status) = child.try_wait().context("wait for the sleep helper")? {
-                    // End anything left in its group, which could hold the
-                    // pipe open, so the read below reaches end of file.
-                    tree.terminate();
-                    let mut msg = String::new();
-                    if let Some(mut err) = child.stderr.take() {
-                        let _ = err.read_to_string(&mut msg);
-                    }
-                    let msg = msg.trim();
-                    if msg.is_empty() {
-                        anyhow::bail!("the helper exited at once ({status})");
-                    }
-                    anyhow::bail!("{msg} ({status})");
+                if let Some(status) = helper
+                    .child
+                    .try_wait()
+                    .context("wait for the sleep helper")?
+                {
+                    anyhow::bail!("{}", helper.reason(status));
                 }
                 if Instant::now() >= deadline {
-                    break;
+                    return Ok(helper);
                 }
                 std::thread::sleep(Duration::from_millis(20));
             }
-            // Neither helper writes anything while it holds the assertion.
-            drop(child.stderr.take());
-            Ok(Self { child, tree })
         }
+
+        /// The helper exited with `status`: its stderr and status. Ends the
+        /// rest of its group first (a member could hold the pipe open), and
+        /// gives up on the read after READ_LIMIT whatever happens.
+        fn reason(&mut self, status: ExitStatus) -> String {
+            self.tree.terminate();
+            self.tree.escalate(Duration::from_secs(1));
+            let msg = self.stderr.take().map(read_bounded).unwrap_or_default();
+            let msg = msg.trim();
+            if msg.is_empty() {
+                format!("the helper exited ({status})")
+            } else {
+                format!("{msg} ({status})")
+            }
+        }
+    }
+
+    /// Up to 4 KiB of `err`, waiting at most READ_LIMIT for end of file. A
+    /// read stuck on a pipe some stray process still holds is abandoned.
+    fn read_bounded(err: ChildStderr) -> String {
+        let (tx, rx) = mpsc::channel();
+        let spawned = std::thread::Builder::new()
+            .name("sleep-helper-stderr".into())
+            .spawn(move || {
+                let mut buf = Vec::new();
+                let _ = err.take(4096).read_to_end(&mut buf);
+                let _ = tx.send(String::from_utf8_lossy(&buf).into_owned());
+            });
+        if spawned.is_err() {
+            return String::new();
+        }
+        rx.recv_timeout(READ_LIMIT).unwrap_or_default()
     }
 
     impl Assertion for Helper {
         fn alive(&mut self) -> bool {
             matches!(self.child.try_wait(), Ok(None))
+        }
+
+        fn ended_because(&mut self) -> Option<String> {
+            match self.child.try_wait() {
+                Ok(Some(status)) => Some(self.reason(status)),
+                _ => None,
+            }
         }
     }
 
@@ -414,12 +472,37 @@ mod tests {
     fn helper_that_exits_at_once_is_a_failed_acquire() {
         let mut cmd = blirp_core::process::command("sh");
         cmd.args(["-c", "echo 'Failed to inhibit: Access denied' >&2; exit 1"]);
-        let err = helper::Helper::spawn(cmd).err().unwrap();
+        // A generous settle time: the helper must be caught exiting however
+        // slowly this machine starts it.
+        let err = helper::Helper::spawn_with(cmd, Duration::from_secs(5))
+            .err()
+            .unwrap();
         assert!(format!("{err:#}").contains("Access denied"), "{err:#}");
 
         let mut cmd = blirp_core::process::command("sh");
         cmd.args(["-c", "sleep 30"]);
         let mut held = helper::Helper::spawn(cmd).unwrap();
         assert!(held.alive());
+        assert!(held.ended_because().is_none());
+    }
+
+    // A helper that dies after it settled still says why, including when a
+    // process it started keeps its stderr open.
+    #[cfg(unix)]
+    #[test]
+    fn helper_that_dies_later_reports_why() {
+        let mut cmd = blirp_core::process::command("sh");
+        cmd.args([
+            "-c",
+            "sleep 30 & sleep 0.5; echo 'inhibitor lost' >&2; exit 3",
+        ]);
+        let mut h = helper::Helper::spawn_with(cmd, Duration::ZERO).unwrap();
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while h.alive() {
+            assert!(Instant::now() < deadline, "the helper did not exit");
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        let why = h.ended_because().unwrap();
+        assert!(why.contains("inhibitor lost"), "{why}");
     }
 }
