@@ -9,7 +9,9 @@ use blirp_core::model::{
 use blirp_core::store::{RecordFilter, Store, StoreError};
 use std::collections::HashMap;
 
+pub const MAX_PINNED: usize = 8;
 pub const MAX_OPEN_THREADS: usize = 10;
+pub const MAX_PLANS: usize = 5;
 pub const MAX_DECISIONS: usize = 8;
 pub const MAX_GOTCHAS: usize = 5;
 pub const MAX_SESSIONS: usize = 3;
@@ -59,6 +61,14 @@ fn record_line(r: &Record) -> String {
         format!("- **{}**: {body}", one_line(&r.title))
     };
     clip(&text, MAX_ITEM_CHARS)
+}
+
+/// A pinned record of any kind, labelled with its kind.
+fn pinned_line(r: &Record) -> String {
+    let label = r.kind.as_str().replace('_', " ");
+    let line = record_line(r);
+    let rest = line.strip_prefix("- ").unwrap_or(&line);
+    clip(&format!("- [{label}] {rest}"), MAX_ITEM_CHARS)
 }
 
 pub fn parse_summary(s: &Session) -> Option<SessionSummary> {
@@ -171,15 +181,24 @@ pub fn render_injection(
         .take(MAX_SESSIONS)
         .collect();
 
+    // Pinned records of any kind (notes included) come first; a record shown
+    // there is not repeated in its kind's section.
+    let pinned: Vec<&Record> = records
+        .iter()
+        .filter(|r| r.pinned)
+        .take(MAX_PINNED)
+        .collect();
+    let pinned_lines: Vec<String> = pinned.iter().map(|r| pinned_line(r)).collect();
     let lines = |kind: RecordKind, max: usize| -> Vec<String> {
         records
             .iter()
-            .filter(|r| r.kind == kind)
+            .filter(|r| r.kind == kind && !pinned.iter().any(|p| p.id == r.id))
             .take(max)
             .map(record_line)
             .collect()
     };
     let threads = lines(RecordKind::OpenThread, MAX_OPEN_THREADS);
+    let plans = lines(RecordKind::Plan, MAX_PLANS);
     let decisions = lines(RecordKind::Decision, MAX_DECISIONS);
     let gotchas = lines(RecordKind::Gotcha, MAX_GOTCHAS);
     let session_lines: Vec<String> = sessions
@@ -202,7 +221,9 @@ pub fn render_injection(
     // The brief may use at most half the budget so the lists always get room.
     let brief_cap = (b.left / 2).max(100);
     b.push(&clip(&brief_text, brief_cap));
+    b.section("## Pinned", &pinned_lines);
     b.section("## Open threads", &threads);
+    b.section("## Active plans", &plans);
     b.section("## Recent decisions", &decisions);
     b.section("## Gotchas", &gotchas);
     b.section("## Recent sessions", &session_lines);
@@ -382,6 +403,33 @@ mod tests {
             t0,
             false,
         );
+        record(
+            &store,
+            &pid,
+            RecordKind::Note,
+            "Release checklist",
+            "tag, then publish",
+            t0 - 1,
+            true,
+        );
+        record(
+            &store,
+            &pid,
+            RecordKind::Note,
+            "Unpinned note",
+            "never injected",
+            t0 + 2,
+            false,
+        );
+        record(
+            &store,
+            &pid,
+            RecordKind::Plan,
+            "Ship v1",
+            "sync, then portal",
+            t0 + 3,
+            false,
+        );
         let mut s = session("s1", &pid, t0);
         s.title = Some("Set up CI".into());
         s.summary = Some(serde_json::json!({"summary": "Added a workflow."}));
@@ -397,9 +445,15 @@ mod tests {
 Demo is a CLI.
 Use cargo.
 
+## Pinned
+- [note] **Release checklist**: tag, then publish
+- [open thread] Pinned thread
+
 ## Open threads
-- Pinned thread
 - **Fix flaky test**: in ci
+
+## Active plans
+- **Ship v1**: sync, then portal
 
 ## Recent decisions
 - **Use SQLite**: WAL mode
@@ -449,11 +503,34 @@ Tools: search older history with the blirp MCP tools (mem_search, mem_session, m
                 1000 + i,
                 false,
             );
+            record(
+                &store,
+                &pid,
+                RecordKind::Plan,
+                &format!("plan {i:02}"),
+                "p",
+                1000 + i,
+                false,
+            );
+            record(
+                &store,
+                &pid,
+                RecordKind::Note,
+                &format!("pinned {i:02}"),
+                "n",
+                1000 + i,
+                true,
+            );
         }
         let big = render_injection(&store, &pid, None, 100_000).unwrap();
         assert_eq!(big.matches("- **thread").count(), MAX_OPEN_THREADS);
         assert_eq!(big.matches("- **decision").count(), MAX_DECISIONS);
         assert_eq!(big.matches("- **gotcha").count(), MAX_GOTCHAS);
+        assert_eq!(big.matches("- **plan").count(), MAX_PLANS);
+        assert_eq!(big.matches("- [note] **pinned").count(), MAX_PINNED);
+        // Pinned comes first, newest first.
+        assert!(big.find("## Pinned").unwrap() < big.find("## Open threads").unwrap());
+        assert!(big.find("pinned 29").unwrap() < big.find("pinned 28").unwrap());
         // Newest first within a section.
         assert!(big.find("thread 29").unwrap() < big.find("thread 28").unwrap());
         for cap in [500, 2000, 8000] {
