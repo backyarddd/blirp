@@ -9,8 +9,7 @@ import { e2eEnv } from './env';
 
 const env = e2eEnv();
 const isWindows = process.platform === 'win32';
-// A user's Stop reads "Stopped" on daemons that report `stopped_by_user`, "Completed" before.
-const STOPPED = /Completed|Stopped/;
+const STOPPED = 'Stopped';
 
 test.describe.configure({ mode: 'serial' });
 
@@ -180,7 +179,7 @@ test('stops the session and shows the exit state in the pane', async () => {
     data: { target: 'browser' },
     headers: { Origin: env.url },
   });
-  expect([400, 422]).toContain(bad.status()); // §11 says 400; axum's JSON rejection gives 422
+  expect(bad.status()).toBe(400);
   expect(((await bad.json()) as { error: { code: string } }).error.code).toBe('invalid_request');
 
   // Resume relaunches the shell in the same row; the pane reattaches to the new process.
@@ -344,7 +343,7 @@ test('settings load and save (full config replace)', async () => {
 });
 
 /** Authenticated API call with the page's session cookie; fails the test on a non-2xx answer. */
-async function apiCall<T>(method: 'GET' | 'POST', path: string, data?: unknown): Promise<T> {
+async function apiCall<T>(method: 'GET' | 'POST' | 'DELETE', path: string, data?: unknown): Promise<T> {
   const res = await page.request.fetch(`${env.url}${path}`, { method, data, headers: { Origin: env.url } });
   const text = await res.text();
   expect(res.ok(), `${method} ${path}: ${res.status()} ${text}`).toBe(true);
@@ -353,9 +352,28 @@ async function apiCall<T>(method: 'GET' | 'POST', path: string, data?: unknown):
 
 interface SessionRow {
   id: string;
+  status: string;
   agent_session_id: string | null;
   parent_session_id: string | null;
+  worktree: string | null;
 }
+
+const LIVE = ['starting', 'working', 'idle', 'waiting'];
+
+/** Launches a shell session through the API, then stops it and waits until it has ended. */
+async function endedShell(body: Record<string, unknown>): Promise<SessionRow> {
+  const s = await apiCall<SessionRow>('POST', '/api/sessions', { agent: 'shell', ...body });
+  await expect
+    .poll(async () => (await apiCall<SessionRow>('GET', `/api/sessions/${s.id}`)).status, { timeout: 30_000 })
+    .toBe('idle');
+  await apiCall('POST', `/api/sessions/${s.id}/stop`);
+  await expect
+    .poll(async () => LIVE.includes((await apiCall<SessionRow>('GET', `/api/sessions/${s.id}`)).status), { timeout: 30_000 })
+    .toBe(false);
+  return apiCall<SessionRow>('GET', `/api/sessions/${s.id}`);
+}
+
+const idOf = (projectUrl: string): string => projectUrl.split('/').pop() ?? '';
 
 test('memory panel shows the memory a shell session was given', async () => {
   const projectId = plainProjectUrl.split('/').pop() ?? '';
@@ -378,7 +396,7 @@ test('memory panel shows the memory a shell session was given', async () => {
   await apiCall('POST', `/api/sessions/${s.id}/stop`);
 });
 
-test('distill with the none summarizer explains the failure; subagents sit under their parent', async () => {
+test('distill with the none summarizer pauses distilling; subagents sit under their parent', async () => {
   // A Claude Code transcript with one subagent, as ingest finds it under CLAUDE_CONFIG_DIR.
   const sid = randomUUID();
   const start = Date.now() - 60 * 60_000;
@@ -430,7 +448,12 @@ test('distill with the none summarizer explains the failure; subagents sit under
   const panel = page.getByRole('complementary', { name: 'Memory' });
   await panel.getByRole('button', { name: 'Distill now' }).click();
   await expect(page.getByText('Distill queued')).toBeVisible();
-  await expect(panel.getByTestId('distill-error')).toContainText('memory.summarizer = "none"');
+  // No summarizer is a failure of the summarizer, not of the session (§9): distilling pauses.
+  const distill = async (): Promise<{ paused: string | null; reason: string | null }> =>
+    (await apiCall<{ distill: { paused: string | null; reason: string | null } }>('GET', '/api/settings')).distill;
+  await expect.poll(async () => (await distill()).paused).toBe('unavailable');
+  expect((await distill()).reason).toContain('memory.summarizer = "none"');
+  await expect(panel.getByTestId('distill-error')).toHaveCount(0);
 });
 
 test('sync: a join deep link prefills the form; enabling the hub gives an invite with QR', async () => {
@@ -508,6 +531,102 @@ test('mobile width (390px) keeps sessions and project pages inside the viewport'
     expect(await overflow(), path).toBeLessThanOrEqual(0);
   }
   await page.setViewportSize({ width: 1360, height: 860 });
+});
+
+test('health reports full capabilities to the local client', async () => {
+  const health = await apiCall<{ capabilities: { admin: boolean; control_terminals: boolean; local: boolean } }>('GET', '/api/health');
+  expect(health.capabilities).toEqual({ admin: true, control_terminals: true, local: true });
+});
+
+test('deletes an ended session here, and follows a delete made by another client', async () => {
+  const mine = await endedShell({ project_id: idOf(plainProjectUrl) });
+  const other = await endedShell({ project_id: idOf(plainProjectUrl) });
+  await page.goto(`${env.url}/sessions/${mine.id}`);
+  const sidebar = page.getByRole('complementary', { name: 'Sessions' });
+  await expect(sidebar.locator(`a[href="/sessions/${mine.id}"]`)).toBeVisible();
+  await expect(sidebar.locator(`a[href="/sessions/${other.id}"]`)).toBeVisible();
+
+  await confirmNextDialog();
+  await page.getByRole('button', { name: 'Delete session' }).click();
+  await expect(page.getByText('Session deleted')).toBeVisible();
+  await expect(page).toHaveURL(`${env.url}/sessions`);
+  await expect(sidebar.locator(`a[href="/sessions/${mine.id}"]`)).toHaveCount(0);
+  expect((await page.request.get(`${env.url}/api/sessions/${mine.id}`)).status()).toBe(404);
+
+  // Another client deletes: the `session_deleted` event removes the card here.
+  await apiCall('DELETE', `/api/sessions/${other.id}`);
+  await expect(sidebar.locator(`a[href="/sessions/${other.id}"]`)).toHaveCount(0);
+
+  // Live sessions offer no delete (the daemon would answer 409 `session_live`).
+  await page.goto(`${env.url}/sessions/${sessionId}`);
+  await page.getByRole('button', { name: 'Resume' }).click();
+  await expect(page.getByRole('button', { name: 'Stop' })).toBeVisible();
+  await expect(page.getByRole('button', { name: 'Delete session' })).toHaveCount(0);
+  await confirmNextDialog();
+  await page.getByRole('button', { name: 'Stop' }).click();
+  await expect(page.getByTestId('terminal-exit')).toContainText(STOPPED);
+});
+
+test('removes a dirty session worktree only after an explicit force', async () => {
+  const s = await endedShell({ project_id: idOf(repoProjectUrl), worktree: true });
+  const wt = s.worktree;
+  if (!wt) throw new Error('the session got no worktree');
+  expect(existsSync(wt)).toBe(true);
+  writeFileSync(join(wt, 'scratch.txt'), 'uncommitted\n');
+
+  await page.goto(`${env.url}/sessions/${s.id}`);
+  await confirmNextDialog();
+  await page.getByRole('button', { name: 'Remove worktree' }).click();
+  const dialog = page.getByRole('dialog', { name: 'Uncommitted changes' });
+  await expect(dialog).toContainText('uncommitted change');
+  // The browser logs the expected 409 `worktree_dirty` as a failed resource load.
+  consoleErrors.splice(0, consoleErrors.length, ...consoleErrors.filter((e) => !e.includes('status of 409')));
+  expect(existsSync(wt)).toBe(true);
+  await dialog.getByRole('button', { name: 'Force remove' }).click();
+  await expect(page.getByText('Worktree removed')).toBeVisible();
+  await expect(dialog).toBeHidden();
+  await expect(page.getByRole('button', { name: 'Remove worktree' })).toHaveCount(0);
+  expect((await apiCall<SessionRow>('GET', `/api/sessions/${s.id}`)).worktree).toBeNull();
+  await expect.poll(() => existsSync(wt)).toBe(false);
+});
+
+test('memory injection toggle and per-agent opt-out persist; summarizer state shows', async () => {
+  interface MemoryView {
+    config: { memory: { inject: boolean; inject_disabled_agents: string[] } };
+  }
+  const injectBox = (): ReturnType<Page['getByRole']> =>
+    page.getByRole('checkbox', { name: /Give new sessions this project.s memory/ });
+  const shellBox = (): ReturnType<Page['getByRole']> =>
+    page.getByRole('group', { name: 'Inject memory for these agents' }).getByRole('checkbox', { name: 'Shell', exact: true });
+  const memoryConfig = async (): Promise<MemoryView['config']['memory']> =>
+    (await apiCall<MemoryView>('GET', '/api/settings')).config.memory;
+
+  await page.goto(`${env.url}/settings/memory`);
+  const status = page.getByTestId('distill-status');
+  await expect(status).toContainText('Automatic distilling is paused'); // by the distill test above
+  await expect(status).toContainText('memory.summarizer = "none"');
+  await expect(status).toContainText('resumes by itself');
+  await expect(status).toContainText('Distill jobs today');
+  await shellBox().uncheck();
+  await page.getByRole('button', { name: 'Save' }).click();
+  await expect(page.getByText('Memory settings saved')).toBeVisible();
+  await page.reload();
+  await expect(shellBox()).not.toBeChecked();
+  expect((await memoryConfig()).inject_disabled_agents).toEqual(['shell']);
+
+  await injectBox().uncheck();
+  await expect(page.getByRole('group', { name: 'Inject memory for these agents' })).toHaveCount(0);
+  await page.getByRole('button', { name: 'Save' }).click();
+  await expect.poll(async () => (await memoryConfig()).inject).toBe(false);
+  await page.reload();
+  await expect(injectBox()).not.toBeChecked();
+  expect((await memoryConfig()).inject_disabled_agents).toEqual(['shell']);
+
+  // Back to the defaults for anything that runs later.
+  await injectBox().check();
+  await shellBox().check();
+  await page.getByRole('button', { name: 'Save' }).click();
+  await expect.poll(memoryConfig).toEqual(expect.objectContaining({ inject: true, inject_disabled_agents: [] }));
 });
 
 test('no CSP violations or unexpected console errors', async () => {
