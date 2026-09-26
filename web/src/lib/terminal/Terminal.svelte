@@ -6,7 +6,7 @@
   import { WebLinksAddon } from '@xterm/addon-web-links';
   import { Unicode11Addon } from '@xterm/addon-unicode11';
   import '@xterm/xterm/css/xterm.css';
-  import { socketUrl, terminalWsPath } from '../api/client';
+  import { api, errorMessage, socketUrl, terminalWsPath } from '../api/client';
   import { theme } from '../theme.svelte';
   import { isMac } from '../prefs';
   import { matchShortcut } from '../shortcuts';
@@ -14,6 +14,7 @@
   import { hasTerminal, sessionStatusInfo } from '../status';
   import type { SessionStatus } from '../api/types.gen';
   import { backoffDelay, decodeServerFrame, encodeBinaryInput, encodeInput, encodeResize } from './protocol';
+  import { MAX_UPLOAD_BYTES, dropAction, pasteAction } from './paste';
 
   type ConnState = 'connecting' | 'open' | 'reconnecting' | 'exited' | 'ended';
 
@@ -269,6 +270,60 @@
       return true;
     });
 
+    // Pasted images and files, and files dropped on the pane (paste.ts): saved on the machine that
+    // runs the session, then their paths are pasted one by one, as a native terminal types a
+    // dropped file, so an agent can attach each. Plain text pastes stay with xterm.
+    const uploadFiles = async (files: File[]): Promise<void> => {
+      if (viewOnly) {
+        app.toast('Read-only: this device may not control terminals, so files cannot be pasted here.');
+        return;
+      }
+      const fits = files.filter((f) => {
+        if (f.size <= MAX_UPLOAD_BYTES) return true;
+        app.toast(`${f.name} is larger than 25 MB and was not uploaded.`);
+        return false;
+      });
+      if (fits.length === 0) return;
+      app.toast(fits.length === 1 ? `Uploading ${fits[0]?.name ?? 'file'}…` : `Uploading ${fits.length} files…`, 'info');
+      const results = await Promise.allSettled(fits.map((f) => api.sessions.upload(id, f)));
+      if (disposed) return;
+      let typed = 0;
+      results.forEach((r, i) => {
+        if (r.status === 'rejected') {
+          app.toast(`Could not upload ${fits[i]?.name ?? 'file'}: ${errorMessage(r.reason)}`);
+          return;
+        }
+        if (typed++ > 0) send(encodeInput(' '));
+        t.paste(r.value.quoted);
+      });
+      if (typed > 0) {
+        send(encodeInput(' '));
+        t.focus();
+      }
+    };
+    // Capture phase: runs before xterm's own paste listener, which would paste nothing for an image.
+    const onPaste = (e: ClipboardEvent): void => {
+      const action = pasteAction(e.clipboardData);
+      if (action.kind !== 'upload') return;
+      e.preventDefault();
+      e.stopPropagation();
+      void uploadFiles(action.files);
+    };
+    const onDragOver = (e: DragEvent): void => {
+      if (!e.dataTransfer?.types.includes('Files')) return;
+      e.preventDefault();
+      e.dataTransfer.dropEffect = viewOnly ? 'none' : 'copy';
+    };
+    const onDrop = (e: DragEvent): void => {
+      const action = dropAction(e.dataTransfer);
+      if (action.kind !== 'upload') return;
+      e.preventDefault();
+      void uploadFiles(action.files);
+    };
+    el.addEventListener('paste', onPaste, true);
+    el.addEventListener('dragover', onDragOver);
+    el.addEventListener('drop', onDrop);
+
     let raf = 0;
     const ro = new ResizeObserver(() => {
       cancelAnimationFrame(raf);
@@ -290,6 +345,9 @@
       cancelAnimationFrame(raf);
       ro.disconnect();
       t.textarea?.removeEventListener('focus', reclaim);
+      el.removeEventListener('paste', onPaste, true);
+      el.removeEventListener('dragover', onDragOver);
+      el.removeEventListener('drop', onDrop);
       ws?.close(1000);
       ws = null;
       term = undefined;

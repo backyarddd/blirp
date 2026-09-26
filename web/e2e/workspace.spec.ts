@@ -176,6 +176,64 @@ test('types into the terminal and sees the output', async () => {
   await runInTerminal(sessionId, isWindows ? "Write-Output ('e2e-' + (6*7))" : 'echo e2e-$((6*7))', 'e2e-42');
 });
 
+/** Files saved for pasted or dropped uploads of a session (`BLIRP_HOME/uploads/<id>/`). */
+function uploads(id: string): string[] {
+  const dir = join(env.root, 'home', 'uploads', id);
+  return existsSync(dir) ? readdirSync(dir) : [];
+}
+
+/**
+ * Put a file into the focused pane the way the browser would: a synthetic paste (a screenshot on
+ * the clipboard) or drop (a file dragged from the desktop). Resolves once the upload answered.
+ */
+async function transferFile(kind: 'paste' | 'drop', name: string, type: string): Promise<void> {
+  const uploaded = page.waitForResponse((r) => r.url().includes(`/api/sessions/${sessionId}/uploads`));
+  await page.evaluate(
+    ({ kind, name, type }) => {
+      const dt = new DataTransfer();
+      dt.items.add(new File([new Uint8Array([0x89, 0x50, 0x4e, 0x47, 1, 2, 3])], name, { type }));
+      if (kind === 'paste') {
+        const target = document.querySelector('.xterm-helper-textarea');
+        if (!target) throw new Error('no xterm textarea');
+        target.dispatchEvent(new ClipboardEvent('paste', { clipboardData: dt, bubbles: true, cancelable: true }));
+      } else {
+        const target = document.querySelector('.xterm-screen');
+        if (!target) throw new Error('no xterm screen');
+        target.dispatchEvent(new DragEvent('dragover', { dataTransfer: dt, bubbles: true, cancelable: true }));
+        target.dispatchEvent(new DragEvent('drop', { dataTransfer: dt, bubbles: true, cancelable: true }));
+      }
+    },
+    { kind, name, type },
+  );
+  expect((await uploaded).status()).toBe(201);
+  // The pane pastes the saved path right after reading the answer.
+  await page.waitForTimeout(300);
+}
+
+test('a pasted image and a dropped file reach the PTY as paths to the saved files', async () => {
+  for (const [kind, name, type, word] of [
+    ['paste', 'e2e-shot.png', 'image/png', 'pasted'],
+    ['drop', 'e2e notes.txt', 'text/plain', 'dropped'],
+  ] as const) {
+    await expect(async () => {
+      await page.locator('.xterm').click();
+      await page.keyboard.press('Control+C'); // an empty line for this attempt
+      // The shell only prints the marker when the pasted text is the path of an existing file.
+      await page.keyboard.type(isWindows ? 'if (Test-Path ' : 'test -f ');
+      await transferFile(kind, name, type);
+      await page.keyboard.type(isWindows ? `) { '${word}-' + (6*7) }` : `&& echo ${word}-$((6*7))`);
+      await page.keyboard.press('Enter');
+      await expect.poll(async () => (await snapshot(sessionId)).data, { timeout: 5_000 }).toContain(`${word}-42`);
+    }).toPass({ timeout: 45_000 });
+  }
+  const saved = uploads(sessionId);
+  expect(saved.some((f) => /^[0-9]+-e2e-shot[.]png$/.test(f))).toBe(true);
+  // Sanitized: the space in the dropped name never reaches the file system.
+  expect(saved.some((f) => /^[0-9]+-e2e_notes[.]txt$/.test(f))).toBe(true);
+  const shot = saved.find((f) => f.endsWith('e2e-shot.png')) ?? '';
+  expect([...readFileSync(join(env.root, 'home', 'uploads', sessionId, shot))]).toEqual([0x89, 0x50, 0x4e, 0x47, 1, 2, 3]);
+});
+
 /** The daemon's own log (`BLIRP_HOME/logs/blirpd.<date>.log`), all days. */
 function daemonLog(): string {
   const dir = join(env.root, 'home', 'logs');

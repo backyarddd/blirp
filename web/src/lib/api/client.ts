@@ -45,6 +45,7 @@ import type {
   SyncInvite,
   SyncStatus,
   UpdateStatus,
+  UploadedFile,
   WikiPage,
   WsTicket,
 } from './types.gen';
@@ -117,7 +118,11 @@ export async function request<T>(method: Method, path: string, body?: unknown, q
   const token = authToken();
   if (token !== null) headers.Authorization = `Bearer ${token}`;
   const init: RequestInit = { method, credentials: 'same-origin', headers };
-  if (body !== undefined) {
+  if (body instanceof Blob) {
+    // File uploads go as the raw bytes.
+    headers['Content-Type'] = 'application/octet-stream';
+    init.body = body;
+  } else if (body !== undefined) {
     headers['Content-Type'] = 'application/json';
     init.body = JSON.stringify(body);
   }
@@ -253,6 +258,12 @@ export const api = {
     delete: (id: string) => request<void>('DELETE', s(id)),
     /** 409 `worktree_dirty` unless `force`; the `blirp/<name>` branch is kept. */
     removeWorktree: (id: string, force = false) => request<Session>('POST', `${s(id)}/worktree/remove`, { force }),
+    /**
+     * Save a pasted or dropped file on the machine running the session (control; 413 `file_too_large`
+     * over 25 MB, 404 `terminal_not_found` when it is not running). Relayed for another machine.
+     */
+    upload: (id: string, file: File) =>
+      request<UploadedFile>('POST', `${s(id)}/uploads`, file, { name: file.name }),
   },
   search: (q: SearchQuery) => request<SearchResults>('GET', '/api/search', undefined, { ...q }),
   agents: {
