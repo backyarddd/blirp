@@ -1,0 +1,336 @@
+//! Replication protocol (§10, `blirp/sync/1`).
+//!
+//! The node dials the hub and opens one bidirectional stream for strict
+//! request/response: `hello` -> `welcome`, then any number of
+//! `push {entries}` -> `push_ack {acked}` and `pull {after}` -> `page`.
+//! The hub opens one unidirectional stream on which it sends
+//! `notify {head}` whenever `hub_log` grows, so the node pulls promptly.
+//! Batches are at most [`MAX_BATCH_ENTRIES`] entries / [`MAX_BATCH_BYTES`].
+//! Every apply and its cursor move happen in one SQLite transaction
+//! (see `blirp_core::store::sync`), so a crash at any point resumes cleanly
+//! and re-sent entries are ignored.
+
+use crate::wire::{MAX_CONTROL_FRAME, MAX_FRAME, read_frame, write_frame};
+use crate::{Result, SyncError, blocking};
+use blirp_core::model::Machine;
+use blirp_core::store::{HubPage, Store, WireEntry};
+use iroh::endpoint::{Connection, RecvStream, SendStream};
+use serde::{Deserialize, Serialize};
+use std::sync::Arc;
+use std::time::Duration;
+use tokio::sync::watch;
+
+pub const MAX_BATCH_ENTRIES: usize = 500;
+pub const MAX_BATCH_BYTES: usize = 4 << 20;
+/// How often the local outbox is checked for new writes.
+// Polling; a store-level change notification would cut latency.
+pub const OUTBOX_POLL: Duration = Duration::from_millis(500);
+const REQUEST_TIMEOUT: Duration = Duration::from_secs(60);
+
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum NodeMsg {
+    Hello {
+        versions: Vec<u32>,
+        machine: Machine,
+    },
+    Push {
+        entries: Vec<WireEntry>,
+    },
+    Pull {
+        after: i64,
+    },
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum HubMsg {
+    Welcome {
+        version: u32,
+        hub_machine_id: String,
+        head: i64,
+    },
+    PushAck {
+        acked: i64,
+    },
+    Page {
+        page: HubPage,
+    },
+    Notify {
+        head: i64,
+    },
+    Error {
+        code: String,
+        message: String,
+    },
+}
+
+fn remote_err(code: String, message: String) -> SyncError {
+    SyncError::Remote { code, message }
+}
+
+/// Hub side of one node connection. Returns when the node disconnects.
+/// `on_exchange(logged)` runs after every answered request; `logged` is
+/// true when a push added rows (to wake other nodes).
+pub async fn serve_hub(
+    conn: Connection,
+    store: Arc<Store>,
+    own_id: String,
+    node_id: String,
+    mut head: watch::Receiver<i64>,
+    on_exchange: impl Fn(bool) + Send + Sync + 'static,
+) -> Result<()> {
+    let (mut send, mut recv) = conn.accept_bi().await.map_err(SyncError::connection)?;
+    let hello: NodeMsg = read_frame(&mut recv, MAX_FRAME).await?;
+    let NodeMsg::Hello { versions, machine } = hello else {
+        return Err(SyncError::Protocol("expected hello".into()));
+    };
+    let Some(version) = crate::negotiate(&versions) else {
+        write_frame(
+            &mut send,
+            &HubMsg::Error {
+                code: "unsupported_version".into(),
+                message: format!("hub speaks {:?}", crate::PROTOCOL_VERSIONS),
+            },
+        )
+        .await?;
+        return Err(SyncError::Protocol("no common protocol version".into()));
+    };
+    if machine.id != node_id {
+        return Err(SyncError::Protocol("hello names another machine".into()));
+    }
+    let current = *head.borrow_and_update();
+    write_frame(
+        &mut send,
+        &HubMsg::Welcome {
+            version,
+            hub_machine_id: own_id.clone(),
+            head: current,
+        },
+    )
+    .await?;
+
+    // Notifications on their own stream so they never interleave with replies.
+    let mut notify = conn.open_uni().await.map_err(SyncError::connection)?;
+    write_frame(&mut notify, &HubMsg::Notify { head: current }).await?;
+    let notifier = tokio::spawn(async move {
+        while head.changed().await.is_ok() {
+            let h = *head.borrow_and_update();
+            if write_frame(&mut notify, &HubMsg::Notify { head: h })
+                .await
+                .is_err()
+            {
+                break;
+            }
+        }
+    });
+
+    let result = async {
+        loop {
+            let msg: NodeMsg = match read_frame(&mut recv, MAX_FRAME).await {
+                Ok(m) => m,
+                Err(crate::wire::WireError::Closed) => return Ok(()),
+                Err(e) => return Err(e.into()),
+            };
+            let reply = match msg {
+                NodeMsg::Push { entries } => {
+                    if entries.len() > MAX_BATCH_ENTRIES {
+                        return Err(SyncError::Protocol(format!(
+                            "push of {} entries exceeds {MAX_BATCH_ENTRIES}",
+                            entries.len()
+                        )));
+                    }
+                    let (st, own, node) = (store.clone(), own_id.clone(), node_id.clone());
+                    let out = blocking(move || Ok(st.hub_ingest(&own, &node, &entries)?)).await?;
+                    on_exchange(out.inserted > 0);
+                    HubMsg::PushAck { acked: out.acked }
+                }
+                NodeMsg::Pull { after } => {
+                    let (st, own, node) = (store.clone(), own_id.clone(), node_id.clone());
+                    let page = blocking(move || {
+                        // Our own writes must be logged before we page.
+                        st.hub_flush_own(&own)?;
+                        Ok(st.hub_page(&node, after, MAX_BATCH_ENTRIES, MAX_BATCH_BYTES)?)
+                    })
+                    .await?;
+                    on_exchange(false);
+                    HubMsg::Page { page }
+                }
+                NodeMsg::Hello { .. } => {
+                    return Err(SyncError::Protocol("duplicate hello".into()));
+                }
+            };
+            write_frame(&mut send, &reply).await?;
+        }
+    }
+    .await;
+    notifier.abort();
+    result
+}
+
+/// Node side of a connected sync session: handshake, then push/pull until
+/// the connection fails or `shutdown` flips. `on_synced` runs after every
+/// successful exchange.
+pub async fn run_node(
+    conn: &Connection,
+    store: Arc<Store>,
+    machine: Machine,
+    hub_id: String,
+    mut shutdown: watch::Receiver<bool>,
+    on_synced: impl Fn() + Send + Sync,
+) -> Result<()> {
+    let (mut send, mut recv) = conn.open_bi().await.map_err(SyncError::connection)?;
+    write_frame(
+        &mut send,
+        &NodeMsg::Hello {
+            versions: crate::PROTOCOL_VERSIONS.to_vec(),
+            machine,
+        },
+    )
+    .await?;
+    match timed(read_frame(&mut recv, MAX_CONTROL_FRAME)).await? {
+        HubMsg::Welcome { hub_machine_id, .. } if hub_machine_id == hub_id => {}
+        HubMsg::Welcome { hub_machine_id, .. } => {
+            return Err(SyncError::Protocol(format!(
+                "expected hub {hub_id}, got {hub_machine_id}"
+            )));
+        }
+        HubMsg::Error { code, message } => return Err(remote_err(code, message)),
+        other => return Err(SyncError::Protocol(format!("unexpected {other:?}"))),
+    }
+
+    // Hub notifications arrive on a uni stream read by its own task (frame
+    // reads are not cancel safe, so they must not sit in a select).
+    let (head_tx, mut head_rx) = watch::channel(0i64);
+    let uni_conn = conn.clone();
+    let notifier = tokio::spawn(async move {
+        let Ok(mut uni) = uni_conn.accept_uni().await else {
+            return;
+        };
+        while let Ok(HubMsg::Notify { head }) =
+            read_frame::<RecvStream, HubMsg>(&mut uni, MAX_CONTROL_FRAME).await
+        {
+            head_tx.send_replace(head);
+        }
+    });
+
+    let result = async {
+        let mut tick = tokio::time::interval(OUTBOX_POLL);
+        tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+        let mut need_pull = true;
+        loop {
+            push_pending(&mut send, &mut recv, &store, &hub_id).await?;
+            if need_pull {
+                pull_all(&mut send, &mut recv, &store, &hub_id).await?;
+                need_pull = false;
+            }
+            on_synced();
+            loop {
+                tokio::select! {
+                    _ = tick.tick() => {
+                        let st = store.clone();
+                        let hub = hub_id.clone();
+                        let pending = blocking(move || {
+                            Ok(st.outbox_head()? > st.sync_cursors(&hub)?.last_pushed_origin_seq)
+                        })
+                        .await?;
+                        if pending {
+                            break;
+                        }
+                    }
+                    changed = head_rx.changed() => {
+                        if changed.is_err() {
+                            return Err(SyncError::Connection("hub notification stream closed".into()));
+                        }
+                        let head = *head_rx.borrow_and_update();
+                        let st = store.clone();
+                        let hub = hub_id.clone();
+                        let pulled = blocking(move || Ok(st.sync_cursors(&hub)?.last_pulled_hub_seq)).await?;
+                        if head > pulled {
+                            need_pull = true;
+                            break;
+                        }
+                    }
+                    _ = shutdown.changed() => return Ok(()),
+                    reason = conn.closed() => return Err(SyncError::connection(reason)),
+                }
+            }
+        }
+    }
+    .await;
+    notifier.abort();
+    result
+}
+
+async fn timed<T>(
+    f: impl std::future::Future<Output = Result<T, crate::wire::WireError>>,
+) -> Result<T> {
+    tokio::time::timeout(REQUEST_TIMEOUT, f)
+        .await
+        .map_err(|_| SyncError::Connection("hub did not answer in time".into()))?
+        .map_err(Into::into)
+}
+
+async fn push_pending(
+    send: &mut SendStream,
+    recv: &mut RecvStream,
+    store: &Arc<Store>,
+    hub_id: &str,
+) -> Result<()> {
+    loop {
+        let st = store.clone();
+        let hub = hub_id.to_string();
+        let batch = blocking(move || {
+            let after = st.sync_cursors(&hub)?.last_pushed_origin_seq;
+            Ok(st.outbox_batch(after, MAX_BATCH_ENTRIES, MAX_BATCH_BYTES)?)
+        })
+        .await?;
+        let Some(last) = batch.last().map(|e| e.origin_seq) else {
+            return Ok(());
+        };
+        write_frame(send, &NodeMsg::Push { entries: batch }).await?;
+        match timed(read_frame(recv, MAX_CONTROL_FRAME)).await? {
+            HubMsg::PushAck { acked } if acked >= last => {
+                let st = store.clone();
+                let hub = hub_id.to_string();
+                blocking(move || Ok(st.set_pushed_cursor(&hub, acked)?)).await?;
+            }
+            HubMsg::PushAck { acked } => {
+                return Err(SyncError::Protocol(format!(
+                    "hub acked {acked}, expected at least {last}"
+                )));
+            }
+            HubMsg::Error { code, message } => return Err(remote_err(code, message)),
+            other => return Err(SyncError::Protocol(format!("unexpected {other:?}"))),
+        }
+    }
+}
+
+async fn pull_all(
+    send: &mut SendStream,
+    recv: &mut RecvStream,
+    store: &Arc<Store>,
+    hub_id: &str,
+) -> Result<()> {
+    loop {
+        let st = store.clone();
+        let hub = hub_id.to_string();
+        let after = blocking(move || Ok(st.sync_cursors(&hub)?.last_pulled_hub_seq)).await?;
+        write_frame(send, &NodeMsg::Pull { after }).await?;
+        let page = match timed(read_frame(recv, MAX_FRAME)).await? {
+            HubMsg::Page { page } => page,
+            HubMsg::Error { code, message } => return Err(remote_err(code, message)),
+            other => return Err(SyncError::Protocol(format!("unexpected {other:?}"))),
+        };
+        if page.entries.len() > MAX_BATCH_ENTRIES {
+            return Err(SyncError::Protocol("oversized page".into()));
+        }
+        let more = page.more;
+        let st = store.clone();
+        let hub = hub_id.to_string();
+        blocking(move || Ok(st.node_apply_pull(&hub, &page)?)).await?;
+        if !more {
+            return Ok(());
+        }
+    }
+}

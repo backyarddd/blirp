@@ -15,25 +15,39 @@ blirp-sync = { path = "crates/blirp-sync" }
 
 anyhow = "1"
 axum = { version = "0.8", features = ["ws"] }
+axum-server = { version = "0.8", features = ["tls-rustls-no-provider"] }
 bytes = "1"
 clap = { version = "4", features = ["derive"] }
+data-encoding = "2"
 dunce = "1"
 futures-util = { version = "0.3", default-features = false, features = ["sink", "std"] }
 gethostname = "1"
 getrandom = "0.3"
 hex = "0.4"
+hmac = "0.13"
+iroh = "1.2"
+iroh-mdns-address-lookup = "0.5"
+hyper = { version = "1", features = ["client", "http1", "server"] }
+hyper-util = { version = "0.1", features = ["tokio", "service"] }
 libc = "0.2"
 portable-pty = "0.9"
+rcgen = "0.14"
 regex = "1"
 reqwest = { version = "0.13", default-features = false, features = ["json"] }
 rusqlite = { version = "0.40", features = ["bundled"] }
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
 rust-embed = { version = "8", features = ["mime-guess"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+sha2 = "0.11"
+spake2 = "0.4"
+subtle = "2"
 tempfile = "3"
 thiserror = "2"
 tokio = { version = "1", features = ["full"] }
+tokio-rustls = { version = "0.26", default-features = false, features = ["ring"] }
 tokio-tungstenite = "0.30"
+tower = { version = "0.5", features = ["util"] }
 toml = "1"
 tracing = "0.1"
 tracing-appender = "0.2"
