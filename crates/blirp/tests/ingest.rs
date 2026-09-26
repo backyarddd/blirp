@@ -948,8 +948,10 @@ fn write_cursor_store(h: &H, db: &Path, messages: &[serde_json::Value]) {
     )
     .unwrap();
     let mut root = Vec::new();
-    for (i, m) in messages.iter().enumerate() {
-        let id = [u8::try_from(i + 1).unwrap(); 32];
+    for m in messages {
+        // Content addressed like Cursor's store: identical messages share a blob.
+        use sha2::Digest as _;
+        let id: [u8; 32] = sha2::Sha256::digest(m.to_string().as_bytes()).into();
         conn.execute(
             "INSERT OR REPLACE INTO blobs VALUES (?1, ?2)",
             rusqlite::params![hex::encode(id), m.to_string().into_bytes()],
@@ -1017,6 +1019,17 @@ fn cursor_chat_store_db() {
     h.pass();
     let ev = h.events(&s);
     assert_eq!((ev.len(), ev[6].text.as_str()), (7, "and metrics"));
+
+    // The same message again (same blob) is a new turn, not a duplicate.
+    more.push(json!({"role": "assistant", "content": [{"type": "text", "text": "ok"}]}));
+    more.push(json!({"role": "user", "content": "<user_query>\nand metrics\n</user_query>"}));
+    write_cursor_store(&h, &db, &more);
+    h.pass();
+    let ev = h.events(&s);
+    assert_eq!(
+        ev[7..].iter().map(|e| e.text.as_str()).collect::<Vec<_>>(),
+        ["ok", "and metrics"]
+    );
 
     // History rewritten shorter (e.g. a revert): nothing lost or duplicated.
     write_cursor_store(&h, &db, &more[..2]);
