@@ -197,6 +197,7 @@ impl Adapter for Opencode {
             transcript_path: Some(format!("{}#{sid}", src.path.display())),
             ..SessionMeta::default()
         };
+        super::report_cwd(sink, sid, &meta, &mut false);
         let messages: Vec<(String, i64, String)> = retry_busy(|| {
             let mut q = conn.prepare(
                 "SELECT id, time_created, data FROM message

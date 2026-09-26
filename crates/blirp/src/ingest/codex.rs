@@ -149,6 +149,7 @@ impl Adapter for Codex {
             transcript_path: Some(src.path.display().to_string()),
             ..SessionMeta::default()
         };
+        let mut reported = false;
         lines.for_each(|ix, raw| {
             let v: Value = match serde_json::from_slice(raw) {
                 Ok(v) => v,
@@ -182,11 +183,18 @@ impl Adapter for Codex {
                     {
                         meta.branch = Some(b.to_string());
                     }
+                    let asid = st.asid.clone().unwrap_or_else(|| fallback.clone());
+                    super::report_cwd(sink, &asid, &meta, &mut reported);
                     return Ok(());
                 }
                 "turn_context" => {
-                    if let Some(c) = p.get("cwd").and_then(Value::as_str) {
+                    // session_meta's cwd (where the session started) wins.
+                    if meta.cwd.is_none()
+                        && let Some(c) = p.get("cwd").and_then(Value::as_str)
+                    {
                         meta.cwd = Some(c.to_string());
+                        let asid = st.asid.clone().unwrap_or_else(|| fallback.clone());
+                        super::report_cwd(sink, &asid, &meta, &mut reported);
                     }
                     if let Some(m) = p.get("model").and_then(Value::as_str) {
                         st.model = Some(m.to_string());

@@ -101,6 +101,22 @@ impl Store {
         self.read(|c| unlinked(c, machine_id, agent, from, to))
     }
 
+    /// Forget the cursors of ingested sessions on `machine_id` filed under
+    /// `cwd` (the folder ingest used when a transcript's cwd was unknown), so
+    /// their transcripts are read again from the start and re-filed. Events
+    /// dedupe, so a re-read adds nothing twice. Returns how many were reset.
+    pub fn reset_cursors_filed_under(&self, machine_id: &str, cwd: &str) -> Result<usize> {
+        self.write(|tx| {
+            Ok(tx.execute(
+                "DELETE FROM ingest_cursors WHERE EXISTS (
+                   SELECT 1 FROM sessions s WHERE s.machine_id = ?1 AND s.origin = 'external'
+                     AND s.cwd = ?2 AND s.agent = ingest_cursors.adapter
+                     AND s.transcript_path = ingest_cursors.source)",
+                params![machine_id, cwd],
+            )?)
+        })
+    }
+
     /// External sessions on this machine still marked `working` whose last
     /// activity is before `before`.
     pub fn stale_external_sessions(&self, machine_id: &str, before: i64) -> Result<Vec<Session>> {

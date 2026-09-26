@@ -149,16 +149,7 @@ impl Adapter for Aider {
                 buf.clear();
                 return Ok(());
             };
-            for (line, events) in buf.drain(..) {
-                let mut e = Emit::line(sink, &asid, line);
-                for (kind, body) in events {
-                    if kind == EventKind::FileEdit {
-                        e.file_edit(ts, &body, Some("aider"), None)?;
-                    } else {
-                        e.text(ts, kind, &body, None)?;
-                    }
-                }
-            }
+            // Before the events: the sink creates the row once it knows the cwd.
             sink.session(
                 &asid,
                 SessionMeta {
@@ -172,6 +163,16 @@ impl Adapter for Aider {
                     ..SessionMeta::default()
                 },
             );
+            for (line, events) in buf.drain(..) {
+                let mut e = Emit::line(sink, &asid, line);
+                for (kind, body) in events {
+                    if kind == EventKind::FileEdit {
+                        e.file_edit(ts, &body, Some("aider"), None)?;
+                    } else {
+                        e.text(ts, kind, &body, None)?;
+                    }
+                }
+            }
             Ok(())
         };
 

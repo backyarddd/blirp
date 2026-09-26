@@ -102,6 +102,7 @@ impl Adapter for Pi {
             transcript_path: Some(src.path.display().to_string()),
             ..SessionMeta::default()
         };
+        let mut reported = false;
         lines.for_each(|ix, raw| {
             let v: Value = match serde_json::from_slice(raw) {
                 Ok(v) => v,
@@ -122,6 +123,8 @@ impl Adapter for Pi {
                     }
                     meta.cwd = s("cwd").map(str::to_string);
                     meta.parent = s("parentSession").and_then(|p| id_from_path(Path::new(p)));
+                    let asid = st.asid.clone().unwrap_or_else(|| fallback.clone());
+                    super::report_cwd(sink, &asid, &meta, &mut reported);
                     return Ok(());
                 }
                 "model_change" => {

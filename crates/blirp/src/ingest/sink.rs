@@ -102,8 +102,13 @@ impl<'e> StoreSink<'e> {
             link: Option<String>,
             project: Option<(String, bool)>,
             parent: Option<String>,
+            /// (cwd, project id, project created) for a row filed before
+            /// its cwd was known.
+            refile: Option<(String, String, bool)>,
         }
         let mut plans = Vec::new();
+        let mut drops = Vec::new();
+        let mut waiting = Vec::new();
         for (asid, p) in pending {
             if self.excluded.contains(&asid) {
                 continue;
@@ -129,9 +134,34 @@ impl<'e> StoreSink<'e> {
             }
             let mut link = None;
             let mut project = None;
+            let mut refile = None;
+            if let Some(s) = &existing
+                && let Some(cwd) = self.misfiled(s, &p)?
+            {
+                if self.is_excluded_cwd(&cwd) {
+                    // One of blirp's own runs, filed before its cwd was known.
+                    drops.push(s.id.clone());
+                    self.excluded.insert(asid);
+                    continue;
+                }
+                let r = store.resolve_project_lenient(
+                    &eng.machine.id,
+                    &eng.machine.name,
+                    Path::new(&cwd),
+                )?;
+                refile = Some((cwd, r.project.id, r.created));
+            }
             if existing.is_none() {
                 if p.events.is_empty() {
                     // Never create an empty session; its facts arrive again.
+                    continue;
+                }
+                if cursor.is_none() && p.meta.cwd.is_none() {
+                    // The cwd decides the project, the launch link and the
+                    // BLIRP_HOME exclusion: a mid-read flush waits for it
+                    // (adapters report it as soon as they read it) or for
+                    // the end of the read.
+                    waiting.push((asid, p));
                     continue;
                 }
                 let cwd = p.meta.cwd.clone();
@@ -154,11 +184,16 @@ impl<'e> StoreSink<'e> {
                 link,
                 project,
                 parent,
+                refile,
             });
         }
+        self.pending = waiting;
 
         let source_key = self.source_key.clone();
         let results = store.ingest_tx(|tx| {
+            for id in &drops {
+                tx.apply(&Change::DeleteSession { id: id.clone() })?;
+            }
             let mut out = Vec::new();
             for plan in &plans {
                 let mut base = tx.session_by_agent_id(agent, &plan.asid)?;
@@ -187,7 +222,11 @@ impl<'e> StoreSink<'e> {
                 };
                 let created = base.is_none();
                 let before = base.clone();
-                let s = self.merge(base, &plan.asid, &plan.p, project_id, plan.parent.clone());
+                let mut s = self.merge(base, &plan.asid, &plan.p, project_id, plan.parent.clone());
+                if let Some((cwd, pid, _)) = &plan.refile {
+                    s.cwd.clone_from(cwd);
+                    s.project_id.clone_from(pid);
+                }
                 let changed = before.as_ref() != Some(&s);
                 if changed {
                     tx.apply(&Change::Session(s.clone()))?;
@@ -202,7 +241,8 @@ impl<'e> StoreSink<'e> {
                         meta: meta.clone(),
                     }))?;
                 }
-                let project_created = created && plan.project.as_ref().is_some_and(|p| p.1);
+                let project_created = (created && plan.project.as_ref().is_some_and(|p| p.1))
+                    || plan.refile.as_ref().is_some_and(|r| r.2);
                 out.push((s, created, changed, project_created));
             }
             if let Some(c) = cursor {
@@ -210,6 +250,9 @@ impl<'e> StoreSink<'e> {
             }
             Ok(out)
         })?;
+        for id in drops {
+            eng.notifier.deleted(id);
+        }
         for (s, created, changed, project_created) in results {
             if project_created {
                 eng.notifier.project(&s.project_id);
@@ -221,6 +264,36 @@ impl<'e> StoreSink<'e> {
             }
         }
         Ok(())
+    }
+
+    /// The transcript's cwd when `s` is an ingested row filed under the home
+    /// folder because its cwd was unknown when the row was created, and this
+    /// read covers the start of the transcript (so `meta.cwd` is where the
+    /// session began, not a later `cd`). Linked and blirp-owned rows keep
+    /// their cwd (§8).
+    fn misfiled(&self, s: &Session, p: &Pending) -> Result<Option<String>> {
+        let Some(cwd) = p.meta.cwd.as_deref() else {
+            return Ok(None);
+        };
+        let home = self.eng.env.home.to_string_lossy();
+        if s.origin != SessionOrigin::External
+            || !text::same_path(&s.cwd, &home)
+            || text::same_path(cwd, &home)
+        {
+            return Ok(None);
+        }
+        let first_read = p.events.iter().map(|e| e.0).min();
+        let first_stored = self.eng.store.min_event_seq(&s.id)?;
+        let from_start = match (first_read, first_stored) {
+            (Some(r), Some(s)) => r <= s,
+            (Some(_), None) => true,
+            (None, _) => false,
+        };
+        Ok(from_start.then(|| {
+            dunce::canonicalize(cwd)
+                .map(|c| c.display().to_string())
+                .unwrap_or_else(|_| cwd.to_string())
+        }))
     }
 
     /// §7: a blirp-launched session of this agent in the same folder whose
@@ -443,6 +516,15 @@ impl Notifier {
             st.last.insert(s.id.clone(), Instant::now());
         }
         (self.emit)(ServerEvent::SessionUpdated { session: s });
+    }
+
+    pub fn deleted(&self, session_id: String) {
+        {
+            let mut st = self.state();
+            st.pending.remove(&session_id);
+            st.last.remove(&session_id);
+        }
+        (self.emit)(ServerEvent::SessionDeleted { session_id });
     }
 
     pub fn project(&self, project_id: &str) {

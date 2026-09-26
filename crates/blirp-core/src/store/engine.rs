@@ -167,6 +167,17 @@ impl Store {
         Ok(v)
     }
 
+    /// Lowest stored event seq of a session (`None` without events).
+    pub fn min_event_seq(&self, session_id: &str) -> Result<Option<i64>> {
+        self.read(|c| {
+            Ok(c.query_row(
+                "SELECT MIN(seq) FROM events WHERE session_id = ?1",
+                params![session_id],
+                |r| r.get(0),
+            )?)
+        })
+    }
+
     pub fn max_event_seq(&self, session_id: &str) -> Result<i64> {
         self.read(|c| {
             Ok(c.query_row(

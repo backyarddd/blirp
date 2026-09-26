@@ -454,6 +454,109 @@ fn claude_session_launched_by_blirp_keeps_its_fields() {
     assert_eq!(h.events(&s).len(), 9);
 }
 
+/// `n` user lines of a Claude transcript, with or without `cwd`.
+fn claude_lines(h: &H, from: usize, n: usize, with_cwd: bool) -> String {
+    (from..from + n)
+        .map(|i| {
+            let l = claude_line(&format!("u{i}"), &format!("prompt number {i}"), h);
+            let l = if with_cwd {
+                l
+            } else {
+                let at = l.find(r#","cwd":""#).unwrap();
+                let value = at + 8;
+                let end = value + l[value..].find('"').unwrap() + 1;
+                format!("{}{}", &l[..at], &l[end..])
+            };
+            format!("{l}\n")
+        })
+        .collect()
+}
+
+// A transcript longer than one ingest batch is flushed mid-read; the row
+// must still be created with the transcript's cwd (project, BLIRP_HOME
+// exclusion), not the home folder.
+#[test]
+fn long_transcripts_are_filed_by_their_cwd() {
+    let h = H::new();
+    // cwd on every line.
+    h.put(
+        &format!(".claude/projects/x/{CLAUDE_SID}.jsonl"),
+        claude_lines(&h, 0, 1100, true).as_bytes(),
+    );
+    // cwd only after the first batch.
+    let late = "aaaaaaaa-1111-4111-8111-111111111111";
+    let mut text = claude_lines(&h, 0, 1100, false);
+    text.push_str(&claude_lines(&h, 1100, 5, true));
+    h.put(&format!(".claude/projects/x/{late}.jsonl"), text.as_bytes());
+    h.pass();
+    let machine = h.store.machine_id().unwrap().unwrap();
+    let project = h
+        .store
+        .find_project_for_path(&machine, &h.cwd)
+        .unwrap()
+        .expect("the cwd became a project");
+    for asid in [CLAUDE_SID, late] {
+        let s = h.session("claude", asid);
+        assert_eq!(Path::new(&s.cwd), h.cwd, "{asid}");
+        assert_eq!(s.project_id, project.id, "{asid}");
+    }
+    let s = h.session("claude", CLAUDE_SID);
+    assert_eq!(h.store.max_event_seq(&s.id).unwrap(), 1099 * 1024);
+
+    // blirp's own long run is skipped as a whole.
+    let h = H::new();
+    let scratch = h.root.join("blirp").join("distill").join("run-1");
+    std::fs::create_dir_all(&scratch).unwrap();
+    let own = H { cwd: scratch, ..h };
+    own.put(
+        &format!(".claude/projects/x/{CLAUDE_SID}.jsonl"),
+        claude_lines(&own, 0, 1100, true).as_bytes(),
+    );
+    own.pass();
+    assert!(
+        own.store
+            .session_by_agent_id("claude", CLAUDE_SID)
+            .unwrap()
+            .is_none()
+    );
+}
+
+// Rows filed under the home folder by the old mid-read flush are re-filed
+// once: the repair re-reads their transcripts from the start. A later
+// incremental read never moves a row (a `cd` is not a new start).
+#[test]
+fn rows_filed_under_home_are_repaired_once() {
+    let h = H::new();
+    let path = h.put(
+        &format!(".claude/projects/x/{CLAUDE_SID}.jsonl"),
+        claude_lines(&h, 0, 3, false).as_bytes(),
+    );
+    h.pass();
+    let home = h.session("claude", CLAUDE_SID);
+    assert_eq!(Path::new(&home.cwd), h.home);
+    append(&path, claude_lines(&h, 3, 2, true).as_bytes());
+    h.pass();
+    let s = h.session("claude", CLAUDE_SID);
+    assert_eq!(
+        (s.cwd.as_str(), s.project_id.as_str()),
+        (home.cwd.as_str(), home.project_id.as_str())
+    );
+
+    h.engine.repair_home_filed();
+    h.pass();
+    let s = h.session("claude", CLAUDE_SID);
+    assert_eq!(Path::new(&s.cwd), h.cwd);
+    assert_ne!(s.project_id, home.project_id);
+    assert_eq!(h.events(&s).len(), 5, "re-read added no duplicates");
+    // Once only.
+    h.store
+        .modify_session(&s.id, |s| s.cwd = home.cwd.clone())
+        .unwrap();
+    h.engine.repair_home_filed();
+    h.pass();
+    assert_eq!(h.session("claude", CLAUDE_SID).cwd, home.cwd);
+}
+
 #[test]
 fn transcripts_of_blirp_own_runs_are_skipped() {
     let h = H::new();

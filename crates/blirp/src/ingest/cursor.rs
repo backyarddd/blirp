@@ -185,6 +185,7 @@ fn ingest_transcript(
         .and_then(Path::file_name)
         .and_then(|n| super::decode_dashed_dir(&n.to_string_lossy()))
         .map(|p| p.display().to_string());
+    super::report_cwd(sink, &asid, &meta, &mut false);
     let mut lines = Lines::open(&src.path, &st.pos, false)?;
     lines.for_each(|ix, raw| {
         let v: Value = match serde_json::from_slice(raw) {
@@ -395,6 +396,7 @@ fn ingest_store(
         }
         stack.extend(children.into_iter().rev());
     }
+    super::report_cwd(sink, &asid, &meta, &mut false);
     let mut e = Emit::counter(sink, &asid, st.next_seq);
     for (key, m) in &messages {
         if st.seen.contains(key) {

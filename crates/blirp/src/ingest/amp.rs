@@ -148,6 +148,7 @@ impl Adapter for Amp {
             // Edited/truncated thread: continue after what is left.
             st.messages = msgs.len() as u64;
         }
+        super::report_cwd(sink, &asid, &meta, &mut false);
         let (mut tin, mut tout, mut cost, mut model) = (0i64, 0i64, 0f64, None::<String>);
         let mut retry = false;
         for (i, m) in msgs.iter().enumerate() {

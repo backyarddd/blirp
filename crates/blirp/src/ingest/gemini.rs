@@ -282,6 +282,7 @@ impl Adapter for Gemini {
             };
             header(&v, &mut st, &mut meta);
             let asid = st.asid.clone().unwrap_or_else(|| fallback.clone());
+            super::report_cwd(sink, &asid, &meta, &mut false);
             let mut e = Emit::counter(sink, &asid, st.next_seq);
             if let Some(Value::Array(msgs)) = v.get("messages") {
                 for m in msgs {
@@ -291,6 +292,7 @@ impl Adapter for Gemini {
             st.next_seq = e.next_seq();
         } else {
             let mut lines = Lines::open(&src.path, &st.pos, false)?;
+            let mut reported = false;
             // A rewritten file restarts at 0; the seen-set prevents duplicates.
             lines.for_each(|_, raw| {
                 let v: Value = match serde_json::from_slice(raw) {
@@ -308,6 +310,7 @@ impl Adapter for Gemini {
                         meta.title = Some(s.clone());
                     }
                     let asid = st.asid.clone().unwrap_or_else(|| fallback.clone());
+                    super::report_cwd(sink, &asid, &meta, &mut reported);
                     let mut e = Emit::counter(sink, &asid, st.next_seq);
                     if let Some(Value::Array(msgs)) = set.get("messages") {
                         for m in msgs {
@@ -322,6 +325,7 @@ impl Adapter for Gemini {
                     return Ok(());
                 }
                 let asid = st.asid.clone().unwrap_or_else(|| fallback.clone());
+                super::report_cwd(sink, &asid, &meta, &mut reported);
                 let mut e = Emit::counter(sink, &asid, st.next_seq);
                 message(&v, &mut e, &mut st, &mut meta)?;
                 st.next_seq = e.next_seq();
