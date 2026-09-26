@@ -371,7 +371,7 @@ Request/response DTOs are defined in `blirp-core::model` and exported to `web/sr
 - Local desktop and `blirp open`: localhost + token cookie.
 - Hub with `portal.lan = true`: axum-server with rustls on `0.0.0.0:lan_port`, self-signed cert generated with `rcgen` and persisted; fingerprint shown in the UI. Browser devices log in by scanning a one-time QR (5 min, single use) shown on an already-authenticated screen, which issues a long-lived device cookie (random 256-bit token, stored hashed). Devices listed and revocable in Settings > Devices. Terminal control from a browser device requires `can_control_terminals`.
 - Users with Tailscale can instead run `tailscale serve` in front of the hub port (documented).
-- Security headers: CSP (self only, no inline scripts), `X-Frame-Options: DENY`, `SameSite=Strict` cookies, CSRF protection via same-site cookie + `Origin` check on mutations and WS upgrades.
+- Security headers: CSP (scripts self only, no inline scripts; `style-src 'self' 'unsafe-inline'` for xterm.js; `img-src 'self' data:`; `connect-src 'self' ws://<host> wss://<host>`), `X-Frame-Options: DENY`, `SameSite=Strict` cookies, CSRF protection via same-site cookie + `Origin` check on mutations and WS upgrades.
 
 ## 14. Web UI (Svelte 5, TypeScript strict)
 
