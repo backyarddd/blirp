@@ -499,7 +499,7 @@ Layout mirrors the reference (Xirp-style):
 
 ## 16. Quality bar
 
-- Rust: edition 2024, `cargo fmt --check`, `cargo clippy --workspace --all-targets -- -D warnings`, `cargo test --workspace`. No `unwrap()`/`expect()` outside tests and provably-infallible cases (comment why). Errors: `thiserror` in libraries, `anyhow` at binary edges, never silently swallowed (log with context). No `unsafe` except where a platform API demands it, with a `SAFETY:` comment.
+- Rust: edition 2024, toolchain pinned in `rust-toolchain.toml` (same version as CI's `RUST_TOOLCHAIN`; bump both together), `cargo fmt --check`, `cargo clippy --workspace --all-targets -- -D warnings`, `cargo test --workspace`. No `unwrap()`/`expect()` outside tests and provably-infallible cases (comment why). Errors: `thiserror` in libraries, `anyhow` at binary edges, never silently swallowed (log with context). No `unsafe` except where a platform API demands it, with a `SAFETY:` comment.
 - Web: `pnpm -C web check` (svelte-check, strict TS, no `any`), `pnpm -C web test` (vitest), `pnpm -C web build`. `pnpm -C web e2e` (not part of `test`) builds the SPA, starts the real daemon on a temp `BLIRP_HOME` and drives the UI with Playwright in the installed Edge (`BLIRP_E2E_CHANNEL` picks another browser, `BLIRP_E2E_KEEP=1` keeps the temp dir and `daemon.log`).
 - Every adapter, redaction rule, migration, the distill JSON contract, project resolution, pairing, and replication have tests. An integration test starts a daemon on a temp `BLIRP_HOME`, launches a PTY session running a shell echo, attaches over WS, and asserts snapshot + stream.
 - CI matrix: windows-latest, macos-latest, ubuntu-latest.
