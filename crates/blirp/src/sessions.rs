@@ -182,8 +182,9 @@ pub async fn launch(state: &SharedState, req: LaunchSession) -> ApiResult<Sessio
     if let Some(m) = &req.machine
         && *m != state.machine.id
     {
-        return Err(ApiError::not_implemented(
-            "launching on another machine requires sync, which is not available in this version",
+        // Remote launches are forwarded by the API layer (crate::sync).
+        return Err(ApiError::bad_request(
+            "machine is not this machine; launch through the API to reach it",
         ));
     }
     if req.continue_from.is_some() {
@@ -252,8 +253,10 @@ pub async fn resume(state: &SharedState, id: &str) -> ApiResult<Session> {
     })
     .await?;
     if session.machine_id != state.machine.id {
-        return Err(ApiError::not_implemented(
-            "resuming a session of another machine requires sync, which is not available in this version",
+        // Forwarded by the API layer when the machine is reachable.
+        return Err(ApiError::conflict(
+            "machine_unreachable",
+            "this session runs on another machine that is not reachable",
         ));
     }
     if state.terminals.get(id).is_some() {

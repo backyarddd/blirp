@@ -27,10 +27,15 @@ pub fn routes() -> Router<SharedState> {
 }
 
 async fn health(State(s): State<SharedState>) -> Json<Health> {
+    // The role changes at runtime (hub enable, pairing); the config is current.
+    let role = s.config().sync.role;
     Json(Health {
         version: env!("CARGO_PKG_VERSION").to_string(),
-        role: s.machine.role,
-        machine: s.machine.clone(),
+        role,
+        machine: blirp_core::model::Machine {
+            role,
+            ..s.machine.clone()
+        },
     })
 }
 
@@ -118,13 +123,21 @@ async fn agents(State(s): State<SharedState>) -> ApiResult<Json<Vec<AgentInfo>>>
     Ok(Json(list))
 }
 
-async fn events_ws(State(s): State<SharedState>, ws: WebSocketUpgrade) -> Response {
-    ws.on_upgrade(move |socket| push_events(s, socket))
+async fn events_ws(
+    State(s): State<SharedState>,
+    principal: crate::api::Principal,
+    ws: WebSocketUpgrade,
+) -> Response {
+    let shutdown = crate::sync::connection_shutdown(&s, &principal);
+    ws.on_upgrade(move |socket| push_events(s, socket, shutdown))
 }
 
-async fn push_events(s: SharedState, mut socket: WebSocket) {
+async fn push_events(
+    s: SharedState,
+    mut socket: WebSocket,
+    mut shutdown: tokio::sync::watch::Receiver<bool>,
+) {
     let mut rx = s.events.subscribe();
-    let mut shutdown = s.shutdown.clone();
     loop {
         tokio::select! {
             ev = rx.recv() => {

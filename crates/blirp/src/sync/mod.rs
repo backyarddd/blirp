@@ -1,0 +1,621 @@
+//! Daemon side of machine sync (§10): role lifecycle, `/api/sync/*`,
+//! `/api/devices/*`, `DELETE /api/machines/:id`, and the remote API /
+//! terminal proxy (see [`proxy`]).
+
+mod proxy;
+
+pub use proxy::{connect_terminal, forward, launch_remote, relay_terminal};
+
+use crate::api::{ApiError, ApiJson, ApiResult, Principal, blocking};
+use crate::state::SharedState;
+use axum::Json;
+use axum::Router;
+use axum::extract::{Path, State};
+use axum::http::StatusCode;
+use axum::routing::{delete, get, post};
+use blirp_core::config::Config;
+use blirp_core::model::{
+    BrowserInvite, Device, DeviceKind, JoinHub, Machine, MachineRole, PatchDevice, ServerEvent,
+    SyncInvite, SyncStatus,
+};
+use blirp_core::store::Change;
+use blirp_sync::pair::{MachineMeta, PairError};
+use blirp_sync::service::{ProxyServe, StatusHook};
+use blirp_sync::{Role, SyncError, SyncService};
+use iroh::{EndpointAddr, SecretKey};
+use std::collections::HashMap;
+use std::sync::{Arc, Mutex, OnceLock, PoisonError};
+
+/// `settings` key holding the hub's last known address (JSON `EndpointAddr`).
+const HUB_ADDR_KEY: &str = "sync.hub_addr";
+
+fn lock<T>(m: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
+    // Plain maps/options replaced whole; poisoning cannot corrupt them.
+    m.lock().unwrap_or_else(PoisonError::into_inner)
+}
+
+pub struct SyncState {
+    service: Mutex<Option<Arc<SyncService>>>,
+    /// Serializes role changes (enable/disable/join/leave).
+    transition: tokio::sync::Mutex<()>,
+    identity: OnceLock<SecretKey>,
+    /// Sessions launched on other machines from here: id -> machine id,
+    /// so their terminals can be attached before the row replicates.
+    remote_sessions: Mutex<HashMap<String, String>>,
+    pub(crate) portal: crate::portal::PortalState,
+    /// Ids of devices that were revoked or changed permissions.
+    device_changes: tokio::sync::broadcast::Sender<String>,
+}
+
+impl Default for SyncState {
+    fn default() -> Self {
+        Self {
+            service: Mutex::default(),
+            transition: tokio::sync::Mutex::default(),
+            identity: OnceLock::new(),
+            remote_sessions: Mutex::default(),
+            portal: crate::portal::PortalState::default(),
+            device_changes: tokio::sync::broadcast::channel(64).0,
+        }
+    }
+}
+
+impl SyncState {
+    pub fn set_identity(&self, key: SecretKey) {
+        // Set once at startup; a second call would be a bug, keep the first.
+        if self.identity.set(key).is_err() {
+            tracing::warn!("identity already set");
+        }
+    }
+
+    fn identity(&self) -> ApiResult<SecretKey> {
+        self.identity
+            .get()
+            .cloned()
+            .ok_or_else(|| ApiError::internal("sync", "identity key not loaded"))
+    }
+
+    pub fn service(&self) -> Option<Arc<SyncService>> {
+        lock(&self.service).clone()
+    }
+
+    pub(crate) fn remember_remote(&self, session: &str, machine: &str) {
+        lock(&self.remote_sessions).insert(session.to_string(), machine.to_string());
+    }
+
+    fn remote_of(&self, session: &str) -> Option<String> {
+        lock(&self.remote_sessions).get(session).cloned()
+    }
+}
+
+pub fn routes() -> Router<SharedState> {
+    Router::new()
+        .route("/api/sync/status", get(get_status))
+        .route("/api/sync/hub/enable", post(hub_enable))
+        .route("/api/sync/hub/disable", post(hub_disable))
+        .route("/api/sync/invite", post(invite))
+        .route("/api/sync/join", post(join))
+        .route("/api/devices", get(list_devices))
+        .route("/api/devices/browser-invite", post(browser_invite))
+        .route(
+            "/api/devices/{id}",
+            delete(revoke_device).patch(patch_device),
+        )
+        .route("/api/machines/{id}", delete(revoke_machine))
+        .route("/api/sync/{*rest}", axum::routing::any(unknown))
+        .route("/api/devices/{id}/{*rest}", axum::routing::any(unknown))
+}
+
+async fn unknown() -> ApiError {
+    ApiError::new(StatusCode::NOT_FOUND, "not_found", "no such endpoint")
+}
+
+// ---------------------------------------------------------------- lifecycle
+
+/// Start sync (and the LAN portal on a hub) for the configured role.
+/// Failures are logged and reported in the status; the daemon keeps running.
+pub async fn start(state: &SharedState) {
+    if let Err(e) = start_service(state).await {
+        tracing::error!(error = %e.message, "sync did not start");
+    }
+    if let Err(e) = crate::portal::sync_with_config(state).await {
+        tracing::error!(error = %format!("{e:#}"), "LAN portal did not start");
+    }
+}
+
+/// Stop sync and the portal (daemon shutdown).
+pub async fn stop(state: &SharedState) {
+    crate::portal::stop(state).await;
+    let svc = lock(&state.sync.service).take();
+    if let Some(svc) = svc {
+        svc.shutdown().await;
+    }
+}
+
+fn hub_addr(state: &SharedState, config: &Config) -> ApiResult<EndpointAddr> {
+    let id = config
+        .sync
+        .hub
+        .as_deref()
+        .ok_or_else(|| ApiError::bad_request("sync.hub is not set"))?;
+    let id: iroh::EndpointId = id.parse().map_err(|e| {
+        ApiError::bad_request(format!("sync.hub {id:?} is not an endpoint id: {e}"))
+    })?;
+    let saved = state
+        .store
+        .get_setting(HUB_ADDR_KEY)?
+        .and_then(|v| serde_json::from_value::<EndpointAddr>(v).ok())
+        .filter(|a| a.id == id);
+    Ok(saved.unwrap_or_else(|| EndpointAddr::new(id)))
+}
+
+async fn start_service(state: &SharedState) -> ApiResult<()> {
+    let config = state.config();
+    let role = match config.sync.role {
+        MachineRole::Standalone => return Ok(()),
+        MachineRole::Hub => Role::Hub,
+        MachineRole::Node => {
+            let st = state.clone();
+            let cfg = config.clone();
+            Role::Node {
+                hub: blocking(move || hub_addr(&st, &cfg)).await?,
+            }
+        }
+    };
+    let weak = Arc::downgrade(state);
+    let proxy: ProxyServe = Arc::new(move |stream, principal| {
+        let weak = weak.clone();
+        Box::pin(async move {
+            if let Some(st) = weak.upgrade() {
+                proxy::serve(st, stream, principal).await;
+            }
+        })
+    });
+    let weak = Arc::downgrade(state);
+    let on_status: StatusHook = Arc::new(move || {
+        if let Some(st) = weak.upgrade() {
+            emit_status(&st);
+        }
+    });
+    let svc = SyncService::start(blirp_sync::StartOptions {
+        secret: state.sync.identity()?,
+        relay: config.sync.relay.clone(),
+        store: state.store.clone(),
+        machine: Machine {
+            role: config.sync.role,
+            ..state.machine.clone()
+        },
+        role,
+        proxy,
+        on_status,
+    })
+    .await
+    .map_err(|e| sync_error("starting sync", e))?;
+    let old = lock(&state.sync.service).replace(Arc::new(svc));
+    if let Some(old) = old {
+        old.shutdown().await;
+    }
+    emit_status(state);
+    Ok(())
+}
+
+async fn stop_service(state: &SharedState) {
+    let svc = lock(&state.sync.service).take();
+    if let Some(svc) = svc {
+        svc.shutdown().await;
+    }
+}
+
+/// Persist a role change: config.toml, the in-memory config and this
+/// machine's (replicated) row.
+async fn set_role(state: &SharedState, role: MachineRole, hub: Option<String>) -> ApiResult<()> {
+    let st = state.clone();
+    blocking(move || {
+        let mut cfg = st.config();
+        cfg.sync.role = role;
+        cfg.sync.hub = hub;
+        cfg.save(&st.paths.config_file())
+            .map_err(|e| ApiError::internal("writing config.toml", e))?;
+        st.set_config(cfg);
+        st.store.upsert_machine(&Machine {
+            role,
+            last_seen: blirp_core::now_ms(),
+            ..st.machine.clone()
+        })?;
+        Ok(())
+    })
+    .await
+}
+
+pub(crate) fn emit_status(state: &SharedState) {
+    let st = state.clone();
+    tokio::spawn(async move {
+        match status(&st).await {
+            Ok(status) => st.emit(ServerEvent::SyncUpdated { status }),
+            Err(e) => tracing::warn!(error = %e.message, "computing sync status failed"),
+        }
+    });
+}
+
+pub async fn status(state: &SharedState) -> ApiResult<SyncStatus> {
+    let config = state.config();
+    let rt = state.sync.service().map(|s| s.status()).unwrap_or_default();
+    let hub = match config.sync.role {
+        MachineRole::Hub => Some(state.machine.id.clone()),
+        MachineRole::Node => config.sync.hub.clone(),
+        MachineRole::Standalone => None,
+    };
+    let pending_outbox = match (&config.sync.role, &hub) {
+        (MachineRole::Node, Some(h)) => {
+            let store = state.store.clone();
+            let h = h.clone();
+            blocking(move || Ok(store.pending_outbox(&h)?)).await?
+        }
+        _ => 0,
+    };
+    let portal = crate::portal::info(state);
+    Ok(SyncStatus {
+        role: config.sync.role,
+        machine_id: state.machine.id.clone(),
+        hub,
+        connected: rt.connected,
+        last_sync_at: rt.last_sync_at,
+        pending_outbox,
+        portal_url: portal.as_ref().map(|p| p.0.clone()),
+        portal_cert_fingerprint: portal.map(|p| p.1),
+    })
+}
+
+fn sync_error(context: &str, e: SyncError) -> ApiError {
+    match e {
+        SyncError::Pair(p) => pair_error(p),
+        SyncError::Connect { message, .. } => ApiError::new(
+            StatusCode::BAD_GATEWAY,
+            "hub_unreachable",
+            format!("cannot reach the hub: {message}"),
+        ),
+        SyncError::Unavailable(m) => ApiError::conflict("machine_unreachable", m),
+        other => ApiError::internal(context, other),
+    }
+}
+
+fn pair_error(e: PairError) -> ApiError {
+    let code = match &e {
+        PairError::InvalidCode => "invalid_code",
+        PairError::InvalidInvite(_) => "invalid_invite",
+        PairError::UnknownInvite => "unknown_invite",
+        PairError::InviteRequired => "invite_required",
+        PairError::Expired => "invite_expired",
+        PairError::TooManyAttempts => "too_many_attempts",
+        PairError::WrongCode => "wrong_code",
+        PairError::UnsupportedVersion => "unsupported_version",
+        PairError::NoHubFound => "no_hub_found",
+        PairError::MultipleHubs => "multiple_hubs",
+        PairError::Refused(_) => "pairing_refused",
+        PairError::Protocol(_) | PairError::Wire(_) | PairError::Random(_) => "pairing_failed",
+    };
+    ApiError::new(StatusCode::BAD_REQUEST, code, e.to_string())
+}
+
+// ---------------------------------------------------------------- handlers
+
+async fn get_status(State(s): State<SharedState>) -> ApiResult<Json<SyncStatus>> {
+    status(&s).await.map(Json)
+}
+
+async fn hub_enable(
+    State(s): State<SharedState>,
+    principal: Principal,
+) -> ApiResult<Json<SyncStatus>> {
+    principal.require_admin()?;
+    let _guard = s.sync.transition.lock().await;
+    match s.config().sync.role {
+        MachineRole::Node => {
+            return Err(ApiError::conflict(
+                "paired_node",
+                "this machine is paired with a hub; leave it before becoming a hub",
+            ));
+        }
+        MachineRole::Hub if s.sync.service().is_some() => {}
+        _ => {
+            set_role(&s, MachineRole::Hub, None).await?;
+            if let Err(e) = start_service(&s).await {
+                set_role(&s, MachineRole::Standalone, None).await?;
+                return Err(e);
+            }
+            crate::portal::sync_with_config(&s)
+                .await
+                .map_err(|e| ApiError::internal("starting the LAN portal", format!("{e:#}")))?;
+        }
+    }
+    status(&s).await.map(Json)
+}
+
+async fn hub_disable(
+    State(s): State<SharedState>,
+    principal: Principal,
+) -> ApiResult<Json<SyncStatus>> {
+    principal.require_admin()?;
+    let _guard = s.sync.transition.lock().await;
+    if s.config().sync.role != MachineRole::Hub {
+        return Err(ApiError::conflict("not_hub", "this machine is not a hub"));
+    }
+    stop_service(&s).await;
+    crate::portal::stop(&s).await;
+    set_role(&s, MachineRole::Standalone, None).await?;
+    emit_status(&s);
+    status(&s).await.map(Json)
+}
+
+async fn invite(State(s): State<SharedState>, principal: Principal) -> ApiResult<Json<SyncInvite>> {
+    principal.require_admin()?;
+    let svc = s
+        .sync
+        .service()
+        .filter(|svc| svc.is_hub())
+        .ok_or_else(|| ApiError::conflict("not_hub", "enable the hub first"))?;
+    let inv = svc
+        .create_invite()
+        .await
+        .map_err(|e| sync_error("creating invite", e))?;
+    Ok(Json(SyncInvite {
+        invite: inv.invite,
+        code: inv.code,
+        uri: inv.uri,
+        expires_at: inv.expires_at,
+    }))
+}
+
+async fn join(
+    State(s): State<SharedState>,
+    principal: Principal,
+    ApiJson(body): ApiJson<JoinHub>,
+) -> ApiResult<Json<SyncStatus>> {
+    principal.require_admin()?;
+    let _guard = s.sync.transition.lock().await;
+    let config = s.config();
+    if config.sync.role != MachineRole::Standalone {
+        return Err(ApiError::conflict(
+            "already_synced",
+            format!("this machine is already a {}", config.sync.role),
+        ));
+    }
+    let (invite, code) = match blirp_sync::pair::parse_join_uri(&body.invite) {
+        Some((i, c)) => (
+            i,
+            if body.code.trim().is_empty() {
+                c
+            } else {
+                body.code
+            },
+        ),
+        None => (body.invite, body.code),
+    };
+    let invite = Some(invite.trim().to_string()).filter(|i| !i.is_empty());
+    let joined = blirp_sync::service::join(
+        &s.sync.identity()?,
+        &config.sync.relay,
+        invite.as_deref(),
+        &code,
+        MachineMeta {
+            name: config.machine.name.clone(),
+            os: std::env::consts::OS.to_string(),
+        },
+    )
+    .await
+    .map_err(|e| sync_error("pairing", e))?;
+    let hub_id = joined.hub.id.to_string();
+    let addr = serde_json::to_value(&joined.hub)
+        .map_err(|e| ApiError::internal("saving hub address", e))?;
+    let store = s.store.clone();
+    blocking(move || Ok(store.set_setting(HUB_ADDR_KEY, &addr)?)).await?;
+    set_role(&s, MachineRole::Node, Some(hub_id.clone())).await?;
+    tracing::info!(hub = %hub_id, name = %joined.hub_meta.name, "paired with hub");
+    start_service(&s).await?;
+    status(&s).await.map(Json)
+}
+
+async fn list_devices(State(s): State<SharedState>) -> ApiResult<Json<Vec<Device>>> {
+    let store = s.store.clone();
+    Ok(Json(blocking(move || Ok(store.list_devices()?)).await?))
+}
+
+async fn browser_invite(
+    State(s): State<SharedState>,
+    _principal: Principal,
+) -> ApiResult<Json<BrowserInvite>> {
+    crate::portal::create_invite(&s).map(Json)
+}
+
+/// Revoke a paired machine on the hub: device + (replicated) machine row,
+/// then drop its live connections.
+async fn revoke_node(s: &SharedState, node_id: &str) -> ApiResult<()> {
+    let store = s.store.clone();
+    let id = node_id.to_string();
+    blocking(move || {
+        let now = blirp_core::now_ms();
+        for d in store.list_devices()? {
+            if d.node_id.as_deref() == Some(id.as_str()) && !d.revoked {
+                store.upsert_device(&Device { revoked: true, ..d })?;
+            }
+        }
+        if let Some(m) = store.get_machine(&id)? {
+            store.apply(Change::Machine(Machine {
+                revoked: true,
+                last_seen: m.last_seen.max(now),
+                ..m
+            }))?;
+        }
+        Ok(())
+    })
+    .await?;
+    if let Some(svc) = s.sync.service() {
+        svc.disconnect(node_id);
+    }
+    emit_status(s);
+    Ok(())
+}
+
+async fn revoke_device(
+    State(s): State<SharedState>,
+    Path(id): Path<String>,
+    principal: Principal,
+) -> ApiResult<StatusCode> {
+    principal.require_admin()?;
+    let store = s.store.clone();
+    let did = id.clone();
+    let device = blocking(move || {
+        store
+            .get_device(&did)?
+            .ok_or_else(|| ApiError::not_found("device"))
+    })
+    .await?;
+    match (device.kind, device.node_id.clone()) {
+        (DeviceKind::Machine, Some(node)) => revoke_node(&s, &node).await?,
+        _ => {
+            let store = s.store.clone();
+            blocking(move || {
+                Ok(store.upsert_device(&Device {
+                    revoked: true,
+                    ..device
+                })?)
+            })
+            .await?;
+        }
+    }
+    device_changed(&s, &id);
+    Ok(StatusCode::NO_CONTENT)
+}
+
+async fn patch_device(
+    State(s): State<SharedState>,
+    Path(id): Path<String>,
+    principal: Principal,
+    ApiJson(body): ApiJson<PatchDevice>,
+) -> ApiResult<Json<Device>> {
+    principal.require_admin()?;
+    let store = s.store.clone();
+    let did = id.clone();
+    let device = blocking(move || {
+        let d = store
+            .get_device(&did)?
+            .ok_or_else(|| ApiError::not_found("device"))?;
+        let d = Device {
+            can_control_terminals: body.can_control_terminals,
+            ..d
+        };
+        store.upsert_device(&d)?;
+        Ok(d)
+    })
+    .await?;
+    // Live connections reopen with the new rights.
+    device_changed(&s, &id);
+    if let (DeviceKind::Machine, Some(node), Some(svc)) =
+        (device.kind, device.node_id.as_deref(), s.sync.service())
+    {
+        svc.disconnect(node);
+    }
+    Ok(Json(device))
+}
+
+/// `DELETE /api/machines/:id`: on the hub, revoke that machine; on a node,
+/// the hub's id means "leave the hub".
+async fn revoke_machine(
+    State(s): State<SharedState>,
+    Path(id): Path<String>,
+    principal: Principal,
+) -> ApiResult<StatusCode> {
+    principal.require_admin()?;
+    let _guard = s.sync.transition.lock().await;
+    let config = s.config();
+    if id == s.machine.id {
+        return Err(ApiError::bad_request("a machine cannot revoke itself"));
+    }
+    match config.sync.role {
+        MachineRole::Hub => {
+            let store = s.store.clone();
+            let mid = id.clone();
+            let known = blocking(move || {
+                Ok(store.get_machine(&mid)?.is_some() || store.device_by_node_id(&mid)?.is_some())
+            })
+            .await?;
+            if !known {
+                return Err(ApiError::not_found("machine"));
+            }
+            revoke_node(&s, &id).await?;
+        }
+        MachineRole::Node if config.sync.hub.as_deref() == Some(id.as_str()) => {
+            stop_service(&s).await;
+            let store = s.store.clone();
+            blocking(move || {
+                Ok(store.set_settings(&std::collections::BTreeMap::from([(
+                    HUB_ADDR_KEY.to_string(),
+                    None,
+                )]))?)
+            })
+            .await?;
+            set_role(&s, MachineRole::Standalone, None).await?;
+            emit_status(&s);
+        }
+        _ => {
+            return Err(ApiError::conflict(
+                "not_hub",
+                "only the hub can revoke other machines",
+            ));
+        }
+    }
+    Ok(StatusCode::NO_CONTENT)
+}
+
+/// Shutdown signal for one long-lived connection (WebSocket): flips on
+/// daemon shutdown and, for a browser device, as soon as that device is
+/// revoked or its permissions change (the client reconnects with its
+/// current rights).
+pub fn connection_shutdown(
+    state: &SharedState,
+    principal: &Principal,
+) -> tokio::sync::watch::Receiver<bool> {
+    let Some(device) = principal.device.clone() else {
+        return state.shutdown.clone();
+    };
+    let (tx, rx) = tokio::sync::watch::channel(*state.shutdown.borrow());
+    let mut global = state.shutdown.clone();
+    let mut changes = state.sync.device_changes.subscribe();
+    tokio::spawn(async move {
+        loop {
+            tokio::select! {
+                r = changes.recv() => match r {
+                    Ok(id) if id != device => continue,
+                    // Ours, or missed messages: close to be safe.
+                    _ => break,
+                },
+                _ = global.changed() => break,
+                _ = tx.closed() => return,
+            }
+        }
+        let _ = tx.send(true);
+    });
+    rx
+}
+
+fn device_changed(s: &SharedState, id: &str) {
+    // No live connections is fine.
+    let _ = s.sync.device_changes.send(id.to_string());
+}
+
+/// The machine a session runs on, when that is another machine.
+pub async fn remote_machine_of(state: &SharedState, session: &str) -> ApiResult<Option<String>> {
+    if let Some(m) = state.sync.remote_of(session) {
+        return Ok(Some(m));
+    }
+    let store = state.store.clone();
+    let id = session.to_string();
+    let local = state.machine.id.clone();
+    blocking(move || {
+        Ok(store
+            .get_session(&id)?
+            .map(|s| s.machine_id)
+            .filter(|m| *m != local))
+    })
+    .await
+}

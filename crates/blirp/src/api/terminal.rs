@@ -3,8 +3,13 @@
 //!   (`snapshot` first, `resize`, `exit`); binary frames are raw PTY output.
 //! - client -> server: binary frames are raw input bytes; text frames are
 //!   JSON [`TerminalClientMessage`] (`input {data}` or `resize {cols, rows}`).
+//!
+//! Callers without terminal control (browser devices without
+//! `can_control_terminals`, proxied read-only requests) get a view-only
+//! stream: their input and resize frames are dropped. A session running on
+//! another machine is attached through the hub (see `crate::sync`).
 
-use super::{ApiError, ApiResult};
+use super::{ApiError, ApiResult, Principal};
 use crate::pty::{Snapshot, TermEvent, Terminal};
 use crate::state::SharedState;
 use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
@@ -18,19 +23,26 @@ use tokio::sync::broadcast::error::RecvError;
 pub async fn attach(
     State(s): State<SharedState>,
     Path(id): Path<String>,
+    principal: Principal,
     ws: WebSocketUpgrade,
 ) -> ApiResult<Response> {
-    let term = s.terminals.get(&id).ok_or_else(|| {
-        ApiError::new(
+    let shutdown = crate::sync::connection_shutdown(&s, &principal);
+    let ws = ws.max_message_size(1024 * 1024);
+    let Some(term) = s.terminals.get(&id) else {
+        if let Some(machine) = crate::sync::remote_machine_of(&s, &id).await? {
+            let remote = crate::sync::connect_terminal(&s, &machine, &id, &principal).await?;
+            return Ok(ws.on_upgrade(move |socket| {
+                crate::sync::relay_terminal(socket, remote, principal.control, shutdown)
+            }));
+        }
+        return Err(ApiError::new(
             StatusCode::NOT_FOUND,
             "terminal_not_found",
             "session has no live terminal",
-        )
-    })?;
-    let shutdown = s.shutdown.clone();
-    Ok(ws
-        .max_message_size(1024 * 1024)
-        .on_upgrade(move |socket| session(term, socket, shutdown)))
+        ));
+    };
+    let control = principal.control;
+    Ok(ws.on_upgrade(move |socket| session(term, socket, shutdown, control)))
 }
 
 fn text(msg: &TerminalServerMessage) -> Option<Message> {
@@ -62,6 +74,7 @@ async fn session(
     term: Arc<Terminal>,
     mut socket: WebSocket,
     mut shutdown: tokio::sync::watch::Receiver<bool>,
+    control: bool,
 ) {
     let (snap, mut rx, exited) = term.attach();
     if !send(&mut socket, snapshot_msg(snap)).await {
@@ -105,6 +118,7 @@ async fn session(
                 }
             }
             msg = socket.recv() => match msg {
+                Some(Ok(Message::Binary(_) | Message::Text(_))) if !control => {}
                 Some(Ok(Message::Binary(b))) => term.write(b.to_vec()),
                 Some(Ok(Message::Text(t))) => match serde_json::from_str::<TerminalClientMessage>(&t) {
                     Ok(TerminalClientMessage::Input { data }) => term.write(data.into_bytes()),

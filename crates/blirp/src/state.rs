@@ -24,6 +24,8 @@ pub struct AppState {
     /// handlers (WebSockets) exit on it so graceful shutdown can finish.
     pub shutdown: watch::Receiver<bool>,
     pub agents_cache: Mutex<Option<(Instant, Vec<AgentInfo>)>>,
+    /// Machine sync, remote proxy and LAN portal (§10, §13).
+    pub sync: crate::sync::SyncState,
 }
 
 impl AppState {
@@ -48,6 +50,7 @@ impl AppState {
             terminals: Registry::default(),
             shutdown,
             agents_cache: Mutex::new(None),
+            sync: crate::sync::SyncState::default(),
         }
     }
 

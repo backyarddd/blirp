@@ -1,4 +1,4 @@
-//! Subcommands implemented by later releases (memory CLI, hooks, MCP, sync,
+//! Subcommands implemented by later releases (memory CLI, hooks, MCP,
 //! autostart). Kept together so each can be replaced in one place.
 
 use clap::Subcommand;
@@ -12,10 +12,6 @@ pub enum LaterCommand {
     Hook(Args),
     /// MCP server over stdio.
     Mcp(Args),
-    /// Pair this machine with a hub.
-    Pair(Args),
-    /// Hub management.
-    Hub(Args),
     /// Install or remove autostart.
     Service(Args),
     /// Install or remove global agent hooks.
@@ -33,8 +29,6 @@ pub fn run(cmd: &LaterCommand) -> ExitCode {
         LaterCommand::Mem(_) => "mem",
         LaterCommand::Hook(_) => "hook",
         LaterCommand::Mcp(_) => "mcp",
-        LaterCommand::Pair(_) => "pair",
-        LaterCommand::Hub(_) => "hub",
         LaterCommand::Service(_) => "service",
         LaterCommand::Hooks(_) => "hooks",
     };
