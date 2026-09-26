@@ -1,0 +1,61 @@
+[workspace]
+resolver = "3"
+members = ["crates/blirp-core", "crates/blirp-sync"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.89"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/blirp/blirp"
+
+[workspace.dependencies]
+blirp-core = { path = "crates/blirp-core" }
+blirp-sync = { path = "crates/blirp-sync" }
+
+anyhow = "1"
+axum = { version = "0.8", features = ["ws"] }
+bytes = "1"
+clap = { version = "4", features = ["derive"] }
+dunce = "1"
+futures-util = { version = "0.3", default-features = false, features = ["sink", "std"] }
+gethostname = "1"
+getrandom = "0.3"
+hex = "0.4"
+libc = "0.2"
+portable-pty = "0.9"
+regex = "1"
+reqwest = { version = "0.13", default-features = false, features = ["json"] }
+rusqlite = { version = "0.40", features = ["bundled"] }
+rust-embed = { version = "8", features = ["mime-guess"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tempfile = "3"
+thiserror = "2"
+tokio = { version = "1", features = ["full"] }
+tokio-tungstenite = "0.30"
+toml = "1"
+tracing = "0.1"
+tracing-appender = "0.2"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
+ts-rs = { version = "12", features = ["serde-json-impl", "no-serde-warnings"] }
+uuid = { version = "1", features = ["v4", "v7", "serde"] }
+vt100 = "0.16"
+windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_System_JobObjects", "Win32_System_Threading", "Win32_Security"] }
+
+[workspace.lints.rust]
+unsafe_code = "deny"
+unused_must_use = "deny"
+
+[workspace.lints.clippy]
+all = { level = "warn", priority = -1 }
+unwrap_used = "warn"
+expect_used = "warn"
+dbg_macro = "warn"
+todo = "warn"
+print_stdout = "allow"
+
+[profile.release]
+lto = "thin"
+codegen-units = 1
+strip = true

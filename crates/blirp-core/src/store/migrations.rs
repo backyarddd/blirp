@@ -1,0 +1,265 @@
+//! Embedded, versioned schema migrations tracked with `PRAGMA user_version`.
+//! Append new migrations; never edit a released one.
+
+use rusqlite::Connection;
+
+/// Index `i` holds the migration that moves the schema from version `i` to `i + 1`.
+pub(crate) const MIGRATIONS: &[&str] = &[V1];
+
+/// Schema of §5. Note on the FTS tables: they are external-content tables keyed
+/// by the implicit rowid of `events`/`records`. blirp never runs `VACUUM`
+/// (which may renumber implicit rowids); anyone who does must follow it with
+/// `INSERT INTO events_fts(events_fts) VALUES('rebuild')` (same for records_fts).
+const V1: &str = r#"
+CREATE TABLE machines(
+    id        TEXT PRIMARY KEY,
+    name      TEXT NOT NULL,
+    os        TEXT NOT NULL,
+    role      TEXT NOT NULL CHECK(role IN ('standalone','node','hub')),
+    last_seen INTEGER NOT NULL,
+    revoked   INTEGER NOT NULL DEFAULT 0
+);
+
+CREATE TABLE projects(
+    id         TEXT PRIMARY KEY,
+    name       TEXT NOT NULL,
+    created_at INTEGER NOT NULL,
+    updated_at INTEGER NOT NULL,
+    deleted    INTEGER NOT NULL DEFAULT 0
+);
+
+CREATE TABLE project_paths(
+    project_id TEXT NOT NULL REFERENCES projects(id),
+    machine_id TEXT NOT NULL,
+    path       TEXT NOT NULL,
+    git_remote TEXT NULL,
+    PRIMARY KEY(machine_id, path)
+);
+CREATE INDEX project_paths_project ON project_paths(project_id);
+CREATE INDEX project_paths_remote ON project_paths(git_remote) WHERE git_remote IS NOT NULL;
+
+CREATE TABLE sessions(
+    id                    TEXT PRIMARY KEY,
+    project_id            TEXT NOT NULL,
+    machine_id            TEXT NOT NULL,
+    agent                 TEXT NOT NULL,
+    agent_session_id      TEXT NULL,
+    origin                TEXT NOT NULL CHECK(origin IN ('blirp','external')),
+    cwd                   TEXT NOT NULL,
+    title                 TEXT NULL,
+    status                TEXT NOT NULL CHECK(status IN ('starting','working','idle','waiting','completed','failed','detached')),
+    branch                TEXT NULL,
+    worktree              TEXT NULL,
+    transcript_path       TEXT NULL,
+    started_at            INTEGER NOT NULL,
+    ended_at              INTEGER NULL,
+    last_activity_at      INTEGER NOT NULL,
+    exit_code             INTEGER NULL,
+    summary_json          TEXT NULL,
+    distilled_through_seq INTEGER NOT NULL DEFAULT 0,
+    tokens_in             INTEGER NOT NULL DEFAULT 0,
+    tokens_out            INTEGER NOT NULL DEFAULT 0,
+    cost_usd              REAL NOT NULL DEFAULT 0,
+    parent_session_id     TEXT NULL,
+    UNIQUE(agent, agent_session_id)
+);
+CREATE INDEX sessions_project ON sessions(project_id, started_at DESC);
+CREATE INDEX sessions_started ON sessions(started_at DESC, id DESC);
+CREATE INDEX sessions_machine_status ON sessions(machine_id, status);
+
+CREATE TABLE events(
+    session_id TEXT NOT NULL,
+    seq        INTEGER NOT NULL,
+    ts         INTEGER NOT NULL,
+    kind       TEXT NOT NULL CHECK(kind IN ('user','assistant','tool_call','tool_result','system','file_edit','summary')),
+    text       TEXT NOT NULL,
+    meta_json  TEXT NULL,
+    PRIMARY KEY(session_id, seq)
+);
+CREATE VIRTUAL TABLE events_fts USING fts5(
+    text, content='events', content_rowid='rowid', tokenize='porter unicode61'
+);
+CREATE TRIGGER events_fts_ai AFTER INSERT ON events BEGIN
+    INSERT INTO events_fts(rowid, text) VALUES (new.rowid, new.text);
+END;
+CREATE TRIGGER events_fts_ad AFTER DELETE ON events BEGIN
+    INSERT INTO events_fts(events_fts, rowid, text) VALUES ('delete', old.rowid, old.text);
+END;
+CREATE TRIGGER events_fts_au AFTER UPDATE ON events BEGIN
+    INSERT INTO events_fts(events_fts, rowid, text) VALUES ('delete', old.rowid, old.text);
+    INSERT INTO events_fts(rowid, text) VALUES (new.rowid, new.text);
+END;
+
+CREATE TABLE records(
+    id                TEXT PRIMARY KEY,
+    project_id        TEXT NOT NULL,
+    kind              TEXT NOT NULL CHECK(kind IN ('decision','plan','note','open_thread','gotcha')),
+    title             TEXT NOT NULL,
+    body              TEXT NOT NULL,
+    status            TEXT NOT NULL CHECK(status IN ('active','resolved','archived')),
+    pinned            INTEGER NOT NULL DEFAULT 0,
+    source_session_id TEXT NULL,
+    created_at        INTEGER NOT NULL,
+    updated_at        INTEGER NOT NULL,
+    updated_by        TEXT NOT NULL
+);
+CREATE INDEX records_project ON records(project_id, status, updated_at DESC);
+CREATE VIRTUAL TABLE records_fts USING fts5(
+    title, body, content='records', content_rowid='rowid', tokenize='porter unicode61'
+);
+CREATE TRIGGER records_fts_ai AFTER INSERT ON records BEGIN
+    INSERT INTO records_fts(rowid, title, body) VALUES (new.rowid, new.title, new.body);
+END;
+CREATE TRIGGER records_fts_ad AFTER DELETE ON records BEGIN
+    INSERT INTO records_fts(records_fts, rowid, title, body) VALUES ('delete', old.rowid, old.title, old.body);
+END;
+CREATE TRIGGER records_fts_au AFTER UPDATE ON records BEGIN
+    INSERT INTO records_fts(records_fts, rowid, title, body) VALUES ('delete', old.rowid, old.title, old.body);
+    INSERT INTO records_fts(rowid, title, body) VALUES (new.rowid, new.title, new.body);
+END;
+
+CREATE TABLE briefs(
+    project_id TEXT PRIMARY KEY,
+    body_md    TEXT NOT NULL,
+    version    INTEGER NOT NULL,
+    updated_at INTEGER NOT NULL,
+    updated_by TEXT NOT NULL
+);
+CREATE TABLE brief_history(
+    project_id TEXT NOT NULL,
+    version    INTEGER NOT NULL,
+    body_md    TEXT NOT NULL,
+    updated_at INTEGER NOT NULL,
+    updated_by TEXT NOT NULL,
+    PRIMARY KEY(project_id, version)
+);
+
+CREATE TABLE wiki_pages(
+    id         TEXT PRIMARY KEY,
+    project_id TEXT NOT NULL,
+    slug       TEXT NOT NULL,
+    title      TEXT NOT NULL,
+    body_md    TEXT NOT NULL,
+    updated_at INTEGER NOT NULL,
+    updated_by TEXT NOT NULL,
+    deleted    INTEGER NOT NULL DEFAULT 0,
+    UNIQUE(project_id, slug)
+);
+
+CREATE TABLE suggestions(
+    id                TEXT PRIMARY KEY,
+    project_id        TEXT NOT NULL,
+    target            TEXT NOT NULL CHECK(target IN ('brief','record','wiki')),
+    target_id         TEXT NULL,
+    proposal_json     TEXT NOT NULL,
+    rationale         TEXT NOT NULL,
+    source_session_id TEXT NULL,
+    status            TEXT NOT NULL CHECK(status IN ('pending','accepted','rejected','dismissed')),
+    created_at        INTEGER NOT NULL,
+    decided_at        INTEGER NULL
+);
+CREATE INDEX suggestions_project ON suggestions(project_id, status, created_at DESC);
+
+CREATE TABLE resources(
+    id         TEXT PRIMARY KEY,
+    project_id TEXT NOT NULL,
+    kind       TEXT NOT NULL CHECK(kind IN ('link','repo','pr','issue','doc','file')),
+    url        TEXT NOT NULL,
+    title      TEXT NOT NULL,
+    meta_json  TEXT NULL,
+    created_at INTEGER NOT NULL,
+    deleted    INTEGER NOT NULL DEFAULT 0
+);
+CREATE INDEX resources_project ON resources(project_id, created_at DESC);
+
+CREATE TABLE ingest_cursors(
+    adapter     TEXT NOT NULL,
+    source      TEXT NOT NULL,
+    cursor_json TEXT NOT NULL,
+    PRIMARY KEY(adapter, source)
+);
+
+CREATE TABLE settings(
+    key        TEXT PRIMARY KEY,
+    value_json TEXT NOT NULL
+);
+
+CREATE TABLE devices(
+    id                    TEXT PRIMARY KEY,
+    name                  TEXT NOT NULL,
+    kind                  TEXT NOT NULL CHECK(kind IN ('machine','browser')),
+    token_hash            TEXT NULL,
+    node_id               TEXT NULL,
+    created_at            INTEGER NOT NULL,
+    last_seen             INTEGER NOT NULL,
+    revoked               INTEGER NOT NULL DEFAULT 0,
+    can_control_terminals INTEGER NOT NULL DEFAULT 0
+);
+CREATE UNIQUE INDEX devices_token ON devices(token_hash) WHERE token_hash IS NOT NULL;
+
+CREATE TABLE outbox(
+    origin_seq   INTEGER PRIMARY KEY AUTOINCREMENT,
+    entity       TEXT NOT NULL,
+    op           TEXT NOT NULL,
+    key          TEXT NOT NULL,
+    payload_json TEXT NOT NULL,
+    ts           INTEGER NOT NULL
+);
+
+CREATE TABLE sync_state(
+    peer                   TEXT PRIMARY KEY,
+    last_pushed_origin_seq INTEGER NOT NULL DEFAULT 0,
+    last_pulled_hub_seq    INTEGER NOT NULL DEFAULT 0
+);
+
+CREATE TABLE hub_log(
+    hub_seq        INTEGER PRIMARY KEY AUTOINCREMENT,
+    origin_machine TEXT NOT NULL,
+    origin_seq     INTEGER NOT NULL,
+    entity         TEXT NOT NULL,
+    op             TEXT NOT NULL,
+    key            TEXT NOT NULL,
+    payload_json   TEXT NOT NULL,
+    ts             INTEGER NOT NULL,
+    UNIQUE(origin_machine, origin_seq)
+);
+"#;
+
+#[derive(Debug, thiserror::Error)]
+pub enum MigrationError {
+    #[error(
+        "database schema version {found} is newer than this blirp supports ({supported}); upgrade blirp"
+    )]
+    TooNew { found: i64, supported: i64 },
+    #[error("migration to version {version} failed: {source}")]
+    Failed {
+        version: i64,
+        #[source]
+        source: rusqlite::Error,
+    },
+}
+
+/// Apply every pending migration, each in its own transaction.
+pub(crate) fn migrate(conn: &mut Connection) -> Result<i64, MigrationError> {
+    let latest = MIGRATIONS.len() as i64;
+    let read_version =
+        |c: &Connection| c.query_row("PRAGMA user_version", [], |r| r.get::<_, i64>(0));
+    let current =
+        read_version(conn).map_err(|source| MigrationError::Failed { version: 0, source })?;
+    if current > latest {
+        return Err(MigrationError::TooNew {
+            found: current,
+            supported: latest,
+        });
+    }
+    for (i, sql) in MIGRATIONS.iter().enumerate().skip(current as usize) {
+        let version = i as i64 + 1;
+        let fail = |source| MigrationError::Failed { version, source };
+        let tx = conn.transaction().map_err(fail)?;
+        tx.execute_batch(sql).map_err(fail)?;
+        tx.pragma_update(None, "user_version", version)
+            .map_err(fail)?;
+        tx.commit().map_err(fail)?;
+    }
+    Ok(latest)
+}
