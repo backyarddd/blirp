@@ -87,8 +87,29 @@ impl Paths {
         self.home.join("launch").join(session_id)
     }
 
-    /// Create the data dir and its fixed subdirectories.
+    /// Create the data dir and its fixed subdirectories. On unix the data dir
+    /// (tokens, transcripts, identity key) is owner-only, 0700, tightened if an
+    /// existing one is looser; everything inside is shielded by it. On Windows
+    /// it inherits the user profile ACL.
     pub fn ensure_dirs(&self) -> Result<(), PathsError> {
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::{DirBuilderExt, PermissionsExt};
+            let home = &self.home;
+            std::fs::DirBuilder::new()
+                .recursive(true)
+                .mode(0o700)
+                .create(home)
+                .map_err(io("create", home))?;
+            let mode = std::fs::metadata(home)
+                .map_err(io("stat", home))?
+                .permissions()
+                .mode();
+            if mode & 0o077 != 0 {
+                std::fs::set_permissions(home, std::fs::Permissions::from_mode(mode & 0o700))
+                    .map_err(io("chmod", home))?;
+            }
+        }
         for dir in [
             self.home.clone(),
             self.logs_dir(),
@@ -197,5 +218,23 @@ mod tests {
         assert!(paths.runtime_file().exists());
         RuntimeInfo::remove_if_owned(&paths, 42).unwrap();
         assert!(!paths.runtime_file().exists());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn home_dir_is_owner_only() {
+        use std::os::unix::fs::PermissionsExt;
+        let mode = |p: &Path| std::fs::metadata(p).unwrap().permissions().mode() & 0o777;
+        let dir = tempfile::tempdir().unwrap();
+
+        let fresh = Paths::at(dir.path().join("fresh"));
+        fresh.ensure_dirs().unwrap();
+        assert_eq!(mode(fresh.home()), 0o700);
+
+        let loose = dir.path().join("loose");
+        std::fs::create_dir(&loose).unwrap();
+        std::fs::set_permissions(&loose, std::fs::Permissions::from_mode(0o755)).unwrap();
+        Paths::at(&loose).ensure_dirs().unwrap();
+        assert_eq!(mode(&loose), 0o700);
     }
 }
