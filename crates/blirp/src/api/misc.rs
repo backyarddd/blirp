@@ -10,8 +10,8 @@ use axum::http::StatusCode;
 use axum::response::Response;
 use axum::routing::{get, post};
 use blirp_core::model::{
-    AgentInfo, Health, Machine, SearchHitKind, SearchResults, ServerEvent, SettingsPatch,
-    SettingsView,
+    AgentInfo, DistillStatus, Health, Machine, SearchHitKind, SearchResults, ServerEvent,
+    SettingsPatch, SettingsView,
 };
 use serde::Deserialize;
 use std::time::{Duration, Instant};
@@ -83,10 +83,23 @@ async fn search(
 
 async fn get_settings(State(s): State<SharedState>) -> ApiResult<Json<SettingsView>> {
     let store = s.store.clone();
-    let values = blocking(move || Ok(store.all_settings()?)).await?;
+    let (values, used) = blocking(move || {
+        Ok((
+            store.all_settings()?,
+            crate::memory::distill::budget_used(&store)?,
+        ))
+    })
+    .await?;
+    let config = s.config();
+    let distill = DistillStatus {
+        budget_used: u32::try_from(used).unwrap_or(u32::MAX),
+        budget_limit: config.memory.daily_distill_limit,
+        ..s.distiller.status(blirp_core::now_ms())
+    };
     Ok(Json(SettingsView {
-        config: s.config(),
+        config,
         values,
+        distill,
     }))
 }
 

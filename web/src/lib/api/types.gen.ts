@@ -411,7 +411,11 @@ export type SettingsView = { config: Config,
 /**
  * UI preferences and other free-form values stored in the database.
  */
-values: { [key in string]: JsonValue }, };
+values: { [key in string]: JsonValue }, 
+/**
+ * Automatic distilling (§9): paused summarizer, today's budget.
+ */
+distill: DistillStatus, };
 
 export type SettingsPatch = { 
 /**
@@ -444,6 +448,30 @@ control_terminals: boolean,
  * The client authenticated with this machine's runtime token.
  */
 local: boolean, };
+
+export type DistillStatus = { 
+/**
+ * Set while automatic distilling is paused.
+ */
+paused: DistillPause | null, 
+/**
+ * The summarizer's last error while paused.
+ */
+reason: string | null, 
+/**
+ * When the summarizer is tried again (unix ms).
+ */
+retry_at: number | null, 
+/**
+ * Distill jobs run today (UTC) and the daily limit.
+ */
+budget_used: number, budget_limit: number, };
+
+/**
+ * Why automatic distilling is paused: the summarizer itself fails, not a
+ * session (§9). Retried with exponential backoff.
+ */
+export type DistillPause = "auth" | "unavailable" | "rate_limited";
 
 /**
  * `GET /api/sync/status` (§10).

@@ -42,7 +42,7 @@ Data dir `BLIRP_HOME`, default `~/.blirp` on every OS (Windows: `%USERPROFILE%\.
   identity.key       iroh secret key, 64 hex chars (0600); created on first start
   tls/cert.pem, tls/key.pem   self-signed LAN portal certificate (hub, key 0600)
   daemon.lock        single-instance lock (OS file lock held by the daemon)
-  logs/blirpd.<date>.log   rolling logs (tracing-appender, daily, keep 7)
+  logs/blirpd.<date>.log   rolling logs (tracing-appender, daily, keep 7); stderr gets a copy only when it is a terminal
   logs/desktop.<date>.log  desktop shell log (same rotation); launchd.log: LaunchAgent stdout/stderr (macOS)
   worktrees/<project-id>/<name>/   optional per-session git worktrees
   launch/<session-id>/             per-launch generated files (claude settings.json, mcp.json, memory.md)
@@ -251,6 +251,8 @@ Summarizer backends (config `memory.summarizer`, default `auto`), all with a 180
 - `ollama`: `POST $OLLAMA_HOST|http://127.0.0.1:11434/api/chat` with `format: "json"`, `stream: false`, model `memory.ollama_model`.
 - `none`: never distill.
 
+Summarizer failures are classified. A failure of the summarizer itself (auth: "not logged in", invalid key; unavailable: not installed, not reachable; rate or usage limits) pauses automatic distilling with a circuit breaker: the unit of budget is given back, the session records no failure (it stays eligible), and automatic jobs are skipped quietly until the pause ends (5 min, doubling on each failed retry up to 6 h; the first job after it is the probe). Success resumes distilling. Pause changes are logged once per attempt; "budget used up" once per day. `GET /api/settings` reports `distill {paused, reason, retry_at, budget_used, budget_limit}`. Manual distills always try. Other failures (timeouts, invalid output) fail only that session as below.
+
 `auto` picks the first available: claude on PATH, codex on PATH, ollama answering `/api/tags`. Every summarizer runs in a fresh empty dir `BLIRP_HOME/distill/run-*` (removed afterwards; inside BLIRP_HOME and outside `worktrees/`, which is exactly what ingest skips, so even a summarizer that persists its session is never ingested and distilled in turn) with `BLIRP_DISTILLING=1` (blirp hooks exit immediately when set) and without `BLIRP_SESSION_ID`/`CLAUDECODE`-style env.
 
 Input: redacted, compacted transcript (user prompts verbatim; assistant text; tool calls as one-line `TOOL: ...` (<= 300 chars); tool results `RESULT: ...` (<= 400 chars); file edits and system lines one-line), capped at `memory.distill_max_chars` (default 60 000, keep head 20% + tail 80% around a `[... N characters omitted ...]` marker), plus the current brief and active records (with ids) of the project.
@@ -412,7 +414,7 @@ GET  /api/agents                         detected agents + versions + integratio
 POST /api/agents/:id/hooks/install|uninstall   global integration (§9); returns the AgentInfo
 POST /api/hooks/:agent/:event            hook ingress (from `blirp hook`)
 GET  /api/inject?session=&cwd=&agent=    {markdown}: the session's launch memory.md, else a render for the session's / folder's project
-GET  /api/settings ; PATCH /api/settings  {config: Config, values: {key: json}}; PATCH {config?: full Config
+GET  /api/settings ; PATCH /api/settings  {config: Config, values: {key: json}, distill: DistillStatus}; PATCH {config?: full Config
                                          (validated, written to config.toml), values?: {key: json|null}}
 GET  /api/sync/status                    SyncStatus {role, machine_id, hub, connected, last_sync_at, pending_outbox,
                                          portal_url, portal_cert_fingerprint}

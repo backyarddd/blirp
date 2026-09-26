@@ -806,6 +806,34 @@ pub struct SettingsView {
     pub config: Config,
     /// UI preferences and other free-form values stored in the database.
     pub values: BTreeMap<String, JsonValue>,
+    /// Automatic distilling (§9): paused summarizer, today's budget.
+    pub distill: DistillStatus,
+}
+
+/// Why automatic distilling is paused: the summarizer itself fails, not a
+/// session (§9). Retried with exponential backoff.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "snake_case")]
+pub enum DistillPause {
+    /// Not logged in, invalid or missing credentials.
+    Auth,
+    /// No summarizer installed or reachable.
+    Unavailable,
+    /// Rate or usage limit reached.
+    RateLimited,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, TS)]
+pub struct DistillStatus {
+    /// Set while automatic distilling is paused.
+    pub paused: Option<DistillPause>,
+    /// The summarizer's last error while paused.
+    pub reason: Option<String>,
+    /// When the summarizer is tried again (unix ms).
+    pub retry_at: Option<i64>,
+    /// Distill jobs run today (UTC) and the daily limit.
+    pub budget_used: u32,
+    pub budget_limit: u32,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize, TS)]
@@ -981,7 +1009,7 @@ mod tests {
             GitStatusEntry, GitStatus, GitDiff, FileEntry, DirListing, FileContent, SessionsPage, SessionDetail,
             LaunchSession, PatchSession, RemoveWorktree, OpenTarget, OpenSession, EventsPage, SearchHit, SearchResults, AgentInfo,
             AgentIntegration, Injection, SummaryItem, DistillFailure, SessionSummary,
-            SettingsView, SettingsPatch, Capabilities, SyncStatus, SyncInvite, JoinHub, BrowserInvite, PatchDevice,
+            SettingsView, SettingsPatch, Capabilities, DistillStatus, DistillPause, SyncStatus, SyncInvite, JoinHub, BrowserInvite, PatchDevice,
             ServerEvent, TerminalServerMessage, TerminalClientMessage,
             Config, DaemonConfig, MachineConfig, AgentsConfig, CustomAgent, SessionsConfig,
             Summarizer, BriefMode, MemoryConfig, SyncConfig, PortalConfig,

@@ -438,10 +438,17 @@ pub fn init_logging(paths: &Paths) -> anyhow::Result<tracing_appender::non_block
         .context("create log file")?;
     let (file, guard) = tracing_appender::non_blocking(appender);
     let filter = EnvFilter::try_from_env("BLIRP_LOG").unwrap_or_else(|_| EnvFilter::new("info"));
+    // The log file always; stderr only for a terminal. Under a service
+    // manager stderr is captured to a file of its own (launchd.log, the
+    // journal), which would duplicate every line, with color codes.
+    use std::io::IsTerminal as _;
+    let console = std::io::stderr()
+        .is_terminal()
+        .then(|| fmt::layer().with_writer(std::io::stderr));
     tracing_subscriber::registry()
         .with(filter)
         .with(fmt::layer().with_writer(file).with_ansi(false))
-        .with(fmt::layer().with_writer(std::io::stderr))
+        .with(console)
         .try_init()
         .context("install log subscriber")?;
     Ok(guard)
