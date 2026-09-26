@@ -42,6 +42,19 @@ function snapshot(id: string): Promise<Snapshot> {
   );
 }
 
+/**
+ * Type a command into the focused pane until its output shows up in the PTY screen. A shell
+ * can report idle before its line editor is ready, so a first attempt may be swallowed.
+ */
+async function runInTerminal(id: string, command: string, marker: string): Promise<void> {
+  await expect(async () => {
+    await page.locator('.xterm').click();
+    await page.keyboard.type(command);
+    await page.keyboard.press('Enter');
+    await expect.poll(async () => (await snapshot(id)).data, { timeout: 5_000 }).toContain(marker);
+  }).toPass({ timeout: 30_000 });
+}
+
 async function addFolder(path: string): Promise<string> {
   await page.getByRole('navigation', { name: 'Main' }).getByRole('link', { name: 'Projects' }).click();
   await page.getByRole('button', { name: 'Add folder' }).click();
@@ -132,11 +145,7 @@ test('launches a shell session in the plain folder', async () => {
 });
 
 test('types into the terminal and sees the output', async () => {
-  await page.locator('.xterm').click();
-  const cmd = isWindows ? "Write-Output ('e2e-' + (6*7))" : 'echo e2e-$((6*7))';
-  await page.keyboard.type(cmd);
-  await page.keyboard.press('Enter');
-  await expect.poll(async () => (await snapshot(sessionId)).data, { timeout: 20_000 }).toContain('e2e-42');
+  await runInTerminal(sessionId, isWindows ? "Write-Output ('e2e-' + (6*7))" : 'echo e2e-$((6*7))', 'e2e-42');
 });
 
 test('resizing the pane resizes the PTY', async () => {
@@ -173,10 +182,7 @@ test('stops the session and shows the exit state in the pane', async () => {
   await page.getByRole('button', { name: 'Resume' }).click();
   await expect(exit).toBeHidden();
   await expect(card.locator('.chip')).toHaveText('Idle', { timeout: 30_000 });
-  await page.locator('.xterm').click();
-  await page.keyboard.type(isWindows ? "Write-Output ('again-' + (6*7))" : 'echo again-$((6*7))');
-  await page.keyboard.press('Enter');
-  await expect.poll(async () => (await snapshot(sessionId)).data, { timeout: 20_000 }).toContain('again-42');
+  await runInTerminal(sessionId, isWindows ? "Write-Output ('again-' + (6*7))" : 'echo again-$((6*7))', 'again-42');
   await confirmNextDialog();
   await page.getByRole('button', { name: 'Stop' }).click();
   await expect(exit).toContainText('Completed');
