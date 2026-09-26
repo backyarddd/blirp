@@ -11,7 +11,7 @@
     <dt>UI version</dt>
     <dd class="mono">{__APP_VERSION__}</dd>
     <dt>Machine</dt>
-    <dd>{app.health?.machine ?? 'unknown'}</dd>
+    <dd>{app.health ? `${app.health.machine.name} (${app.health.machine.os})` : 'unknown'}</dd>
     <dt>Sync role</dt>
     <dd>{app.health?.role ?? 'unknown'}</dd>
   </dl>

@@ -1,12 +1,12 @@
 <script lang="ts">
   import { untrack } from 'svelte';
   import { api, errorMessage } from '../../lib/api/client';
-  import type { Project, Session, SessionStatus } from '../../lib/api/types';
+  import type { ProjectSummary, Session, SessionStatus } from '../../lib/api/types.gen';
   import { app } from '../../lib/app.svelte';
   import Loadable from '../../lib/components/Loadable.svelte';
   import SessionRow from '../../lib/components/SessionRow.svelte';
 
-  let { project }: { project: Project } = $props();
+  let { project }: { project: ProjectSummary } = $props();
   const pid = $derived(project.id);
 
   const STATUSES: SessionStatus[] = ['working', 'idle', 'waiting', 'completed', 'failed', 'detached'];

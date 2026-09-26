@@ -2,7 +2,15 @@
   import Plus from '@lucide/svelte/icons/plus';
   import History from '@lucide/svelte/icons/history';
   import { api } from '../../lib/api/client';
-  import type { Brief, MemoryRecord, Project, RecordKind, RecordStatus, Suggestion } from '../../lib/api/types';
+  import type {
+    Brief,
+    ProjectSummary,
+    Record as MemoryRecord,
+    RecordKind,
+    RecordStatus,
+    Suggestion,
+  } from '../../lib/api/types.gen';
+  import { proposalMarkdown } from '../../lib/memory';
   import { app } from '../../lib/app.svelte';
   import { Resource } from '../../lib/resource.svelte';
   import { href } from '../../lib/router';
@@ -12,7 +20,7 @@
   import Markdown from '../../lib/components/Markdown.svelte';
   import RecordItem, { KIND_LABEL } from '../../lib/components/RecordItem.svelte';
 
-  let { project }: { project: Project } = $props();
+  let { project }: { project: ProjectSummary } = $props();
   const pid = $derived(project.id);
 
   const memory = new Resource(() => api.projects.memory(pid));
@@ -97,14 +105,6 @@
   }
 
   const pending = $derived((suggestions.data ?? []).filter((s) => s.status === 'pending'));
-
-  function proposalText(s: Suggestion): string {
-    const p = s.proposal;
-    const str = (k: string): string => (typeof p[k] === 'string' ? (p[k] as string) : '');
-    if (s.target === 'brief') return str('body_md');
-    if (s.target === 'wiki') return `### ${str('title')}\n\n${str('body_md')}`;
-    return `**${str('title')}**\n\n${str('body')}`;
-  }
 </script>
 
 <div class="stack">
@@ -168,7 +168,7 @@
               {#if s.source_session_id}<a class="small" href={href.sessions(s.source_session_id)}>from session</a>{/if}
             </div>
             {#if s.rationale}<p class="small rationale">{s.rationale}</p>{/if}
-            <div class="proposal"><Markdown source={proposalText(s)} class="small" /></div>
+            <div class="proposal"><Markdown source={proposalMarkdown(s)} class="small" /></div>
             <div class="row">
               <span class="spacer"></span>
               <button type="button" class="btn sm ghost" onclick={() => decide(s, 'dismiss')}>Dismiss</button>

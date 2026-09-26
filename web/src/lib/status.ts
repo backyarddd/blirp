@@ -1,4 +1,4 @@
-import type { Project, Session, SessionStatus } from './api/types';
+import type { ProjectSummary, Session, SessionStatus } from './api/types.gen';
 
 export type StatusTone = 'working' | 'idle' | 'waiting' | 'completed' | 'failed' | 'detached';
 
@@ -34,9 +34,12 @@ export function hasTerminal(s: Pick<Session, 'origin' | 'status'>): boolean {
   return s.origin === 'blirp' && isLive(s.status);
 }
 
-/** Detached sessions can be resumed when the agent's own session id is known. */
-export function canResume(s: Pick<Session, 'status' | 'agent_session_id'>): boolean {
-  return (s.status === 'detached' || s.status === 'completed' || s.status === 'failed') && s.agent_session_id !== null;
+/**
+ * Ended sessions can be resumed: with the agent's own session id the agent resumes its
+ * conversation; blirp-launched sessions without one relaunch fresh in the same folder (§7).
+ */
+export function canResume(s: Pick<Session, 'status' | 'agent_session_id' | 'origin'>): boolean {
+  return !isLive(s.status) && (s.agent_session_id !== null || s.origin === 'blirp');
 }
 
 /** Status transitions worth a browser notification when the tab is unfocused. */
@@ -75,12 +78,12 @@ export function sessionTitle(s: Pick<Session, 'title' | 'agent' | 'cwd'>): strin
 export interface SessionGroup {
   projectId: string;
   name: string;
-  project: Project | undefined;
+  project: ProjectSummary | undefined;
   sessions: Session[];
 }
 
 /** Groups sessions by project, preserving input order (groups ordered by their first session). */
-export function groupSessions(sessions: readonly Session[], projects: ReadonlyMap<string, Project>): SessionGroup[] {
+export function groupSessions(sessions: readonly Session[], projects: ReadonlyMap<string, ProjectSummary>): SessionGroup[] {
   const groups = new Map<string, SessionGroup>();
   for (const s of sessions) {
     let g = groups.get(s.project_id);

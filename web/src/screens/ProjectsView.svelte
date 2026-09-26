@@ -5,6 +5,7 @@
   import { navigate } from '../lib/router.svelte';
   import { href } from '../lib/router';
   import { formatRelative } from '../lib/time';
+  import type { ProjectSummary } from '../lib/api/types.gen';
   import Loadable from '../lib/components/Loadable.svelte';
   import Modal from '../lib/components/Modal.svelte';
   import ProjectBadge from '../lib/components/ProjectBadge.svelte';
@@ -18,6 +19,8 @@
   const projects = $derived(
     [...app.projects].sort((a, b) => (b.last_activity_at ?? b.updated_at) - (a.last_activity_at ?? a.updated_at)),
   );
+
+  const machineCount = (p: ProjectSummary): number => new Set(p.paths.map((x) => x.machine_id)).size;
 
   function openAdd(): void {
     path = '';
@@ -77,15 +80,15 @@
               </div>
               <ul class="paths">
                 {#each p.paths as path (path.machine_id + path.path)}
-                  <li class="mono ellipsis" title={path.path}>{path.path}</li>
+                  <li class="mono ellipsis" title={path.path}>{path.path}{path.local ? '' : ' (other machine)'}</li>
                 {:else}
-                  <li class="faint">No folders on this machine</li>
+                  <li class="faint">{p.is_home ? 'Sessions started in your home folder' : 'No folders on this machine'}</li>
                 {/each}
               </ul>
               <div class="row wrap foot small muted">
                 <span>{p.session_count} {p.session_count === 1 ? 'session' : 'sessions'}</span>
                 {#if p.live_session_count > 0}<span class="badge accent">{p.live_session_count} live</span>{/if}
-                {#if p.machine_ids.length > 1}<span>· {p.machine_ids.length} machines</span>{/if}
+                {#if machineCount(p) > 1}<span>· {machineCount(p)} machines</span>{/if}
                 <span class="spacer"></span>
                 <span>{p.last_activity_at ? formatRelative(p.last_activity_at) : 'No activity yet'}</span>
               </div>

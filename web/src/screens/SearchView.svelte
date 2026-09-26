@@ -3,7 +3,7 @@
   import MessageSquare from '@lucide/svelte/icons/message-square';
   import BookMarked from '@lucide/svelte/icons/book-marked';
   import { api } from '../lib/api/client';
-  import type { SearchHit, SearchKind } from '../lib/api/types';
+  import type { SearchHit, SearchHitKind, SearchResults } from '../lib/api/types.gen';
   import { app } from '../lib/app.svelte';
   import { Resource } from '../lib/resource.svelte';
   import { navigate } from '../lib/router.svelte';
@@ -12,11 +12,10 @@
   import { agentLabel } from '../lib/status';
   import { formatRelative } from '../lib/time';
   import Loadable from '../lib/components/Loadable.svelte';
-  import { KIND_LABEL } from '../lib/components/RecordItem.svelte';
 
   let { q, project, kind }: { q: string; project: string | null; kind: string | null } = $props();
 
-  const validKind = (k: string | null): SearchKind | undefined => (k === 'event' || k === 'record' ? k : undefined);
+  const validKind = (k: string | null): SearchHitKind | undefined => (k === 'event' || k === 'record' ? k : undefined);
 
   // Form state follows the URL; submitting writes the URL, which drives the query.
   let text = $derived(q);
@@ -26,7 +25,7 @@
   const results = new Resource(() =>
     q.trim()
       ? api.search({ q: q.trim(), ...(project ? { project } : {}), ...(validKind(kind) ? { kind: validKind(kind) } : {}) })
-      : Promise.resolve<SearchHit[]>([]),
+      : Promise.resolve<SearchResults>({ hits: [] }),
   );
   $effect(() => {
     void results.load();
@@ -36,6 +35,11 @@
     e.preventDefault();
     navigate(href.search(text.trim(), projectSel || null, kindSel || null));
   }
+
+  const hits = $derived(results.data?.hits ?? []);
+  const hitKey = (h: SearchHit): string => `${h.kind}:${h.session_id ?? ''}:${h.seq ?? ''}:${h.record_id ?? ''}`;
+  const hitTitle = (h: SearchHit): string =>
+    h.title?.trim() || (h.kind === 'event' ? `${h.agent ? agentLabel(h.agent) : 'Session'} transcript` : 'Untitled record');
 
   function hitHref(h: SearchHit): string {
     if (h.kind === 'event' && h.session_id) return href.sessions(h.session_id);
@@ -69,13 +73,13 @@
       <Loadable
         loading={results.loading}
         error={results.error}
-        empty={(results.data?.length ?? 0) === 0}
+        empty={hits.length === 0}
         emptyText="No matches for “{q}”."
         onretry={() => results.load()}
       >
-        <p class="small muted count" role="status">{results.data?.length ?? 0} results</p>
+        <p class="small muted count" role="status">{hits.length} {hits.length === 1 ? 'result' : 'results'}</p>
         <ul class="hits">
-          {#each results.data ?? [] as h (h.kind + h.id)}
+          {#each hits as h (hitKey(h))}
             <li>
               <a class="hit card" href={hitHref(h)}>
                 <span class="icon" aria-hidden="true">
@@ -83,14 +87,14 @@
                 </span>
                 <span class="body">
                   <span class="row wrap top">
-                    <strong class="ellipsis">{h.title}</strong>
-                    <span class="badge">{h.kind === 'event' ? 'Transcript' : h.record_kind ? KIND_LABEL[h.record_kind] : 'Record'}</span>
+                    <strong class="ellipsis">{hitTitle(h)}</strong>
+                    <span class="badge">{h.kind === 'event' ? 'Transcript' : 'Memory record'}</span>
                   </span>
                   <span class="snippet"
                     >{#each splitSnippet(h.snippet) as part, i (i)}{#if part.match}<mark>{part.text}</mark>{:else}{part.text}{/if}{/each}</span
                   >
                   <span class="small faint">
-                    {h.project_name}{h.agent ? ` · ${agentLabel(h.agent)}` : ''} · {formatRelative(h.ts)}
+                    {app.projectById.get(h.project_id)?.name ?? 'Unknown project'}{h.agent ? ` · ${agentLabel(h.agent)}` : ''} · {formatRelative(h.ts)}
                   </span>
                 </span>
               </a>

@@ -1,6 +1,6 @@
 <script lang="ts">
   import { api } from '../lib/api/client';
-  import type { Settings } from '../lib/api/types';
+  import type { SettingsView } from '../lib/api/types.gen';
   import { Resource } from '../lib/resource.svelte';
   import { href, type SettingsSection } from '../lib/router';
   import Loadable from '../lib/components/Loadable.svelte';
@@ -29,7 +29,7 @@
 
   const needsSettings = $derived(section === 'agents' || section === 'memory' || section === 'portal' || section === 'sync');
 
-  function saved(s: Settings): void {
+  function saved(s: SettingsView): void {
     settings.data = s;
   }
 </script>

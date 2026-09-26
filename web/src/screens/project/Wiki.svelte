@@ -3,7 +3,7 @@
   import Pencil from '@lucide/svelte/icons/pencil';
   import Trash from '@lucide/svelte/icons/trash-2';
   import { api, errorMessage } from '../../lib/api/client';
-  import type { Project, WikiPage } from '../../lib/api/types';
+  import type { ProjectSummary, WikiPage } from '../../lib/api/types.gen';
   import { app } from '../../lib/app.svelte';
   import { Resource } from '../../lib/resource.svelte';
   import { navigate } from '../../lib/router.svelte';
@@ -13,7 +13,7 @@
   import Loadable from '../../lib/components/Loadable.svelte';
   import Markdown from '../../lib/components/Markdown.svelte';
 
-  let { project, slug }: { project: Project; slug: string | null } = $props();
+  let { project, slug }: { project: ProjectSummary; slug: string | null } = $props();
   const pid = $derived(project.id);
 
   const pages = new Resource(() => api.projects.wiki(pid));
@@ -71,7 +71,7 @@
     try {
       const saved =
         mode === 'edit' && current
-          ? await api.projects.updateWiki(pid, current.slug, input)
+          ? await api.projects.updateWiki(pid, current.slug, { title: input.title, body_md: input.body_md })
           : await api.projects.createWiki(pid, input);
       const rest = (pages.data ?? []).filter((p) => p.id !== saved.id);
       pages.data = [...rest, saved];
@@ -138,7 +138,8 @@
                 slugTouched = true;
                 pageSlug = e.currentTarget.value;
               }}
-              pattern="[a-z0-9-]+"
+              pattern="[a-z0-9\-]+"
+              readonly={mode === 'edit'}
               title="Lowercase letters, digits and dashes"
             />
           </label>

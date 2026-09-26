@@ -8,9 +8,9 @@
   import Info from '@lucide/svelte/icons/info';
   import Sparkles from '@lucide/svelte/icons/sparkles';
   import { api, errorMessage } from '../lib/api/client';
-  import type { EventKind, Session, SessionEvent } from '../lib/api/types';
+  import type { Event as SessionEvent, EventKind, Session } from '../lib/api/types.gen';
+  import { parseSummary } from '../lib/memory';
   import { app } from '../lib/app.svelte';
-  import { Resource } from '../lib/resource.svelte';
   import { agentLabel, sessionTitle } from '../lib/status';
   import { formatDateTime, formatElapsed, formatTime } from '../lib/time';
   import Markdown from '../lib/components/Markdown.svelte';
@@ -22,21 +22,17 @@
   const PAGE = 200;
   // Derived ids so status pushes (new session objects, same id) don't refetch everything.
   const sid = $derived(session.id);
-  const detail = new Resource(() => api.sessions.get(sid));
   let events: SessionEvent[] = $state.raw([]);
   let eventsLoading = $state(false);
   let eventsError: string | null = $state(null);
-  let done = $state(false);
-
-  $effect(() => {
-    void detail.load();
-  });
+  /** `after` cursor for the next page; null once the last page is loaded. */
+  let nextAfter: number | null = $state(0);
 
   $effect(() => {
     const id = sid;
     untrack(() => {
       events = [];
-      done = false;
+      nextAfter = 0;
       void loadMore(id);
     });
   });
@@ -44,12 +40,12 @@
   async function loadMore(id: string): Promise<void> {
     eventsLoading = true;
     eventsError = null;
-    const after = events[events.length - 1]?.seq ?? 0;
+    const after = nextAfter ?? 0;
     try {
       const page = await api.sessions.events(id, after, PAGE);
       if (id !== sid) return;
-      events = [...events, ...page];
-      done = page.length < PAGE;
+      events = [...events, ...page.items];
+      nextAfter = page.next_after;
     } catch (e) {
       if (id === sid) eventsError = errorMessage(e);
     } finally {
@@ -57,7 +53,8 @@
     }
   }
 
-  const summary = $derived(detail.data?.summary ?? null);
+  // Session rows (list, detail and pushed updates) carry the summary; no extra fetch needed.
+  const summary = $derived(parseSummary(session.summary));
 
   let busy = $state(false);
   async function distill(): Promise<void> {
@@ -109,9 +106,7 @@
   </header>
 
   <div class="body">
-    {#if detail.error}
-      <p class="err" role="alert">Could not load the summary: {detail.error}</p>
-    {:else if summary}
+    {#if summary}
       <section class="card summary">
         <h2 class="section-title">Summary</h2>
         <p>{summary.summary}</p>
@@ -142,7 +137,7 @@
           {/if}
         </div>
       </section>
-    {:else if !detail.loading}
+    {:else}
       <p class="muted small">No summary yet. blirp distills sessions after they go idle or end.</p>
     {/if}
 
@@ -179,7 +174,7 @@
         {/each}
       </ol>
       {#if eventsError}<p class="err" role="alert">{eventsError}</p>{/if}
-      {#if !done}
+      {#if nextAfter !== null}
         <button type="button" class="btn more" onclick={() => loadMore(session.id)} disabled={eventsLoading}>
           {eventsLoading ? 'Loading…' : 'Load more'}
         </button>

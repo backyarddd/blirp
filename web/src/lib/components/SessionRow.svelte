@@ -1,7 +1,7 @@
 <script lang="ts">
   import GitBranch from '@lucide/svelte/icons/git-branch';
   import Folder from '@lucide/svelte/icons/folder';
-  import type { Session } from '../api/types';
+  import type { Session } from '../api/types.gen';
   import { href } from '../router';
   import { agentLabel, basename, sessionTitle } from '../status';
   import { formatRelative } from '../time';

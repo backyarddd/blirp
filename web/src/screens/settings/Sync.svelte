@@ -1,14 +1,15 @@
 <script lang="ts">
   import Copy from '@lucide/svelte/icons/copy';
   import { api, errorMessage } from '../../lib/api/client';
-  import type { Device, Invite, Machine, Settings } from '../../lib/api/types';
+  import type { Device, Machine, SettingsView } from '../../lib/api/types.gen';
+  import type { Invite } from '../../lib/api/types.pending';
   import { app } from '../../lib/app.svelte';
   import { Resource } from '../../lib/resource.svelte';
   import { formatDateTime, formatRelative } from '../../lib/time';
   import Loadable from '../../lib/components/Loadable.svelte';
   import QrCode from '../../lib/components/QrCode.svelte';
 
-  let { settings, onsaved }: { settings: Settings; onsaved: (s: Settings) => void } = $props();
+  let { settings, onsaved }: { settings: SettingsView; onsaved: (s: SettingsView) => void } = $props();
 
   const status = new Resource(() => api.sync.status());
   const machines = new Resource(() => api.machines.list());
@@ -19,18 +20,18 @@
     void machines.load();
   });
 
-  const role = $derived(status.data?.role ?? settings.sync.role);
+  const role = $derived(status.data?.role ?? settings.config.sync.role);
   $effect(() => {
     if (role === 'hub') void devices.load();
   });
 
-  let machineName = $derived(settings.machine.name);
+  let machineName = $derived(settings.config.machine.name);
 
   async function saveName(e: SubmitEvent): Promise<void> {
     e.preventDefault();
     const name = machineName.trim();
     if (!name) return;
-    const s = await app.act(() => api.settings.patch({ machine: { name } }), 'Machine name saved');
+    const s = await app.act(() => api.settings.patch({ config: { ...settings.config, machine: { ...settings.config.machine, name } } }), 'Machine name saved');
     if (s) onsaved(s);
   }
 
@@ -69,7 +70,7 @@
     }
     joining = true;
     try {
-      status.data = await api.sync.join(inv, code);
+      status.data = await api.sync.join({ invite: inv, code });
       joinInvite = '';
       joinCode = '';
       app.toast('Paired with the hub. Memory will sync in the background.', 'info');
@@ -109,7 +110,7 @@
   }
 
   async function setControl(d: Device, on: boolean): Promise<void> {
-    const updated = await app.act(() => api.devices.setControl(d.id, on));
+    const updated = await app.act(() => api.devices.patch(d.id, { can_control_terminals: on }));
     if (updated) devices.data = (devices.data ?? []).map((x) => (x.id === updated.id ? updated : x));
     else void devices.reload();
   }
@@ -122,7 +123,7 @@
       <span>Machine name</span>
       <input class="input" bind:value={machineName} required />
     </label>
-    <button type="submit" class="btn" disabled={machineName.trim() === settings.machine.name}>Save</button>
+    <button type="submit" class="btn" disabled={machineName.trim() === settings.config.machine.name}>Save</button>
   </form>
   <Loadable loading={status.loading} error={status.error} empty={!status.data} onretry={() => status.load()}>
     {#if status.data}

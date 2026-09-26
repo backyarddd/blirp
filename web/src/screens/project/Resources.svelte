@@ -4,12 +4,12 @@
   import Trash from '@lucide/svelte/icons/trash-2';
   import ExternalLink from '@lucide/svelte/icons/external-link';
   import { api } from '../../lib/api/client';
-  import type { Project, Resource as Res, ResourceInput, ResourceKind } from '../../lib/api/types';
+  import type { CreateResource, ProjectSummary, Resource as Res, ResourceKind } from '../../lib/api/types.gen';
   import { app } from '../../lib/app.svelte';
   import { Resource } from '../../lib/resource.svelte';
   import Loadable from '../../lib/components/Loadable.svelte';
 
-  let { project }: { project: Project } = $props();
+  let { project }: { project: ProjectSummary } = $props();
   const pid = $derived(project.id);
 
   const list = new Resource(() => api.projects.resources(pid));
@@ -31,7 +31,7 @@
   const isWeb = (url: string): boolean => /^https?:\/\//i.test(url);
 
   let editingId: string | 'new' | null = $state(null);
-  let form: ResourceInput = $state({ kind: 'link', url: '', title: '' });
+  let form: CreateResource = $state({ kind: 'link', url: '', title: '' });
   let saving = $state(false);
 
   function startNew(): void {
@@ -46,7 +46,7 @@
 
   async function save(e: SubmitEvent): Promise<void> {
     e.preventDefault();
-    const input: ResourceInput = { kind: form.kind, url: form.url.trim(), title: form.title.trim() || form.url.trim() };
+    const input: CreateResource = { kind: form.kind, url: form.url.trim(), title: form.title.trim() || form.url.trim() };
     if (!input.url) return;
     saving = true;
     const id = editingId;
