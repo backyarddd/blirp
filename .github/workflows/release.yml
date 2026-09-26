@@ -1,13 +1,19 @@
 name: Release
 
 # Push a tag `vX.Y.Z` matching the workspace version. The workflow builds the
-# standalone CLI archives and the desktop bundles, uploads them with checksums,
-# updater signatures and latest.json to a DRAFT release, and renders the
-# Homebrew / winget manifests. Publish the draft by hand after checking it;
-# the in-app updater only sees published releases.
+# standalone CLI archives and the desktop app (portable assets for
+# install.sh / install.ps1 / `blirp update`: `blirp_<ver>_<arch>.app.tar.gz`,
+# `blirp_<ver>_x64-portable.zip`, `blirp_<ver>_<arch>.AppImage`; plus the
+# NSIS/MSI/DMG/deb/rpm installers), uploads them to a DRAFT release with
+# SHA256SUMS.txt and its minisign signature SHA256SUMS.txt.sig, and renders
+# the Homebrew / winget manifests. Publish the draft by hand after checking
+# it: the install scripts and `blirp update` only see published releases
+# (`releases/latest` skips drafts and prereleases).
 #
-# Secrets (see CONTRIBUTING.md): TAURI_SIGNING_PRIVATE_KEY(+_PASSWORD) are
-# required. Code signing runs only when its secrets exist:
+# Secrets (see docs/development.md): TAURI_SIGNING_PRIVATE_KEY(+_PASSWORD)
+# are required (they sign SHA256SUMS.txt; the public key is
+# packaging/minisign.pub). Code signing is optional and runs only when its
+# secrets exist:
 #   macOS:   APPLE_CERTIFICATE, APPLE_CERTIFICATE_PASSWORD, APPLE_SIGNING_IDENTITY,
 #            notarization: APPLE_ID, APPLE_PASSWORD, APPLE_TEAM_ID
 #   Windows: Azure Artifact Signing: AZURE_TENANT_ID, AZURE_CLIENT_ID, AZURE_CLIENT_SECRET,
@@ -222,19 +228,10 @@ jobs:
     runs-on: ${{ matrix.os }}
     timeout-minutes: 90
     env:
+      VERSION: ${{ needs.draft.outputs.version }}
       TARGET: ${{ matrix.target }}
     steps:
       - uses: actions/checkout@v4
-
-      - name: Require the updater signing key
-        env:
-          KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
-        shell: bash
-        run: |
-          if [ -z "$KEY" ]; then
-            echo "::error::TAURI_SIGNING_PRIVATE_KEY is not set; updater artifacts cannot be signed"
-            exit 1
-          fi
 
       - name: Install Linux build dependencies
         if: runner.os == 'Linux'
@@ -332,25 +329,64 @@ jobs:
           }
           "TAURI_SIGN_ARGS=--config $overlay" | Out-File -Append -Encoding utf8 $env:GITHUB_ENV
 
-      - uses: tauri-apps/tauri-action@v0
+      # Tauri bundles the installers (NSIS + MSI, DMG, deb + rpm + AppImage);
+      # the install scripts use the portable assets packaged below.
+      - name: Build the desktop app
+        shell: bash
         env:
-          GITHUB_TOKEN: ${{ github.token }}
-          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
-          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
           # Read by trusted-signing-cli through signCommand (Windows, Azure only).
           AZURE_TENANT_ID: ${{ secrets.AZURE_TENANT_ID }}
           AZURE_CLIENT_ID: ${{ secrets.AZURE_CLIENT_ID }}
           AZURE_CLIENT_SECRET: ${{ secrets.AZURE_CLIENT_SECRET }}
-        with:
-          projectPath: app
-          tauriScript: pnpm tauri
-          args: --target ${{ matrix.target }} ${{ env.TAURI_SIGN_ARGS }}
-          releaseId: ${{ needs.draft.outputs.release_id }}
-          includeUpdaterJson: true
-          updaterJsonPreferNsis: true
+        run: |
+          # shellcheck disable=SC2086 # TAURI_SIGN_ARGS is "--config <file>" or empty
+          pnpm -C app tauri build --target "$TARGET" ${TAURI_SIGN_ARGS:-}
+
+      - name: Package the desktop app (macOS)
+        if: runner.os == 'macOS'
+        run: |
+          arch=x64
+          if [ "$TARGET" = aarch64-apple-darwin ]; then arch=aarch64; fi
+          bundle="target/$TARGET/release/bundle"
+          mkdir -p dist
+          tar -czf "dist/blirp_${VERSION}_${arch}.app.tar.gz" -C "$bundle/macos" blirp.app
+          cp "$bundle"/dmg/*.dmg dist/
+      - name: Package the desktop app (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          arch=amd64
+          if [ "$TARGET" = aarch64-unknown-linux-gnu ]; then arch=aarch64; fi
+          bundle="target/$TARGET/release/bundle"
+          mkdir -p dist
+          cp "$bundle"/appimage/*.AppImage "dist/blirp_${VERSION}_${arch}.AppImage"
+          cp "$bundle"/deb/*.deb "$bundle"/rpm/*.rpm dist/
+      - name: Package the desktop app (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          # Portable: the desktop exe with its sidecar and ConPTY, the layout
+          # install.ps1 and `blirp update` expect.
+          $name = "blirp_$($env:VERSION)_x64-portable"
+          $dir = "dist/$name"
+          New-Item -ItemType Directory -Force "$dir/x64" | Out-Null
+          Copy-Item "target/$env:TARGET/release/blirp-desktop.exe" "$dir/"
+          Copy-Item "app/src-tauri/binaries/blirp-$env:TARGET.exe" "$dir/blirp.exe"
+          Copy-Item app/src-tauri/binaries/conpty/conpty.dll "$dir/"
+          Copy-Item app/src-tauri/binaries/conpty/x64/OpenConsole.exe "$dir/x64/"
+          Compress-Archive -Path $dir -DestinationPath "dist/$name.zip"
+          Remove-Item -Recurse -Force $dir
+          $bundle = "target/$env:TARGET/release/bundle"
+          Copy-Item "$bundle/nsis/*.exe", "$bundle/msi/*.msi" dist/
+
+      - name: Upload to the draft release
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release upload "$GITHUB_REF_NAME" dist/* --clobber
 
   packaging:
-    name: Checksums and package manifests
+    name: Checksums, signature and package manifests
     needs: [draft, cli, desktop]
     runs-on: ubuntu-latest
     env:
@@ -358,15 +394,48 @@ jobs:
       GH_TOKEN: ${{ github.token }}
     steps:
       - uses: actions/checkout@v4
+      - name: Require the release signing key
+        env:
+          KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+        run: |
+          if [ -z "$KEY" ]; then
+            echo "::error::TAURI_SIGNING_PRIVATE_KEY is not set; SHA256SUMS.txt cannot be signed and blirp update would refuse the release"
+            exit 1
+          fi
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 12
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+          cache-dependency-path: app/pnpm-lock.yaml
+      - run: pnpm -C app install --frozen-lockfile
       - name: Download release assets
         run: gh release download "$GITHUB_REF_NAME" --dir assets
       - name: SHA256SUMS for every asset
         run: |
           cd assets
           find . -maxdepth 1 -type f ! -name '*.sha256' ! -name '*.sig' ! -name 'SHA256SUMS.txt' \
+            ! -name 'homebrew-*.rb' ! -name 'winget-*.yaml' \
             -printf '%f\n' | sort | xargs sha256sum > SHA256SUMS.txt
           cat SHA256SUMS.txt
+      # `blirp update` verifies this signature with packaging/minisign.pub
+      # before trusting any checksum. `tauri signer sign` writes base64 of a
+      # standard minisign signature; publish the plain minisign file so
+      # `minisign -V` (and rsign2) check it directly.
+      - name: Sign SHA256SUMS.txt
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+        run: |
+          rm -f assets/SHA256SUMS.txt.sig
+          pnpm -C app tauri signer sign "$PWD/assets/SHA256SUMS.txt"
+          base64 -d assets/SHA256SUMS.txt.sig > assets/SHA256SUMS.txt.minisig
+          mv assets/SHA256SUMS.txt.minisig assets/SHA256SUMS.txt.sig
+          sudo apt-get install -y --no-install-recommends minisign
+          minisign -V -m assets/SHA256SUMS.txt -x assets/SHA256SUMS.txt.sig -p packaging/minisign.pub
       - name: Render Homebrew and winget manifests
         run: sh scripts/render-packaging.sh "$VERSION" assets packaging-out
       - name: Upload
-        run: gh release upload "$GITHUB_REF_NAME" assets/SHA256SUMS.txt packaging-out/* --clobber
+        run: gh release upload "$GITHUB_REF_NAME" assets/SHA256SUMS.txt assets/SHA256SUMS.txt.sig packaging-out/* --clobber
