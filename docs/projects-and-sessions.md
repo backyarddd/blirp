@@ -40,7 +40,7 @@ A session is one run of an agent (or shell, or custom command) in a folder. blir
 | Failed | Process exited with a non-zero code, or could not be spawned. |
 | Detached | The daemon stopped (or restarted) while the session was running. The process is gone; use Resume. |
 
-A session you stop with **Stop** (UI or `blirp stop <id>`) is recorded as Completed with `stopped_by_user` set, whatever exit code the agent returns, so a deliberate stop is distinguishable from the agent finishing on its own. Stop kills the whole process tree (Windows job object; process group SIGHUP then SIGKILL after 3 s on macOS/Linux). Only sessions blirp launched can be stopped from blirp; external sessions belong to the terminal that started them.
+A session you stop with **Stop** (UI or `blirp stop <id>`) is recorded as Completed with `stopped_by_user` set, whatever exit code the agent returns, and its chip reads **Stopped**, so a deliberate stop is distinguishable from the agent finishing on its own. Stop kills the whole process tree (Windows job object; process group SIGHUP then SIGKILL after 3 s on macOS/Linux). Only sessions blirp launched can be stopped from blirp; external sessions belong to the terminal that started them.
 
 Browser notifications (Settings > Appearance) fire when a session becomes Waiting, Completed or Failed while blirp is in the background.
 
@@ -65,9 +65,9 @@ The new session gets a handoff pack appended to its injected memory: the source 
 
 ### Subagents
 
-When an agent spawns subagents, blirp ingests them as child sessions of the parent: Claude Code `subagents/agent-*.jsonl`, opencode sessions with a parent, Gemini CLI `chats/<parentId>/`, Cursor `subagents/`. In the sidebar they are grouped under their parent session instead of cluttering the list. Subagents are not distilled on their own (the parent transcript already contains each subagent's task and final report), but they are searchable, and **Distill now** works on them manually.
+When an agent spawns subagents, blirp ingests them as child sessions of the parent: Claude Code `subagents/agent-*.jsonl`, opencode sessions with a parent, Gemini CLI `chats/<parentId>/`, Cursor `subagents/`. They do not clutter the session lists: the parent's card shows an expandable "N subagents" toggle that lists them. Subagents are not distilled on their own (the parent transcript already contains each subagent's task and final report), but they are searchable, and **Distill now** works on them manually.
 
-In the API, `GET /api/sessions?parent=<id>` lists a session's children, and `include_children=true` includes child sessions in a normal listing (see [api.md](api.md#sessions)).
+In the API, `GET /api/sessions?parent=<id>` lists a session's children, and `include_children` controls whether subagent sessions appear in a normal listing (see [api.md](api.md#sessions)). Continue-in and fork sessions also record their source as parent but are regular top-level sessions.
 
 ### External sessions
 

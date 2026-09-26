@@ -101,7 +101,7 @@ Tools: search older history with the blirp MCP tools (mem_search, mem_session, m
 - Nothing in the text depends on the current time, so it only changes when memory changes, and agents' prompt caches keep hitting.
 - For continue in / fork, a [handoff pack](projects-and-sessions.md#continue-in--fork) is appended.
 
-The rendered text is written to `~/.blirp/launch/<session-id>/memory.md` and `BLIRP_MEMORY_FILE` points at it. The session's **Memory** panel ("Injected at start") shows exactly that file (`GET /api/inject?session=<id>`).
+The rendered text is written to `~/.blirp/launch/<session-id>/memory.md` and `BLIRP_MEMORY_FILE` points at it. The session's **Memory** panel shows exactly that file under **Injected at start** (`GET /api/inject?session=<id>`), followed by the session's distilled summary and the project's brief, open threads and pinned records, all editable in place.
 
 How it reaches each agent:
 
@@ -159,7 +159,7 @@ blirp hooks status  [--agent ...]
 blirp hooks uninstall [--agent ...]
 ```
 
-Without `--agent`, `install` handles every supported agent found on `PATH`; `status` and `uninstall` handle all supported agents. The same is available per agent in **Settings > Agents** (Install hooks / Uninstall hooks).
+Without `--agent`, `install` handles every supported agent found on `PATH`; `status` and `uninstall` handle all supported agents. The same is available per agent in **Settings > Agents**, which shows the state of global hooks, the MCP server and memory at launch for each agent; **Install** lists the files it will change before it changes them, **Uninstall** removes the entries. Only the machine's own desktop app or `blirp open` session can do this, not portal devices.
 
 Files changed (`~` is your home directory; environment overrides in brackets):
 

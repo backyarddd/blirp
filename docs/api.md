@@ -108,7 +108,7 @@ Text fields are limited to 256 KiB.
 
 | Method and path | Description |
 |---|---|
-| `GET /api/sessions?project=&status=&agent=&machine=&q=&parent=&include_children=&cursor=&limit=` | `{items: Session[], next_cursor}`, newest first, `limit` default 50. `parent=<id>` returns that session's child sessions (subagents, continuations); child sessions are omitted from other listings unless `include_children=true`. Pass `next_cursor` back as `cursor` for the next page. |
+| `GET /api/sessions?project=&status=&agent=&machine=&q=&parent=&include_children=&cursor=&limit=` | `{items: Session[], next_cursor}`, newest first, `limit` default 50. `parent=<id>` returns the sessions whose `parent_session_id` is `<id>`; `include_children=true` includes subagent sessions (external sessions with a parent) in other listings, `false` leaves them out. Pass `next_cursor` back as `cursor` for the next page. |
 | `POST /api/sessions` | control. Launch, body `LaunchSession`: `{agent, project_id?, cwd?, prompt?, worktree?, continue_from?, machine?, cols?, rows?}`. One of `project_id`/`cwd` is required unless `continue_from` is given. `machine` other than this one forwards the launch to that machine. 201 `Session`. |
 | `GET /api/sessions/:id` | `Session` |
 | `PATCH /api/sessions/:id` | `{title}` (up to 300 characters; `null` clears) |

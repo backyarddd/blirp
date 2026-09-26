@@ -90,7 +90,7 @@ It is valid for 10 minutes, works once, and is invalidated after 5 wrong attempt
 On each other machine (standalone role), either:
 
 - **CLI:** `blirp pair <invite> <code>`. On the same LAN, `blirp pair <code>` alone finds the hub through local network discovery (mDNS), as long as exactly one hub is advertising and it has one open invite. `blirp pair 'blirp://join/...#CODE'` also works.
-- **UI:** **Settings > Machines & Sync > Join a hub**, paste the invite and code, **Pair with hub**. With the desktop app installed, opening a `blirp://join/...` link (or scanning the hub's QR code with a device that has the app) opens this screen prefilled.
+- **UI:** **Settings > Machines & Sync > Join a hub**, paste the invite and code (on the same LAN the invite can stay empty), **Pair with hub**. With the desktop app installed, opening a `blirp://join/...` link (or scanning the hub's QR code with a device that has the app) opens this screen prefilled.
 
 Pairing is a password-authenticated key exchange (SPAKE2) over a QUIC connection bound to both machines' keys, with key confirmation. The invite alone is useless without the code, a wrong code cannot be brute-forced within 5 attempts, and a man in the middle is detected. After pairing, the hub accepts sync only from known, non-revoked machine keys.
 
@@ -148,13 +148,8 @@ With sync, the new-session dialog has a **Machine** picker. A session started fo
 
 - **Revoke a machine** (on the hub): **Settings > Machines & Sync > Machines > Revoke**, or `blirp devices revoke <device-id>` (ids from `blirp devices list`). Its live connections close at once and reconnects are refused. The machine row is marked revoked on every machine. Data it already synced stays.
 - **Revoke a browser device** (on the hub): **Devices > Revoke**, or `blirp devices revoke <id>`; it is signed out immediately.
-- **Leave the hub** (on a node): send `DELETE /api/machines/<hub id>` to the node's own daemon, for example
-  ```sh
-  TOKEN=$(jq -r .token ~/.blirp/runtime.json); PORT=$(jq -r .port ~/.blirp/runtime.json)
-  curl -X DELETE -H "Authorization: Bearer $TOKEN" http://127.0.0.1:$PORT/api/machines/<hub id>
-  ```
-  The node returns to `standalone` and keeps its local copy of the data.
-- **Stop being a hub:** `blirp hub disable`. Sync and the portal stop and the role returns to `standalone`; paired machines stay known, so `blirp hub enable` later resumes without re-pairing. A node cannot become a hub while paired (`paired_node`); leave first.
+- **Leave the hub** (on a node): **Settings > Machines & Sync > Leave hub** (API: `DELETE /api/machines/<hub id>` on the node). The node returns to `standalone` and keeps its local copy of the data.
+- **Stop being a hub:** **Disable hub** in the same place, or `blirp hub disable`. Sync and the portal stop and the role returns to `standalone`; paired machines stay known, so `blirp hub enable` later resumes without re-pairing. A node cannot become a hub while paired (`paired_node`); leave first.
 
 ## Backups and moving the hub
 
