@@ -16,6 +16,7 @@ blirp-sync = { path = "crates/blirp-sync" }
 anyhow = "1"
 axum = { version = "0.8", features = ["ws"] }
 bytes = "1"
+chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
 clap = { version = "4", features = ["derive"] }
 dunce = "1"
 futures-util = { version = "0.3", default-features = false, features = ["sink", "std"] }
@@ -23,6 +24,7 @@ gethostname = "1"
 getrandom = "0.3"
 hex = "0.4"
 libc = "0.2"
+notify-debouncer-full = "0.7"
 portable-pty = "0.9"
 regex = "1"
 reqwest = { version = "0.13", default-features = false, features = ["json"] }
@@ -41,6 +43,7 @@ tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
 ts-rs = { version = "12", features = ["serde-json-impl", "no-serde-warnings"] }
 uuid = { version = "1", features = ["v4", "v7", "serde"] }
 vt100 = "0.16"
+zstd = "0.13"
 windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_System_JobObjects", "Win32_System_Threading", "Win32_Security"] }
 
 [workspace.lints.rust]
