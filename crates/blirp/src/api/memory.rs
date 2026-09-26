@@ -340,6 +340,7 @@ async fn create_resource(
 ) -> ApiResult<(StatusCode, Json<Resource>)> {
     validate_url(&b.url)?;
     let r = project_op(&s, id, Some(MemoryPart::Resources), move |st, pid| {
+        let now = blirp_core::now_ms();
         Ok(st.create_resource(Resource {
             id: blirp_core::new_id(),
             project_id: pid.to_string(),
@@ -347,7 +348,8 @@ async fn create_resource(
             url: b.url.trim().to_string(),
             title: b.title.trim().to_string(),
             meta: b.meta,
-            created_at: blirp_core::now_ms(),
+            created_at: now,
+            updated_at: now,
             deleted: false,
         })?)
     })

@@ -111,7 +111,12 @@ export type RecordProposal = { kind: RecordKind, title: string, body: string, st
 
 export type WikiProposal = { slug: string, title: string, body_md: string, };
 
-export type Resource = { id: string, project_id: string, kind: ResourceKind, url: string, title: string, meta: JsonValue | null, created_at: number, deleted: boolean, };
+export type Resource = { id: string, project_id: string, kind: ResourceKind, url: string, title: string, meta: JsonValue | null, created_at: number, 
+/**
+ * Last change; replicated copies converge on the newest (§10). Changes
+ * queued by versions without it (before migration 8) read as 0.
+ */
+updated_at: number, deleted: boolean, };
 
 export type Device = { id: string, name: string, kind: DeviceKind, node_id: string | null, created_at: number, last_seen: number, revoked: boolean, can_control_terminals: boolean, };
 

@@ -46,7 +46,9 @@ pub(super) fn outbox_off(c: &Connection) -> Result<bool> {
 
 /// Queue every row this machine replicates except events (those follow in
 /// batches, see [`Store::backfill_events`]): its machine row, folders and
-/// sessions, all projects and shared memory, and session tombstones.
+/// sessions, all projects and shared memory, and session and record
+/// tombstones. Shared rows keep their `updated_at`, so a stale copy loses
+/// to a newer version the hub already has (see `write_row`).
 /// Sessions come before any event is queued, so the hub knows the session
 /// of every event it receives.
 fn backfill_rows_in(tx: &Transaction<'_>) -> Result<usize> {
@@ -124,6 +126,11 @@ fn backfill_rows_in(tx: &Transaction<'_>) -> Result<usize> {
             .into_iter()
             .map(|id| Change::DeleteSession { id }),
     );
+    changes.extend(
+        all(tx, "SELECT id FROM deleted_records", [], |r| r.get(0))?
+            .into_iter()
+            .map(|id| Change::DeleteRecord { id }),
+    );
     for c in &changes {
         super::queue_in(tx, c)?;
     }
@@ -134,32 +141,40 @@ fn backfill_rows_in(tx: &Transaction<'_>) -> Result<usize> {
 /// legitimate entry stays below this even with JSON escaping.
 pub const MAX_ENTRY_BYTES: usize = 4 << 20;
 
-/// Session fields only the session's own machine may set: they decide what
-/// that machine runs and reads (resume argv, folder, worktree, transcript).
-fn same_owned_fields(a: &Session, b: &Session) -> bool {
-    a.machine_id == b.machine_id
-        && a.agent == b.agent
-        && a.agent_session_id == b.agent_session_id
-        && a.origin == b.origin
-        && a.cwd == b.cwd
-        && a.worktree == b.worktree
-        && a.transcript_path == b.transcript_path
-        && a.parent_session_id == b.parent_session_id
+/// Another machine's write of session `old`: it may re-point the session to
+/// another project (merge), retitle it and change its status fields;
+/// everything else is the owner's (what it runs and reads: resume argv,
+/// folder, worktree, transcript; and what it derives from its transcript:
+/// summary, distill position, tokens, cost), so it is kept from `old`. A
+/// foreign copy carries whatever version of those fields it last saw.
+fn foreign_session_write(old: Session, new: &Session) -> Session {
+    Session {
+        project_id: new.project_id.clone(),
+        title: new.title.clone(),
+        status: new.status,
+        ended_at: new.ended_at,
+        last_activity_at: new.last_activity_at,
+        exit_code: new.exit_code,
+        stopped_by_user: new.stopped_by_user,
+        ..old
+    }
 }
 
 /// §10 ownership: a machine's folders, sessions and their events are
 /// written only by that machine. Another machine may only re-point an
-/// existing folder or session to another project (merge), retitle a
-/// session or change its status fields, and unregister folders of a deleted
-/// project. `hub` is set when a node applies a pull: the hub also writes
-/// the machine rows of the nodes it pairs and revokes. Records, briefs,
-/// wiki pages, resources and projects are shared by design.
+/// existing folder or session to another project (merge) and retitle a
+/// session or change its status fields ([`foreign_session_write`]: its other
+/// fields are replaced by the stored ones, the returned change); folders are
+/// never removed by another machine (a deleted project's folders are dropped
+/// by every machine itself). `hub` is set when a node applies a pull: the
+/// hub also writes the machine rows of the nodes it pairs and revokes.
+/// Records, briefs, wiki pages, resources and projects are shared by design.
 fn check_owner(
     c: &Connection,
     origin: &str,
     hub: Option<&str>,
-    change: &Change,
-) -> std::result::Result<(), String> {
+    change: Change,
+) -> std::result::Result<Change, String> {
     let session = |id: &str| -> std::result::Result<Option<Session>, String> {
         one(
             c,
@@ -188,64 +203,62 @@ fn check_owner(
         Change::DeleteMachine { id } => Err(format!("machine delete of {id}")),
         Change::ProjectPath(p) if foreign(&p.machine_id) => {
             match path_project(&p.machine_id, &p.path)? {
-                Some(old) if old.git_remote == p.git_remote => Ok(()),
+                Some(old) if old.git_remote == p.git_remote => Ok(Change::ProjectPath(p)),
                 _ => Err(format!("folder of machine {}", p.machine_id)),
             }
         }
-        Change::DeleteProjectPath { machine_id, path } if foreign(machine_id) => {
-            let Some(old) = path_project(machine_id, path)? else {
-                return Ok(());
-            };
-            let deleted: bool = one(
-                c,
-                "SELECT deleted FROM projects WHERE id = ?1",
-                params![old.project_id],
-                |r| r.get(0),
-            )
-            .map_err(|e| e.to_string())?
-            .unwrap_or(true);
-            if deleted {
-                Ok(())
-            } else {
-                Err(format!("folder removal on machine {machine_id}"))
-            }
+        Change::DeleteProjectPath { machine_id, .. } if foreign(&machine_id) => {
+            Err(format!("folder removal on machine {machine_id}"))
         }
         Change::Session(s) => match session(&s.id)? {
-            Some(old) if !foreign(&old.machine_id) && !foreign(&s.machine_id) => Ok(()),
-            Some(old) if same_owned_fields(&old, s) => Ok(()),
+            Some(old) if !foreign(&old.machine_id) && !foreign(&s.machine_id) => {
+                Ok(Change::Session(s))
+            }
+            Some(old) if old.machine_id == s.machine_id => {
+                Ok(Change::Session(foreign_session_write(old, &s)))
+            }
             Some(old) => Err(format!("session of machine {}", old.machine_id)),
-            None if !foreign(&s.machine_id) => Ok(()),
+            None if !foreign(&s.machine_id) => Ok(Change::Session(s)),
             None => Err(format!("new session for machine {}", s.machine_id)),
         },
-        Change::DeleteSession { id } => match session(id)? {
+        Change::DeleteSession { id } => match session(&id)? {
             Some(old) if foreign(&old.machine_id) => {
                 Err(format!("delete of a session of machine {}", old.machine_id))
             }
-            _ => Ok(()),
+            _ => Ok(Change::DeleteSession { id }),
         },
         Change::Event(e) => match session(&e.session_id)? {
-            Some(s) if !foreign(&s.machine_id) => Ok(()),
+            Some(s) if !foreign(&s.machine_id) => Ok(Change::Event(e)),
             Some(s) => Err(format!("event of a session of machine {}", s.machine_id)),
             None => Err("event of an unknown session".into()),
         },
-        _ => Ok(()),
+        other => Ok(other),
     }
 }
 
 /// Everything a replicated entry must pass before it is logged or applied.
+/// Returns the change to apply, and its payload when that differs from the
+/// entry's (another machine's session write, reduced to what it may change).
 fn check_entry(
     c: &Connection,
     origin: &str,
     hub: Option<&str>,
     e: &WireEntry,
-) -> std::result::Result<Change, String> {
+) -> std::result::Result<(Change, Option<String>), String> {
     if e.payload_json.len() > MAX_ENTRY_BYTES {
         return Err(format!("payload of {} bytes", e.payload_json.len()));
     }
-    let change = e.change().map_err(|err| err.to_string())?;
-    check_ids(&change).map_err(|err| err.to_string())?;
-    check_owner(c, origin, hub, &change)?;
-    Ok(change)
+    let parsed = e.change().map_err(|err| err.to_string())?;
+    check_ids(&parsed).map_err(|err| err.to_string())?;
+    let sent = matches!(parsed, Change::Session(_)).then(|| parsed.clone());
+    let change = check_owner(c, origin, hub, parsed)?;
+    let payload = match sent {
+        Some(sent) if sent != change => {
+            Some(serde_json::to_string(&change).map_err(|err| err.to_string())?)
+        }
+        _ => None,
+    };
+    Ok((change, payload))
 }
 
 /// One outbox entry as sent from a node to the hub. `payload_json` is the
@@ -386,12 +399,14 @@ fn flush_own_in(tx: &Transaction<'_>, own: &str) -> Result<usize> {
 
 impl Store {
     /// Turn replication on (a hub or node) or off (standalone). Off: nothing
-    /// is queued and the outbox is emptied. Turning it on backfills: every
-    /// replicated row except events is queued in this transaction, events
-    /// follow in bounded, resumable batches ([`Store::backfill_events`]).
-    /// Returns how many rows were queued.
+    /// new is queued; entries already queued stay (unpushed ones, deletes
+    /// among them, are sent when the machine pairs again). Turning it on
+    /// backfills: every replicated row except events is queued in this
+    /// transaction, events that exist now follow in bounded, resumable
+    /// batches ([`Store::backfill_events`]). Returns how many rows were
+    /// queued.
     pub fn set_replication(&self, on: bool) -> Result<usize> {
-        let queued = self.write(|tx| {
+        self.write(|tx| {
             let off = outbox_off(tx)?;
             match (on, off) {
                 (true, true) => {
@@ -400,10 +415,15 @@ impl Store {
                         params![OUTBOX_OFF_KEY],
                     )?;
                     let n = backfill_rows_in(tx)?;
+                    // Events written from now on are queued as they come.
+                    let until: i64 =
+                        tx.query_row("SELECT coalesce(max(rowid), 0) FROM events", [], |r| {
+                            r.get(0)
+                        })?;
                     tx.execute(
-                        "INSERT INTO settings(key, value_json) VALUES (?1, '0')
-                         ON CONFLICT(key) DO UPDATE SET value_json = '0'",
-                        params![BACKFILL_KEY],
+                        "INSERT INTO settings(key, value_json) VALUES (?1, ?2)
+                         ON CONFLICT(key) DO UPDATE SET value_json = excluded.value_json",
+                        params![BACKFILL_KEY, serde_json::to_string(&[0, until])?],
                     )?;
                     Ok(n)
                 }
@@ -413,30 +433,20 @@ impl Store {
                         params![OUTBOX_OFF_KEY],
                     )?;
                     tx.execute("DELETE FROM settings WHERE key = ?1", params![BACKFILL_KEY])?;
+                    // Pairing again queues every session row as it is then.
                     tx.execute("DELETE FROM outbox_deferred", [])?;
                     Ok(0)
                 }
                 _ => Ok(0),
             }
-        })?;
-        if !on {
-            // Emptied in chunks so a large outbox never holds the writer long.
-            while self.write(|tx| {
-                Ok(tx.execute(
-                    "DELETE FROM outbox WHERE origin_seq IN
-                       (SELECT origin_seq FROM outbox ORDER BY origin_seq LIMIT 20000)",
-                    [],
-                )?)
-            })? > 0
-            {}
-        }
-        Ok(queued)
+        })
     }
 
     /// Queue up to `limit` more of this machine's events after turning
-    /// replication on (see [`Store::set_replication`]); the position is
-    /// kept in the database, so it resumes after a restart. Returns how
-    /// many were queued (0: nothing left, the backfill is finished).
+    /// replication on (see [`Store::set_replication`]): the events that
+    /// existed then, in rowid order. The position is kept in the database,
+    /// so it resumes after a restart. Returns how many were queued (0:
+    /// nothing left, the backfill is finished).
     pub fn backfill_events(&self, limit: usize) -> Result<usize> {
         // Usually none is running: answer that without taking the writer.
         let running = self.read(|c| {
@@ -452,22 +462,33 @@ impl Store {
             return Ok(0);
         }
         self.write(|tx| {
-            let after: Option<String> = one(
+            let pos: Option<String> = one(
                 tx,
                 "SELECT value_json FROM settings WHERE key = ?1",
                 params![BACKFILL_KEY],
                 |r| r.get(0),
             )?;
-            let Some(after) = after.and_then(|a| a.parse::<i64>().ok()) else {
+            let Some(pos) = pos else {
                 return Ok(0);
+            };
+            // `[after, until]` rowids; a bare position is a backfill started
+            // before the bound was kept: it ends at the events there are now.
+            let (after, until) = match serde_json::from_str::<(i64, i64)>(&pos) {
+                Ok(p) => p,
+                Err(_) => (
+                    pos.parse::<i64>().unwrap_or(0),
+                    tx.query_row("SELECT coalesce(max(rowid), 0) FROM events", [], |r| {
+                        r.get(0)
+                    })?,
+                ),
             };
             let me = super::local_machine_in(tx)?;
             let rows = all(
                 tx,
                 "SELECT e.rowid AS rid, e.* FROM events e
                  JOIN sessions s ON s.id = e.session_id AND s.machine_id = ?1
-                 WHERE e.rowid > ?2 ORDER BY e.rowid LIMIT ?3",
-                params![me, after, limit as i64],
+                 WHERE e.rowid > ?2 AND e.rowid <= ?3 ORDER BY e.rowid LIMIT ?4",
+                params![me, after, until, limit as i64],
                 |r| Ok((r.get::<_, i64>("rid")?, super::sessions::event_row(r)?)),
             )?;
             let Some(last) = rows.last().map(|(rid, _)| *rid) else {
@@ -479,7 +500,7 @@ impl Store {
             }
             tx.execute(
                 "UPDATE settings SET value_json = ?2 WHERE key = ?1",
-                params![BACKFILL_KEY, last.to_string()],
+                params![BACKFILL_KEY, serde_json::to_string(&[last, until])?],
             )?;
             Ok(rows.len())
         })
@@ -609,7 +630,7 @@ impl Store {
                     )));
                 }
                 acked = acked.max(e.origin_seq);
-                let change = match check_entry(tx, origin, None, e) {
+                let (change, payload) = match check_entry(tx, origin, None, e) {
                     Ok(c) => c,
                     Err(err) => {
                         tracing::warn!(origin, origin_seq = e.origin_seq, entity = %e.entity, error = %err, "rejecting replicated entry");
@@ -617,10 +638,13 @@ impl Store {
                         continue;
                     }
                 };
+                // Logged as applied: other machines never see what the
+                // origin was not allowed to change.
+                let payload = payload.as_deref().unwrap_or(&e.payload_json);
                 let n = tx.execute(
                     "INSERT OR IGNORE INTO hub_log(origin_machine, origin_seq, entity, op, key, payload_json, ts)
                      VALUES (?1,?2,?3,?4,?5,?6,?7)",
-                    params![origin, e.origin_seq, e.entity, e.op, e.key, e.payload_json, e.ts],
+                    params![origin, e.origin_seq, e.entity, e.op, e.key, payload, e.ts],
                 )?;
                 if n == 0 {
                     continue;
@@ -723,6 +747,7 @@ impl Store {
             if page.up_to <= cur.last_pulled_hub_seq {
                 return Ok(0);
             }
+            let me = super::local_machine_in(tx)?;
             let mut own_seen = page.own_seen;
             let mut applied = 0;
             let mut later_own = tx.prepare_cached(
@@ -745,26 +770,36 @@ impl Store {
                         if *hub_seq <= cur.last_pulled_hub_seq {
                             continue;
                         }
+                        // This machine's own writes only ever come back as
+                        // markers; a "remote" entry claiming to be ours
+                        // would pass every ownership check.
+                        if origin_machine.is_empty() || *origin_machine == me {
+                            tracing::warn!(origin = %origin_machine, hub_seq, entity = %entry.entity, "skipping a pulled entry that claims this machine as its origin");
+                            continue;
+                        }
                         // The hub checked this too; a node does not rely on it.
                         let change = match check_entry(tx, origin_machine, Some(hub), entry) {
-                            Ok(c) => c,
+                            Ok((c, _)) => c,
                             Err(err) => {
                                 tracing::warn!(origin = %origin_machine, hub_seq, entity = %entry.entity, error = %err, "skipping rejected replicated entry");
                                 continue;
                             }
                         };
-                        // Events are append-only and a session delete always
-                        // wins (tombstone); everything else is LWW.
-                        let delete_wins = matches!(change, Change::DeleteSession { .. });
-                        if entry.op != "insert"
-                            && !delete_wins
+                        // Events are append-only, deletes of sessions and
+                        // records always win (tombstones) and shared rows
+                        // keep the newest version (`write_row`); only owned
+                        // rows are last-writer-wins by hub order.
+                        let by_hub_order = matches!(
+                            change,
+                            Change::Machine(_)
+                                | Change::DeleteMachine { .. }
+                                | Change::ProjectPath(_)
+                                | Change::DeleteProjectPath { .. }
+                                | Change::Session(_)
+                        );
+                        if by_hub_order
                             && later_own.exists(params![entry.entity, entry.key, own_seen])?
                         {
-                            // Our later brief stays current, but the other
-                            // machine's version still joins the history.
-                            if let Change::Brief(b) = &change {
-                                super::memory::insert_brief_history(tx, b)?;
-                            }
                             continue;
                         }
                         match savepoint(tx, || write_row(tx, &change))? {
@@ -782,7 +817,9 @@ impl Store {
             // Our entries logged up to here are behind every entry still to
             // be pulled, so they can never be the "later own write" that
             // makes a pull skip a remote one: they are no longer needed.
-            prune_in(tx, own_seen)?;
+            // Never past what the hub acknowledged: `own_seen` is the hub's
+            // word, and an unpushed entry dropped here would be lost.
+            prune_in(tx, own_seen.min(cur.last_pushed_origin_seq))?;
             Ok(applied)
         })
     }
@@ -958,51 +995,146 @@ mod tests {
         assert_eq!(pull(&a, "A", &hub, "H"), 0);
     }
 
+    fn project_at(id: &str, name: &str, updated_at: i64) -> Change {
+        Change::Project(Project {
+            id: id.into(),
+            name: name.into(),
+            created_at: 1,
+            updated_at,
+            deleted: false,
+        })
+    }
+
+    // Shared rows converge on the newest version whatever order the
+    // versions reach the hub and the nodes in.
     #[test]
-    fn last_writer_by_hub_order_converges() {
+    fn newest_version_wins_everywhere() {
         let (_h, hub) = temp_store();
         let (_a, a) = temp_store();
         let (_b, b) = temp_store();
-        a.apply(project("p", "v0")).unwrap();
+        a.apply(project_at("p", "v0", 10)).unwrap();
         push(&a, "A", &hub, "H");
         pull(&b, "B", &hub, "H");
 
-        // B writes v1 and pushes; A writes v2 (unpushed) then pulls v1:
-        // A keeps v2 because its write will be logged after v1.
-        b.apply(project("p", "v1")).unwrap();
+        // B's newer v1 reaches the hub first; A's older v2 (unpushed) loses
+        // on A when it pulls v1, and on the hub when it arrives.
+        b.apply(project_at("p", "v1", 30)).unwrap();
         push(&b, "B", &hub, "H");
-        a.apply(project("p", "v2")).unwrap();
+        a.apply(project_at("p", "v2", 20)).unwrap();
         pull(&a, "A", &hub, "H");
-        assert_eq!(name_of(&a, "p"), "v2");
         push(&a, "A", &hub, "H");
         pull(&b, "B", &hub, "H");
         for s in [&hub, &a, &b] {
-            assert_eq!(name_of(s, "p"), "v2");
+            assert_eq!(name_of(s, "p"), "v1");
         }
 
-        // A writes v3 and pushes before B's v4 reaches the hub, then pulls:
-        // v4 is later in hub order and wins everywhere.
-        a.apply(project("p", "v3")).unwrap();
-        push(&a, "A", &hub, "H");
-        b.apply(project("p", "v4")).unwrap();
+        // A newer write reaching the hub last wins too.
+        a.apply(project_at("p", "v3", 50)).unwrap();
+        b.apply(project_at("p", "v4", 40)).unwrap();
         push(&b, "B", &hub, "H");
+        push(&a, "A", &hub, "H");
         pull(&a, "A", &hub, "H");
         pull(&b, "B", &hub, "H");
         for s in [&hub, &a, &b] {
-            assert_eq!(name_of(s, "p"), "v4");
+            assert_eq!(name_of(s, "p"), "v3");
         }
 
-        // B writes v5, pushes it, but a remote v6 lands before B pulls:
-        // B's own entry sits before v6, so v6 wins.
-        b.apply(project("p", "v5")).unwrap();
+        // Equal timestamps: every machine picks the same version.
+        a.apply(project_at("p", "same-a", 70)).unwrap();
+        b.apply(project_at("p", "same-b", 70)).unwrap();
+        push(&a, "A", &hub, "H");
         push(&b, "B", &hub, "H");
-        a.apply(project("p", "v6")).unwrap();
+        pull(&a, "A", &hub, "H");
+        pull(&b, "B", &hub, "H");
+        for s in [&hub, &a, &b] {
+            assert_eq!(name_of(s, "p"), "same-b");
+        }
+
+        // A local edit on a machine whose clock is behind the version it
+        // replaces is stamped after it, so it is not lost.
+        a.apply(project_at("p", "slow clock", 5)).unwrap();
         push(&a, "A", &hub, "H");
         pull(&b, "B", &hub, "H");
-        pull(&a, "A", &hub, "H");
         for s in [&hub, &a, &b] {
-            assert_eq!(name_of(s, "p"), "v6");
+            assert_eq!(name_of(s, "p"), "slow clock");
         }
+    }
+
+    // A machine that leaves and pairs again queues its (stale) copy of
+    // everything; newer versions written meanwhile stay newest, deleted
+    // records stay deleted, and deletes it made while paired but did not
+    // push yet are sent then.
+    #[test]
+    fn rejoining_with_stale_copies_keeps_newer_versions() {
+        use crate::model::{Record, RecordKind, RecordStatus};
+        let (_h, hub) = temp_store();
+        let (_a, a) = temp_store();
+        let (_b, b) = temp_store();
+        for s in [&hub, &a, &b] {
+            s.set_replication(true).unwrap();
+        }
+        let record = |id: &str, body: &str, at: i64| Record {
+            id: id.into(),
+            project_id: "p".into(),
+            kind: RecordKind::Decision,
+            title: id.into(),
+            body: body.into(),
+            status: RecordStatus::Active,
+            pinned: false,
+            source_session_id: None,
+            created_at: 1,
+            updated_at: at,
+            updated_by: "user".into(),
+        };
+        a.apply(project_at("p", "shared", 10)).unwrap();
+        a.put_brief("p", "old brief", "user").unwrap();
+        a.create_wiki_page("p", "w", "Wiki", "old page", "user")
+            .unwrap();
+        for id in ["edited", "gone", "doomed"] {
+            a.create_record(record(id, "old", 10)).unwrap();
+        }
+        push(&a, "A", &hub, "H");
+        pull(&b, "B", &hub, "H");
+        // A deletes a record but leaves before pushing it.
+        a.delete_record("doomed").unwrap();
+        a.set_replication(false).unwrap();
+
+        // Meanwhile B edits, deletes, renames and writes a newer brief.
+        b.modify_record("edited", |r| r.body = "new".into())
+            .unwrap();
+        b.delete_record("gone").unwrap();
+        b.apply(project_at("p", "renamed", crate::now_ms() + 10))
+            .unwrap();
+        b.put_brief("p", "new brief", "user").unwrap();
+        b.update_wiki_page("p", "w", "Wiki", "new page", "user")
+            .unwrap();
+        push(&b, "B", &hub, "H");
+
+        // A pairs again: everything it has is queued, and pulled over.
+        assert!(a.set_replication(true).unwrap() > 0);
+        push(&a, "A", &hub, "H");
+        pull(&a, "A", &hub, "H");
+        pull(&b, "B", &hub, "H");
+        for s in [&hub, &a, &b] {
+            assert_eq!(s.get_record("edited").unwrap().unwrap().body, "new");
+            assert!(s.get_record("gone").unwrap().is_none());
+            assert!(s.get_record("doomed").unwrap().is_none());
+            assert_eq!(name_of(s, "p"), "renamed");
+            assert_eq!(s.get_brief("p").unwrap().unwrap().body_md, "new brief");
+            assert_eq!(
+                s.get_wiki_page("p", "w").unwrap().unwrap().body_md,
+                "new page"
+            );
+        }
+        // A replayed copy of a deleted record does not bring it back.
+        let late = [wire(
+            1000,
+            &Change::Record(record("gone", "zombie", 1 << 50)),
+        )];
+        hub.hub_ingest("H", "A", &late).unwrap();
+        pull(&b, "B", &hub, "H");
+        assert!(hub.get_record("gone").unwrap().is_none());
+        assert!(b.get_record("gone").unwrap().is_none());
     }
 
     // Two machines writing the next brief version at once: both versions
@@ -1118,8 +1250,9 @@ mod tests {
         assert_eq!(outbox_len(&a), 1);
     }
 
-    // A standalone machine queues nothing; pairing queues what exists:
-    // everything but events at once, events in resumable batches.
+    // A standalone machine queues nothing (what was queued before stays);
+    // pairing queues what exists: everything but events at once, the
+    // events that exist then in resumable batches.
     #[test]
     fn standalone_queues_nothing_and_pairing_backfills() {
         use crate::model::{Event, EventKind};
@@ -1128,7 +1261,7 @@ mod tests {
             .unwrap();
         s.apply(project("early", "x")).unwrap();
         s.set_replication(false).unwrap();
-        assert_eq!(outbox_len(&s), 0, "emptied");
+        assert_eq!(outbox_len(&s), 1, "kept for the next pairing");
         s.upsert_machine(&Machine {
             id: "A".into(),
             name: "a".into(),
@@ -1160,7 +1293,7 @@ mod tests {
         }
         s.put_brief("p", "one", "user").unwrap();
         s.put_brief("p", "two", "user").unwrap();
-        assert_eq!(outbox_len(&s), 0, "standalone queues nothing");
+        assert_eq!(outbox_len(&s), 1, "standalone queues nothing");
 
         let n = s.set_replication(true).unwrap();
         let kinds = |s: &Store| -> Vec<(String, String)> {
@@ -1171,7 +1304,7 @@ mod tests {
                 .collect()
         };
         let q = kinds(&s);
-        assert_eq!(q.len(), n);
+        assert_eq!(q.len(), n + 1);
         for want in [
             ("machines", "A"),
             ("projects", "early"),
@@ -1190,8 +1323,17 @@ mod tests {
         );
         assert_eq!(q.iter().filter(|(e, _)| e == "briefs").count(), 3);
         assert!(!q.iter().any(|(e, _)| e == "events"), "events come later");
-        // Live writes are queued again.
+        // Live writes are queued again, events too (and only once).
         s.apply(project("live", "x")).unwrap();
+        s.apply(Change::Event(Event {
+            session_id: "mine".into(),
+            seq: 4,
+            ts: 1,
+            kind: EventKind::User,
+            text: "live".into(),
+            meta: None,
+        }))
+        .unwrap();
 
         assert_eq!(s.backfill_events(2).unwrap(), 2);
         // Resumes from the stored position (e.g. after a restart).
@@ -1204,7 +1346,7 @@ mod tests {
             .filter(|(e, _)| e == "events")
             .map(|(_, k)| k)
             .collect();
-        assert_eq!(events, ["mine\n1", "mine\n2", "mine\n3"]);
+        assert_eq!(events, ["mine\n4", "mine\n1", "mine\n2", "mine\n3"]);
         assert!(kinds(&s).iter().any(|(_, k)| k == "live"));
     }
 
@@ -1301,12 +1443,8 @@ mod tests {
         let evil = [
             // A folder on the hub's disk (then readable via the files API).
             Change::ProjectPath(path("H", "/Users/h")),
-            // A session of the hub with an option-shaped resume id.
+            // A new session of the hub, or moving one to another machine.
             Change::Session(session_of("planted", "H")),
-            Change::Session(crate::model::Session {
-                agent_session_id: Some("-cnotify=[\"calc\"]".into()),
-                ..hs.clone()
-            }),
             Change::Session(crate::model::Session {
                 machine_id: "A".into(),
                 ..hs.clone()
@@ -1347,28 +1485,29 @@ mod tests {
         assert!(hub.get_session("planted").unwrap().is_none());
         assert_eq!(hub.project_paths("p").unwrap(), [path("H", "/hub")]);
 
-        // Allowed: A's own rows, retitling and re-pointing H's session (merge),
-        // and dropping H's folder once the project is deleted.
+        // Allowed: A's own rows, and retitling H's session; everything else
+        // in A's copy of it (what H runs, reads and derives from its
+        // transcript) is replaced by H's values, also in the logged entry.
         let mut own = session_of("as", "A");
         own.cwd = "/a".into();
+        let foreign_edit = crate::model::Session {
+            title: Some("renamed".into()),
+            agent_session_id: Some("-cnotify=[\"calc\"]".into()),
+            cwd: "/".into(),
+            worktree: Some("/etc".into()),
+            transcript_path: Some("/etc/passwd".into()),
+            summary: Some(serde_json::json!({"summary": "planted"})),
+            distilled_through_seq: 1 << 40,
+            tokens_in: 1,
+            tokens_out: 2,
+            cost_usd: 1e9,
+            branch: Some("evil".into()),
+            ..hs.clone()
+        };
         let fine = [
             Change::Session(own),
             Change::ProjectPath(path("A", "/a")),
-            Change::Session(crate::model::Session {
-                title: Some("renamed".into()),
-                ..hs.clone()
-            }),
-            Change::Project(crate::model::Project {
-                id: "p".into(),
-                name: "shared".into(),
-                created_at: 1,
-                updated_at: 2,
-                deleted: true,
-            }),
-            Change::DeleteProjectPath {
-                machine_id: "H".into(),
-                path: "/hub".into(),
-            },
+            Change::Session(foreign_edit),
         ];
         let entries: Vec<WireEntry> = fine
             .iter()
@@ -1377,11 +1516,37 @@ mod tests {
             .collect();
         let out = hub.hub_ingest("H", "A", &entries).unwrap();
         assert_eq!((out.inserted, out.rejected), (fine.len(), 0));
-        assert_eq!(
-            hub.get_session("hs").unwrap().unwrap().title.as_deref(),
-            Some("renamed")
+        let renamed = crate::model::Session {
+            title: Some("renamed".into()),
+            ..hs.clone()
+        };
+        assert_eq!(hub.get_session("hs").unwrap().unwrap(), renamed);
+        let logged = hub.hub_page("B", 0, 100, 4 << 20).unwrap();
+        let logged = serde_json::to_string(&logged).unwrap();
+        assert!(!logged.contains("planted") && !logged.contains("passwd"));
+
+        // A deleted project's folders are dropped by every machine when it
+        // applies the delete; a foreign folder removal stays refused.
+        let deleted = wire(
+            200,
+            &Change::Project(crate::model::Project {
+                id: "p".into(),
+                name: "shared".into(),
+                created_at: 1,
+                updated_at: 2,
+                deleted: true,
+            }),
         );
-        assert_eq!(hub.project_paths("p").unwrap(), [path("A", "/a")]);
+        let remove = wire(
+            201,
+            &Change::DeleteProjectPath {
+                machine_id: "H".into(),
+                path: "/hub".into(),
+            },
+        );
+        let out = hub.hub_ingest("H", "A", &[deleted, remove]).unwrap();
+        assert_eq!((out.inserted, out.rejected), (1, 1));
+        assert!(hub.project_paths("p").unwrap().is_empty());
 
         // A node checks pulled entries itself: the hub cannot plant a
         // folder of the node, and a third machine cannot either.
@@ -1411,6 +1576,77 @@ mod tests {
         assert_eq!(b.node_apply_pull("H", &page).unwrap(), 1);
         assert!(b.project_paths("p").unwrap().is_empty());
         assert!(b.get_session("cs").unwrap().is_none());
+    }
+
+    // A hub labelling an entry with the node's own id would pass every
+    // ownership check (a folder of the node at "/", then readable through
+    // the files API; rewritten sessions): the node refuses such entries.
+    #[test]
+    fn pulled_entries_claiming_this_machine_are_refused() {
+        use crate::model::ProjectPath;
+        let (_b, b) = temp_store();
+        b.set_setting(super::super::MACHINE_ID_KEY, &serde_json::json!("B"))
+            .unwrap();
+        let mine = session_of("bs", "B");
+        b.apply(project_at("p", "shared", 10)).unwrap();
+        b.apply(Change::Session(mine.clone())).unwrap();
+        let root = Change::ProjectPath(ProjectPath {
+            project_id: "p".into(),
+            machine_id: "B".into(),
+            path: "/".into(),
+            git_remote: None,
+        });
+        let hijack = Change::Session(crate::model::Session {
+            agent_session_id: Some("-cnotify=[\"calc\"]".into()),
+            ..mine.clone()
+        });
+        let entries = [project_at("p", "renamed", 20), root, hijack];
+        for origin in ["B", ""] {
+            let page = HubPage {
+                own_seen: 0,
+                entries: entries
+                    .iter()
+                    .enumerate()
+                    .map(|(i, c)| PulledEntry::Remote {
+                        hub_seq: i as i64 + 1,
+                        origin_machine: origin.into(),
+                        entry: wire(i as i64 + 1, c),
+                    })
+                    .collect(),
+                up_to: 3,
+                more: false,
+            };
+            let hub = format!("hub{origin}");
+            assert_eq!(b.node_apply_pull(&hub, &page).unwrap(), 0);
+        }
+        assert_eq!(name_of(&b, "p"), "shared");
+        assert!(b.project_paths("p").unwrap().is_empty());
+        assert_eq!(b.get_session("bs").unwrap().unwrap(), mine);
+    }
+
+    // `own_seen` comes from the hub: a pull never prunes outbox entries the
+    // hub has not acknowledged, whatever it claims to have seen.
+    #[test]
+    fn pull_never_prunes_unacknowledged_entries() {
+        let (_a, a) = temp_store();
+        a.apply(project("p1", "x")).unwrap();
+        a.apply(project("p2", "x")).unwrap();
+        age(&a);
+        a.set_pushed_cursor("H", 1).unwrap();
+        let page = HubPage {
+            own_seen: 100,
+            entries: vec![],
+            up_to: 1,
+            more: false,
+        };
+        a.node_apply_pull("H", &page).unwrap();
+        let left: Vec<i64> = a
+            .outbox_after(0, 10)
+            .unwrap()
+            .iter()
+            .map(|e| e.origin_seq)
+            .collect();
+        assert_eq!(left, [2]);
     }
 
     #[test]

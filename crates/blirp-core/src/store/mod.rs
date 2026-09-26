@@ -33,6 +33,7 @@ use rusqlite::{
 };
 use serde::{Deserialize, Serialize};
 use serde_json::Value as JsonValue;
+use std::borrow::Cow;
 use std::path::{Path, PathBuf};
 use std::sync::{Mutex, MutexGuard, PoisonError};
 use std::time::Duration;
@@ -355,13 +356,52 @@ pub(crate) fn queue_in(tx: &Transaction<'_>, change: &Change) -> Result<()> {
     Ok(())
 }
 
+/// A local edit replaces the version this machine has, so it must also be
+/// newer than that version where shared rows converge on the newest
+/// `updated_at` (§10); a clock behind the replicated copy is moved past it.
+fn stamp_after_stored(tx: &Transaction<'_>, change: &mut Cow<'_, Change>) -> Result<()> {
+    let (table, id, at) = match change.as_ref() {
+        Change::Project(p) => ("projects", p.id.clone(), p.updated_at),
+        Change::Record(r) => ("records", r.id.clone(), r.updated_at),
+        Change::WikiPage(w) => ("wiki_pages", w.id.clone(), w.updated_at),
+        Change::Resource(r) => ("resources", r.id.clone(), r.updated_at),
+        _ => return Ok(()),
+    };
+    let stored: Option<i64> = one(
+        tx,
+        &format!("SELECT updated_at FROM {table} WHERE id = ?1"),
+        params![id],
+        |r| r.get(0),
+    )?;
+    if let Some(stored) = stored.filter(|s| *s >= at) {
+        match change.to_mut() {
+            Change::Project(p) => p.updated_at = stored + 1,
+            Change::Record(r) => r.updated_at = stored + 1,
+            Change::WikiPage(w) => w.updated_at = stored + 1,
+            Change::Resource(r) => r.updated_at = stored + 1,
+            _ => {}
+        }
+    }
+    Ok(())
+}
+
 /// Write the row(s) for `change` and append it to the outbox.
 pub(crate) fn apply_in(tx: &Transaction<'_>, change: &Change) -> Result<bool> {
-    let redacted = redact_memory(change);
-    let change = redacted.as_ref().unwrap_or(change);
+    let mut change = match redact_memory(change) {
+        Some(redacted) => Cow::Owned(redacted),
+        None => Cow::Borrowed(change),
+    };
+    stamp_after_stored(tx, &mut change)?;
+    let change = change.as_ref();
     let written = write_row(tx, change)?;
-    if written == 0 && matches!(change, Change::Event(_) | Change::Session(_)) {
-        // A duplicate event, or a write of a deleted session: nothing to queue.
+    if written == 0
+        && matches!(
+            change,
+            Change::Event(_) | Change::Session(_) | Change::Record(_)
+        )
+    {
+        // A duplicate event, or a write of a deleted session or record:
+        // nothing to queue.
         return Ok(false);
     }
     if let Change::Session(s) = change {
@@ -414,6 +454,13 @@ pub(crate) fn check_ids(change: &Change) -> Result<()> {
 /// Write the row(s) for `change` only; returns the affected row count.
 /// Replication applies received changes with this so they are never
 /// queued again (no echo).
+///
+/// Shared rows (projects, records, wiki pages, resources, the current
+/// brief) converge on the newest version wherever and in whatever order the
+/// versions arrive: an upsert only replaces a row it is newer than by
+/// `updated_at`, ties broken by comparing the remaining columns (a total
+/// order, so every machine keeps the same one). A stale copy (a machine
+/// re-pairing with what it had, a late replay) never wins (§10).
 fn write_row(tx: &Transaction<'_>, change: &Change) -> Result<usize> {
     check_ids(change)?;
     Ok(match change {
@@ -426,12 +473,26 @@ fn write_row(tx: &Transaction<'_>, change: &Change) -> Result<usize> {
         Change::DeleteMachine { id } => {
             tx.execute("DELETE FROM machines WHERE id=?1", params![id])?
         }
-        Change::Project(p) => tx.execute(
-            "INSERT INTO projects(id, name, created_at, updated_at, deleted) VALUES (?1,?2,?3,?4,?5)
-             ON CONFLICT(id) DO UPDATE SET name=excluded.name, created_at=excluded.created_at,
-               updated_at=excluded.updated_at, deleted=excluded.deleted",
-            params![p.id, p.name, p.created_at, p.updated_at, p.deleted],
-        )?,
+        Change::Project(p) => {
+            let n = tx.execute(
+                "INSERT INTO projects(id, name, created_at, updated_at, deleted) VALUES (?1,?2,?3,?4,?5)
+                 ON CONFLICT(id) DO UPDATE SET name=excluded.name, created_at=excluded.created_at,
+                   updated_at=excluded.updated_at, deleted=excluded.deleted
+                 WHERE (excluded.updated_at, excluded.deleted, excluded.name, excluded.created_at)
+                     > (projects.updated_at, projects.deleted, projects.name, projects.created_at)",
+                params![p.id, p.name, p.created_at, p.updated_at, p.deleted],
+            )?;
+            if n > 0 && p.deleted {
+                // A deleted project has no folders. Every machine drops them
+                // itself when it applies the delete; nobody removes another
+                // machine's folder by replication (§10 ownership).
+                tx.execute(
+                    "DELETE FROM project_paths WHERE project_id = ?1",
+                    params![p.id],
+                )?;
+            }
+            n
+        }
         Change::ProjectPath(p) => tx.execute(
             "INSERT INTO project_paths(project_id, machine_id, path, git_remote) VALUES (?1,?2,?3,?4)
              ON CONFLICT(machine_id, path) DO UPDATE SET project_id=excluded.project_id,
@@ -442,7 +503,7 @@ fn write_row(tx: &Transaction<'_>, change: &Change) -> Result<usize> {
             "DELETE FROM project_paths WHERE machine_id=?1 AND path=?2",
             params![machine_id, path],
         )?,
-        Change::Session(s) if tombstoned(tx, &s.id)? => 0,
+        Change::Session(s) if tombstoned(tx, "deleted_sessions", &s.id)? => 0,
         Change::Session(s) => tx.execute(
             "INSERT INTO sessions(id, project_id, machine_id, agent, agent_session_id, origin, cwd, title,
                status, branch, worktree, transcript_path, started_at, ended_at, last_activity_at, exit_code,
@@ -506,34 +567,50 @@ fn write_row(tx: &Transaction<'_>, change: &Change) -> Result<usize> {
                 params![id],
             )?
         }
-        Change::Event(e) if tombstoned(tx, &e.session_id)? => 0,
+        Change::Event(e) if tombstoned(tx, "deleted_sessions", &e.session_id)? => 0,
         Change::Event(e) => tx.execute(
             "INSERT INTO events(session_id, seq, ts, kind, text, meta_json) VALUES (?1,?2,?3,?4,?5,?6)
              ON CONFLICT(session_id, seq) DO NOTHING",
             params![e.session_id, e.seq, e.ts, e.kind, e.text, json_text(&e.meta)],
         )?,
+        Change::Record(r) if tombstoned(tx, "deleted_records", &r.id)? => 0,
         Change::Record(r) => tx.execute(
             "INSERT INTO records(id, project_id, kind, title, body, status, pinned, source_session_id,
                created_at, updated_at, updated_by) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11)
              ON CONFLICT(id) DO UPDATE SET project_id=excluded.project_id, kind=excluded.kind,
                title=excluded.title, body=excluded.body, status=excluded.status, pinned=excluded.pinned,
                source_session_id=excluded.source_session_id, created_at=excluded.created_at,
-               updated_at=excluded.updated_at, updated_by=excluded.updated_by",
+               updated_at=excluded.updated_at, updated_by=excluded.updated_by
+             WHERE (excluded.updated_at, excluded.updated_by, excluded.status, excluded.pinned,
+                    excluded.kind, excluded.title, excluded.body, excluded.project_id,
+                    coalesce(excluded.source_session_id, ''), excluded.created_at)
+                 > (records.updated_at, records.updated_by, records.status, records.pinned,
+                    records.kind, records.title, records.body, records.project_id,
+                    coalesce(records.source_session_id, ''), records.created_at)",
             params![
                 r.id, r.project_id, r.kind, r.title, r.body, r.status, r.pinned, r.source_session_id,
                 r.created_at, r.updated_at, r.updated_by
             ],
         )?,
-        Change::DeleteRecord { id } => tx.execute("DELETE FROM records WHERE id=?1", params![id])?,
+        Change::DeleteRecord { id } => {
+            // Tombstone first: no copy of the record may bring it back.
+            tx.execute(
+                "INSERT OR IGNORE INTO deleted_records(id, deleted_at) VALUES (?1, ?2)",
+                params![id, crate::now_ms()],
+            )?;
+            tx.execute("DELETE FROM records WHERE id=?1", params![id])?
+        }
         Change::Brief(b) => {
             let id = memory::insert_brief_history(tx, b)?;
-            // The current brief is last-writer-wins by hub order like any row.
+            // Every version joins the history; the current brief is the
+            // newest one (the order version numbers are derived in).
             tx.execute(
                 "INSERT INTO briefs(project_id, body_md, version, updated_at, updated_by, history_id, machine_id)
                  VALUES (?1,?2,?3,?4,?5,?6,?7)
                  ON CONFLICT(project_id) DO UPDATE SET body_md=excluded.body_md, version=excluded.version,
                    updated_at=excluded.updated_at, updated_by=excluded.updated_by,
-                   history_id=excluded.history_id, machine_id=excluded.machine_id",
+                   history_id=excluded.history_id, machine_id=excluded.machine_id
+                 WHERE (excluded.updated_at, excluded.history_id) > (briefs.updated_at, briefs.history_id)",
                 params![b.project_id, b.body_md, b.version, b.updated_at, b.updated_by, id, b.machine_id],
             )?
         }
@@ -542,25 +619,38 @@ fn write_row(tx: &Transaction<'_>, change: &Change) -> Result<usize> {
              VALUES (?1,?2,?3,?4,?5,?6,?7,?8)
              ON CONFLICT(id) DO UPDATE SET project_id=excluded.project_id, slug=excluded.slug,
                title=excluded.title, body_md=excluded.body_md, updated_at=excluded.updated_at,
-               updated_by=excluded.updated_by, deleted=excluded.deleted",
+               updated_by=excluded.updated_by, deleted=excluded.deleted
+             WHERE (excluded.updated_at, excluded.deleted, excluded.updated_by, excluded.title,
+                    excluded.body_md, excluded.slug, excluded.project_id)
+                 > (wiki_pages.updated_at, wiki_pages.deleted, wiki_pages.updated_by, wiki_pages.title,
+                    wiki_pages.body_md, wiki_pages.slug, wiki_pages.project_id)",
             params![w.id, w.project_id, w.slug, w.title, w.body_md, w.updated_at, w.updated_by, w.deleted],
         )?,
         Change::Resource(r) => tx.execute(
-            "INSERT INTO resources(id, project_id, kind, url, title, meta_json, created_at, deleted)
-             VALUES (?1,?2,?3,?4,?5,?6,?7,?8)
+            "INSERT INTO resources(id, project_id, kind, url, title, meta_json, created_at, updated_at, deleted)
+             VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9)
              ON CONFLICT(id) DO UPDATE SET project_id=excluded.project_id, kind=excluded.kind,
                url=excluded.url, title=excluded.title, meta_json=excluded.meta_json,
-               created_at=excluded.created_at, deleted=excluded.deleted",
-            params![r.id, r.project_id, r.kind, r.url, r.title, json_text(&r.meta), r.created_at, r.deleted],
+               created_at=excluded.created_at, updated_at=excluded.updated_at, deleted=excluded.deleted
+             WHERE (excluded.updated_at, excluded.deleted, excluded.url, excluded.title, excluded.kind,
+                    excluded.project_id, coalesce(excluded.meta_json, ''), excluded.created_at)
+                 > (resources.updated_at, resources.deleted, resources.url, resources.title,
+                    resources.kind, resources.project_id, coalesce(resources.meta_json, ''),
+                    resources.created_at)",
+            params![
+                r.id, r.project_id, r.kind, r.url, r.title, json_text(&r.meta), r.created_at,
+                r.updated_at, r.deleted
+            ],
         )?,
     })
 }
 
-/// Whether session `id` was deleted (see migration 7).
-fn tombstoned(c: &Connection, id: &str) -> Result<bool> {
+/// Whether `id` has a tombstone in `table` (`deleted_sessions`, migration 7;
+/// `deleted_records`, migration 8).
+fn tombstoned(c: &Connection, table: &str, id: &str) -> Result<bool> {
     Ok(one(
         c,
-        "SELECT 1 FROM deleted_sessions WHERE id = ?1",
+        &format!("SELECT 1 FROM {table} WHERE id = ?1"),
         params![id],
         |_| Ok(()),
     )?
