@@ -178,6 +178,26 @@ pub fn parse_output(text: &str, known_ids: &HashSet<String>) -> Result<DistillOu
             "brief_md is longer than {MAX_BRIEF_CHARS} characters"
         ));
     }
+    // The model may echo a secret the transcript redaction missed or that
+    // it reconstructed; its output is stored, injected and replicated.
+    let red = |s: &mut String| {
+        if let std::borrow::Cow::Owned(r) = blirp_core::redact::redact(s) {
+            *s = r;
+        }
+    };
+    red(&mut out.title);
+    red(&mut out.summary);
+    red(&mut out.brief_md);
+    out.files.iter_mut().for_each(red);
+    for it in out
+        .decisions
+        .iter_mut()
+        .chain(&mut out.open_threads)
+        .chain(&mut out.gotchas)
+    {
+        red(&mut it.title);
+        red(&mut it.body);
+    }
     Ok(out)
 }
 
@@ -271,9 +291,55 @@ async fn ollama_up(base: &str) -> bool {
         .is_ok_and(|r| r.status().is_success())
 }
 
-/// Resolve `memory.summarizer` to a runnable backend (`auto`: claude, codex,
-/// ollama in that order). `Ok(None)` for `none`. CLI summarizers run in a
-/// fresh dir under `scratch`.
+/// `auto`: claude, else ollama. Codex is never picked automatically: its
+/// built-in tools cannot all be switched off (only shell, exec and the
+/// optional tools are, see [`codex_args`]), so it runs only when chosen.
+fn pick_auto(claude: Option<Backend>, ollama: Option<Backend>) -> Result<Backend, String> {
+    claude.or(ollama).ok_or_else(|| {
+        "neither claude nor ollama is available (codex runs only when chosen explicitly)".into()
+    })
+}
+
+/// `codex exec` for a summarizer run: no hooks, MCP servers, shell or exec
+/// tools, apps, plugins, browser, computer use, subagents or image tools
+/// (feature names verified against codex 0.153), read-only sandbox, no
+/// persisted session; the reply goes to `last`.
+fn codex_args(last: &Path) -> Vec<OsString> {
+    let mut args: Vec<OsString> = [
+        "exec",
+        "--json",
+        "--ephemeral",
+        "--skip-git-repo-check",
+        "--sandbox",
+        "read-only",
+        "-c",
+        "mcp_servers={}",
+    ]
+    .iter()
+    .map(OsString::from)
+    .collect();
+    for feature in [
+        "hooks",
+        "shell_tool",
+        "unified_exec",
+        "view_image",
+        "apps",
+        "plugins",
+        "browser_use",
+        "computer_use",
+        "multi_agent",
+        "image_generation",
+    ] {
+        args.push("--disable".into());
+        args.push(feature.into());
+    }
+    args.push("--output-last-message".into());
+    args.push(last.as_os_str().to_owned());
+    args
+}
+
+/// Resolve `memory.summarizer` to a runnable backend (see [`pick_auto`]).
+/// `Ok(None)` for `none`. CLI summarizers run in a fresh dir under `scratch`.
 pub async fn select_backend(cfg: &MemoryConfig, scratch: &Path) -> Result<Option<Backend>, String> {
     // PATH scans touch the filesystem: off the async runtime.
     let (claude_exe, codex_exe) =
@@ -313,13 +379,13 @@ pub async fn select_backend(cfg: &MemoryConfig, scratch: &Path) -> Result<Option
             }
         }
         Summarizer::Auto => {
-            if let Some(b) = claude().or_else(codex) {
-                return Ok(Some(b));
-            }
-            if ollama_up(&base).await {
-                return Ok(Some(ollama));
-            }
-            Err("none of claude, codex or ollama is available".into())
+            let claude = claude();
+            let ollama = if claude.is_none() && ollama_up(&base).await {
+                Some(ollama)
+            } else {
+                None
+            };
+            pick_auto(claude, ollama).map(Some)
         }
     }
 }
@@ -471,24 +537,7 @@ impl Backend {
             Backend::Codex { exe: path, scratch } => {
                 let dir = scratch_dir(scratch)?;
                 let last = dir.path().join("last-message.txt");
-                let mut args: Vec<OsString> = [
-                    "exec",
-                    "--json",
-                    "--ephemeral",
-                    "--skip-git-repo-check",
-                    "--sandbox",
-                    "read-only",
-                    "--disable",
-                    "hooks",
-                    "-c",
-                    "mcp_servers={}",
-                    "--output-last-message",
-                ]
-                .iter()
-                .map(OsString::from)
-                .collect();
-                args.push(last.clone().into_os_string());
-                let out = run_process(path, args, prompt, dir.path(), timeout).await?;
+                let out = run_process(path, codex_args(&last), prompt, dir.path(), timeout).await?;
                 match std::fs::read_to_string(&last) {
                     Ok(t) if !t.trim().is_empty() => Ok(t),
                     _ => parse_codex_jsonl(&out.stdout).map_err(|e| {
@@ -1223,6 +1272,32 @@ mod tests {
     }
 
     #[test]
+    fn codex_is_opt_in_and_runs_without_tools() {
+        let claude = Backend::Claude {
+            exe: "claude".into(),
+            scratch: "s".into(),
+        };
+        let ollama = Backend::Ollama {
+            base: "b".into(),
+            model: "m".into(),
+        };
+        assert_eq!(pick_auto(Some(claude), None).unwrap().name(), "claude");
+        assert_eq!(pick_auto(None, Some(ollama)).unwrap().name(), "ollama");
+        assert!(pick_auto(None, None).is_err());
+        let args: Vec<String> = codex_args(Path::new("last.txt"))
+            .into_iter()
+            .map(|a| a.to_string_lossy().into_owned())
+            .collect();
+        for f in ["hooks", "shell_tool", "unified_exec", "view_image"] {
+            assert!(
+                args.windows(2).any(|w| w[0] == "--disable" && w[1] == f),
+                "{f}: {args:?}"
+            );
+        }
+        assert_eq!(args.last().map(String::as_str), Some("last.txt"));
+    }
+
+    #[test]
     fn output_validation() {
         let known: HashSet<String> = ["r1".to_string()].into();
         let ok = r#"Here you go: ```json
@@ -1249,6 +1324,17 @@ mod tests {
             "b".repeat(13_000)
         );
         assert!(parse_output(&long_brief, &known).is_err());
+        // A secret echoed by the model never reaches the stored summary.
+        let key = "AKIAIOSFODNN7EXAMPLE";
+        let leaky = format!(
+            r#"{{"title":"t {key}","summary":"used {key}","gotchas":[{{"title":"g","body":"{key}"}}],"brief_md":"b {key}"}}"#
+        );
+        let o = parse_output(&leaky, &known).unwrap();
+        let all = format!(
+            "{} {} {} {}",
+            o.title, o.summary, o.gotchas[0].body, o.brief_md
+        );
+        assert!(!all.contains(key) && all.contains("[REDACTED:"), "{all}");
     }
 
     #[test]

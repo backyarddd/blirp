@@ -59,13 +59,13 @@ A failed run keeps the earlier summary, stores the error on the session (shown o
 
 | Value | What runs | Where your data goes | Cost / quota |
 |---|---|---|---|
-| `auto` (default) | first available of: `claude` on PATH, `codex` on PATH, Ollama answering at `$OLLAMA_HOST` or `http://127.0.0.1:11434` | depends on the pick | depends on the pick |
+| `auto` (default) | first available of: `claude` on PATH, Ollama answering at `$OLLAMA_HOST` or `http://127.0.0.1:11434` (never `codex`, see below) | depends on the pick | depends on the pick |
 | `claude` | `claude -p --model haiku --output-format json --safe-mode --strict-mcp-config --no-session-persistence --tools ""` | Anthropic, under your Claude Code login | Uses your Claude plan's usage limits or your API key's billing. One run sends up to about 60 000 characters (roughly 15 000 tokens) plus the brief and records to Haiku. |
-| `codex` | `codex exec --json --ephemeral --skip-git-repo-check --sandbox read-only --disable hooks -c mcp_servers={}` | OpenAI (or your configured Codex provider), under your Codex login | Uses Codex's configured default model, which may be a large one; counts against your ChatGPT plan or API billing. |
+| `codex` (explicit only) | `codex exec --json --ephemeral --skip-git-repo-check --sandbox read-only -c mcp_servers={}` plus `--disable` for `hooks`, `shell_tool`, `unified_exec`, `view_image`, `apps`, `plugins`, `browser_use`, `computer_use`, `multi_agent`, `image_generation` | OpenAI (or your configured Codex provider), under your Codex login | Uses Codex's configured default model, which may be a large one; counts against your ChatGPT plan or API billing. |
 | `ollama` | `POST /api/chat` with model `memory.ollama_model` (default `qwen2.5:7b`) | stays on the machine running Ollama | free; quality depends on the model (7B+ recommended) |
 | `none` | nothing | nowhere | none |
 
-Every CLI run happens in an empty scratch folder `~/.blirp/distill/run-*` (deleted afterwards) with hooks, plugins, MCP servers, tools and session persistence disabled, and with `BLIRP_DISTILLING=1`, so the summarizer run is never ingested, never triggers blirp hooks, and cannot touch your files. It is killed with its whole process tree after 180 s.
+Every CLI run happens in an empty scratch folder `~/.blirp/distill/run-*` (deleted afterwards) with hooks, plugins, MCP servers and session persistence disabled, and with `BLIRP_DISTILLING=1`, so the summarizer run is never ingested and never triggers blirp hooks. It is killed with its whole process tree after 180 s. `claude` runs with no tools at all. `codex` has no switch that removes every built-in tool: blirp turns off its shell and exec tools and the optional tools (feature names checked against codex 0.153) and keeps its read-only sandbox, but a transcript crafted to steer the model could still use a remaining built-in tool (for example to look at files). That is why `auto` never picks `codex`; choose it only if you accept that. The summarizer's reply is redacted before it is stored.
 
 To cap spend: lower `memory.daily_distill_limit`, raise `memory.distill_idle_secs` (fewer partial distills of long sessions), lower `memory.distill_max_chars`, or use `ollama`.
 
