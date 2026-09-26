@@ -98,6 +98,16 @@ fn suggestion_row(r: &Row<'_>) -> rusqlite::Result<Suggestion> {
     })
 }
 
+/// All brief versions of a project, newest first.
+pub(super) fn history_in(c: &Connection, project_id: &str) -> Result<Vec<Brief>> {
+    all(
+        c,
+        &format!("{HISTORY} ORDER BY updated_at DESC, id DESC"),
+        params![project_id],
+        brief_row,
+    )
+}
+
 pub(super) fn get_brief_in(c: &Connection, project_id: &str) -> Result<Option<Brief>> {
     one(
         c,
@@ -108,18 +118,6 @@ pub(super) fn get_brief_in(c: &Connection, project_id: &str) -> Result<Option<Br
         params![project_id],
         brief_row,
     )
-}
-
-/// This machine's id as the daemon recorded it ("" before the first start).
-fn local_machine_in(c: &Connection) -> Result<String> {
-    let v: Option<String> = one(
-        c,
-        "SELECT value_json FROM settings WHERE key = ?1",
-        params![super::MACHINE_ID_KEY],
-        |r| r.get(0),
-    )?;
-    Ok(v.and_then(|s| serde_json::from_str::<String>(&s).ok())
-        .unwrap_or_default())
 }
 
 pub(super) fn put_brief_in(
@@ -147,7 +145,7 @@ pub(super) fn put_brief_in(
         version: count + 1,
         updated_at: crate::now_ms().max(newest.map_or(0, |n| n + 1)),
         updated_by: by.to_string(),
-        machine_id: local_machine_in(tx)?,
+        machine_id: super::local_machine_in(tx)?,
     };
     apply_in(tx, &Change::Brief(b.clone()))?;
     Ok(b)
@@ -238,14 +236,7 @@ impl Store {
 
     /// All brief versions, newest first.
     pub fn brief_history(&self, project_id: &str) -> Result<Vec<Brief>> {
-        self.read(|c| {
-            all(
-                c,
-                &format!("{HISTORY} ORDER BY updated_at DESC, id DESC"),
-                params![project_id],
-                brief_row,
-            )
-        })
+        self.read(|c| history_in(c, project_id))
     }
 
     /// Write the body of history entry `version` as a new version.

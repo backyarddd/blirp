@@ -17,6 +17,119 @@ use crate::model::Session;
 use rusqlite::{Connection, Transaction, params};
 use serde::{Deserialize, Serialize};
 
+/// Present while replication is off (standalone): nothing is queued.
+const OUTBOX_OFF_KEY: &str = "sync.outbox_off";
+/// Events rowid up to which a backfill queued them (present while one runs).
+const BACKFILL_KEY: &str = "sync.backfill_events";
+
+/// Drop outbox entries up to `upto` that are older than the session status
+/// coalescing window (`modify_session` reads the time of a session's last
+/// entry).
+fn prune_in(tx: &Transaction<'_>, upto: i64) -> Result<()> {
+    tx.execute(
+        "DELETE FROM outbox WHERE origin_seq <= ?1 AND ts < ?2",
+        params![upto, crate::now_ms() - super::sessions::STATUS_COALESCE_MS],
+    )?;
+    Ok(())
+}
+
+/// Whether replication is off, so writes queue nothing.
+pub(super) fn outbox_off(c: &Connection) -> Result<bool> {
+    Ok(one(
+        c,
+        "SELECT 1 FROM settings WHERE key = ?1",
+        params![OUTBOX_OFF_KEY],
+        |_| Ok(()),
+    )?
+    .is_some())
+}
+
+/// Queue every row this machine replicates except events (those follow in
+/// batches, see [`Store::backfill_events`]): its machine row, folders and
+/// sessions, all projects and shared memory, and session tombstones.
+/// Sessions come before any event is queued, so the hub knows the session
+/// of every event it receives.
+fn backfill_rows_in(tx: &Transaction<'_>) -> Result<usize> {
+    use super::memory::{record_row, resource_row, wiki_row};
+    let me = super::local_machine_in(tx)?;
+    let mut changes: Vec<Change> = Vec::new();
+    changes.extend(
+        all(
+            tx,
+            "SELECT * FROM machines WHERE id = ?1",
+            params![me],
+            super::misc::machine_row,
+        )?
+        .into_iter()
+        .map(Change::Machine),
+    );
+    changes.extend(
+        all(
+            tx,
+            "SELECT * FROM projects ORDER BY created_at",
+            [],
+            super::projects::project_row,
+        )?
+        .into_iter()
+        .map(Change::Project),
+    );
+    changes.extend(
+        all(
+            tx,
+            "SELECT * FROM project_paths WHERE machine_id = ?1",
+            params![me],
+            path_row,
+        )?
+        .into_iter()
+        .map(Change::ProjectPath),
+    );
+    changes.extend(
+        all(
+            tx,
+            "SELECT * FROM sessions WHERE machine_id = ?1 ORDER BY started_at",
+            params![me],
+            session_row,
+        )?
+        .into_iter()
+        .map(Change::Session),
+    );
+    changes.extend(
+        all(tx, "SELECT * FROM records", [], record_row)?
+            .into_iter()
+            .map(Change::Record),
+    );
+    changes.extend(
+        all(tx, "SELECT * FROM wiki_pages", [], wiki_row)?
+            .into_iter()
+            .map(Change::WikiPage),
+    );
+    changes.extend(
+        all(tx, "SELECT * FROM resources", [], resource_row)?
+            .into_iter()
+            .map(Change::Resource),
+    );
+    // Every brief version, oldest first, then each project's current one
+    // (its history row is already queued; this makes it current there too).
+    let projects: Vec<String> = all(tx, "SELECT project_id FROM briefs", [], |r| r.get(0))?;
+    for p in &projects {
+        for b in super::memory::history_in(tx, p)?.into_iter().rev() {
+            changes.push(Change::Brief(b));
+        }
+        if let Some(b) = super::memory::get_brief_in(tx, p)? {
+            changes.push(Change::Brief(b));
+        }
+    }
+    changes.extend(
+        all(tx, "SELECT id FROM deleted_sessions", [], |r| r.get(0))?
+            .into_iter()
+            .map(|id| Change::DeleteSession { id }),
+    );
+    for c in &changes {
+        super::queue_in(tx, c)?;
+    }
+    Ok(changes.len())
+}
+
 /// Largest accepted replicated entry. API bodies are capped at 2 MB, so a
 /// legitimate entry stays below this even with JSON escaping.
 pub const MAX_ENTRY_BYTES: usize = 4 << 20;
@@ -265,10 +378,113 @@ fn flush_own_in(tx: &Transaction<'_>, own: &str) -> Result<usize> {
         cur.last_pushed_origin_seq = head;
         set_cursors_in(tx, own, cur)?;
     }
+    // Logged: the hub's own outbox entries have done their job (the last
+    // few seconds stay: session status coalescing looks at them).
+    prune_in(tx, cur.last_pushed_origin_seq)?;
     Ok(n)
 }
 
 impl Store {
+    /// Turn replication on (a hub or node) or off (standalone). Off: nothing
+    /// is queued and the outbox is emptied. Turning it on backfills: every
+    /// replicated row except events is queued in this transaction, events
+    /// follow in bounded, resumable batches ([`Store::backfill_events`]).
+    /// Returns how many rows were queued.
+    pub fn set_replication(&self, on: bool) -> Result<usize> {
+        let queued = self.write(|tx| {
+            let off = outbox_off(tx)?;
+            match (on, off) {
+                (true, true) => {
+                    tx.execute(
+                        "DELETE FROM settings WHERE key = ?1",
+                        params![OUTBOX_OFF_KEY],
+                    )?;
+                    let n = backfill_rows_in(tx)?;
+                    tx.execute(
+                        "INSERT INTO settings(key, value_json) VALUES (?1, '0')
+                         ON CONFLICT(key) DO UPDATE SET value_json = '0'",
+                        params![BACKFILL_KEY],
+                    )?;
+                    Ok(n)
+                }
+                (false, false) => {
+                    tx.execute(
+                        "INSERT INTO settings(key, value_json) VALUES (?1, 'true')",
+                        params![OUTBOX_OFF_KEY],
+                    )?;
+                    tx.execute("DELETE FROM settings WHERE key = ?1", params![BACKFILL_KEY])?;
+                    tx.execute("DELETE FROM outbox_deferred", [])?;
+                    Ok(0)
+                }
+                _ => Ok(0),
+            }
+        })?;
+        if !on {
+            // Emptied in chunks so a large outbox never holds the writer long.
+            while self.write(|tx| {
+                Ok(tx.execute(
+                    "DELETE FROM outbox WHERE origin_seq IN
+                       (SELECT origin_seq FROM outbox ORDER BY origin_seq LIMIT 20000)",
+                    [],
+                )?)
+            })? > 0
+            {}
+        }
+        Ok(queued)
+    }
+
+    /// Queue up to `limit` more of this machine's events after turning
+    /// replication on (see [`Store::set_replication`]); the position is
+    /// kept in the database, so it resumes after a restart. Returns how
+    /// many were queued (0: nothing left, the backfill is finished).
+    pub fn backfill_events(&self, limit: usize) -> Result<usize> {
+        // Usually none is running: answer that without taking the writer.
+        let running = self.read(|c| {
+            Ok(one(
+                c,
+                "SELECT 1 FROM settings WHERE key = ?1",
+                params![BACKFILL_KEY],
+                |_| Ok(()),
+            )?
+            .is_some())
+        })?;
+        if !running {
+            return Ok(0);
+        }
+        self.write(|tx| {
+            let after: Option<String> = one(
+                tx,
+                "SELECT value_json FROM settings WHERE key = ?1",
+                params![BACKFILL_KEY],
+                |r| r.get(0),
+            )?;
+            let Some(after) = after.and_then(|a| a.parse::<i64>().ok()) else {
+                return Ok(0);
+            };
+            let me = super::local_machine_in(tx)?;
+            let rows = all(
+                tx,
+                "SELECT e.rowid AS rid, e.* FROM events e
+                 JOIN sessions s ON s.id = e.session_id AND s.machine_id = ?1
+                 WHERE e.rowid > ?2 ORDER BY e.rowid LIMIT ?3",
+                params![me, after, limit as i64],
+                |r| Ok((r.get::<_, i64>("rid")?, super::sessions::event_row(r)?)),
+            )?;
+            let Some(last) = rows.last().map(|(rid, _)| *rid) else {
+                tx.execute("DELETE FROM settings WHERE key = ?1", params![BACKFILL_KEY])?;
+                return Ok(0);
+            };
+            for (_, e) in &rows {
+                super::queue_in(tx, &Change::Event(e.clone()))?;
+            }
+            tx.execute(
+                "UPDATE settings SET value_json = ?2 WHERE key = ?1",
+                params![BACKFILL_KEY, last.to_string()],
+            )?;
+            Ok(rows.len())
+        })
+    }
+
     /// Write a replicated change received from another machine: the row
     /// only, never the outbox. Returns false for a duplicate event.
     pub fn apply_remote(&self, change: &Change) -> Result<bool> {
@@ -563,6 +779,10 @@ impl Store {
             drop(later_own);
             cur.last_pulled_hub_seq = page.up_to;
             set_cursors_in(tx, hub, cur)?;
+            // Our entries logged up to here are behind every entry still to
+            // be pulled, so they can never be the "later own write" that
+            // makes a pull skip a remote one: they are no longer needed.
+            prune_in(tx, own_seen)?;
             Ok(applied)
         })
     }
@@ -686,7 +906,20 @@ mod tests {
         node.set_pushed_cursor(hub_id, out.acked).unwrap();
     }
 
+    /// Make every outbox entry older than the coalescing window, so pruning
+    /// runs in these tests as it does in real use.
+    fn age(s: &Store) {
+        s.write(|tx| Ok(tx.execute("UPDATE outbox SET ts = 0", [])?))
+            .unwrap();
+    }
+
+    fn outbox_len(s: &Store) -> usize {
+        s.outbox_after(0, 1_000_000).unwrap().len()
+    }
+
     fn pull(node: &Store, node_id: &str, hub: &Store, hub_id: &str) -> usize {
+        age(node);
+        age(hub);
         hub.hub_flush_own(hub_id).unwrap();
         let mut total = 0;
         loop {
@@ -861,6 +1094,118 @@ mod tests {
             assert!(st.get_session("s1").unwrap().is_none());
             assert_eq!(st.max_event_seq("s1").unwrap(), 0);
         }
+    }
+
+    // Entries the hub logged are dropped from the outbox once a pull passed
+    // them (node) or once logged (hub); hub_log keeps them for pulls.
+    #[test]
+    fn acknowledged_outbox_entries_are_pruned() {
+        let (_h, hub) = temp_store();
+        let (_a, a) = temp_store();
+        for i in 0..3 {
+            a.apply(project(&format!("p{i}"), "x")).unwrap();
+        }
+        hub.apply(project("h", "hub")).unwrap();
+        push(&a, "A", &hub, "H");
+        assert_eq!(outbox_len(&a), 3, "pushed, not yet pulled past");
+        pull(&a, "A", &hub, "H");
+        assert_eq!(outbox_len(&a), 0);
+        assert_eq!(outbox_len(&hub), 0);
+        assert_eq!(hub.hub_head().unwrap(), 4);
+        // Unpushed writes stay.
+        a.apply(project("p9", "later")).unwrap();
+        pull(&a, "A", &hub, "H");
+        assert_eq!(outbox_len(&a), 1);
+    }
+
+    // A standalone machine queues nothing; pairing queues what exists:
+    // everything but events at once, events in resumable batches.
+    #[test]
+    fn standalone_queues_nothing_and_pairing_backfills() {
+        use crate::model::{Event, EventKind};
+        let (dir, s) = temp_store();
+        s.set_setting(super::super::MACHINE_ID_KEY, &serde_json::json!("A"))
+            .unwrap();
+        s.apply(project("early", "x")).unwrap();
+        s.set_replication(false).unwrap();
+        assert_eq!(outbox_len(&s), 0, "emptied");
+        s.upsert_machine(&Machine {
+            id: "A".into(),
+            name: "a".into(),
+            os: "x".into(),
+            role: MachineRole::Standalone,
+            last_seen: 1,
+            revoked: false,
+        })
+        .unwrap();
+        s.apply(project("p", "shared")).unwrap();
+        for (id, m) in [("mine", "A"), ("theirs", "B"), ("gone", "A")] {
+            s.apply(Change::Session(crate::model::Session {
+                agent_session_id: Some(id.into()),
+                ..session_of(id, m)
+            }))
+            .unwrap();
+        }
+        s.delete_session("gone").unwrap();
+        for (sid, seq) in [("mine", 1), ("mine", 2), ("mine", 3), ("theirs", 1)] {
+            s.apply(Change::Event(Event {
+                session_id: sid.into(),
+                seq,
+                ts: 1,
+                kind: EventKind::User,
+                text: "t".into(),
+                meta: None,
+            }))
+            .unwrap();
+        }
+        s.put_brief("p", "one", "user").unwrap();
+        s.put_brief("p", "two", "user").unwrap();
+        assert_eq!(outbox_len(&s), 0, "standalone queues nothing");
+
+        let n = s.set_replication(true).unwrap();
+        let kinds = |s: &Store| -> Vec<(String, String)> {
+            s.outbox_after(0, 1000)
+                .unwrap()
+                .into_iter()
+                .map(|e| (e.entity, e.key))
+                .collect()
+        };
+        let q = kinds(&s);
+        assert_eq!(q.len(), n);
+        for want in [
+            ("machines", "A"),
+            ("projects", "early"),
+            ("projects", "p"),
+            ("sessions", "mine"),
+            ("sessions", "gone"),
+        ] {
+            assert!(
+                q.iter().any(|(e, k)| (e.as_str(), k.as_str()) == want),
+                "{want:?} in {q:?}"
+            );
+        }
+        assert!(
+            !q.iter().any(|(_, k)| k == "theirs"),
+            "other machines' rows stay"
+        );
+        assert_eq!(q.iter().filter(|(e, _)| e == "briefs").count(), 3);
+        assert!(!q.iter().any(|(e, _)| e == "events"), "events come later");
+        // Live writes are queued again.
+        s.apply(project("live", "x")).unwrap();
+
+        assert_eq!(s.backfill_events(2).unwrap(), 2);
+        // Resumes from the stored position (e.g. after a restart).
+        drop(s);
+        let s = Store::open(&dir.path().join("blirp.db")).unwrap();
+        assert_eq!(s.backfill_events(2).unwrap(), 1);
+        assert_eq!(s.backfill_events(2).unwrap(), 0);
+        let events: Vec<String> = kinds(&s)
+            .into_iter()
+            .filter(|(e, _)| e == "events")
+            .map(|(_, k)| k)
+            .collect();
+        assert_eq!(events, ["mine\n1", "mine\n2", "mine\n3"]);
+        assert!(kinds(&s).iter().any(|(_, k)| k == "live"));
     }
 
     #[test]

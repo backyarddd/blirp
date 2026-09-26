@@ -1413,15 +1413,15 @@ async fn hook_transcript_path_is_ingested_promptly() {
     })
     .await;
     assert!(start.elapsed() < Duration::from_secs(5));
-    // Ingest filled the session the hook created, through the outbox.
+    // Ingest filled the session the hook created.
     let s = store
         .session_by_agent_id("claude", CLAUDE_SID)
         .unwrap()
         .unwrap();
     assert_eq!(s.id, hook_session);
     assert_eq!(s.title.as_deref(), Some("Greeting helper"));
-    let outbox = store.outbox_after(0, 1_000_000).unwrap();
-    assert_eq!(outbox.iter().filter(|e| e.entity == "events").count(), 9);
+    // A standalone daemon queues nothing for replication.
+    assert!(store.outbox_after(0, 1_000_000).unwrap().is_empty());
     daemon.shutdown().await.unwrap();
 }
 

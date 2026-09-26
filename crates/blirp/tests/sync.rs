@@ -414,8 +414,13 @@ async fn pair_replicate_proxy_revoke_and_portal() {
             _ => None,
         })
         .collect();
-    let b_head = b_store.outbox_head().unwrap();
-    assert_eq!(from_b, (1..=b_head).collect::<Vec<_>>());
+    // Contiguous up to what B pushed: nothing lost, nothing logged twice.
+    // (B's outbox itself is pruned once the hub logged its entries.)
+    let b_pushed = b_store
+        .sync_cursors(&a.id())
+        .unwrap()
+        .last_pushed_origin_seq;
+    assert_eq!(from_b, (from_b[0]..=b_pushed).collect::<Vec<_>>());
 
     // ---- restart resume: A writes while B is down; B catches up after.
     b.daemon.shutdown().await.unwrap();

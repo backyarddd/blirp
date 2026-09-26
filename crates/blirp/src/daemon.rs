@@ -163,6 +163,10 @@ impl Daemon {
                             if let Err(e) = st.store.flush_deferred(blirp_core::now_ms()) {
                                 tracing::warn!(error = %e, "queueing coalesced session updates failed");
                             }
+                            // Events of a backfill after pairing (§10), in batches.
+                            if let Err(e) = st.store.backfill_events(2000) {
+                                tracing::warn!(error = %e, "queueing events for replication failed");
+                            }
                             owned
                         })
                         .await

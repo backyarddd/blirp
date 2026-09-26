@@ -6,7 +6,7 @@ use rusqlite::{Row, params};
 use serde_json::Value as JsonValue;
 use std::collections::BTreeMap;
 
-fn machine_row(r: &Row<'_>) -> rusqlite::Result<Machine> {
+pub(super) fn machine_row(r: &Row<'_>) -> rusqlite::Result<Machine> {
     Ok(Machine {
         id: r.get("id")?,
         name: r.get("name")?,

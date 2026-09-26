@@ -323,23 +323,25 @@ fn redact_memory(change: &Change) -> Option<Change> {
     changed.then_some(c)
 }
 
-/// Write the row(s) for `change` and append it to the outbox.
-pub(crate) fn apply_in(tx: &Transaction<'_>, change: &Change) -> Result<bool> {
-    let redacted = redact_memory(change);
-    let change = redacted.as_ref().unwrap_or(change);
-    let written = write_row(tx, change)?;
-    if written == 0 && matches!(change, Change::Event(_) | Change::Session(_)) {
-        // A duplicate event, or a write of a deleted session: nothing to queue.
-        return Ok(false);
+/// This machine's id as the daemon recorded it ("" before the first start).
+pub(crate) fn local_machine_in(c: &Connection) -> Result<String> {
+    let v: Option<String> = one(
+        c,
+        "SELECT value_json FROM settings WHERE key = ?1",
+        params![MACHINE_ID_KEY],
+        |r| r.get(0),
+    )?;
+    Ok(v.and_then(|s| serde_json::from_str::<String>(&s).ok())
+        .unwrap_or_default())
+}
+
+/// Append `change` to the outbox (unless replication is off, see
+/// [`Store::set_replication`]).
+pub(crate) fn queue_in(tx: &Transaction<'_>, change: &Change) -> Result<()> {
+    if sync::outbox_off(tx)? {
+        return Ok(());
     }
     let (entity, op, key) = change.describe();
-    if matches!(change, Change::Session(_)) {
-        // The full row is queued now; a deferred status write is covered.
-        tx.execute(
-            "DELETE FROM outbox_deferred WHERE entity = ?1 AND key = ?2",
-            params![entity, key],
-        )?;
-    }
     tx.execute(
         "INSERT INTO outbox(entity, op, key, payload_json, ts) VALUES (?1,?2,?3,?4,?5)",
         params![
@@ -350,6 +352,26 @@ pub(crate) fn apply_in(tx: &Transaction<'_>, change: &Change) -> Result<bool> {
             crate::now_ms()
         ],
     )?;
+    Ok(())
+}
+
+/// Write the row(s) for `change` and append it to the outbox.
+pub(crate) fn apply_in(tx: &Transaction<'_>, change: &Change) -> Result<bool> {
+    let redacted = redact_memory(change);
+    let change = redacted.as_ref().unwrap_or(change);
+    let written = write_row(tx, change)?;
+    if written == 0 && matches!(change, Change::Event(_) | Change::Session(_)) {
+        // A duplicate event, or a write of a deleted session: nothing to queue.
+        return Ok(false);
+    }
+    if let Change::Session(s) = change {
+        // The full row is queued now; a deferred status write is covered.
+        tx.execute(
+            "DELETE FROM outbox_deferred WHERE entity = 'sessions' AND key = ?1",
+            params![s.id],
+        )?;
+    }
+    queue_in(tx, change)?;
     Ok(true)
 }
 
