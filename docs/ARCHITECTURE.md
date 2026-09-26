@@ -49,7 +49,7 @@ Data dir `BLIRP_HOME`, default `~/.blirp` on every OS (Windows: `%USERPROFILE%\.
   distill/run-*/                   summarizer scratch dirs (§9), removed after each run
 ```
 
-`runtime.json` + the token authenticate every local client (Tauri shell, hooks, MCP stdio shim, CLI). The daemon binds `127.0.0.1:<port>` (default 47770). A taken port fails the start with an error naming the program that holds it when the OS tells (never a silent move to another port, which would leave the known address to whoever holds it); `daemon.port = 0` explicitly picks a free port. The actual port is in runtime.json.
+`runtime.json` + the token authenticate every local client (Tauri shell, hooks, MCP stdio shim, CLI). The daemon binds `127.0.0.1:<port>` (default 47770). It and the LAN portal bind exclusively (`SO_EXCLUSIVEADDRUSE` on Windows, where another program could otherwise bind a more specific address on the same port, e.g. `127.0.0.1` under the portal's `0.0.0.0`, and receive its connections). A taken port fails the start with an error naming the program that holds it when the OS tells (never a silent move to another port, which would leave the known address to whoever holds it); `daemon.port = 0` explicitly picks a free port. The actual port is in runtime.json.
 
 ## 4. Processes
 

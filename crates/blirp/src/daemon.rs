@@ -95,7 +95,7 @@ fn load_machine(store: &Store, config: &Config, id: String) -> anyhow::Result<Ma
 /// address clients and bookmarks know. `0` asks for a free port.
 async fn bind(port: u16, config_file: &std::path::Path) -> anyhow::Result<TcpListener> {
     let addr = SocketAddr::from((Ipv4Addr::LOCALHOST, port));
-    match TcpListener::bind(addr).await {
+    match crate::bind_exclusive(addr).and_then(TcpListener::from_std) {
         Ok(l) => Ok(l),
         Err(e) if port != 0 && e.kind() == std::io::ErrorKind::AddrInUse => {
             let owner = tokio::task::spawn_blocking(move || port_owner(port))
