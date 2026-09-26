@@ -1050,6 +1050,18 @@ fn amp_threads() {
     std::fs::write(&path, v.to_string()).unwrap();
     h.pass();
     assert_eq!(h.events(&s), before);
+    // A message added after the edit is stored, past every earlier seq.
+    v["messages"]
+        .as_array_mut()
+        .unwrap()
+        .push(json!({"role": "user", "content": [{"type": "text", "text": "after the edit"}]}));
+    std::fs::write(&path, v.to_string()).unwrap();
+    h.pass();
+    let after = h.events(&s);
+    assert_eq!(after.len(), before.len() + 1);
+    let last = after.last().unwrap();
+    assert_eq!(last.text, "after the edit");
+    assert!(last.seq > before.last().unwrap().seq);
 }
 
 // ---------------------------------------------------------------- aider

@@ -40,6 +40,11 @@ impl Amp {
 #[derive(Debug, Default, Serialize, Deserialize)]
 struct State {
     messages: u64,
+    /// Added to a message's index for its seq. After the thread was
+    /// edited shorter it moves past every index used so far, so messages
+    /// appended later never reuse (and lose to) an old message's seqs.
+    #[serde(default)]
+    base: u64,
 }
 
 /// `file:///C:/x` or `file:///home/x` -> a local path string.
@@ -146,6 +151,7 @@ impl Adapter for Amp {
             .unwrap_or(&empty);
         if (msgs.len() as u64) < st.messages {
             // Edited/truncated thread: continue after what is left.
+            st.base += st.messages;
             st.messages = msgs.len() as u64;
         }
         super::report_cwd(sink, &asid, &meta, &mut false);
@@ -197,7 +203,7 @@ impl Adapter for Amp {
                         .and_then(parse_ts)
                 })
                 .or(created);
-            let mut e = Emit::line(sink, &asid, i as u64);
+            let mut e = Emit::line(sink, &asid, st.base + i as u64);
             message(m, role, ts, &mut e)?;
             st.messages = i as u64 + 1;
         }
