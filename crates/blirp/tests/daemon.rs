@@ -547,3 +547,61 @@ async fn concurrent_resumes_start_one_agent() {
     let Harness { daemon, _home, .. } = h;
     daemon.shutdown().await.unwrap();
 }
+
+// Ingested subagent sessions stay out of the default list; `parent=` lists
+// them and the detail counts them.
+#[tokio::test]
+async fn subagent_children_are_filtered_and_counted() {
+    use blirp_core::model::{SessionDetail, SessionOrigin, SessionsPage};
+    let h = Harness::start().await;
+    let store = &h.daemon.state.store;
+    let proj = h._home.path().join("kids");
+    std::fs::create_dir(&proj).unwrap();
+    let project = store
+        .register_project(&h.daemon.state.machine.id, &proj, None)
+        .unwrap();
+    let mk = |id: &str, parent: Option<&str>, origin: SessionOrigin, at: i64| Session {
+        id: id.into(),
+        project_id: project.id.clone(),
+        machine_id: h.daemon.state.machine.id.clone(),
+        agent: "claude".into(),
+        agent_session_id: Some(format!("asid-{id}")),
+        origin,
+        cwd: proj.display().to_string(),
+        title: None,
+        status: SessionStatus::Completed,
+        branch: None,
+        worktree: None,
+        transcript_path: None,
+        started_at: at,
+        ended_at: Some(at),
+        last_activity_at: at,
+        exit_code: None,
+        summary: None,
+        distilled_through_seq: 0,
+        tokens_in: 0,
+        tokens_out: 0,
+        cost_usd: 0.0,
+        parent_session_id: parent.map(str::to_string),
+        stopped_by_user: false,
+    };
+    store
+        .insert_session(&mk("top", None, SessionOrigin::External, 1))
+        .unwrap();
+    store
+        .insert_session(&mk("fork", Some("top"), SessionOrigin::Blirp, 2))
+        .unwrap();
+    store
+        .insert_session(&mk("sub", Some("top"), SessionOrigin::External, 3))
+        .unwrap();
+    let ids = |p: SessionsPage| p.items.into_iter().map(|s| s.id).collect::<Vec<_>>();
+    assert_eq!(ids(h.get("/api/sessions").await), ["fork", "top"]);
+    assert_eq!(
+        ids(h.get("/api/sessions?include_children=true").await),
+        ["sub", "fork", "top"]
+    );
+    assert_eq!(ids(h.get("/api/sessions?parent=top").await), ["sub"]);
+    let d: SessionDetail = h.get("/api/sessions/top").await;
+    assert_eq!((d.session.id.as_str(), d.children_count), ("top", 1));
+    h.daemon.shutdown().await.unwrap();
+}

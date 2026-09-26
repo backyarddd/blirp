@@ -51,10 +51,19 @@ pub struct SessionFilter {
     pub machine_id: Option<String>,
     /// Substring match on title, cwd and agent.
     pub q: Option<String>,
+    /// Only subagent children of this session (origin `external` with
+    /// `parent_session_id` set to it).
+    pub parent: Option<String>,
+    /// Leave out every subagent child session.
+    pub hide_children: bool,
     /// Opaque cursor from a previous page.
     pub cursor: Option<String>,
     pub limit: i64,
 }
+
+/// SQL condition for "is an ingested subagent session" (§8): continue/fork
+/// sessions also carry a parent but are the user's own (origin `blirp`).
+const IS_CHILD: &str = "(origin = 'external' AND parent_session_id IS NOT NULL)";
 
 fn like_escape(s: &str) -> String {
     let mut out = String::with_capacity(s.len() + 2);
@@ -161,6 +170,15 @@ impl Store {
         if let Some(m) = &f.machine_id {
             push(" AND machine_id = ?", m.clone().into(), &mut sql);
         }
+        if let Some(p) = &f.parent {
+            push(
+                &format!(" AND {IS_CHILD} AND parent_session_id = ?"),
+                p.clone().into(),
+                &mut sql,
+            );
+        } else if f.hide_children {
+            sql.push_str(&format!(" AND NOT {IS_CHILD}"));
+        }
         if let Some(q) = f.q.as_deref().map(str::trim).filter(|q| !q.is_empty()) {
             let pat = like_escape(q);
             push(
@@ -193,6 +211,19 @@ impl Store {
             None
         };
         Ok(SessionsPage { items, next_cursor })
+    }
+
+    /// Subagent sessions recorded under `id` (see [`SessionFilter::parent`]).
+    pub fn children_count(&self, id: &str) -> Result<i64> {
+        self.read(|c| {
+            Ok(c.query_row(
+                &format!(
+                    "SELECT count(*) FROM sessions WHERE {IS_CHILD} AND parent_session_id = ?1"
+                ),
+                params![id],
+                |r| r.get(0),
+            )?)
+        })
     }
 
     pub fn insert_event(&self, e: Event) -> Result<bool> {
@@ -396,6 +427,52 @@ mod tests {
             .unwrap();
         assert_eq!(m.status, SessionStatus::Completed);
         assert_eq!(store.live_sessions_on("m").unwrap().len(), 5);
+    }
+
+    #[test]
+    fn subagent_children_are_filtered_and_counted() {
+        let (_d, store) = temp_store();
+        store.insert_session(&session("top", "p", 100)).unwrap();
+        let mut fork = session("fork", "p", 101);
+        fork.parent_session_id = Some("top".into());
+        store.insert_session(&fork).unwrap();
+        for (i, id) in ["sub1", "sub2"].iter().enumerate() {
+            let mut sub = session(id, "p", 102 + i as i64);
+            sub.origin = SessionOrigin::External;
+            sub.parent_session_id = Some("top".into());
+            store.insert_session(&sub).unwrap();
+        }
+        let ids = |f: SessionFilter| -> Vec<String> {
+            store
+                .list_sessions(&SessionFilter { limit: 50, ..f })
+                .unwrap()
+                .items
+                .into_iter()
+                .map(|s| s.id)
+                .collect()
+        };
+        assert_eq!(
+            ids(SessionFilter::default()),
+            ["sub2", "sub1", "fork", "top"]
+        );
+        // Forks keep showing: only ingested subagents are children.
+        assert_eq!(
+            ids(SessionFilter {
+                hide_children: true,
+                ..Default::default()
+            }),
+            ["fork", "top"]
+        );
+        assert_eq!(
+            ids(SessionFilter {
+                parent: Some("top".into()),
+                hide_children: true,
+                ..Default::default()
+            }),
+            ["sub2", "sub1"]
+        );
+        assert_eq!(store.children_count("top").unwrap(), 2);
+        assert_eq!(store.children_count("sub1").unwrap(), 0);
     }
 
     #[test]

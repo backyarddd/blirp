@@ -228,6 +228,29 @@ export type SessionsPage = { items: Array<Session>,
  */
 next_cursor: string | null, };
 
+/**
+ * `GET /api/sessions/:id`: the session plus how many subagent sessions
+ * ingest recorded under it (origin `external` with `parent_session_id`
+ * set to it, §8); list them with `GET /api/sessions?parent=<id>`.
+ */
+export type SessionDetail = { children_count: number, id: string, project_id: string, machine_id: string, 
+/**
+ * `claude|codex|opencode|pi|gemini|cursor|amp|aider|dsh|shell|custom:<name>`
+ */
+agent: string, 
+/**
+ * The agent's own session id (claude uuid, codex rollout uuid, ...).
+ */
+agent_session_id: string | null, origin: SessionOrigin, cwd: string, title: string | null, status: SessionStatus, branch: string | null, worktree: string | null, transcript_path: string | null, started_at: number, ended_at: number | null, last_activity_at: number, exit_code: number | null, 
+/**
+ * Distill output (§9), null until the session is distilled.
+ */
+summary: JsonValue | null, distilled_through_seq: number, tokens_in: number, tokens_out: number, cost_usd: number, parent_session_id: string | null, 
+/**
+ * Ended by a user Stop: `status` is `completed` and `exit_code` null.
+ */
+stopped_by_user: boolean, };
+
 export type LaunchSession = { 
 /**
  * Launch in this project's folder on this machine. One of `project_id`/`cwd` is required.

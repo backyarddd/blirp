@@ -593,6 +593,16 @@ pub struct FileContent {
     pub content: String,
 }
 
+/// `GET /api/sessions/:id`: the session plus how many subagent sessions
+/// ingest recorded under it (origin `external` with `parent_session_id`
+/// set to it, §8); list them with `GET /api/sessions?parent=<id>`.
+#[derive(Debug, Clone, Serialize, Deserialize, TS)]
+pub struct SessionDetail {
+    #[serde(flatten)]
+    pub session: Session,
+    pub children_count: i64,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, TS)]
 pub struct SessionsPage {
     pub items: Vec<Session>,
@@ -931,7 +941,7 @@ mod tests {
             ErrorBody, ErrorDetail, Health, ProjectPathInfo, ProjectSummary, CreateProject,
             PatchProject, MergeProject, ProjectMemory, PutBrief, RevertBrief, CreateRecord,
             PatchRecord, CreateWikiPage, PutWikiPage, CreateResource, PatchResource,
-            GitStatusEntry, GitStatus, GitDiff, FileEntry, DirListing, FileContent, SessionsPage,
+            GitStatusEntry, GitStatus, GitDiff, FileEntry, DirListing, FileContent, SessionsPage, SessionDetail,
             LaunchSession, PatchSession, OpenTarget, OpenSession, EventsPage, SearchHit, SearchResults, AgentInfo,
             AgentIntegration, Injection, SummaryItem, DistillFailure, SessionSummary,
             SettingsView, SettingsPatch, SyncStatus, SyncInvite, JoinHub, BrowserInvite, PatchDevice,

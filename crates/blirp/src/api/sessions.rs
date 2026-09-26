@@ -8,7 +8,8 @@ use axum::response::Response;
 use axum::routing::{get, post};
 use axum::{Json, Router};
 use blirp_core::model::{
-    EventsPage, LaunchSession, PatchSession, ServerEvent, Session, SessionStatus, SessionsPage,
+    EventsPage, LaunchSession, PatchSession, ServerEvent, Session, SessionDetail, SessionStatus,
+    SessionsPage,
 };
 use blirp_core::store::SessionFilter;
 use serde::Deserialize;
@@ -30,6 +31,10 @@ struct ListQuery {
     agent: Option<String>,
     machine: Option<String>,
     q: Option<String>,
+    /// Only the subagent children of this session.
+    parent: Option<String>,
+    /// Include subagent children in an unfiltered list (default false).
+    include_children: Option<bool>,
     cursor: Option<String>,
     limit: Option<i64>,
 }
@@ -45,6 +50,8 @@ async fn list(
         agent: q.agent,
         machine_id: q.machine,
         q: q.q,
+        hide_children: q.parent.is_none() && !q.include_children.unwrap_or(false),
+        parent: q.parent,
         cursor: q.cursor,
         limit: q.limit.unwrap_or(50),
     };
@@ -80,12 +87,17 @@ async fn remote_machine(s: &SharedState, id: &str) -> ApiResult<Option<String>> 
 async fn detail(
     State(s): State<SharedState>,
     ApiPath(id): ApiPath<String>,
-) -> ApiResult<Json<Session>> {
+) -> ApiResult<Json<SessionDetail>> {
     let store = s.store.clone();
     blocking(move || {
-        store
+        let session = store
             .get_session(&id)?
-            .ok_or_else(|| ApiError::not_found("session"))
+            .ok_or_else(|| ApiError::not_found("session"))?;
+        let children_count = store.children_count(&id)?;
+        Ok(SessionDetail {
+            session,
+            children_count,
+        })
     })
     .await
     .map(Json)
