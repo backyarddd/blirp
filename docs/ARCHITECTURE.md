@@ -336,6 +336,8 @@ GET  /api/settings ; PATCH /api/settings  {config: Config, values: {key: json}};
 POST /api/sync/hub/enable ; POST /api/sync/invite ; POST /api/sync/join {invite, code} ; GET /api/sync/status
 POST /api/devices/browser-invite         one-time QR login for phone/browser (hub)
 GET  /api/events/ws                      server push: session status changes, new sessions, memory updates
+POST /api/daemon/shutdown                202; graceful stop, same as SIGTERM (desktop tray Quit, updater;
+                                         the detached Windows daemon has no console to signal)
 GET  /mcp                                MCP Streamable HTTP
 GET  /*                                  embedded SPA
 ```

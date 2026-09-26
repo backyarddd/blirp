@@ -96,7 +96,12 @@ async fn run(cmd: Command, paths: Paths) -> anyhow::Result<ExitCode> {
             port,
         } => {
             let _guard = crate::daemon::init_logging(&paths)?;
-            crate::daemon::run_foreground(paths, port).await?;
+            if let Err(e) = crate::daemon::run_foreground(paths, port).await {
+                // A detached daemon's stderr goes nowhere; the log is where
+                // `--detach` and the desktop app tell the user to look.
+                tracing::error!(error = format!("{e:#}"), "daemon failed");
+                return Err(e);
+            }
             Ok(ExitCode::SUCCESS)
         }
         Command::Status => status(&paths).await,

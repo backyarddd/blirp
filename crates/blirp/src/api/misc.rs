@@ -6,8 +6,9 @@ use axum::Json;
 use axum::Router;
 use axum::extract::State;
 use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
+use axum::http::StatusCode;
 use axum::response::Response;
-use axum::routing::get;
+use axum::routing::{get, post};
 use blirp_core::model::{
     AgentInfo, Health, Machine, SearchHitKind, SearchResults, ServerEvent, SettingsPatch,
     SettingsView,
@@ -24,6 +25,15 @@ pub fn routes() -> Router<SharedState> {
         .route("/api/settings", get(get_settings).patch(patch_settings))
         .route("/api/agents", get(agents))
         .route("/api/events/ws", get(events_ws))
+        .route("/api/daemon/shutdown", post(shutdown))
+}
+
+/// Graceful stop for clients without a signal path to the daemon (the
+/// detached Windows daemon has no console): same as SIGTERM / Ctrl+C.
+async fn shutdown(State(s): State<SharedState>) -> StatusCode {
+    tracing::info!("shutdown requested over the API");
+    s.stop_requested.notify_one();
+    StatusCode::ACCEPTED
 }
 
 async fn health(State(s): State<SharedState>) -> Json<Health> {

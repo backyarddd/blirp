@@ -412,3 +412,27 @@ async fn api_auth_projects_memory_files() {
 
     h.daemon.shutdown().await.unwrap();
 }
+
+// The desktop tray stops the daemon over the API (no signal path on Windows).
+#[tokio::test]
+async fn shutdown_endpoint_requests_stop() {
+    let h = Harness::start().await;
+    let r = h
+        .http
+        .post(h.url("/api/daemon/shutdown"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(r.status(), 401);
+    let r = h
+        .send(reqwest::Method::POST, "/api/daemon/shutdown", json!({}))
+        .await;
+    assert_eq!(r.status(), 202);
+    tokio::time::timeout(
+        Duration::from_secs(5),
+        h.daemon.state.stop_requested.notified(),
+    )
+    .await
+    .expect("stop was not requested");
+    h.daemon.shutdown().await.unwrap();
+}
