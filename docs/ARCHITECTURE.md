@@ -39,7 +39,8 @@ Data dir `BLIRP_HOME`, default `~/.blirp` on every OS (Windows: `%USERPROFILE%\.
   config.toml        user config (see §12)
   blirp.db           SQLite (WAL) - all state
   runtime.json       {pid, port, token, version, started_at}; written by daemon, mode 0600
-  identity.key       iroh secret key (0600)
+  identity.key       iroh secret key, 64 hex chars (0600); created on first start
+  tls/cert.pem, tls/key.pem   self-signed LAN portal certificate (hub, key 0600)
   daemon.lock        single-instance lock (OS file lock held by the daemon)
   logs/blirpd.<date>.log   rolling logs (tracing-appender, daily, keep 7)
   worktrees/<project-id>/<name>/   optional per-session git worktrees
@@ -53,7 +54,7 @@ Data dir `BLIRP_HOME`, default `~/.blirp` on every OS (Windows: `%USERPROFILE%\.
 - `blirp daemon` - long-running per-user process. Owns PTYs, ingest watchers, memory jobs, SQLite writer, local HTTP/WS API, and (optionally) the iroh sync endpoint and LAN portal (hub). Single instance enforced by a lock file.
 - `blirp hook <agent> <event>` - short-lived; reads hook JSON from stdin, POSTs to daemon, prints injection output where the agent supports it. Always exits 0.
 - `blirp mcp` - stdio MCP server spawned by agents. Reads the local SQLite directly in read-only mode for queries; writes (e.g. `mem_record`) go through the daemon API.
-- `blirp <cli>` - `status`, `open` (opens UI/portal in browser with a login link), `mem search|brief|show`, `sessions`, `pair`, `hub`, `service install|uninstall`, `hooks install|uninstall|status`, `doctor`.
+- `blirp <cli>` - `status`, `open` (opens UI/portal in browser with a login link), `mem search|brief|show`, `sessions`, `pair`, `hub enable|disable|invite|status`, `devices list|revoke`, `service install|uninstall`, `hooks install|uninstall|status`, `doctor`.
 - Desktop app - on launch ensures the daemon is running (spawns sidecar `blirp daemon --detach` if not), reads runtime.json, opens a window at `http://127.0.0.1:<port>/auth?token=...` which sets an HttpOnly cookie and redirects to `/`. Closing the window does not stop the daemon or sessions.
 
 Autostart: `blirp service install` registers per-user autostart: macOS LaunchAgent, Linux `systemd --user` unit, Windows `HKCU\Software\Microsoft\Windows\CurrentVersion\Run` entry. Never a system service (it would not see the user's agent logins).
@@ -63,7 +64,7 @@ Autostart: `blirp service install` registers per-user autostart: macOS LaunchAge
 All ids are UUIDv7 strings unless stated. Timestamps are integer unix milliseconds. Migrations are embedded and versioned (`PRAGMA user_version`). WAL mode, `foreign_keys=ON`, `busy_timeout=5000`.
 
 ```sql
-machines(id TEXT PK,            -- iroh NodeId (z32) or local uuid before identity exists
+machines(id TEXT PK,            -- iroh endpoint id (lowercase hex of the Ed25519 public key)
          name TEXT, os TEXT, role TEXT CHECK(role IN ('standalone','node','hub')),
          last_seen INT, revoked INT DEFAULT 0)
 
@@ -128,7 +129,9 @@ hub_log(hub_seq INTEGER PRIMARY KEY AUTOINCREMENT, origin_machine TEXT, origin_s
         UNIQUE(origin_machine, origin_seq))            -- only populated on the hub
 ```
 
-All writes to replicated entities (`projects`, `project_paths`, `sessions`, `events`, `records`, `briefs`, `wiki_pages`, `resources`, `machines`) go through `Store::apply(Change)` which writes the row and appends to `outbox` in one transaction. Nothing else may write those tables.
+All writes to replicated entities (`projects`, `project_paths`, `sessions`, `events`, `records`, `briefs`, `wiki_pages`, `resources`, `machines`) go through `Store::apply(Change)` which writes the row and appends to `outbox` in one transaction. Nothing else may write those tables, except replication applying changes received from other machines (`Store::apply_remote` and the hub/node batch paths in `store::sync`), which write the row without queueing it again (no echo).
+
+The machine id is the iroh endpoint id from `identity.key`. Installs that predate the identity used a local uuid; on first start the daemon rebinds that uuid to the endpoint id once (`Store::rebind_machine`: this machine's folders and sessions move, the old machine row is dropped with `Change::DeleteMachine`, all through the outbox). Migration 2 adds the indexes replication needs (`outbox(entity, key, origin_seq)`, `hub_log(origin_machine, hub_seq)`).
 
 ### Project resolution
 
@@ -285,21 +288,28 @@ Current project = resolved from `BLIRP_PROJECT_ID` env or the MCP client's cwd.
 
 ## 10. Sync (`blirp-sync`)
 
-Roles: `standalone` (default), `hub`, `node`. Transport: iroh (QUIC, NAT traversal, relay fallback; custom relay URL configurable; local-network discovery enabled). ALPNs: `blirp/pair/1`, `blirp/sync/1`, `blirp/proxy/1`.
+Roles: `standalone` (default), `hub`, `node`. Transport: iroh 1.x (QUIC, NAT traversal, relay fallback). `sync.relay`: `default` = n0 relays plus n0 DNS address publishing/lookup (peers are found by id alone), `disabled` = direct addresses only, `<url>` = that relay only. Local-network discovery (mDNS, service `blirp`) is always on; hubs advertise the user data `blirp-hub`. ALPNs: `blirp/pair/1`, `blirp/sync/1`, `blirp/proxy/1`. One accept loop routes by ALPN: a hub accepts pairing from anyone and sync/proxy only from paired, non-revoked machines (`devices` kind `machine`, matched on the TLS-authenticated endpoint id); a node accepts proxy only from its hub. Standalone machines open no endpoint at all.
 
-Pairing:
-1. Hub: `blirp hub enable` (or UI) -> shows invite `blirp1-<base32 ticket>` + 8-char code `XXXX-XXXX` (+ QR of `blirp://join/<ticket>#<code>`). Code valid 10 minutes, single use.
-2. Node: `blirp pair <invite> <code>` (or UI; on LAN the hub is discoverable so only the code is needed). Connects via `blirp/pair/1`, runs SPAKE2 (spake2 crate, Ed25519 group) with the code as password, then both sides exchange node ids + machine metadata authenticated by a MAC keyed from the SPAKE2 session key.
-3. Hub stores the node in `devices` (kind machine) and `machines`; node stores the hub id in config. From then on `blirp/sync/1` and `blirp/proxy/1` connections are accepted only from known, non-revoked node ids.
+Wire format (all three protocols): frames of a 4-byte big-endian length + JSON. JSON because replicated payloads are already JSON and stay debuggable. Frames are size-checked before reading (8 MiB hard cap, 64 KiB for handshake/control frames). Each protocol opens with a hello carrying the sender's `versions`; the receiver picks the highest common version or answers `unsupported_version` (current: 1).
 
-Replication (`blirp/sync/1`):
-- Push: node sends outbox entries after `last_pushed_origin_seq` in batches (<= 500 entries or 4 MiB). Hub inserts into `hub_log` (idempotent on `(origin_machine, origin_seq)`), applies to its own tables, acks the highest origin_seq.
-- Pull: node requests `hub_log` after `last_pulled_hub_seq`, skips entries it originated, applies them in order.
-- Conflict rule: rows are applied as last-writer-wins by hub_seq order. `events` are append-only and keyed by (session_id, seq). Local deletion of an agent transcript never deletes anything (ingest-only).
-- Live: after catch-up, the stream stays open; hub pushes new entries as notifications. Offline nodes queue in outbox.
-- Hub itself is also a normal machine with its own sessions.
+Pairing (`blirp/pair/1`):
+1. Hub: `blirp hub enable` (or UI) -> invite `blirp1-<base32 ticket>` (JSON `{addr: EndpointAddr, invite_id: 128-bit hex}`) + 8-char code `XXXX-XXXX` from `23456789ABCDEFGHJKLMNPQRSTUVWXYZ` (40 bits; no 0/O/1/I) + QR of `blirp://join/<invite>#<code>`. Valid 10 minutes, single use, at most 5 attempts (counted when an attempt starts, so parallel attempts cannot exceed it), then invalidated. Invites live in the hub's memory; a daemon restart invalidates them.
+2. Node: `blirp pair <invite> <code>` (or UI). On a LAN, `blirp pair <code>` (empty invite in the API) finds the only hub advertising itself over mDNS and uses that hub's only open invite.
+3. Protocol: node `hello {versions, invite_id?, spake}` -> hub `challenge {version, spake}`: symmetric SPAKE2 (spake2 crate, Ed25519 group, identity `blirp/pair/1`) with the normalized code as password. Then key confirmation: node `confirm {mac}`, hub `confirm {mac}` with HMAC-SHA256 keyed by the SPAKE2 key over a transcript hash binding the invite id, both endpoint ids (as authenticated by QUIC TLS) and both SPAKE2 messages; tags are checked in constant time. Only after confirmation both send `meta {name, os, mac}` (MACed with the same key); the hub stores the node and answers `welcome`. Errors are `error {code, message}` (`wrong_code`, `expired`, `too_many_attempts`, `unknown_invite`, `invite_required`, ...).
+4. Hub stores the node in `devices` (kind `machine`, `can_control_terminals = 1`: paired machines are trusted to control terminals by default) and `machines`; the node stores `sync.role = "node"`, `sync.hub = <hub id>` in config and the hub's last address in the `settings` key `sync.hub_addr`.
 
-Remote proxy (`blirp/proxy/1`): the hub (or any node) can forward an API request or a terminal WS to another machine: request frame `{method, path, headers, body}` answered by the target daemon's own axum router (in-process tower call), WS frames tunneled as a bidirectional stream. Terminal input over proxy requires the requesting device to have `can_control_terminals`.
+Replication (`blirp/sync/1`): the node dials the hub and opens one bidirectional stream for strict request/response (`hello {versions, machine}` -> `welcome {version, hub_machine_id, head}`, `push {entries}` -> `push_ack {acked}`, `pull {after}` -> `page`); the hub opens one unidirectional stream for `notify {head}` frames whenever `hub_log` grows.
+- Push: node sends outbox entries after `last_pushed_origin_seq` in batches (<= 500 entries or 4 MiB). Hub, in one transaction: first logs its own pending local writes into `hub_log`, then inserts each entry (idempotent on `(origin_machine, origin_seq)`), applies it to its tables and advances the node's cursor; acks the highest origin_seq. Entries whose payload does not match their declared entity/op/key, or `machines` rows for another machine than the sender, are rejected (logged, never retried). An entry that fails to apply on the hub (constraint) is still logged.
+- Pull: node requests `hub_log` after `last_pulled_hub_seq`. The page carries other machines' entries in full and the requester's own entries only as position markers, plus `own_seen` (the requester's highest origin_seq logged before the page). The node applies the page and moves its cursor in one transaction.
+- Conflict rule: rows are last-writer-wins by `hub_seq` order. The hub's tables always equal `hub_log` replayed in order. A node skips a pulled remote upsert/delete for a row it wrote itself later (a local outbox entry for the same entity/key with origin_seq > own_seen: unpushed, or pushed after the remote entry), because that write will be (or was) logged after it. `events` are append-only and keyed by (session_id, seq). Local deletion of an agent transcript never deletes anything (ingest-only).
+- Crash safety: every apply commits together with its cursor; re-sent batches are ignored. Offline nodes queue in the outbox; the node reconnects with exponential backoff (1 s .. 60 s, jitter). Local writes are picked up by polling the outbox head every 500 ms.
+- Hub itself is also a normal machine with its own sessions; its own writes enter `hub_log` within 500 ms (or before any push/pull is served).
+
+Remote proxy (`blirp/proxy/1`): every node keeps one proxy connection to its hub and either side opens bidirectional streams on it (so nodes behind NAT are reachable). A stream starts with `open {version, target, control, via}` answered by `reply {ok, code?, message?}`; after `ok` it carries plain HTTP/1.1 (including WebSocket upgrades) served by the target daemon's own axum router (hyper over the stream). The hub serves streams addressed to itself and relays others byte for byte to the target's proxy connection (`machine_offline` when it is not connected). `control` is ANDed on the hub with the requesting machine's `can_control_terminals`; a node trusts its hub's value. Only method, path and JSON body are forwarded, never local credentials. Proxied requests run with `admin = false` (§11).
+- `POST /api/sessions` with `machine` != this machine is forwarded to that machine; stop/resume of a session running elsewhere is forwarded too. The launching daemon remembers the session's machine so its terminal can be attached before the row replicates.
+- `GET /api/terminals/:id/ws` for a session on another machine is relayed through the hub. Without `control`, terminal input and resize frames are dropped (on both ends).
+
+Revocation (`DELETE /api/machines/:id` or `DELETE /api/devices/:id` on the hub): the device and the replicated machine row are marked revoked and the machine's live connections are closed at once; reconnects are refused. `PATCH /api/devices/:id` also closes the machine's connections (or the browser device's WebSockets) so they reopen with the new rights. On a node, `DELETE /api/machines/<hub id>` leaves the hub (role back to standalone).
 
 ## 11. HTTP API (daemon, axum)
 
@@ -333,14 +343,22 @@ POST /api/hooks/:agent/:event            hook ingress (from `blirp hook`)
 GET  /api/inject?session=&cwd=&agent=    rendered injection
 GET  /api/settings ; PATCH /api/settings  {config: Config, values: {key: json}}; PATCH {config?: full Config
                                          (validated, written to config.toml), values?: {key: json|null}}
-POST /api/sync/hub/enable ; POST /api/sync/invite ; POST /api/sync/join {invite, code} ; GET /api/sync/status
-POST /api/devices/browser-invite         one-time QR login for phone/browser (hub)
+GET  /api/sync/status                    SyncStatus {role, machine_id, hub, connected, last_sync_at, pending_outbox,
+                                         portal_url, portal_cert_fingerprint}
+POST /api/sync/hub/enable | /hub/disable SyncStatus (admin); enable fails with 409 `paired_node` on a node
+POST /api/sync/invite                    SyncInvite {invite, code, uri, expires_at} (admin, hub)
+POST /api/sync/join {invite, code}       SyncStatus (admin); invite may be a join URI, or "" to find the hub on the LAN
+GET  /api/devices                        Device[] ; DELETE /api/devices/:id (admin, revoke)
+PATCH /api/devices/:id {can_control_terminals}   Device (admin)
+POST /api/devices/browser-invite         BrowserInvite {url, expires_at}: one-time login link/QR for a browser (hub portal)
 GET  /api/events/ws                      server push: session status changes, new sessions, memory updates
 GET  /mcp                                MCP Streamable HTTP
 GET  /*                                  embedded SPA
 ```
 
-Request/response DTOs are defined in `blirp-core::model` and exported to `web/src/lib/api/types.gen.ts` (`cargo test -p blirp-core export_bindings`). Endpoints owned by later phases (`/api/hooks/*`, `/api/inject`, `/api/sync/*`, `/api/devices/*`, `DELETE /api/machines/:id`, `POST /api/sessions/:id/distill`, `/mcp`, and `continue_from`/`machine` on launch) answer 501 `not_implemented` until implemented. `/api/events/ws` pushes JSON `ServerEvent` frames: `session_created`, `session_updated`, `project_updated`, `memory_updated {project_id, part}`, and `resync` when the client fell behind and must refetch.
+Request/response DTOs are defined in `blirp-core::model` and exported to `web/src/lib/api/types.gen.ts` (`cargo test -p blirp-core export_bindings`). Endpoints owned by later phases (`/api/hooks/*`, `/api/inject`, `POST /api/sessions/:id/distill`, `/mcp`, and `continue_from` on launch) answer 501 `not_implemented` until implemented. `/api/events/ws` pushes JSON `ServerEvent` frames: `session_created`, `session_updated`, `project_updated`, `memory_updated {project_id, part}`, `sync_updated {status}` (role, connection or portal changed), and `resync` when the client fell behind and must refetch.
+
+Every authenticated request carries a principal: local clients (runtime token or `blirp_session` cookie) have `control` and `admin`; portal browser devices have `control = can_control_terminals` and no `admin`; requests relayed by the sync proxy have the proxied `control` and no `admin`. `control` is required to launch, resume or stop sessions (403 `control_not_allowed`) and to send terminal input; `admin` is required for hub/pairing/device management (403 `admin_only`).
 
 ## 12. Config (`~/.blirp/config.toml`, validated at startup; unknown keys are an error with a clear message)
 
@@ -367,7 +385,7 @@ Request/response DTOs are defined in `blirp-core::model` and exported to `web/sr
 ## 13. Portal and remote browser access
 
 - Local desktop and `blirp open`: localhost + token cookie.
-- Hub with `portal.lan = true`: axum-server with rustls on `0.0.0.0:lan_port`, self-signed cert generated with `rcgen` and persisted; fingerprint shown in the UI. Browser devices log in by scanning a one-time QR (5 min, single use) shown on an already-authenticated screen, which issues a long-lived device cookie (random 256-bit token, stored hashed). Devices listed and revocable in Settings > Devices. Terminal control from a browser device requires `can_control_terminals`.
+- Hub with `portal.lan = true`: axum-server with rustls (ring, TLS 1.2/1.3, ALPN `http/1.1` so WebSockets upgrade) on `0.0.0.0:lan_port`, serving the same router; self-signed cert generated with `rcgen` (SANs localhost, 127.0.0.1, LAN IP) and persisted in `~/.blirp/tls/`; SHA-256 fingerprint (`AA:BB:...`) in `GET /api/sync/status`. The portal runs while the role is hub and `portal.lan` is set (checked at daemon start and on hub enable/disable). Browser devices log in by opening a one-time link/QR `https://<lan ip>:<port>/device-login?invite=<128-bit token>` (5 min, single use, stored hashed, redemption rate-limited to 10 attempts per minute per client IP) created with `POST /api/devices/browser-invite` on an already-authenticated screen; it creates a `devices` row (kind `browser`, no terminal control) and sets `blirp_device=<random 256-bit token>; HttpOnly; Secure; SameSite=Strict; Path=/; Max-Age=400 days` (stored as SHA-256), then redirects to `/`. The portal accepts only device cookies (not the runtime token). Devices are listed and revocable in Settings > Devices; revoking or changing a device closes its open WebSockets. Terminal control from a browser device requires `can_control_terminals`.
 - Users with Tailscale can instead run `tailscale serve` in front of the hub port (documented).
 - Security headers: CSP (self only, no inline scripts), `X-Frame-Options: DENY`, `SameSite=Strict` cookies, CSRF protection via same-site cookie + `Origin` check on mutations and WS upgrades.
 
