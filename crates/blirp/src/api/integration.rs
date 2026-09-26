@@ -1,12 +1,12 @@
 //! Memory-engine endpoints (§11): hook ingress, rendered injection, manual
 //! distill, global integration install/uninstall and MCP over HTTP.
 
-use super::{ApiError, ApiJson, ApiQuery, ApiResult, Principal, blocking};
+use super::{ApiError, ApiJson, ApiPath, ApiQuery, ApiResult, Principal, blocking};
 use crate::hooks::{HookIngress, HookReply};
 use crate::memory::launch::MEMORY_FILE;
 use crate::memory::render::render_injection;
 use crate::state::SharedState;
-use axum::extract::{Path, State};
+use axum::extract::State;
 use axum::http::StatusCode;
 use axum::routing::{get, post};
 use axum::{Json, Router};
@@ -37,7 +37,7 @@ pub fn mcp_routes(state: &SharedState) -> Router<SharedState> {
 async fn hook(
     State(s): State<SharedState>,
     principal: Principal,
-    Path((agent, event)): Path<(String, String)>,
+    ApiPath((agent, event)): ApiPath<(String, String)>,
     ApiJson(body): ApiJson<HookIngress>,
 ) -> ApiResult<Json<HookReply>> {
     // Only `blirp hook` on this machine (runtime token) reports agent events.
@@ -96,7 +96,7 @@ async fn inject(
 async fn distill(
     State(s): State<SharedState>,
     principal: Principal,
-    Path(id): Path<String>,
+    ApiPath(id): ApiPath<String>,
 ) -> ApiResult<StatusCode> {
     // Runs the summarizer agent on this machine.
     principal.require_control()?;
@@ -129,7 +129,7 @@ async fn distill(
 async fn agent_hooks(
     State(s): State<SharedState>,
     principal: Principal,
-    Path((id, action)): Path<(String, String)>,
+    ApiPath((id, action)): ApiPath<(String, String)>,
 ) -> ApiResult<Json<AgentInfo>> {
     // Writes the user's global agent configuration.
     principal.require_admin()?;

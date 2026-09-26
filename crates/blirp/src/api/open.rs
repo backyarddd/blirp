@@ -2,11 +2,11 @@
 //! file manager or the user's editor. The program is spawned detached; the
 //! request returns as soon as it started.
 
-use super::{ApiError, ApiJson, ApiResult, Principal, blocking};
+use super::{ApiError, ApiJson, ApiPath, ApiResult, Principal, blocking};
 use crate::agents::PlatformCommand;
 use crate::state::SharedState;
 use axum::Router;
-use axum::extract::{Path, State};
+use axum::extract::State;
 use axum::http::StatusCode;
 use axum::routing::post;
 use blirp_core::model::{OpenSession, OpenTarget};
@@ -22,7 +22,7 @@ pub fn routes() -> Router<SharedState> {
 async fn open(
     State(s): State<SharedState>,
     principal: Principal,
-    Path(id): Path<String>,
+    ApiPath(id): ApiPath<String>,
     ApiJson(body): ApiJson<OpenSession>,
 ) -> ApiResult<StatusCode> {
     // Opens a window on this machine's desktop: its own app or CLI only.

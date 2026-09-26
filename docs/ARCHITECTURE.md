@@ -354,7 +354,7 @@ Revocation (`DELETE /api/machines/:id` or `DELETE /api/devices/:id` on the hub):
 
 ## 11. HTTP API (daemon, axum)
 
-Auth: local clients send `Authorization: Bearer <runtime token>` or the `blirp_session` cookie set by `/auth?token=`. LAN/portal browser devices use device cookies (§13). All JSON; validation errors return 400 `{error:{code,message}}`.
+Auth: local clients send `Authorization: Bearer <runtime token>` or the `blirp_session` cookie set by `/auth?token=`. LAN/portal browser devices use device cookies (§13). All JSON; validation errors (malformed or mistyped JSON bodies, query strings and path parameters) return 400 `{error:{code,message}}` with code `invalid_request`; only a missing JSON content type (415) and an oversized body (413) keep their own status.
 
 ```
 GET  /api/health                         {version, machine, role}

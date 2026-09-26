@@ -170,7 +170,10 @@ pub async fn blocking<T: Send + 'static>(
         .map_err(|e| ApiError::internal("background task", e))?
 }
 
-/// `Json` extractor whose rejections use the API error shape.
+/// `Json` extractor whose rejections use the API error shape. Syntax and
+/// validation errors (axum answers 422 for the latter) are 400 (§11); a
+/// missing JSON content type (415) and an oversized body (413) keep their
+/// status.
 pub struct ApiJson<T>(pub T);
 
 impl<S: Send + Sync, T: serde::de::DeserializeOwned> FromRequest<S> for ApiJson<T> {
@@ -178,7 +181,37 @@ impl<S: Send + Sync, T: serde::de::DeserializeOwned> FromRequest<S> for ApiJson<
     async fn from_request(req: Request, state: &S) -> Result<Self, Self::Rejection> {
         match Json::<T>::from_request(req, state).await {
             Ok(Json(v)) => Ok(Self(v)),
-            Err(r) => Err(ApiError::new(r.status(), "invalid_request", r.body_text())),
+            Err(r) => {
+                let status = match r.status() {
+                    s @ (StatusCode::UNSUPPORTED_MEDIA_TYPE | StatusCode::PAYLOAD_TOO_LARGE) => s,
+                    _ => StatusCode::BAD_REQUEST,
+                };
+                Err(ApiError::new(status, "invalid_request", r.body_text()))
+            }
+        }
+    }
+}
+
+/// `Path` extractor whose rejections (bad percent-encoding, a parameter
+/// that does not parse) are 400 with the API error shape.
+pub struct ApiPath<T>(pub T);
+
+impl<S: Send + Sync, T: serde::de::DeserializeOwned + Send> FromRequestParts<S> for ApiPath<T> {
+    type Rejection = ApiError;
+    async fn from_request_parts(
+        parts: &mut axum::http::request::Parts,
+        state: &S,
+    ) -> Result<Self, Self::Rejection> {
+        match axum::extract::Path::<T>::from_request_parts(parts, state).await {
+            Ok(axum::extract::Path(v)) => Ok(Self(v)),
+            Err(r) => {
+                let status = if r.status().is_server_error() {
+                    r.status()
+                } else {
+                    StatusCode::BAD_REQUEST
+                };
+                Err(ApiError::new(status, "invalid_request", r.body_text()))
+            }
         }
     }
 }

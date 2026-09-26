@@ -1,8 +1,8 @@
 //! Sessions: list, launch, detail, events, stop, resume, rename.
 
-use super::{ApiError, ApiJson, ApiQuery, ApiResult, Principal, blocking};
+use super::{ApiError, ApiJson, ApiPath, ApiQuery, ApiResult, Principal, blocking};
 use crate::state::SharedState;
-use axum::extract::{Path, State};
+use axum::extract::State;
 use axum::http::StatusCode;
 use axum::response::Response;
 use axum::routing::{get, post};
@@ -77,7 +77,10 @@ async fn remote_machine(s: &SharedState, id: &str) -> ApiResult<Option<String>> 
     crate::sync::remote_machine_of(s, id).await
 }
 
-async fn detail(State(s): State<SharedState>, Path(id): Path<String>) -> ApiResult<Json<Session>> {
+async fn detail(
+    State(s): State<SharedState>,
+    ApiPath(id): ApiPath<String>,
+) -> ApiResult<Json<Session>> {
     let store = s.store.clone();
     blocking(move || {
         store
@@ -97,7 +100,7 @@ struct EventsQuery {
 
 async fn events(
     State(s): State<SharedState>,
-    Path(id): Path<String>,
+    ApiPath(id): ApiPath<String>,
     ApiQuery(q): ApiQuery<EventsQuery>,
 ) -> ApiResult<Json<EventsPage>> {
     let store = s.store.clone();
@@ -115,7 +118,7 @@ async fn events(
 
 async fn stop(
     State(s): State<SharedState>,
-    Path(id): Path<String>,
+    ApiPath(id): ApiPath<String>,
     principal: Principal,
 ) -> ApiResult<Response> {
     principal.require_control()?;
@@ -132,7 +135,7 @@ async fn stop(
 
 async fn resume(
     State(s): State<SharedState>,
-    Path(id): Path<String>,
+    ApiPath(id): ApiPath<String>,
     principal: Principal,
 ) -> ApiResult<Response> {
     principal.require_control()?;
@@ -147,7 +150,7 @@ async fn resume(
 
 async fn patch(
     State(s): State<SharedState>,
-    Path(id): Path<String>,
+    ApiPath(id): ApiPath<String>,
     ApiJson(body): ApiJson<PatchSession>,
 ) -> ApiResult<Json<Session>> {
     let title = body

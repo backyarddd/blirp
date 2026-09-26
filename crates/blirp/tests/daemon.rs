@@ -399,11 +399,42 @@ async fn api_auth_projects_memory_files() {
             json!({"kind": "nope", "title": "x", "body": ""}),
         )
         .await;
-    assert_eq!(r.status(), 422);
+    assert_eq!(r.status(), 400);
     assert_eq!(
         r.json::<ErrorBody>().await.unwrap().error.code,
         "invalid_request"
     );
+    // Every extractor answers 400 with the error shape: JSON syntax, query
+    // and path parameters.
+    let r = h
+        .http
+        .post(h.url(&format!("/api/projects/{id}/records")))
+        .bearer_auth(&h.token)
+        .header("content-type", "application/json")
+        .body("{not json")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(r.status(), 400);
+    assert_eq!(
+        r.json::<ErrorBody>().await.unwrap().error.code,
+        "invalid_request"
+    );
+    for path in ["/api/sessions?limit=many", "/api/sessions/%FF"] {
+        let r = h
+            .http
+            .get(h.url(path))
+            .bearer_auth(&h.token)
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(r.status(), 400, "{path}");
+        assert_eq!(
+            r.json::<ErrorBody>().await.unwrap().error.code,
+            "invalid_request",
+            "{path}"
+        );
+    }
 
     // Unknown endpoints answer 404 with the standard error shape.
     let r = h

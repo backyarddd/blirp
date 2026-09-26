@@ -9,11 +9,11 @@
 //! stream: their input and resize frames are dropped. A session running on
 //! another machine is attached through the hub (see `crate::sync`).
 
-use super::{ApiError, ApiResult, Principal};
+use super::{ApiError, ApiPath, ApiResult, Principal};
 use crate::pty::{ExitInfo, Snapshot, TermEvent, Terminal};
 use crate::state::SharedState;
+use axum::extract::State;
 use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
-use axum::extract::{Path, State};
 use axum::http::StatusCode;
 use axum::response::Response;
 use blirp_core::model::{TerminalClientMessage, TerminalServerMessage};
@@ -23,7 +23,7 @@ use tokio::sync::broadcast::error::RecvError;
 
 pub async fn attach(
     State(s): State<SharedState>,
-    Path(id): Path<String>,
+    ApiPath(id): ApiPath<String>,
     principal: Principal,
     ws: WebSocketUpgrade,
 ) -> ApiResult<Response> {

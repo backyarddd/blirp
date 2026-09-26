@@ -6,11 +6,11 @@ mod proxy;
 
 pub use proxy::{connect_terminal, forward, launch_remote, relay_terminal};
 
-use crate::api::{ApiError, ApiJson, ApiResult, Principal, blocking};
+use crate::api::{ApiError, ApiJson, ApiPath, ApiResult, Principal, blocking};
 use crate::state::SharedState;
 use axum::Json;
 use axum::Router;
-use axum::extract::{Path, State};
+use axum::extract::State;
 use axum::http::StatusCode;
 use axum::routing::{delete, get, post};
 use blirp_core::config::Config;
@@ -458,7 +458,7 @@ async fn revoke_node(s: &SharedState, node_id: &str) -> ApiResult<()> {
 
 async fn revoke_device(
     State(s): State<SharedState>,
-    Path(id): Path<String>,
+    ApiPath(id): ApiPath<String>,
     principal: Principal,
 ) -> ApiResult<StatusCode> {
     principal.require_admin()?;
@@ -489,7 +489,7 @@ async fn revoke_device(
 
 async fn patch_device(
     State(s): State<SharedState>,
-    Path(id): Path<String>,
+    ApiPath(id): ApiPath<String>,
     principal: Principal,
     ApiJson(body): ApiJson<PatchDevice>,
 ) -> ApiResult<Json<Device>> {
@@ -522,7 +522,7 @@ async fn patch_device(
 /// the hub's id means "leave the hub".
 async fn revoke_machine(
     State(s): State<SharedState>,
-    Path(id): Path<String>,
+    ApiPath(id): ApiPath<String>,
     principal: Principal,
 ) -> ApiResult<StatusCode> {
     principal.require_admin()?;
