@@ -162,12 +162,14 @@ Implementation notes: a subfolder of an unregistered repo registers the repo top
 - Each live terminal: child process, master reader task, writer, `vt100::Parser` holding screen state (scrollback 10 000 lines), subscriber broadcast channel.
 - Attach protocol (WS `/api/terminals/:id/ws`): server first sends a `snapshot` frame (formatted screen contents reproducing the current screen, including alt-screen state, cursor position and title), then streams raw output bytes. Client sends `input` (bytes), `resize {cols, rows}`. Multiple clients may attach; last resize wins.
 - Framing (types `TerminalServerMessage` / `TerminalClientMessage` in `types.gen.ts`):
-  - server -> client **text** frames are JSON: `{"type":"snapshot","cols","rows","data"}` (reset the terminal, then write `data`; it starts with `ESC c`, replays scrollback lines on the normal screen, redraws the screen and restores input modes, cursor and title; sent first and again whenever the client fell behind), `{"type":"readonly"}` (right after the first snapshot when the client may not control the terminal: its input and resize frames are ignored), `{"type":"resize","cols","rows"}` (another client resized; never echoed to the client that asked), `{"type":"exit","status","exit_code"}` (process ended; the socket closes).
+  - server -> client **text** frames are JSON: `{"type":"snapshot","cols","rows","data"}` (reset the terminal, then write `data`; it starts with `ESC c`, replays scrollback lines on the normal screen (all kept lines, at most the newest 16 MiB), redraws the screen and restores input modes, cursor and title; sent first and again whenever the client fell behind; relayed terminals accept frames up to 64 MiB for it), `{"type":"readonly"}` (right after the first snapshot when the client may not control the terminal: its input and resize frames are ignored), `{"type":"resize","cols","rows"}` (another client resized; never echoed to the client that asked), `{"type":"exit","status","exit_code"}` (process ended; the socket closes).
   - server -> client **binary** frames are raw PTY output bytes (may split UTF-8 sequences; feed them to the terminal as bytes).
   - client -> server **binary** frames are raw input bytes; **text** frames are JSON `{"type":"input","data":"..."}` or `{"type":"resize","cols":N,"rows":N}` (1-1000 each). Frames are capped at 1 MiB.
   - A live terminal that has exited is gone: attaching returns 404 `terminal_not_found`; use the session's status and events instead.
   - Closing (this and `/api/events/ws`) always completes the WebSocket close handshake: a client's close is answered; the server closes with 1000 `exited` after the exit frame, 1001 `going away` when the daemon shuts down or the client's access changed (reconnect), and a relayed terminal passes the remote daemon's close code on (1011 when the remote side is unreachable).
-- The daemon answers terminal queries itself when no client is attached (DSR cursor position `ESC[6n`, DSR status `ESC[5n`, primary DA `ESC[c`) so ConPTY and TUIs never block at startup. Attached clients (xterm.js) answer them instead.
+- The daemon answers terminal queries itself when no client is attached (DSR cursor position `ESC[6n`, DSR status `ESC[5n`, primary DA `ESC[c`) so ConPTY and TUIs never block at startup. Attached clients (xterm.js) answer them instead; replies no client sent within 2 s (a client that is attached but gone, e.g. a laptop asleep before its relayed connection timed out, or one that never answers) are sent by the daemon.
+- `CSI 3 J` (erase saved lines), which vt100 ignores, clears the kept scrollback (the screen state is rebuilt without it, normal screen only), as xterm.js does: TUIs that redraw their history after it (Claude Code) do not show it twice on reattach.
+- Keep-awake (`sessions.keep_awake`, default on for the hub role, `blirp::keep_awake`): the status tick holds one OS sleep assertion while any terminal is live and releases it when none is: macOS `caffeinate -i -w <daemon pid>`, Windows `SetThreadExecutionState(ES_CONTINUOUS | ES_SYSTEM_REQUIRED)` on a dedicated thread, Linux `systemd-inhibit --what=sleep --mode=block` around a loop that ends with the daemon. A failed acquire (or a helper that died) is retried after 60 s. Reported as `keep_awake` in `GET /api/health`.
 - Kill = terminate the whole process tree (Windows job object + ClosePseudoConsole; Unix: the tree is the child's process group plus every process of its session (the PTY child is a session leader; shells put background jobs such as `nohup x &` into groups of their own, and reparenting to init keeps the session) plus descendants still linked by parent pid, listed with `ps` and remembered at Stop time; it gets SIGHUP and SIGTERM, then SIGKILL after 3 s if anything is still alive, whether or not the leader already exited). The Windows job has `KILL_ON_JOB_CLOSE`, so sessions also end if the daemon dies; after a normal exit the rest of the tree is reaped the same way (like a terminal hangup). On Unix the output reader polls, so a process outside the group that keeps the PTY open cannot pin the reader thread: it gives up 1 s after the group is gone. The ConPTY is closed outside the PTY locks (the close waits for the reader, which needs the screen lock).
 - Live terminals are registered per session id; a launch or resume reserves the id before spawning, so concurrent resumes of one session start one agent (the others get 409 `already_running`), and an exiting terminal records its exit and then removes only its own registry entry.
 - Activity tracking: `last_output_at`; status heuristics in §7.
@@ -366,6 +368,7 @@ Replication (`blirp/sync/1`): the node dials the hub and opens one bidirectional
 Remote proxy (`blirp/proxy/1`): every node keeps one proxy connection to its hub and either side opens bidirectional streams on it (so nodes behind NAT are reachable). A stream starts with `open {version, target, control, via}` answered by `reply {ok, code?, message?}`; after `ok` it carries plain HTTP/1.1 (including WebSocket upgrades) served by the target daemon's own axum router (hyper over the stream). The hub serves streams addressed to itself and relays others byte for byte to the target's proxy connection (`machine_offline` when it is not connected). `control` is ANDed on the hub with the requesting machine's `can_control_terminals`; a node trusts its hub's value but grants it only when its own config has `sync.allow_hub_control = true` (default false: the hub and other machines can read a node, not control it). Only method, path and JSON body are forwarded, never local credentials. Proxied requests run with `admin = false` (§11).
 - `POST /api/sessions` with `machine` != this machine is forwarded to that machine; stop/resume/delete of a session of another machine are forwarded too. The launching daemon remembers the session's machine so its terminal can be attached before the row replicates.
 - `GET /api/terminals/:id/ws` for a session on another machine is relayed through the hub. Without `control`, terminal input and resize frames are dropped (on both ends).
+- `/api/machines/:id/{health,agents,dirs,clone,clone/:job}` for another machine are forwarded to it (the target answers the same route for its own id), so the new-session dialog shows the target's agents (with claude's login state), browses its folders and clones onto it. `clone` with `project_id` is resolved on the requesting machine (the remote URL of its folder of that project) and forwarded as a URL without credentials.
 
 Revocation (`DELETE /api/machines/:id` or `DELETE /api/devices/:id` on the hub): the device and the replicated machine row are marked revoked and the machine's live connections are closed at once; reconnects are refused. `PATCH /api/devices/:id` also closes the machine's connections (or the browser device's WebSockets) so they reopen with the new rights. On a node, `DELETE /api/machines/<hub id>` leaves the hub (role back to standalone).
 
@@ -374,12 +377,22 @@ Revocation (`DELETE /api/machines/:id` or `DELETE /api/devices/:id` on the hub):
 Auth: local clients send `Authorization: Bearer <runtime token>`. The loopback listener takes no cookies: a cookie for 127.0.0.1 is sent to every server on that host whatever its port, so another local program could collect it. The SPA gets the token in the URL fragment (`/#token=<token>`, never sent to a server), keeps it in `localStorage` (per origin, so per port), strips it with `history.replaceState` and sends it as bearer; WebSockets, which cannot carry headers, use single-use tickets (`POST /api/ws-ticket {path}` -> `{ticket}`, valid 30 s for that path, `?ticket=` on the upgrade). `GET /auth?token=` only redirects old links to `/#token=`; a request still carrying the old `blirp_session` cookie gets it expired (`Max-Age=0`). LAN/portal browser devices use device cookies (§13). All JSON; validation errors (malformed or mistyped JSON bodies, query strings and path parameters) return 400 `{error:{code,message}}` with code `invalid_request`; only a missing JSON content type (415) and an oversized body (413) keep their own status.
 
 ```
-GET  /api/health                         {version, machine, role, capabilities: {admin, control_terminals, local}}
+GET  /api/health                         {version, machine, role, capabilities: {admin, control_terminals, local},
+                                         keep_awake}
 GET  /api/update                         UpdateStatus {current, latest, available, notes_url, enabled}: newest
                                          published release; asks GitHub at most once a day (hourly after a
                                          failure), never when `update.check = false` (§17)
                                          (the calling client's rights)
 GET  /api/machines                       list; DELETE /api/machines/:id (revoke)
+GET  /api/machines/:id/health | /agents  that machine's health / agents (relayed for another machine, §10)
+GET  /api/machines/:id/dirs?path=&hidden= MachineDirs (control): folder names only, inside that machine's user
+                                         home (403 `path_outside_home`), symlinked folders left out, hidden ones
+                                         with hidden=true, at most 2 000
+POST /api/machines/:id/clone             {url? | project_id?, parent?, name?} (control): `git clone` there into
+                                         <parent or ~/blirp>/<name>, parent inside home, destination must not exist
+                                         (409 `already_exists`); https/http/ssh/git/scp-like URLs only, userinfo
+                                         secrets removed; `-c protocol.ext.allow=never`, GIT_TERMINAL_PROMPT=0, ssh
+                                         BatchMode; 202 CloneJob; GET .../clone/:job polls it (30 min timeout)
 GET  /api/projects                       list with path(s), git flag, session counts, last activity; GET /api/projects/:id one
 POST /api/projects                       {path, name?} register folder (absolute path, else 400)
 PATCH/DELETE /api/projects/:id           rename / soft delete: the project is hidden (`deleted = 1`) and its folders are
@@ -427,7 +440,8 @@ POST /api/sessions/:id/open              {target: "folder"|"editor"}: session fo
                                          $VISUAL / $EDITOR / `code` (first on PATH), else the OS default; 204
 GET  /api/terminals/:id/ws               terminal attach (§6)
 GET  /api/search?q=&project=&kind=       FTS over events + records
-GET  /api/agents                         detected agents + versions + integration status
+GET  /api/agents                         detected agents + versions + integration status + auth (claude:
+                                         `claude auth status` in the daemon's context, no model call)
 POST /api/agents/:id/hooks/install|uninstall   global integration (§9); returns the AgentInfo
 POST /api/hooks/:agent/:event            hook ingress (from `blirp hook`)
 GET  /api/inject?session=&cwd=&agent=    {markdown}: the session's launch memory.md, else a render for the session's / folder's project
@@ -458,7 +472,7 @@ Request/response DTOs are defined in `blirp-core::model` and exported to `web/sr
 
 Every authenticated request carries a principal: local clients (runtime token or WebSocket ticket) have `control` and `admin`; portal browser devices have `control = can_control_terminals` and no `admin`; requests relayed by the sync proxy have the proxied `control` and no `admin`. Rights are checked before the request body is read (extractors `Control` / `Admin`), so a caller without them always gets 403:
 - `admin` (403 `admin_only`): `PATCH /api/settings` (config.toml, settings values), hub enable/disable, invite, join, browser invites, device and machine revoke/patch, hook ingress, global integration install/uninstall, `POST /api/sessions/:id/open`, `POST /api/daemon/shutdown`.
-- `control` (403 `control_not_allowed`): every other mutation: launch, resume, stop, distill, rename or delete sessions, worktree removal, project register/rename/delete/merge, brief, records, wiki, resources and suggestions; plus terminal input and resize.
+- `control` (403 `control_not_allowed`): every other mutation: launch, resume, stop, distill, rename or delete sessions, worktree removal, machine folder listing and clone, project register/rename/delete/merge, brief, records, wiki, resources and suggestions; plus terminal input and resize.
 - Reads (every `GET`, the event stream, viewing a terminal) need authentication only.
 A portal browser device without terminal control is therefore read-only. `tests/daemon.rs` keeps a table of every mutating route and checks it against a viewer and a controlling portal device.
 
@@ -474,6 +488,7 @@ The loopback listener answers only requests whose `Host` is `127.0.0.1:<port>`, 
 [agents]   default = "claude"
            [[agents.custom]] name = "..." command = "..." args = [] 
 [sessions] worktree_default = false
+           keep_awake = <unset>  # hold a sleep assertion while sessions run; unset = on for the hub role
 [memory]   summarizer = "auto" | "claude" | "codex" | "ollama" | "none"
            ollama_model = "qwen2.5:7b"
            distill_idle_secs = 300
@@ -504,9 +519,10 @@ The loopback listener answers only requests whose `Host` is `127.0.0.1:<port>`, 
 ## 14. Web UI (Svelte 5, TypeScript strict)
 
 Layout mirrors the reference (Xirp-style):
-- Top bar: blirp logo, **Projects**, **Sessions**, orange **+** (new session dialog: project/folder, agent, optional prompt, worktree toggle only for git projects, machine picker when synced). Right: grid view toggle, machine/connection indicator, command palette (Ctrl/Cmd+K), settings.
+- Top bar: blirp logo, **Projects**, **Sessions**, orange **+** (new session dialog: project/folder, agent, optional prompt, worktree toggle only for git projects; when synced a **Run on** choice: this machine (default), **Cloud (<hub>)**, other machines, with that machine's agents and claude login warning, a folder browser, recent folders there and **Clone on <machine>** for git projects without a folder there). "Keeping <machine> awake" while this machine or the hub holds a keep-awake assertion. Right: grid view toggle, machine/connection indicator, command palette (Ctrl/Cmd+K), settings.
 - Sessions view: breadcrumb `<project> / Sessions`; left sidebar grouped by project (and by repo/subfolder for multi-root projects) with session cards: title, branch or folder, status chip (Working/Idle/Waiting/Completed/Failed/Detached) with colors, "+" per group. Main pane: the live terminal (xterm.js 6 + WebGL addon, fit addon, web-links addon, unicode11). Session toolbar: agent chip with "Continue in..." menu, elapsed time, open folder, open in editor, fork, Stop / Resume. Right collapsible **Memory** panel: exactly what was injected + brief + open threads, editable.
 - Grid view: all live terminals tiled; click to focus.
+- Sessions on another machine carry a machine badge (cloud icon for the hub) on cards, rows, the session toolbar and grid tiles. The session a client last had open is kept in its local storage (`blirp.openSessions`) and shown again when the app opens without a session in the URL; closing it (Ctrl/Cmd+W) forgets it.
 - Projects view: cards with path(s), git/no-git badge, last activity, session counts, machines. Project page tabs: Overview (brief, open threads, recent sessions, prompt box to start a session), Sessions, Memory (records CRUD, brief history/revert, suggestions queue), Wiki, Resources, Files, Git (only when git).
 - Session detail (for ended/external sessions): transcript viewer (events), summary, resume/continue buttons.
 - Search: global FTS with filters.

@@ -9,6 +9,7 @@
 | [Projects and sessions](projects-and-sessions.md) | folders vs git, worktrees, statuses, stop and resume, continue in / fork, subagents, external sessions |
 | [Memory](memory.md) | capture, redaction, distilling and summarizer costs, brief/records/wiki/suggestions, injection per agent, MCP tools, `blirp mem`, global hooks, turning things off |
 | [Agents](agents.md) | what blirp does for each supported agent, custom agents |
+| [Cloud sessions](cloud-sessions.md) | run sessions on your hub (an always-on machine) from your PC, keep them through sleep and restarts, keep-awake, clone and pick folders on the hub |
 | [Sync and hub](sync-and-hub.md) | self-hosting a hub (macOS, Linux, Windows), pairing, what syncs, conflicts, relays and privacy, remote sessions, revocation, backups |
 | [Web portal](portal.md) | LAN HTTPS portal, phone login via QR, certificate fingerprint, browser device permissions, Tailscale |
 

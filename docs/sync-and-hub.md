@@ -44,7 +44,7 @@ Run the hub under your normal user account, never as root or a system service: s
    The LaunchAgent restarts the daemon after a crash (not after a deliberate stop). launchd output goes to `~/.blirp/logs/launchd.log`, the daemon's own log to `~/.blirp/logs/blirpd.<date>.log`.
 4. Keep it running:
    - LaunchAgents run while the user is logged in. For a headless Mac enable **System Settings > Users & Groups > Automatically log in as** (unavailable with FileVault; then log in once after each reboot, e.g. over Screen Sharing).
-   - Prevent sleep: **System Settings > Energy > Prevent automatic sleeping when the display is off**, or `sudo pmset -a sleep 0 disksleep 0`.
+   - Prevent sleep: **System Settings > Energy > Prevent automatic sleeping when the display is off**, or `sudo pmset -a sleep 0 disksleep 0`. While sessions run, the hub also holds a sleep assertion itself (`sessions.keep_awake`, on by default for the hub; see [cloud-sessions.md](cloud-sessions.md#keep-awake)).
    - Optional: **Start up automatically after a power failure**.
 5. `blirp hub enable` (below).
 
@@ -137,7 +137,7 @@ Sync does not need Tailscale; iroh finds a path on its own and also works across
 
 ## Remote sessions
 
-With sync, the new-session dialog has a **Machine** picker. A session started for another machine is created by that machine's daemon (its agents, its folders), and its terminal is attached through the hub, so you can drive a session on the hub from your laptop, and vice versa. Stop and Resume of a session that runs elsewhere are forwarded to its machine.
+With sync, the new-session dialog has a **Run on** choice: this machine, **Cloud (<hub>)** and the other paired machines. A session started for another machine is created by that machine's daemon (its agents, its folders), and its terminal is attached through the hub, so you can drive a session on the hub from your laptop, and vice versa. The dialog lists that machine's agents (and whether Claude Code is logged in there), browses its folders and can `git clone` a project onto it. Stop and Resume of a session that runs elsewhere are forwarded to its machine. Running your work on the hub while your PC sleeps: [cloud-sessions.md](cloud-sessions.md).
 
 - Every node keeps one connection to the hub, and the hub relays requests byte for byte to the target machine, so nodes behind NAT are reachable.
 - A node accepts control from elsewhere only when it opted in with `sync.allow_hub_control = true` (default off; the box in the join dialog, **Allow the hub to control this machine** in Settings > Machines & Sync, or `config.toml`; leaving the hub resets it; changing it closes relayed terminals and streams so they reopen with the new rights): until then the hub and other machines can view its sessions, but their launches, stops, resumes, deletes, terminal input and memory edits on it are refused (`control_not_allowed`). The hub itself accepts control from paired machines unless you turn **Terminal control** off for a machine under **Devices** on the hub.
