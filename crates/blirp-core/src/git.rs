@@ -20,7 +20,30 @@ pub enum GitError {
     Failed { args: String, stderr: String },
 }
 
+/// Config forced onto every call. A cloned repo's own config is untrusted and
+/// must never get to run a command during our read-only queries. Passed as
+/// `GIT_CONFIG_KEY_n`/`GIT_CONFIG_VALUE_n` (command scope, overrides repo
+/// config; keys need no `=` escaping unlike `-c`).
+const SAFE_CONFIG: &[(&str, &str)] = &[
+    ("core.fsmonitor", "false"),
+    ("diff.external", ""),
+    // Inline submodule diffs and status summaries spawn git inside submodules,
+    // whose config we have not neutralized.
+    ("diff.submodule", "short"),
+    ("status.submoduleSummary", "false"),
+];
+
 fn git(dir: &Path, args: &[&str], cap: usize) -> Result<Vec<u8>, GitError> {
+    git_with(dir, args, cap, &[])
+}
+
+/// `git` with `extra` config layered on top of [`SAFE_CONFIG`].
+fn git_with(
+    dir: &Path,
+    args: &[&str],
+    cap: usize,
+    extra: &[(String, String)],
+) -> Result<Vec<u8>, GitError> {
     let mut cmd = process::command("git");
     cmd.arg("-C")
         .arg(dir)
@@ -28,7 +51,21 @@ fn git(dir: &Path, args: &[&str], cap: usize) -> Result<Vec<u8>, GitError> {
         .env("GIT_TERMINAL_PROMPT", "0")
         // Read-only queries must never take index.lock away from the user's own git.
         .env("GIT_OPTIONAL_LOCKS", "0")
+        // Paths we pass come from API clients; pathspec magic such as `:(top)x`
+        // or `:/` would reach outside the project folder.
+        .env("GIT_LITERAL_PATHSPECS", "1")
         .env("LC_ALL", "C");
+    let config = SAFE_CONFIG
+        .iter()
+        .copied()
+        .chain(extra.iter().map(|(k, v)| (k.as_str(), v.as_str())));
+    let mut count = 0usize;
+    for (i, (k, v)) in config.enumerate() {
+        cmd.env(format!("GIT_CONFIG_KEY_{i}"), k)
+            .env(format!("GIT_CONFIG_VALUE_{i}"), v);
+        count = i + 1;
+    }
+    cmd.env("GIT_CONFIG_COUNT", count.to_string());
     let out = process::run(cmd, TIMEOUT, cap).map_err(|e| match e {
         RunError::NotFound(_) => GitError::NotInstalled,
         other => GitError::Run(other),
@@ -41,6 +78,50 @@ fn git(dir: &Path, args: &[&str], cap: usize) -> Result<Vec<u8>, GitError> {
             stderr: String::from_utf8_lossy(&out.stderr).trim().to_string(),
         })
     }
+}
+
+/// Overrides disabling every clean/smudge filter driver the repo's own config
+/// (local, worktree or included from them) defines or redefines: `status` and
+/// `diff` pipe work tree files through them. Drivers only defined in the
+/// user's global/system config (git-lfs) are the user's own and keep working.
+fn repo_filter_overrides(dir: &Path) -> Result<Vec<(String, String)>, GitError> {
+    let out = match git(
+        dir,
+        &["config", "-z", "--show-scope", "--get-regexp", r"^filter\."],
+        MAX_OUTPUT,
+    ) {
+        Ok(o) => o,
+        // Exit status 1: no filter configured anywhere.
+        Err(GitError::Failed { .. }) => return Ok(Vec::new()),
+        Err(e) => return Err(e),
+    };
+    let text = String::from_utf8_lossy(&out);
+    // `-z --show-scope` emits `<scope>\0<key>\n<value>\0` per entry.
+    let mut fields = text.split('\0');
+    let mut names: Vec<&str> = Vec::new();
+    while let (Some(scope), Some(entry)) = (fields.next(), fields.next()) {
+        if matches!(scope, "system" | "global") {
+            continue;
+        }
+        let key = entry.split('\n').next().unwrap_or("");
+        if let Some((name, _)) = key.strip_prefix("filter.").and_then(|k| k.rsplit_once('.'))
+            && !names.contains(&name)
+        {
+            names.push(name);
+        }
+    }
+    Ok(names
+        .into_iter()
+        .flat_map(|n| {
+            [
+                (format!("filter.{n}.clean"), String::new()),
+                (format!("filter.{n}.smudge"), String::new()),
+                (format!("filter.{n}.process"), String::new()),
+                // An empty driver is a no-op, which `required` would turn into a hard error.
+                (format!("filter.{n}.required"), "false".to_string()),
+            ]
+        })
+        .collect())
 }
 
 fn git_line(dir: &Path, args: &[&str]) -> Result<String, GitError> {
@@ -169,7 +250,8 @@ pub fn current_branch(dir: &Path) -> Option<String> {
 }
 
 pub fn status(root: &Path) -> Result<GitStatus, GitError> {
-    let out = git(
+    let filters = repo_filter_overrides(root)?;
+    let out = git_with(
         root,
         &[
             "status",
@@ -177,8 +259,11 @@ pub fn status(root: &Path) -> Result<GitStatus, GitError> {
             "--branch",
             "-z",
             "--untracked-files=all",
+            // Checking a submodule's work tree runs git with the submodule's own config.
+            "--ignore-submodules=dirty",
         ],
         MAX_OUTPUT,
+        &filters,
     )?;
     Ok(parse_status(&out, root))
 }
@@ -264,13 +349,20 @@ pub fn parse_status(out: &[u8], root: &Path) -> GitStatus {
 /// Unified diff of the work tree against HEAD (or the index before the first
 /// commit), optionally limited to one relative path. Returns (diff, truncated).
 pub fn diff(root: &Path, rel_path: Option<&str>, cap: usize) -> Result<(String, bool), GitError> {
+    let filters = repo_filter_overrides(root)?;
     let run = |base: &[&str]| {
         let mut args: Vec<&str> = base.to_vec();
-        args.extend(["--no-color", "--no-ext-diff"]);
+        // External diff drivers and textconv are commands named by repo config.
+        args.extend([
+            "--no-color",
+            "--no-ext-diff",
+            "--no-textconv",
+            "--ignore-submodules=dirty",
+        ]);
         if let Some(p) = rel_path {
             args.extend(["--", p]);
         }
-        git(root, &args, cap + 1)
+        git_with(root, &args, cap + 1, &filters)
     };
     let out = match run(&["diff", "HEAD"]) {
         Ok(o) => o,
@@ -416,5 +508,102 @@ u UU N... 100644 100644 100644 100644 a b c conflict.rs\0\
         let plain = dir.path().join("plain");
         std::fs::create_dir(&plain).unwrap();
         assert_eq!(repo_info(&plain).unwrap(), None);
+    }
+
+    #[test]
+    fn pathspec_magic_stays_inside_root() {
+        if !is_installed() {
+            eprintln!("git missing; skipping");
+            return;
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let repo = dir.path().join("repo");
+        std::fs::create_dir_all(repo.join("sub")).unwrap();
+        run_git(&repo, &["init"]);
+        std::fs::write(repo.join("outside.txt"), "one\n").unwrap();
+        std::fs::write(repo.join("sub/inside.txt"), "one\n").unwrap();
+        run_git(&repo, &["add", "."]);
+        run_git(&repo, &["commit", "-m", "init"]);
+        std::fs::write(repo.join("outside.txt"), "leak\n").unwrap();
+        std::fs::write(repo.join("sub/inside.txt"), "two\n").unwrap();
+
+        let sub = repo.join("sub");
+        let (d, _) = diff(&sub, Some("inside.txt"), 1 << 20).unwrap();
+        assert!(d.contains("+two"), "{d}");
+        for magic in [":(top)outside.txt", ":/outside.txt", ":/", ":(glob)**", "*"] {
+            let (d, _) = diff(&sub, Some(magic), 1 << 20).unwrap();
+            assert!(!d.contains("leak"), "{magic}: {d}");
+        }
+    }
+
+    /// A cloned repo's config names commands; none of them may run when we
+    /// only read the repo.
+    #[test]
+    fn untrusted_repo_config_never_runs_commands() {
+        if !is_installed() {
+            eprintln!("git missing; skipping");
+            return;
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let repo = dir.path().join("repo");
+        std::fs::create_dir(&repo).unwrap();
+        run_git(&repo, &["init"]);
+        std::fs::write(repo.join(".gitattributes"), "f.txt filter=evil diff=evil\n").unwrap();
+        std::fs::write(repo.join("f.txt"), "one\n").unwrap();
+        run_git(&repo, &["add", "."]);
+        run_git(&repo, &["commit", "-m", "init"]);
+        // Each command drops a marker next to the repo (hooks run in the work tree).
+        for (key, cmd) in [
+            ("core.fsmonitor", "touch ../fsmonitor.ran; true"),
+            ("filter.evil.clean", "touch ../clean.ran; cat"),
+            ("filter.evil.smudge", "touch ../smudge.ran; cat"),
+            ("filter.evil.required", "true"),
+            ("diff.evil.textconv", "touch ../textconv.ran; cat"),
+            ("diff.evil.command", "touch ../extdiff.ran; true"),
+            ("diff.external", "touch ../external.ran; true"),
+        ] {
+            run_git(&repo, &["config", key, cmd]);
+        }
+        std::fs::write(repo.join("f.txt"), "two\n").unwrap();
+        let markers = ["fsmonitor.ran", "clean.ran", "textconv.ran"].map(|m| dir.path().join(m));
+
+        // Control: stock git runs them, so the assertions below mean something.
+        for args in [
+            &["status"][..],
+            &["diff", "HEAD"],
+            &["diff", "HEAD", "--no-ext-diff"],
+        ] {
+            std::process::Command::new("git")
+                .arg("-C")
+                .arg(&repo)
+                .args(args)
+                .output()
+                .unwrap();
+        }
+        for m in &markers {
+            assert!(m.exists(), "control: {} not created", m.display());
+        }
+        let all = [
+            "fsmonitor.ran",
+            "clean.ran",
+            "smudge.ran",
+            "textconv.ran",
+            "extdiff.ran",
+            "external.ran",
+        ];
+        for m in all {
+            let _ = std::fs::remove_file(dir.path().join(m));
+        }
+
+        let st = status(&repo).unwrap();
+        assert_eq!(st.entries.len(), 1, "{st:?}");
+        let (d, _) = diff(&repo, None, 1 << 20).unwrap();
+        assert!(d.contains("+two"), "{d}");
+        diff(&repo, Some("f.txt"), 1 << 20).unwrap();
+        repo_info(&repo).unwrap().unwrap();
+        current_branch(&repo);
+        for m in all {
+            assert!(!dir.path().join(m).exists(), "{m} ran");
+        }
     }
 }
