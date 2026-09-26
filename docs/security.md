@@ -72,7 +72,7 @@ Never expose the daemon port or the portal to the internet. For remote access us
 
 ## Summarizer runs
 
-The `claude` summarizer runs with every tool, hooks, plugins, MCP servers and session persistence disabled (`--tools ""`, `--safe-mode`, `--no-session-persistence`), in an empty scratch folder, with a 180 s timeout that kills the process tree: a transcript cannot make it run commands or read files. `codex` has no way to switch off every built-in tool: blirp disables its shell and exec tools, hooks, MCP servers, apps, plugins, browser and computer use and keeps its read-only sandbox, but a crafted transcript could still steer it to a remaining built-in tool (for example to read files). `auto` therefore never picks `codex`; it runs only when you set `summarizer = "codex"`. Summarizer replies are redacted before they are stored.
+The `claude` summarizer runs with every tool, hooks, plugins, MCP servers and session persistence disabled (`--tools ""`, `--safe-mode`, `--no-session-persistence`), in an empty scratch folder, with a 180 s timeout that kills the process tree: a transcript cannot make it run commands or read files. `codex` has no single switch for "no tools": blirp does not load your Codex `config.toml` (so none of your MCP servers, plugins or hooks), turns off web search, its shell and exec tools, apps, browser, computer use, subagents and image tools, and keeps its read-only sandbox; with codex 0.153.2 the model is then offered no tool at all. A newer Codex can add a built-in tool that these switches do not cover, which a crafted transcript could steer it to, so `auto` never picks `codex`; it runs only when you set `summarizer = "codex"`. Summarizer replies are redacted before they are stored.
 
 ## Memory is context, not instructions
 
