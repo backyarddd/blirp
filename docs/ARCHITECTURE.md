@@ -173,7 +173,7 @@ Implementation notes: a subfolder of an unregistered repo registers the repo top
 An `AgentSpec` describes each agent: binary name(s), how to detect it on PATH, launch args, resume args, env injection, hook/MCP integration, transcript adapter. Custom agents are any command line from config (no memory ingest, but still tracked with status and injection via `BLIRP_MEMORY_FILE` env and AGENTS.md if the user enables it).
 
 Launch (`POST /api/sessions`): body `{project_id | cwd, agent, prompt?, worktree?: bool, continue_from?: session_id, machine?: id}` (`cwd` must be absolute, else 400):
-1. Resolve project + cwd. If `worktree` and project is git: `git worktree add ~/.blirp/worktrees/<project>/<name> -b blirp/<name>`; name is `adjective-animal-xxxx`.
+1. Resolve project + cwd. If `worktree` and project is git: `git worktree add ~/.blirp/worktrees/<project>/<name> -b blirp/<name>`; name is `adjective-animal-xxxx`. If the session row then cannot be written, the worktree is removed again (the branch is kept).
 2. Create session row (`starting`, origin `blirp`).
 3. Render memory injection (§9) to `~/.blirp/launch/<id>/memory.md`.
 4. Build argv/env per agent:

@@ -111,6 +111,8 @@ struct Prepared {
     cwd: PathBuf,
     branch: Option<String>,
     worktree: Option<String>,
+    /// Main work tree of the repo a new worktree was added to.
+    repo_root: Option<PathBuf>,
 }
 
 /// §7 step 1: resolve project + cwd, optionally create a worktree.
@@ -174,6 +176,7 @@ fn prepare(state: &SharedState, req: &LaunchSession) -> ApiResult<Prepared> {
             project_id,
             cwd,
             worktree: None,
+            repo_root: None,
         });
     }
     let repo = git::repo_info(&cwd).map_err(|e| ApiError::internal("inspecting git repo", e))?;
@@ -191,6 +194,7 @@ fn prepare(state: &SharedState, req: &LaunchSession) -> ApiResult<Prepared> {
             project_id,
             cwd,
             worktree: None,
+            repo_root: None,
         });
     };
     let name = worktree_name()?;
@@ -222,6 +226,7 @@ fn prepare(state: &SharedState, req: &LaunchSession) -> ApiResult<Prepared> {
         },
         branch: Some(branch),
         worktree: Some(wt.display().to_string()),
+        repo_root: Some(repo.toplevel.clone()),
     })
 }
 
@@ -308,8 +313,17 @@ pub async fn launch(state: &SharedState, req: LaunchSession) -> ApiResult<Sessio
     let store = state.store.clone();
     let row = session.clone();
     let src = source.clone();
+    let repo_root = prepared.repo_root;
     let handoff = crate::api::blocking(move || {
-        store.insert_session(&row)?;
+        if let Err(e) = store.insert_session(&row) {
+            // No session will ever own the worktree just added for it.
+            if let (Some(wt), Some(root)) = (&row.worktree, &repo_root)
+                && let Err(ge) = git::worktree_remove(root, Path::new(wt), true)
+            {
+                tracing::warn!(worktree = %wt, error = %ge, "removing the worktree of a failed launch failed");
+            }
+            return Err(e.into());
+        }
         Ok(match src {
             Some(s) => Some(crate::memory::render::render_handoff(&store, &s)?),
             None => None,
