@@ -46,7 +46,7 @@ pub async fn update(
         );
         return Ok(ExitCode::SUCCESS);
     }
-    let Some(mut inst) = install::installed()? else {
+    let Some(inst) = install::installed()? else {
         bail!(
             "{} was not installed by the blirp install script, so it is not updated in place. \
              Update it the way you installed it (git pull + cargo build, your package manager), \
@@ -54,7 +54,34 @@ pub async fn update(
             crate::memory::blirp_exe().display()
         );
     };
-    let names = update::this_platform(&target)?;
+    println!("Updating blirp {current} -> {target}");
+    let result = install_release(paths, &client, &release, inst, &current, &target).await;
+    // Settings > About shows the last attempt (`GET /api/update`), also
+    // after an update started there, which runs without a terminal.
+    let outcome = blirp_core::model::UpdateOutcome {
+        from: current.to_string(),
+        to: target.to_string(),
+        ok: result.is_ok(),
+        error: result.as_ref().err().map(|e| format!("{e:#}")),
+        finished_at: blirp_core::now_ms(),
+    };
+    if let Err(e) = update::record_outcome(paths, &outcome) {
+        eprintln!("blirp: could not record the update in the log: {e:#}");
+    }
+    result.map(|()| ExitCode::SUCCESS)
+}
+
+/// Download, verify and install `release` (`target`) over this
+/// installation; the daemon is stopped only once everything is verified.
+async fn install_release(
+    paths: &Paths,
+    client: &reqwest::Client,
+    release: &update::Release,
+    mut inst: install::Installed,
+    current: &semver::Version,
+    target: &semver::Version,
+) -> anyhow::Result<()> {
+    let names = update::this_platform(target)?;
     let app = inst
         .receipt
         .app()
@@ -68,8 +95,8 @@ pub async fn update(
         .with_context(|| format!("create a staging folder in {}", inst.dir.display()))?;
     let sums_file = stage.path().join(update::SUMS);
     let sig_file = stage.path().join(update::SUMS_SIG);
-    update::download(&client, release.asset(update::SUMS)?, &sums_file).await?;
-    update::download(&client, release.asset(update::SUMS_SIG)?, &sig_file).await?;
+    update::download(client, release.asset(update::SUMS)?, &sums_file).await?;
+    update::download(client, release.asset(update::SUMS_SIG)?, &sig_file).await?;
     let sums_bytes = std::fs::read(&sums_file)?;
     let sig = std::fs::read_to_string(&sig_file)?;
     update::verify_signature(&sums_bytes, &sig, update::release_key()).with_context(|| {
@@ -83,7 +110,7 @@ pub async fn update(
 
     println!("Downloading blirp {target}...");
     let cli_archive = stage.path().join(&names.cli);
-    let hash = update::download(&client, release.asset(&names.cli)?, &cli_archive).await?;
+    let hash = update::download(client, release.asset(&names.cli)?, &cli_archive).await?;
     update::check_sha256(&sums, &names.cli, &hash)?;
     let unpacked = stage.path().join("cli");
     install::extract(&cli_archive, &unpacked)?;
@@ -104,7 +131,7 @@ pub async fn update(
                 .tempdir_in(parent)
                 .with_context(|| format!("create a staging folder in {}", parent.display()))?;
             let file = dir.path().join(&names.app);
-            let hash = update::download(&client, release.asset(&names.app)?, &file).await?;
+            let hash = update::download(client, release.asset(&names.app)?, &file).await?;
             update::check_sha256(&sums, &names.app, &hash)?;
             let staged = stage_app(&file, dir.path(), &names.app)?;
             Some((dir, staged, dst.clone()))
@@ -156,9 +183,9 @@ pub async fn update(
         )));
     }
     println!("Updated blirp {current} -> {target}");
+    // Never fails the update: the outcome stays what the install did.
     super::skills::refresh_after_update(&inst.dir.join(install::CLI_FILES[0]));
-    restarted?;
-    Ok(ExitCode::SUCCESS)
+    restarted
 }
 
 /// Unpack a downloaded desktop app asset in `dir`; returns the new app

@@ -553,6 +553,28 @@ impl Background {
     }
 }
 
+/// `POST /api/update/apply`: start the updater like the background daemon
+/// (it outlives this daemon, which it stops); returns its pid. On Unix a
+/// thread reaps it should it end while this daemon still runs.
+pub(crate) fn spawn_detached(
+    exe: &std::path::Path,
+    args: &[String],
+    dir: &std::path::Path,
+) -> std::io::Result<u32> {
+    #[allow(unused_mut)]
+    let mut bg = spawn_background(exe, args, dir)?;
+    let pid = bg.pid;
+    #[cfg(unix)]
+    std::thread::spawn(move || match bg.child.wait() {
+        Ok(s) if !s.success() => {
+            tracing::warn!(pid, status = %s, "the updater failed; see logs/update.log")
+        }
+        Ok(_) => {}
+        Err(e) => tracing::warn!(pid, error = %e, "waiting for the updater"),
+    });
+    Ok(pid)
+}
+
 /// Start `exe args` detached from the caller: its own session / process
 /// group, no console, `dir` as working directory (never the caller's
 /// folder, which it would keep in use), `BLIRP_HOME` set, no std streams.

@@ -423,6 +423,25 @@ pub struct UpdateStatus {
     /// desktop app the script installed. False for installers, package
     /// managers and source builds, which update the way they were installed.
     pub self_update: bool,
+    /// When GitHub was last asked (unix ms); null before the first check.
+    pub checked_at: Option<i64>,
+    /// Why that check failed (offline, rate limited, ...); null when it worked.
+    pub error: Option<String>,
+    /// The last `blirp update` that tried to install a release on this
+    /// machine (from the Update now button or a terminal).
+    pub last_update: Option<UpdateOutcome>,
+}
+
+/// One install attempt of `blirp update`, a line of `logs/update.log`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+pub struct UpdateOutcome {
+    pub from: String,
+    pub to: String,
+    pub ok: bool,
+    /// Why it failed; the previous version is still installed.
+    pub error: Option<String>,
+    /// Unix ms.
+    pub finished_at: i64,
 }
 
 /// Rights of the calling client (§11), so a UI can hide what the daemon
@@ -1239,7 +1258,7 @@ mod tests {
             MemoryPart, IntegrationState, InjectMode, CloneState,
             Machine, Project, ProjectPath, Session, Event, Record, Brief, WikiPage, Suggestion,
             BriefProposal, RecordProposal, WikiProposal, Resource, Device,
-            ErrorBody, ErrorDetail, Health, UpdateStatus, ProjectPathInfo, ProjectSummary, CreateProject,
+            ErrorBody, ErrorDetail, Health, UpdateStatus, UpdateOutcome, ProjectPathInfo, ProjectSummary, CreateProject,
             PatchProject, MergeProject, ProjectMemory, PutBrief, RevertBrief, CreateRecord,
             PatchRecord, CreateWikiPage, PutWikiPage, CreateResource, PatchResource,
             GitStatusEntry, GitStatus, GitDiff, FileEntry, DirListing, FileContent, SessionsPage, SessionDetail,

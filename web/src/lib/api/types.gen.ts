@@ -167,7 +167,33 @@ enabled: boolean,
  * desktop app the script installed. False for installers, package
  * managers and source builds, which update the way they were installed.
  */
-self_update: boolean, };
+self_update: boolean, 
+/**
+ * When GitHub was last asked (unix ms); null before the first check.
+ */
+checked_at: number | null, 
+/**
+ * Why that check failed (offline, rate limited, ...); null when it worked.
+ */
+error: string | null, 
+/**
+ * The last `blirp update` that tried to install a release on this
+ * machine (from the Update now button or a terminal).
+ */
+last_update: UpdateOutcome | null, };
+
+/**
+ * One install attempt of `blirp update`, a line of `logs/update.log`.
+ */
+export type UpdateOutcome = { from: string, to: string, ok: boolean, 
+/**
+ * Why it failed; the previous version is still installed.
+ */
+error: string | null, 
+/**
+ * Unix ms.
+ */
+finished_at: number, };
 
 export type ProjectPathInfo = { machine_id: string, path: string, git_remote: string | null, 
 /**

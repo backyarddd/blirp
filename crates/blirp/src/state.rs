@@ -41,6 +41,8 @@ pub struct AppState {
     pub keep_awake: crate::keep_awake::KeepAwake,
     /// `git clone` jobs started with `POST /api/machines/:id/clone`.
     pub clones: crate::clone::CloneJobs,
+    /// Release checks and the Update now button (`/api/update*`).
+    pub updates: crate::update::Updates,
 }
 
 impl AppState {
@@ -72,6 +74,7 @@ impl AppState {
             ws_tickets: crate::api::ticket::WsTickets::default(),
             keep_awake: crate::keep_awake::KeepAwake::default(),
             clones: crate::clone::CloneJobs::default(),
+            updates: crate::update::Updates::default(),
         }
     }
 

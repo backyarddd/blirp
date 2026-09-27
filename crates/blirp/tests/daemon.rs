@@ -854,6 +854,7 @@ async fn claude_login_token_is_stored_but_never_returned() {
 /// here is a route nobody checked.
 const MUTATING_ROUTES: &[(&str, &str, Need)] = &[
     ("PATCH", "/api/settings", Need::Admin),
+    ("POST", "/api/update/check", Need::Admin),
     ("POST", "/api/sync/hub/enable", Need::Admin),
     ("POST", "/api/sync/hub/disable", Need::Admin),
     ("POST", "/api/sync/invite", Need::Admin),
@@ -982,7 +983,11 @@ async fn portal_devices_get_only_their_rights() {
         }
     }
     // Loopback-only routes do not exist on the portal.
-    for path in ["/api/daemon/shutdown", "/api/ws-ticket"] {
+    for path in [
+        "/api/daemon/shutdown",
+        "/api/ws-ticket",
+        "/api/update/apply",
+    ] {
         let (status, _) = portal_call(&app, "POST", path, &controller).await;
         assert_eq!(status, 404, "{path}");
     }
@@ -1404,4 +1409,198 @@ async fn taken_port_fails_startup() {
     assert!(msg.contains("config.toml"), "{msg}");
     assert!(!home.path().join("runtime.json").exists());
     drop(squatter);
+}
+
+/// A local stand-in for the GitHub releases API: `GET /releases/latest`
+/// answers `tag` and counts the requests.
+async fn fake_releases(
+    tag: &'static str,
+) -> (String, std::sync::Arc<std::sync::atomic::AtomicUsize>) {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    let hits = std::sync::Arc::new(AtomicUsize::new(0));
+    let counter = hits.clone();
+    let app = axum::Router::new().route(
+        "/releases/latest",
+        axum::routing::get(move || {
+            counter.fetch_add(1, Ordering::SeqCst);
+            async move {
+                axum::Json(json!({
+                    "tag_name": tag,
+                    "html_url": format!("https://example.invalid/releases/{tag}"),
+                    "assets": [],
+                }))
+            }
+        }),
+    );
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let base = format!("http://{}/releases", listener.local_addr().unwrap());
+    tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+    (base, hits)
+}
+
+type Spawned =
+    std::sync::Arc<std::sync::Mutex<Vec<(std::path::PathBuf, Vec<String>, std::path::PathBuf)>>>;
+
+/// Overrides that make this daemon a script install whose updater is only
+/// recorded, never run.
+fn fake_install(h: &Harness, base: &str) -> (std::path::PathBuf, Spawned) {
+    let cli = h.daemon.state.paths.home().join("bin").join("blirp");
+    let spawned: Spawned = Default::default();
+    let record = spawned.clone();
+    h.daemon
+        .state
+        .updates
+        .set_overrides(blirp::update::Overrides {
+            base_url: Some(base.to_string()),
+            cli: Some(cli.clone()),
+            spawn: Some(std::sync::Arc::new(move |exe, args, dir| {
+                record
+                    .lock()
+                    .unwrap()
+                    .push((exe.to_path_buf(), args.to_vec(), dir.to_path_buf()));
+                Ok(4242)
+            })),
+        });
+    (cli, spawned)
+}
+
+async fn post_status(h: &Harness, path: &str) -> (u16, serde_json::Value) {
+    let r = h.send(reqwest::Method::POST, path, json!({})).await;
+    let status = r.status().as_u16();
+    (status, r.json().await.unwrap_or(serde_json::Value::Null))
+}
+
+#[tokio::test]
+async fn update_status_check_and_apply() {
+    use blirp_core::model::{UpdateOutcome, UpdateStatus};
+    use std::sync::atomic::Ordering;
+    let h = Harness::start().await;
+    let (base, hits) = fake_releases("v99.0.0").await;
+    h.daemon
+        .state
+        .updates
+        .set_overrides(blirp::update::Overrides {
+            base_url: Some(base.clone()),
+            ..Default::default()
+        });
+
+    // Not a script install (a test binary has no receipt): nothing to apply.
+    let st: UpdateStatus = h.get("/api/update").await;
+    assert!(st.available && st.enabled && !st.self_update, "{st:?}");
+    assert_eq!(st.latest.as_deref(), Some("99.0.0"));
+    assert_eq!(
+        st.notes_url.as_deref(),
+        Some("https://example.invalid/releases/v99.0.0")
+    );
+    assert!(st.checked_at.is_some() && st.error.is_none() && st.last_update.is_none());
+    let (code, body) = post_status(&h, "/api/update/apply").await;
+    assert_eq!(
+        (code, body["error"]["code"].as_str()),
+        (409, Some("not_self_update"))
+    );
+
+    // Check now within a minute of the last ask is answered from it.
+    let (code, body) = post_status(&h, "/api/update/check").await;
+    assert_eq!(code, 200, "{body}");
+    assert_eq!(body["latest"], "99.0.0");
+    assert_eq!(hits.load(Ordering::SeqCst), 1);
+
+    // A script install: the updater is the installed CLI, pinned to the
+    // release the UI showed, with this daemon's data dir.
+    let (cli, spawned) = fake_install(&h, &base);
+    let (code, body) = post_status(&h, "/api/update/apply").await;
+    assert_eq!(code, 202, "{body}");
+    {
+        let spawned = spawned.lock().unwrap();
+        assert_eq!(spawned.len(), 1);
+        let (exe, args, dir) = &spawned[0];
+        assert!(
+            args.ends_with(&["update".into(), "--version".into(), "99.0.0".into()]),
+            "{args:?}"
+        );
+        // Linux CI may run the tests inside a systemd service.
+        let cli_s = cli.display().to_string();
+        assert!(
+            *exe == cli || (exe == std::path::Path::new("systemd-run") && args.contains(&cli_s)),
+            "{exe:?} {args:?}"
+        );
+        assert_eq!(dir, h.daemon.state.paths.home());
+    }
+    // One updater at a time, until it records an outcome.
+    let (code, body) = post_status(&h, "/api/update/apply").await;
+    assert_eq!(
+        (code, body["error"]["code"].as_str()),
+        (409, Some("update_in_progress"))
+    );
+    let failed = UpdateOutcome {
+        from: blirp::update::CURRENT.into(),
+        to: "99.0.0".into(),
+        ok: false,
+        error: Some("updating to 99.0.0 failed: disk full".into()),
+        finished_at: blirp_core::now_ms() + 1,
+    };
+    blirp::update::record_outcome(&h.daemon.state.paths, &failed).unwrap();
+    let st: UpdateStatus = h.get("/api/update").await;
+    assert_eq!(st.last_update.as_ref(), Some(&failed));
+    assert!(st.self_update);
+    let (code, body) = post_status(&h, "/api/update/apply").await;
+    assert_eq!(code, 202, "{body}");
+    assert_eq!(spawned.lock().unwrap().len(), 2);
+    assert_eq!(
+        hits.load(Ordering::SeqCst),
+        1,
+        "apply reuses the last check"
+    );
+
+    // Checks off: no check, no update.
+    let mut cfg = h.daemon.state.config();
+    cfg.update.check = false;
+    h.daemon.state.set_config(cfg);
+    for path in ["/api/update/check", "/api/update/apply"] {
+        let (code, body) = post_status(&h, path).await;
+        assert_eq!(
+            (code, body["error"]["code"].as_str()),
+            (409, Some("update_checks_off")),
+            "{path}"
+        );
+    }
+    let st: UpdateStatus = h.get("/api/update").await;
+    assert!(!st.enabled && st.latest.is_none() && !st.available);
+    assert_eq!(hits.load(Ordering::SeqCst), 1);
+}
+
+#[tokio::test]
+async fn update_apply_needs_a_newer_release() {
+    use blirp_core::model::UpdateStatus;
+    let h = Harness::start().await;
+    let (base, _) = fake_releases(concat!("v", env!("CARGO_PKG_VERSION"))).await;
+    let (_, spawned) = fake_install(&h, &base);
+    let st: UpdateStatus = h.get("/api/update").await;
+    assert!(!st.available && st.self_update, "{st:?}");
+    let (code, body) = post_status(&h, "/api/update/apply").await;
+    assert_eq!(
+        (code, body["error"]["code"].as_str()),
+        (409, Some("no_update"))
+    );
+
+    // Offline: the error is reported and nothing can be applied.
+    let closed = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let base = format!("http://{}/releases", closed.local_addr().unwrap());
+    drop(closed);
+    let h = Harness::start().await;
+    let (_, offline) = fake_install(&h, &base);
+    let st: UpdateStatus = h.get("/api/update").await;
+    assert!(st.latest.is_none() && !st.available, "{st:?}");
+    assert!(
+        st.error
+            .as_deref()
+            .is_some_and(|e| e.contains("/releases/latest")),
+        "{st:?}"
+    );
+    let (code, body) = post_status(&h, "/api/update/apply").await;
+    assert_eq!(
+        (code, body["error"]["code"].as_str()),
+        (409, Some("no_update"))
+    );
+    assert!(spawned.lock().unwrap().is_empty() && offline.lock().unwrap().is_empty());
 }

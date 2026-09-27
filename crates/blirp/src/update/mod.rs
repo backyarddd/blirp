@@ -2,16 +2,18 @@
 //! this platform's assets, download them and verify them against the
 //! minisign-signed `SHA256SUMS.txt`. `install` owns the files on disk (install
 //! receipt, replacing binaries, uninstall). Used by `blirp update`,
-//! `blirp uninstall` and `GET /api/update`.
+//! `blirp uninstall` and the daemon's `/api/update` routes.
 
 pub mod install;
 
 use anyhow::{Context as _, bail};
+use blirp_core::model::UpdateOutcome;
+use blirp_core::paths::Paths;
 use reqwest::header::ACCEPT;
 use semver::Version;
 use sha2::{Digest as _, Sha256};
 use std::collections::BTreeMap;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::io::AsyncWriteExt as _;
@@ -118,7 +120,15 @@ pub async fn fetch_release(
     client: &reqwest::Client,
     version: Option<&Version>,
 ) -> anyhow::Result<Release> {
-    let base = base_url();
+    fetch_release_from(client, &base_url(), version).await
+}
+
+/// [`fetch_release`] from the releases API at `base`.
+pub async fn fetch_release_from(
+    client: &reqwest::Client,
+    base: &str,
+    version: Option<&Version>,
+) -> anyhow::Result<Release> {
     let url = match version {
         Some(v) => format!("{base}/tags/v{v}"),
         None => format!("{base}/latest"),
@@ -141,6 +151,14 @@ pub async fn fetch_release(
         };
         bail!("{what} at {base}{hint}");
     }
+    if rate_limited(status, resp.headers()) {
+        let hint = if token().is_some() {
+            ""
+        } else {
+            "; set GITHUB_TOKEN to raise the limit"
+        };
+        bail!("the GitHub API rate limit is used up, try again later{hint}");
+    }
     if !status.is_success() {
         let body = resp.text().await.unwrap_or_default();
         bail!("GET {url}: {status} {}", body.trim());
@@ -148,6 +166,15 @@ pub async fn fetch_release(
     resp.json()
         .await
         .with_context(|| format!("unexpected answer from {url}"))
+}
+
+/// GitHub answers an exhausted rate limit with 403 or 429 and
+/// `x-ratelimit-remaining: 0`.
+fn rate_limited(status: reqwest::StatusCode, headers: &reqwest::header::HeaderMap) -> bool {
+    matches!(status.as_u16(), 403 | 429)
+        && headers
+            .get("x-ratelimit-remaining")
+            .is_some_and(|v| v.as_bytes() == b"0")
 }
 
 /// Download an asset to `dest`; returns its SHA-256 (lowercase hex).
@@ -288,42 +315,183 @@ pub struct Latest {
     pub notes_url: String,
 }
 
-type Checked = (Instant, Option<Arc<Latest>>);
+/// One ask to GitHub.
+#[derive(Debug, Clone)]
+pub struct Checked {
+    at: Instant,
+    /// Unix ms of the ask, for clients.
+    pub at_ms: i64,
+    /// A failure is formatted for clients.
+    pub latest: Result<Arc<Latest>, String>,
+}
 
-/// Last answer of [`latest_cached`]; one check per day (per hour after a failure).
-static LATEST: tokio::sync::Mutex<Option<Checked>> = tokio::sync::Mutex::const_new(None);
+/// Starts `exe args` detached with `dir` as data dir; returns its pid.
+pub type Spawner = Arc<dyn Fn(&Path, &[String], &Path) -> std::io::Result<u32> + Send + Sync>;
 
-/// The latest release, asking GitHub at most once a day. None when the check
-/// fails (logged).
-pub async fn latest_cached() -> Option<Arc<Latest>> {
-    const OK_TTL: Duration = Duration::from_secs(24 * 3600);
-    const ERR_TTL: Duration = Duration::from_secs(3600);
-    // Held across the request so concurrent callers share one check.
-    let mut slot = LATEST.lock().await;
-    if let Some((at, latest)) = slot.as_ref() {
-        let ttl = if latest.is_some() { OK_TTL } else { ERR_TTL };
-        if at.elapsed() < ttl {
-            return latest.clone();
-        }
+/// Replacements for what the daemon's update routes reach outside the
+/// process. Only tests set them.
+#[derive(Clone, Default)]
+pub struct Overrides {
+    /// Releases API instead of [`BASE_URL_ENV`] / [`RELEASES_API`].
+    pub base_url: Option<String>,
+    /// Treat this as the installed CLI (self-update possible) instead of
+    /// reading the install receipt.
+    pub cli: Option<PathBuf>,
+    /// Instead of starting the updater process.
+    pub spawn: Option<Spawner>,
+}
+
+/// The daemon's update state (`/api/update*`).
+#[derive(Default)]
+pub struct Updates {
+    /// Last ask to GitHub. Held across the request so concurrent callers
+    /// share one check.
+    checked: tokio::sync::Mutex<Option<Checked>>,
+    /// When `POST /api/update/apply` last started the updater (unix ms).
+    pub started_at: std::sync::Mutex<Option<i64>>,
+    overrides: std::sync::RwLock<Overrides>,
+}
+
+/// A good answer is reused for a day, a failure for an hour.
+const OK_TTL: Duration = Duration::from_secs(24 * 3600);
+const ERR_TTL: Duration = Duration::from_secs(3600);
+/// A forced check (`POST /api/update/check`) asks GitHub at most this often;
+/// the anonymous API allows 60 requests an hour per address.
+pub const FORCE_TTL: Duration = Duration::from_secs(60);
+
+impl Updates {
+    pub fn set_overrides(&self, o: Overrides) {
+        *self
+            .overrides
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = o;
     }
-    let result = tokio::time::timeout(Duration::from_secs(20), async {
-        let release = fetch_release(&http()?, None).await?;
-        anyhow::Ok(Latest {
-            version: release.version()?,
-            notes_url: release.html_url,
+
+    pub fn overrides(&self) -> Overrides {
+        self.overrides
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone()
+    }
+
+    /// The latest release: the last answer while it is fresh (a day, an
+    /// hour after a failure; `force` shortens both to [`FORCE_TTL`]), else a
+    /// new ask to GitHub. A failure is logged and kept as the answer.
+    pub async fn latest(&self, force: bool) -> Checked {
+        let mut slot = self.checked.lock().await;
+        if let Some(c) = slot.as_ref() {
+            let ttl = match (&c.latest, force) {
+                (_, true) => FORCE_TTL,
+                (Ok(_), false) => OK_TTL,
+                (Err(_), false) => ERR_TTL,
+            };
+            if c.at.elapsed() < ttl {
+                return c.clone();
+            }
+        }
+        let base = self.overrides().base_url.unwrap_or_else(base_url);
+        let result = tokio::time::timeout(Duration::from_secs(20), async {
+            let release = fetch_release_from(&http()?, &base, None).await?;
+            anyhow::Ok(Latest {
+                version: release.version()?,
+                notes_url: release.html_url,
+            })
         })
-    })
-    .await
-    .unwrap_or_else(|_| Err(anyhow::anyhow!("timed out")));
-    let latest = match result {
-        Ok(l) => Some(Arc::new(l)),
+        .await
+        .unwrap_or_else(|_| Err(anyhow::anyhow!("GitHub did not answer within 20 s")));
+        let latest = result.map(Arc::new).map_err(|e| {
+            let e = format!("{e:#}");
+            tracing::warn!(error = %e, "update check failed");
+            e
+        });
+        let c = Checked {
+            at: Instant::now(),
+            at_ms: blirp_core::now_ms(),
+            latest,
+        };
+        *slot = Some(c.clone());
+        c
+    }
+}
+
+/// Where `blirp update` records its install attempts, one JSON
+/// [`UpdateOutcome`] per line; the daemon reports the last one.
+pub fn outcome_log(paths: &Paths) -> PathBuf {
+    paths.logs_dir().join("update.log")
+}
+
+pub fn record_outcome(paths: &Paths, outcome: &UpdateOutcome) -> anyhow::Result<()> {
+    use std::io::Write as _;
+    let path = outcome_log(paths);
+    std::fs::create_dir_all(paths.logs_dir())
+        .with_context(|| format!("create {}", paths.logs_dir().display()))?;
+    let mut f = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&path)
+        .with_context(|| format!("open {}", path.display()))?;
+    writeln!(f, "{}", serde_json::to_string(outcome)?)
+        .with_context(|| format!("write {}", path.display()))
+}
+
+/// The last readable line of the outcome log; None without one.
+pub fn last_outcome(paths: &Paths) -> Option<UpdateOutcome> {
+    let text = match std::fs::read_to_string(outcome_log(paths)) {
+        Ok(t) => t,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return None,
         Err(e) => {
-            tracing::warn!(error = format!("{e:#}"), "update check failed");
-            None
+            tracing::warn!(error = %e, "read the update log");
+            return None;
         }
     };
-    *slot = Some((Instant::now(), latest.clone()));
-    latest
+    text.lines()
+        .rev()
+        .find_map(|l| serde_json::from_str(l.trim()).ok())
+}
+
+/// The updater command line: `<cli> update --version <version>`. On Linux
+/// under a systemd service (`under_systemd`), `systemd-run --user` starts
+/// it in a unit of its own, because stopping the daemon's service kills
+/// everything in the service's cgroup, the updater included.
+/// `--setenv=NAME` copies a variable from the environment `systemd-run`
+/// gets; `present` says which are set.
+pub fn updater_command(
+    cli: &Path,
+    version: &Version,
+    under_systemd: bool,
+    present: impl Fn(&str) -> bool,
+) -> (PathBuf, Vec<String>) {
+    let args = vec![
+        "update".to_string(),
+        "--version".to_string(),
+        version.to_string(),
+    ];
+    if !under_systemd {
+        return (cli.to_path_buf(), args);
+    }
+    let mut wrapped: Vec<String> = [
+        "--user",
+        "--collect",
+        "--quiet",
+        "--description=blirp update",
+    ]
+    .map(String::from)
+    .to_vec();
+    for name in [
+        blirp_core::paths::HOME_ENV,
+        "PATH",
+        "XDG_DATA_HOME",
+        TOKEN_ENV,
+        BASE_URL_ENV,
+    ] {
+        if present(name) {
+            wrapped.push(format!("--setenv={name}"));
+        }
+    }
+    wrapped.push("--".to_string());
+    wrapped.push(cli.display().to_string());
+    wrapped.extend(args);
+    (PathBuf::from("systemd-run"), wrapped)
 }
 
 #[cfg(test)]
@@ -421,6 +589,71 @@ U9d1YnP09dRsKTqDZBVlbrzr0GNVnDVjBx4vqKQqfwyTXTiIr3dIkL33LD0QhQ6UtqF3neyOI/DD6jVI
         let bad_sig = TEST_SIG.replace("U9d1", "U9d2");
         assert!(verify_signature(TEST_DATA.as_bytes(), &bad_sig, TEST_KEY).is_err());
         assert!(verify_signature(TEST_DATA.as_bytes(), "garbage", TEST_KEY).is_err());
+    }
+
+    #[test]
+    fn updater_command_leaves_the_service_cgroup_under_systemd() {
+        let cli = Path::new("/home/me/.local/bin/blirp");
+        let v = parse_version("0.2.0").unwrap();
+        let (exe, args) = updater_command(cli, &v, false, |_| true);
+        assert_eq!(exe, cli);
+        assert_eq!(args, ["update", "--version", "0.2.0"]);
+        let (exe, args) = updater_command(cli, &v, true, |n| n != TOKEN_ENV);
+        assert_eq!(exe, Path::new("systemd-run"));
+        assert_eq!(
+            args,
+            [
+                "--user",
+                "--collect",
+                "--quiet",
+                "--description=blirp update",
+                "--setenv=BLIRP_HOME",
+                "--setenv=PATH",
+                "--setenv=XDG_DATA_HOME",
+                "--setenv=BLIRP_RELEASE_BASE_URL",
+                "--",
+                "/home/me/.local/bin/blirp",
+                "update",
+                "--version",
+                "0.2.0",
+            ]
+        );
+    }
+
+    #[test]
+    fn outcome_log_keeps_the_last_attempt() {
+        let root = tempfile::tempdir().unwrap();
+        let paths = Paths::at(root.path());
+        assert_eq!(last_outcome(&paths), None);
+        let outcome = |ok, at| UpdateOutcome {
+            from: "0.1.0".into(),
+            to: "0.2.0".into(),
+            ok,
+            error: (!ok).then(|| "disk full".to_string()),
+            finished_at: at,
+        };
+        record_outcome(&paths, &outcome(false, 1)).unwrap();
+        record_outcome(&paths, &outcome(true, 2)).unwrap();
+        assert_eq!(last_outcome(&paths), Some(outcome(true, 2)));
+        // A torn last line (a crash while writing) falls back to the one before.
+        let mut text = std::fs::read_to_string(outcome_log(&paths)).unwrap();
+        text.push_str("{\"from\":");
+        std::fs::write(outcome_log(&paths), text).unwrap();
+        assert_eq!(last_outcome(&paths), Some(outcome(true, 2)));
+    }
+
+    #[test]
+    fn rate_limit_is_recognized() {
+        use reqwest::StatusCode;
+        use reqwest::header::{HeaderMap, HeaderValue};
+        let mut empty = HeaderMap::new();
+        assert!(!rate_limited(StatusCode::FORBIDDEN, &empty));
+        empty.insert("x-ratelimit-remaining", HeaderValue::from_static("0"));
+        assert!(rate_limited(StatusCode::FORBIDDEN, &empty));
+        assert!(rate_limited(StatusCode::TOO_MANY_REQUESTS, &empty));
+        assert!(!rate_limited(StatusCode::NOT_FOUND, &empty));
+        empty.insert("x-ratelimit-remaining", HeaderValue::from_static("12"));
+        assert!(!rate_limited(StatusCode::FORBIDDEN, &empty));
     }
 
     #[test]
