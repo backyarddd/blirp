@@ -412,14 +412,23 @@ async fn open(paths: &Paths) -> anyhow::Result<ExitCode> {
 
 async fn sessions(paths: &Paths, project: Option<String>, limit: u32) -> anyhow::Result<ExitCode> {
     let client = Client::connect(paths).await?;
-    let mut path = format!("/api/sessions?limit={limit}");
+    // Only the path and query are sent; the base just makes the URL parse.
+    let mut url = reqwest::Url::parse("http://blirp.local/api/sessions")?;
+    url.query_pairs_mut()
+        .append_pair("limit", &limit.to_string());
     if let Some(p) = project {
         // An unknown id is an error (as in `blirp mem`), not "no sessions".
+        let mut check = reqwest::Url::parse("http://blirp.local/")?;
+        check
+            .path_segments_mut()
+            .map_err(|()| anyhow::anyhow!("building the project path"))?
+            .extend(["api", "projects", p.as_str()]);
         client
-            .send(reqwest::Method::GET, &format!("/api/projects/{p}"), None)
+            .send(reqwest::Method::GET, check.path(), None)
             .await?;
-        path.push_str(&format!("&project={p}"));
+        url.query_pairs_mut().append_pair("project", &p);
     }
+    let path = format!("{}?{}", url.path(), url.query().unwrap_or_default());
     let page: SessionsPage = client.get(&path).await?;
     if page.items.is_empty() {
         println!("no sessions");

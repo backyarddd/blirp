@@ -168,17 +168,25 @@ pub async fn devices(client: &Client, action: DevicesAction) -> anyhow::Result<E
         DevicesAction::List => {
             let list: Vec<Device> = client.get("/api/devices").await?;
             if list.is_empty() {
-                let s: SyncStatus = client.get("/api/sync/status").await?;
+                // The role only picks the hint: without it, the neutral one.
+                let role = match client.get::<SyncStatus>("/api/sync/status").await {
+                    Ok(s) => Some(s.role),
+                    Err(e) => {
+                        eprintln!("warning: reading the sync role failed: {e:#}");
+                        None
+                    }
+                };
                 println!(
                     "{}",
-                    match s.role {
-                        MachineRole::Node => {
+                    match role {
+                        None => "no devices",
+                        Some(MachineRole::Node) => {
                             "no devices here: the hub keeps them (run `blirp devices list` on the hub)"
                         }
-                        MachineRole::Hub => {
+                        Some(MachineRole::Hub) => {
                             "no devices yet (pair machines with `blirp hub invite`)"
                         }
-                        MachineRole::Standalone => {
+                        Some(MachineRole::Standalone) => {
                             "no devices (make a machine the hub with `blirp hub enable`, then pair others with it)"
                         }
                     }

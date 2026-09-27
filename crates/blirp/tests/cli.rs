@@ -256,6 +256,8 @@ fn unknown_projects_and_zero_limits_are_refused() {
 
     for args in [
         &["sessions", "--project", "nope"][..],
+        // Sent as one path segment, not as a path of its own.
+        &["sessions", "--project", "memory/../x?y#z"],
         &["mem", "recent", "--project", "nope"],
         &["mem", "search", "--project", "nope", "x"],
         &["mem", "brief", "--project", "nope"],
