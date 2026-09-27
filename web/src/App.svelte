@@ -12,6 +12,7 @@
   import CommandPalette from './lib/components/CommandPalette.svelte';
   import NewSessionDialog from './lib/components/NewSessionDialog.svelte';
   import Toasts from './lib/components/Toasts.svelte';
+  import UpdateBanner from './lib/components/UpdateBanner.svelte';
   import logo from './lib/assets/logo.svg';
   import SessionsView from './screens/SessionsView.svelte';
   import GridView from './screens/GridView.svelte';
@@ -89,6 +90,7 @@
 {#if app.auth === 'ok'}
   <div class="shell">
     <TopBar />
+    <UpdateBanner />
     <main class="main">
       {#if route.name === 'sessions'}
         <SessionsView sessionId={route.sessionId} />
@@ -145,10 +147,12 @@
 <style>
   .shell {
     display: grid;
-    grid-template-rows: var(--topbar-h) minmax(0, 1fr);
+    /* The middle row is the update banner's; empty without one. */
+    grid-template-rows: var(--topbar-h) auto minmax(0, 1fr);
     height: 100%;
   }
   .main {
+    grid-row: 3;
     min-height: 0;
     overflow: hidden;
   }

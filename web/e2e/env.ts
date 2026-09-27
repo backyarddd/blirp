@@ -1,3 +1,6 @@
+/** The release the fake releases API offers (newer than any build). */
+export const FAKE_RELEASE = '99.0.0';
+
 export interface E2eEnv {
   /** Daemon origin, e.g. `http://127.0.0.1:53211`. */
   url: string;

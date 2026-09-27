@@ -1,12 +1,15 @@
 // Starts the real blirp daemon on a throwaway BLIRP_HOME for the end-to-end suite and
 // prepares two projects on disk: a plain folder (no git) and a git repository with one
-// modified and one untracked file. Connection details reach the tests through
+// modified and one untracked file. The daemon's update check asks a local fake releases API
+// that offers FAKE_RELEASE, so the suite never calls GitHub. Connection details reach the tests through
 // `process.env.BLIRP_E2E` (Playwright passes the global setup's env to its workers).
 import { execFileSync, spawn } from 'node:child_process';
+import { createServer } from 'node:http';
+import type { AddressInfo } from 'node:net';
 import { createWriteStream, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
-import type { E2eEnv } from './env';
+import { FAKE_RELEASE, type E2eEnv } from './env';
 
 const repoRoot = resolve(import.meta.dirname, '../..');
 
@@ -69,6 +72,21 @@ export default async function globalSetup(): Promise<() => Promise<void>> {
   writeFileSync(join(repo, 'README.md'), '# repo\n\nchanged line\n');
   writeFileSync(join(repo, 'new-file.txt'), 'untracked\n');
 
+  // GitHub's `releases/latest` for a release newer than any build. It has no assets: the
+  // suite never runs an update.
+  const releases = createServer((req, res) => {
+    if (req.method === 'GET' && req.url === '/releases/latest') {
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(
+        JSON.stringify({ tag_name: `v${FAKE_RELEASE}`, html_url: `https://example.invalid/releases/v${FAKE_RELEASE}`, assets: [] }),
+      );
+    } else {
+      res.writeHead(404).end();
+    }
+  });
+  await new Promise<void>((r) => releases.listen(0, '127.0.0.1', r));
+  const releasesUrl = `http://127.0.0.1:${(releases.address() as AddressInfo).port}/releases`;
+
   const log = createWriteStream(join(root, 'daemon.log'));
   // A login token in the developer's own environment would override the one the suite stores.
   const { CLAUDE_CODE_OAUTH_TOKEN: _ownToken, ...parentEnv } = process.env;
@@ -87,6 +105,7 @@ export default async function globalSetup(): Promise<() => Promise<void>> {
       RUST_LOG: process.env.RUST_LOG ?? 'info',
       // Loopback-only sockets, no relays or mDNS: no firewall prompt for this debug binary.
       BLIRP_LOOPBACK_ONLY: '1',
+      BLIRP_RELEASE_BASE_URL: releasesUrl,
     },
     stdio: ['ignore', 'pipe', 'pipe'],
   });
@@ -117,6 +136,8 @@ export default async function globalSetup(): Promise<() => Promise<void>> {
       await done;
     }
     await new Promise<void>((r) => log.end(r));
+    releases.closeAllConnections();
+    await new Promise<void>((r) => releases.close(() => r()));
     if (process.env.BLIRP_E2E_KEEP) {
       console.log(`blirp e2e: kept ${root}`);
       return;

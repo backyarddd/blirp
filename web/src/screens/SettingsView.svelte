@@ -4,6 +4,7 @@
   import { Resource } from '../lib/resource.svelte';
   import { href, type SettingsSection } from '../lib/router';
   import Loadable from '../lib/components/Loadable.svelte';
+  import { app } from '../lib/app.svelte';
   import Agents from './settings/Agents.svelte';
   import MemorySettings from './settings/MemorySettings.svelte';
   import Sync from './settings/Sync.svelte';
@@ -41,6 +42,7 @@
           <li><a href={href.settings(s.id)} aria-current={s.id === (section === 'portal' ? 'sync' : section) ? 'page' : undefined}>{s.label}</a></li>
         {/each}
       </ul>
+      <p class="version faint small" data-testid="settings-version">blirp {app.health?.version ?? __APP_VERSION__}</p>
     </nav>
     <div class="content">
       {#if needsSettings}
@@ -98,6 +100,9 @@
     box-shadow: var(--shadow);
     border: 1px solid var(--border);
   }
+  .version {
+    margin: 12px 10px 0;
+  }
   .content {
     display: grid;
     gap: 16px;
@@ -115,6 +120,9 @@
     }
     .nav a {
       white-space: nowrap;
+    }
+    .version {
+      display: none;
     }
   }
 </style>

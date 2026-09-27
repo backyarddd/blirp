@@ -186,8 +186,12 @@ export interface Rooted {
 
 export const api = {
   health: () => request<Health>('GET', '/api/health'),
-  /** Asks GitHub at most once a day; updating is `blirp update` in a terminal. */
+  /** Asks GitHub at most once a day. */
   update: () => request<UpdateStatus>('GET', '/api/update'),
+  /** Admin: asks GitHub now, unless it was asked in the last minute. */
+  updateCheck: () => request<UpdateStatus>('POST', '/api/update/check'),
+  /** 202: the updater runs and restarts the daemon; loopback listener only (404 on the portal). */
+  updateApply: () => request<void>('POST', '/api/update/apply'),
   machines: {
     list: () => request<Machine[]>('GET', '/api/machines'),
     revoke: (id: string) => request<void>('DELETE', `/api/machines/${enc(id)}`),

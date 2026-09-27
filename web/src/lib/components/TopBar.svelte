@@ -11,6 +11,7 @@
   import { href } from '../router';
   import { isMac } from '../prefs';
   import { shortcutLabel } from '../shortcuts';
+  import { updates } from '../update.svelte';
 
   const section = $derived(
     nav.route.name === 'projects' || nav.route.name === 'project'
@@ -20,6 +21,9 @@
         : null,
   );
   const inGrid = $derived(nav.route.name === 'grid');
+  // The daemon's version (the UI's own before health is known).
+  const versionLabel = $derived(`blirp ${app.health?.version ?? __APP_VERSION__}`);
+  const updateAvailable = $derived(updates.status?.available === true);
 
   // Machines holding a sleep-prevention assertion while their sessions run (sessions.keep_awake).
   const awake = $derived(
@@ -37,7 +41,7 @@
 </script>
 
 <header class="topbar">
-  <a class="logo" href={href.sessions()} aria-label="blirp home">
+  <a class="logo" href={href.sessions()} aria-label="blirp home" title={versionLabel} data-testid="logo">
     <img src={logo} width="28" height="28" alt="" />
     <span>blirp</span>
   </a>
@@ -92,15 +96,29 @@
     <Command size={18} />
   </button>
   <a
-    class="icon-btn"
+    class="icon-btn settings"
     href={href.settings()}
-    aria-label="Settings"
-    title="Settings"
-    aria-current={nav.route.name === 'settings' ? 'page' : undefined}><Settings size={18} /></a
+    aria-label={updateAvailable ? `Settings (blirp ${updates.status?.latest} is available)` : 'Settings'}
+    title={updateAvailable ? `Settings: blirp ${updates.status?.latest} is available` : 'Settings'}
+    aria-current={nav.route.name === 'settings' ? 'page' : undefined}
+    ><Settings size={18} />{#if updateAvailable}<span class="update-dot" aria-hidden="true" data-testid="update-dot"></span>{/if}</a
   >
 </header>
 
 <style>
+  .settings {
+    position: relative;
+  }
+  .update-dot {
+    position: absolute;
+    top: 5px;
+    right: 5px;
+    width: 7px;
+    height: 7px;
+    border-radius: 50%;
+    background: var(--accent);
+    box-shadow: 0 0 0 2px var(--panel);
+  }
   .awake {
     display: inline-flex;
     align-items: center;
