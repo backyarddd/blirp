@@ -547,7 +547,12 @@ img-src 'self' data:; font-src 'self'; object-src 'none'; base-uri 'self'; \
 form-action 'self'; frame-ancestors 'none'";
 
 /// `connect-src` names the same-origin WebSocket URLs explicitly: older
-/// browsers do not match `ws:`/`wss:` against `'self'`.
+/// browsers do not match `ws:`/`wss:` against `'self'`. It also allows the
+/// desktop app's IPC endpoint (`http://ipc.localhost` on Windows, `ipc:`
+/// elsewhere), which carries its `notify` command; a browser has no such
+/// endpoint.
+const IPC: &str = "http://ipc.localhost ipc:";
+
 fn csp(host: Option<&str>) -> String {
     let host = host.filter(|h| {
         !h.is_empty()
@@ -555,8 +560,8 @@ fn csp(host: Option<&str>) -> String {
                 .all(|b| b.is_ascii_alphanumeric() || b".-:[]".contains(&b))
     });
     match host {
-        Some(h) => format!("{CSP_BASE}; connect-src 'self' ws://{h} wss://{h}"),
-        None => format!("{CSP_BASE}; connect-src 'self'"),
+        Some(h) => format!("{CSP_BASE}; connect-src 'self' ws://{h} wss://{h} {IPC}"),
+        None => format!("{CSP_BASE}; connect-src 'self' {IPC}"),
     }
 }
 
@@ -627,13 +632,18 @@ mod tests {
     fn csp_allows_same_origin_websockets_only() {
         let p = csp(Some("127.0.0.1:47770"));
         assert!(p.contains("script-src 'self';"));
-        assert!(p.ends_with("connect-src 'self' ws://127.0.0.1:47770 wss://127.0.0.1:47770"));
+        assert!(p.ends_with(
+            "connect-src 'self' ws://127.0.0.1:47770 wss://127.0.0.1:47770 http://ipc.localhost ipc:"
+        ));
         assert!(csp(Some("[::1]:47770")).contains("ws://[::1]:47770"));
         // A hostile Host header must not be able to add directives.
         for bad in ["evil; script-src *", "a b", ""] {
-            assert!(csp(Some(bad)).ends_with("connect-src 'self'"), "{bad}");
+            assert!(
+                csp(Some(bad)).ends_with("connect-src 'self' http://ipc.localhost ipc:"),
+                "{bad}"
+            );
         }
-        assert!(csp(None).ends_with("connect-src 'self'"));
+        assert!(csp(None).ends_with("connect-src 'self' http://ipc.localhost ipc:"));
     }
 
     #[test]

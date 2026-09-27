@@ -5,12 +5,14 @@
 //! tray icon. Updates are `blirp update` or the web UI's Update now, which
 //! replace this app too; the app has no updater of its own.
 //!
-//! The remote UI gets no Tauri IPC: only the bundled loading page may call
-//! the three commands below (see `capabilities/main.json`). The one thing
-//! the UI can ask of the shell is a relaunch after an update, by navigating
-//! to [`RESTART_PATH`] on the daemon's origin; the navigation is cancelled.
+//! Only the bundled loading page may call the three startup commands below
+//! (`capabilities/main.json`); the daemon's remote UI may only call `notify`
+//! (`capabilities/daemon-ui.json`, see `notify.rs`). The UI can also ask the
+//! shell for a relaunch after an update, by navigating to [`RESTART_PATH`] on
+//! the daemon's origin; the navigation is cancelled.
 
 mod daemon;
+mod notify;
 
 use blirp_core::paths::{Paths, RuntimeInfo};
 use serde::Serialize;
@@ -59,6 +61,8 @@ struct Shell {
     /// SPA route from a deep link, opened once the UI is logged in.
     pending_route: Mutex<Option<String>>,
     tray_status: Mutex<Option<MenuItem<Wry>>>,
+    /// Why OS notifications may not show (Windows sender registration).
+    notify_problem: Mutex<Option<String>>,
 }
 
 impl Shell {
@@ -506,6 +510,7 @@ pub fn run() -> anyhow::Result<()> {
         local_url: Mutex::new(None),
         pending_route: Mutex::new(None),
         tray_status: Mutex::new(None),
+        notify_problem: Mutex::new(None),
     });
 
     let app = tauri::Builder::default()
@@ -524,8 +529,14 @@ pub fn run() -> anyhow::Result<()> {
         )
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_opener::init())
+        .plugin(tauri_plugin_notification::init())
         .manage(shell.clone())
-        .invoke_handler(tauri::generate_handler![startup_state, retry, open_logs])
+        .invoke_handler(tauri::generate_handler![
+            startup_state,
+            retry,
+            open_logs,
+            notify::notify
+        ])
         .setup(move |app| {
             let handle = app.handle().clone();
             let config = app
@@ -570,6 +581,15 @@ pub fn run() -> anyhow::Result<()> {
             *lock(&shell.local_url) = win.url().ok();
 
             build_tray(&handle, &shell)?;
+
+            #[cfg(windows)]
+            {
+                // Spawns reg.exe; keep it off the UI thread.
+                let (app, shell) = (handle.clone(), shell.clone());
+                std::thread::spawn(move || {
+                    *lock(&shell.notify_problem) = notify::register(&app, &shell.paths);
+                });
+            }
 
             // macOS registers blirp:// from Info.plist. Linux (AppImage) and
             // Windows (the install script's portable app has no installer to

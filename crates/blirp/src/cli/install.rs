@@ -393,8 +393,9 @@ fn remove_install(inst: &install::Installed) -> bool {
 }
 
 /// The desktop app registers `blirp://` for itself when it runs (Linux and
-/// Windows, see app/src-tauri/src/lib.rs); drop that registration when it
-/// points at the app being removed.
+/// Windows, see app/src-tauri/src/lib.rs), and on Windows its notification
+/// sender (app/src-tauri/src/notify.rs); drop the link handler when it points
+/// at the app being removed, and the sender with it.
 fn remove_url_handler(inst: &install::Installed) -> bool {
     let Some(app) = inst.receipt.app() else {
         return true;
@@ -407,6 +408,14 @@ fn remove_url_handler(inst: &install::Installed) -> bool {
             Ok(false) => {}
             Err(e) => {
                 eprintln!("error: blirp:// link handler: {e:#}");
+                return false;
+            }
+        }
+        match windows::remove_toast_sender() {
+            Ok(true) => println!("removed the notification sender registration"),
+            Ok(false) => {}
+            Err(e) => {
+                eprintln!("error: notification sender registration: {e:#}");
                 return false;
             }
         }
@@ -505,6 +514,18 @@ if ($c -and $c.IndexOf($d, [StringComparison]::OrdinalIgnoreCase) -ge 0) {
 }
 "#;
         Ok(run(script, &[("BLIRP_DIR", dir)])? == "removed")
+    }
+
+    /// Delete the desktop app's toast sender (`HKCU\Software\Classes\AppUserModelId\dev.blirp.desktop`).
+    pub fn remove_toast_sender() -> anyhow::Result<bool> {
+        let script = r#"
+$k = 'HKCU:\Software\Classes\AppUserModelId\dev.blirp.desktop'
+if (Test-Path -LiteralPath $k) {
+  Remove-Item -LiteralPath $k -Recurse -Force
+  'removed'
+}
+"#;
+        Ok(run(script, &[])? == "removed")
     }
 
     /// Remove `dir` from the user Path (registry, keeping REG_EXPAND_SZ) and

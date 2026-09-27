@@ -35,6 +35,7 @@ fn main() {
             "startup_state",
             "retry",
             "open_logs",
+            "notify",
         ]));
     if let Err(e) = tauri_build::try_build(attrs) {
         println!("cargo::error=tauri build step failed: {e:#}");
