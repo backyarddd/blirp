@@ -298,7 +298,7 @@ impl Target<'_> {
                 Err(_) => {}
             }
         }
-        self.retry(target, || std::fs::rename(tmp, target))
+        self.retry(target, || replace(tmp, target))
             .map_err(io(wire))
     }
 
@@ -356,12 +356,67 @@ impl Target<'_> {
         if !self.matches(wire, &target, expect)? {
             return Err(WriteError::Changed(wire.to_string()));
         }
-        match self.retry(&target, || std::fs::remove_file(&target)) {
+        match self.retry(&target, || remove(&target)) {
             Ok(()) => Ok(()),
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
             Err(e) => Err(io(wire)(e)),
         }
     }
+}
+
+/// Windows can refuse to replace or delete a file (access denied) that it
+/// still lets be renamed: Defender's real-time protection does that to
+/// files it is looking at, for seconds at a time under load. Such a
+/// target is moved aside under a temp name first (never a read-only one,
+/// which stays refused).
+fn denied_but_movable(e: &std::io::Error, target: &Path) -> Option<PathBuf> {
+    if !cfg!(windows) || e.kind() != std::io::ErrorKind::PermissionDenied {
+        return None;
+    }
+    if std::fs::symlink_metadata(target).map_or(true, |m| m.permissions().readonly()) {
+        return None;
+    }
+    let aside = target
+        .parent()?
+        .join(format!("{TMP_PREFIX}{}", crate::random_hex::<8>().ok()?));
+    std::fs::rename(target, &aside).ok()?;
+    Some(aside)
+}
+
+/// Move `tmp` onto `target`; see [`denied_but_movable`]. What was moved
+/// aside is removed, or left to the scan's sweep of old temp files while
+/// it is still held; it comes back if the new file cannot go in.
+fn replace(tmp: &Path, target: &Path) -> std::io::Result<()> {
+    let e = match std::fs::rename(tmp, target) {
+        Err(e) => e,
+        ok => return ok,
+    };
+    let Some(aside) = denied_but_movable(&e, target) else {
+        return Err(e);
+    };
+    match std::fs::rename(tmp, target) {
+        Ok(()) => {
+            let _ = std::fs::remove_file(&aside);
+            Ok(())
+        }
+        Err(e) => {
+            let _ = std::fs::rename(&aside, target);
+            Err(e)
+        }
+    }
+}
+
+/// Remove `target`; see [`denied_but_movable`].
+fn remove(target: &Path) -> std::io::Result<()> {
+    let e = match std::fs::remove_file(target) {
+        Err(e) => e,
+        ok => return ok,
+    };
+    let Some(aside) = denied_but_movable(&e, target) else {
+        return Err(e);
+    };
+    let _ = std::fs::remove_file(&aside);
+    Ok(())
 }
 
 /// Time Windows retries may spend in all: one per pass (an apply, a
@@ -687,5 +742,61 @@ mod tests {
             w.link("l2", &Expect::Absent, "../../etc"),
             Err(WriteError::Refused { .. })
         ));
+    }
+
+    /// A file Windows lets be renamed but not replaced or deleted (here a
+    /// running program's image, as real-time protection holds files it
+    /// scans) is still replaced and removed, without waiting on it.
+    #[cfg(windows)]
+    #[test]
+    fn a_file_that_cannot_be_replaced_in_place_is_moved_aside() {
+        let dir = tempfile::tempdir().unwrap();
+        let held = dir.path().join("held.exe");
+        let system = std::env::var_os("SystemRoot")
+            .map_or_else(|| PathBuf::from(r"C:\Windows"), PathBuf::from);
+        std::fs::copy(system.join("System32").join("PING.EXE"), &held).unwrap();
+        let mut run = crate::process::command(&held)
+            .args(["-n", "30", "127.0.0.1"])
+            .stdout(std::process::Stdio::null())
+            .spawn()
+            .unwrap();
+        // The signature seen under load: replace denied, rename allowed.
+        let probe = dir.path().join("probe");
+        std::fs::write(&probe, "x").unwrap();
+        let denied = std::fs::rename(&probe, &held).unwrap_err();
+        assert_eq!(denied.kind(), std::io::ErrorKind::PermissionDenied);
+
+        let w = t(dir.path());
+        let started = std::time::Instant::now();
+        let new = b"new content";
+        w.write_verified(
+            "held.exe",
+            &Expect::Any,
+            &mut &new[..],
+            &hash_bytes(new),
+            false,
+            None,
+        )
+        .unwrap();
+        assert_eq!(std::fs::read(&held).unwrap(), new);
+        assert!(started.elapsed() < std::time::Duration::from_secs(2));
+
+        // Deleting such a file works too: it is moved aside.
+        std::fs::copy(
+            system.join("System32").join("PING.EXE"),
+            dir.path().join("b.exe"),
+        )
+        .unwrap();
+        let mut run2 = crate::process::command(dir.path().join("b.exe"))
+            .args(["-n", "30", "127.0.0.1"])
+            .stdout(std::process::Stdio::null())
+            .spawn()
+            .unwrap();
+        w.remove("b.exe", &Expect::Any).unwrap();
+        assert!(!dir.path().join("b.exe").exists());
+        for r in [&mut run, &mut run2] {
+            let _ = r.kill();
+            let _ = r.wait();
+        }
     }
 }
