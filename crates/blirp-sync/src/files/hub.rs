@@ -299,7 +299,8 @@ impl HubFiles {
         if len > self.max_file() {
             return Err(HubError::TooLarge);
         }
-        let have = self.blobs.part_len(hash);
+        // The part exists from here on, so empty content (no chunk) finishes.
+        let have = self.blobs.start_part(hash)?;
         if have > len {
             self.blobs.discard_part(hash);
             return self.begin_put(hash, len);

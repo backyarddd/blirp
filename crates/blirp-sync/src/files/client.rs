@@ -323,7 +323,14 @@ impl RemoteHub {
             .acquire()
             .await
             .map_err(|e| SyncError::Unavailable(e.to_string()))?;
-        let mut have = self.parts.part_len(hash);
+        // The part exists from here on, so empty content (no chunk) verifies.
+        let (parts, h) = (self.parts.clone(), hash.to_string());
+        let mut have = blocking(move || {
+            parts
+                .start_part(&h)
+                .map_err(|e| SyncError::Unavailable(e.to_string()))
+        })
+        .await?;
         let conn = self.connection().await?;
         let (mut send, mut recv) = conn.open_bi().await.map_err(SyncError::connection)?;
         write_frame(

@@ -120,19 +120,30 @@ impl BlobStore {
             .map_or(0, |m| m.len())
     }
 
-    /// Append raw bytes at `offset` (must equal what was received so far).
-    pub fn append(&self, hash: &str, offset: u64, raw: &[u8]) -> Result<u64, BlobError> {
+    /// Start (or resume) the transfer of `hash`: its part exists from now
+    /// on, even for empty content (which sends no chunk at all), and holds
+    /// the returned number of bytes.
+    pub fn start_part(&self, hash: &str) -> Result<u64, BlobError> {
+        Ok(self.open_part(hash)?.metadata()?.len())
+    }
+
+    fn open_part(&self, hash: &str) -> Result<std::fs::File, BlobError> {
         let part = self.part_path(hash)?;
         if let Some(p) = part.parent() {
             std::fs::create_dir_all(p)?;
         }
         // A part just removed can linger as "delete pending" on Windows.
-        let mut f = retry_busy(|| {
+        Ok(retry_busy(|| {
             std::fs::OpenOptions::new()
                 .create(true)
                 .append(true)
                 .open(&part)
-        })?;
+        })?)
+    }
+
+    /// Append raw bytes at `offset` (must equal what was received so far).
+    pub fn append(&self, hash: &str, offset: u64, raw: &[u8]) -> Result<u64, BlobError> {
+        let mut f = self.open_part(hash)?;
         let have = f.metadata()?.len();
         if have != offset {
             return Err(BlobError::Offset { offset, have });

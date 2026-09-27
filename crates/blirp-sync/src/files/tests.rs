@@ -230,6 +230,27 @@ async fn uploads_commits_downloads_and_resumes() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn empty_content_uploads_and_downloads() {
+    // Empty content sends no chunk either way: the part must exist anyway.
+    let r = rig(ALPN_FILES).await;
+    let fh = FileHub::Remote(r.remote.clone());
+    let h = hash_bytes(b"");
+    let src = r.dir.join("empty");
+    std::fs::write(&src, b"").unwrap();
+    fh.upload(&h, &src, 0).await.unwrap();
+    assert!(
+        fh.missing(std::slice::from_ref(&h))
+            .await
+            .unwrap()
+            .is_empty()
+    );
+    let got = fh.download(&h).await.unwrap();
+    assert_eq!(std::fs::read(&got).unwrap(), b"");
+    r.node_ep.close().await;
+    r.hub_ep.close().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_hub_without_file_sync_is_reported() {
     let r = rig(ALPN_SYNC).await;
     let err = FileHub::Remote(r.remote.clone())
