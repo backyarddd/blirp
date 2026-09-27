@@ -56,6 +56,9 @@ so every tag needs one.
   after two quiet minutes now waits `memory.distill_idle_secs` like an idle
   one, and a session is distilled again only when a new prompt or reply
   arrived since its last distill.
+- Claude Code's "You've hit your session limit" (and weekly limit) is
+  recognized as a usage limit: automatic distilling pauses and the budget
+  unit is given back instead of the session failing.
 
 ## [0.2.0] - 2026-09-27
 

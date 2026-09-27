@@ -874,7 +874,11 @@ pub fn parse_claude_json(stdout: &str) -> Result<String, String> {
     let v: serde_json::Value = serde_json::from_str(stdout.trim())
         .map_err(|e| format!("claude output is not JSON: {e}"))?;
     let result = v.get("result").and_then(|r| r.as_str()).unwrap_or_default();
-    if v.get("is_error").and_then(|b| b.as_bool()) == Some(true) {
+    // A limit message can come back as a plain result: it must fail the run
+    // (and pause distilling), not count as the model's reply.
+    if v.get("is_error").and_then(|b| b.as_bool()) == Some(true)
+        || (extract_json(result).is_none() && is_rate_limit(result))
+    {
         return Err(format!("claude reported an error: {}", tail(result)));
     }
     if result.trim().is_empty() {
@@ -1113,6 +1117,27 @@ pub fn record_failure(
 const PAUSE_MIN_MS: i64 = 5 * 60 * 1000;
 const PAUSE_MAX_MS: i64 = 6 * 3600 * 1000;
 
+/// A usage or rate limit message of a summarizer or its API, e.g. Claude
+/// Code's "You've hit your session limit · resets 3pm" or "Claude AI usage
+/// limit reached".
+fn is_rate_limit(text: &str) -> bool {
+    let msg = text.to_lowercase();
+    [
+        "rate limit",
+        "rate_limit",
+        "usage limit",
+        "session limit",
+        "weekly limit",
+        "hit your limit",
+        "too many requests",
+        "status 429",
+        "quota",
+        "overloaded",
+    ]
+    .iter()
+    .any(|w| msg.contains(w))
+}
+
 /// A failure of the summarizer itself (credentials, installation, limits),
 /// which would fail every session alike, as opposed to one session's
 /// content. `None`: a per-session failure.
@@ -1137,15 +1162,7 @@ pub fn classify(e: &DistillError) -> Option<DistillPause> {
         "status 403",
     ]) {
         Some(DistillPause::Auth)
-    } else if any(&[
-        "rate limit",
-        "rate_limit",
-        "usage limit",
-        "too many requests",
-        "status 429",
-        "quota",
-        "overloaded",
-    ]) {
+    } else if is_rate_limit(&msg) {
         Some(DistillPause::RateLimited)
     } else if any(&[
         "cannot start",
@@ -1815,6 +1832,28 @@ mod tests {
         );
         assert!(parse_claude_json(r#"{"is_error":true,"result":"Not logged in"}"#).is_err());
         assert!(parse_claude_json("garbage").is_err());
+        // Claude Code's limit messages pause distilling (and refund the
+        // budget unit), whether or not the envelope flags them as errors.
+        for is_error in [true, false] {
+            for text in [
+                "You've hit your session limit · resets 3pm (Europe/Berlin)",
+                "You've hit your weekly limit · resets Oct 2",
+                "You've hit your limit · resets 1am",
+                "Claude AI usage limit reached|1790000000",
+            ] {
+                let env =
+                    serde_json::json!({"type": "result", "is_error": is_error, "result": text});
+                let err = parse_claude_json(&env.to_string()).unwrap_err();
+                assert_eq!(
+                    classify(&DistillError::Backend(err)),
+                    Some(DistillPause::RateLimited),
+                    "{text}"
+                );
+            }
+        }
+        // A reply that is the contract JSON is never taken for a limit.
+        let ok = serde_json::json!({"is_error": false, "result": "{\"summary\":\"hit the session limit\"}"});
+        assert!(parse_claude_json(&ok.to_string()).is_ok());
         let jsonl = "{\"type\":\"thread.started\"}\n{\"type\":\"item.completed\",\"item\":{\"type\":\"agent_message\",\"text\":\"first\"}}\nnoise\n{\"type\":\"item.completed\",\"item\":{\"type\":\"agent_message\",\"text\":\"{}\"}}\n";
         assert_eq!(parse_codex_jsonl(jsonl).unwrap(), "{}");
         let failed = "{\"type\":\"turn.failed\",\"error\":{\"message\":\"quota\"}}";
