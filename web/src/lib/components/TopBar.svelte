@@ -192,6 +192,11 @@
     .hide-sm {
       display: none;
     }
+    /* The margin sets off the wordmark, hidden here; at 390px wide fonts
+       (DejaVu Sans on Linux) leave no room for it. */
+    .logo {
+      margin-right: 0;
+    }
     .pill {
       padding: 0 9px;
     }
