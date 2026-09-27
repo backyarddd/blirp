@@ -1890,6 +1890,90 @@ fn headless_claude_runs_make_no_session_or_project() {
     );
 }
 
+/// Subagents inherit the parent's `sdk-*` entrypoint and have one prompt:
+/// they follow their parent, whichever file is read first.
+#[test]
+fn claude_subagents_follow_their_parent() {
+    let h = H::new();
+    let sub = |sid: &str| {
+        h.fill(&fixture("claude/agent-a1.jsonl"))
+            .replace(r#""entrypoint":"cli""#, r#""entrypoint":"sdk-cli""#)
+            .replace(CLAUDE_SID, sid)
+    };
+    // An Agent SDK app someone chats in (two prompts): kept, subagent too.
+    let chat = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
+    h.put(
+        &format!(".claude/projects/y/{chat}/subagents/agent-a1.jsonl"),
+        sub(chat).as_bytes(),
+    );
+    h.pass();
+    h.put(
+        &format!(".claude/projects/y/{chat}.jsonl"),
+        format!(
+            "{}{}",
+            claude_print_run(&h).replace(CLAUDE_SID, chat),
+            claude_line_from(&h, "p2", "and the docs", "sdk-cli")
+        )
+        .as_bytes(),
+    );
+    h.pass();
+    let parent = h.session("claude", chat);
+    // The subagent's file did not change; a new line makes it read again.
+    let path = h
+        .home
+        .join(".claude/projects/y")
+        .join(chat)
+        .join("subagents")
+        .join("agent-a1.jsonl");
+    append(
+        &path,
+        claude_line_from(&h, "x1", "more", "sdk-cli").as_bytes(),
+    );
+    h.pass();
+    let child = h.session("claude", &format!("{chat}:agent-a1"));
+    assert_eq!(child.parent_session_id.as_deref(), Some(parent.id.as_str()));
+
+    // Read after its stored parent: kept at once.
+    let later = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb";
+    h.put(
+        &format!(".claude/projects/y/{later}.jsonl"),
+        format!(
+            "{}{}",
+            claude_print_run(&h).replace(CLAUDE_SID, later),
+            claude_line_from(&h, "p2", "and the docs", "sdk-cli")
+        )
+        .as_bytes(),
+    );
+    h.pass();
+    h.put(
+        &format!(".claude/projects/y/{later}/subagents/agent-a1.jsonl"),
+        sub(later).as_bytes(),
+    );
+    h.pass();
+    h.session("claude", &format!("{later}:agent-a1"));
+
+    // A scripted run's subagent is skipped with it.
+    let bot = "cccccccc-cccc-4ccc-8ccc-cccccccccccc";
+    h.put(
+        &format!(".claude/projects/y/{bot}.jsonl"),
+        claude_print_run(&h).replace(CLAUDE_SID, bot).as_bytes(),
+    );
+    h.put(
+        &format!(".claude/projects/y/{bot}/subagents/agent-a1.jsonl"),
+        sub(bot).as_bytes(),
+    );
+    h.pass();
+    for asid in [bot.to_string(), format!("{bot}:agent-a1")] {
+        assert!(
+            h.store
+                .session_by_agent_id("claude", &asid)
+                .unwrap()
+                .is_none(),
+            "{asid}"
+        );
+    }
+}
+
 #[test]
 fn claude_scripted_run_resumed_interactively_becomes_a_session() {
     let h = H::new();
@@ -2292,6 +2376,17 @@ fn ingested_headless_runs_are_removed_once() {
     record("r-bot-user", &proj.id, "bot1", "user", false);
     record("r-bot-pinned", &proj.id, "bot1", "distiller", true);
     record("r-human", &proj.id, "human", "distiller", false);
+    // A subagent of the kept session looks scripted on its own (it inherits
+    // an sdk entrypoint from `-p --resume` and has one prompt): it stays.
+    let mut human_sub = row(
+        "human-sub",
+        "claude",
+        &proj.id,
+        SessionOrigin::External,
+        Some(&bot_in_proj),
+    );
+    human_sub.parent_session_id = Some("human".into());
+    h.store.apply(Change::Session(human_sub)).unwrap();
     row(
         "launched",
         "claude",
@@ -2427,7 +2522,7 @@ fn ingested_headless_runs_are_removed_once() {
     for id in ["bot1", "bot2", "bot2-sub", "exec", "bot3"] {
         assert!(!exists(id), "{id} removed");
     }
-    for id in ["human", "launched", "gone"] {
+    for id in ["human", "human-sub", "launched", "gone"] {
         assert!(exists(id), "{id} kept");
     }
     let records: Vec<String> = h

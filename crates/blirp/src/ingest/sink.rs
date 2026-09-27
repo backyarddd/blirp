@@ -201,9 +201,11 @@ impl<'e> StoreSink<'e> {
                     continue;
                 }
                 link = self.link_candidate(&p)?;
-                if p.meta.headless == Some(true) && link.is_none() {
+                if p.meta.headless == Some(true) && link.is_none() && parent.is_none() {
                     // A scripted run (`claude -p`, Agent SDK, `codex exec`,
-                    // §8): no session, no project. A blirp launch keeps it.
+                    // §8): no session, no project. A blirp launch keeps it,
+                    // and a subagent of a stored session is that session's
+                    // (it inherits the entrypoint and has a single prompt).
                     self.excluded.insert(asid);
                     continue;
                 }

@@ -284,7 +284,7 @@ impl Launches {
     }
 
     /// Nothing later in the transcript can make it headless again.
-    fn settled(&self) -> bool {
+    pub(crate) fn settled(&self) -> bool {
         self.interactive || self.turns > 1
     }
 

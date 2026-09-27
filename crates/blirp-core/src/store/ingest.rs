@@ -137,13 +137,16 @@ impl Store {
     }
 
     /// Ingested claude and codex sessions of `machine_id` with a transcript:
-    /// the rows that can be scripted runs (§8).
+    /// the rows that can be scripted runs (§8). Subagents are left out: they
+    /// look scripted (the parent's entrypoint, one prompt) and go with a
+    /// removed parent, stay with a kept one.
     pub fn headless_candidates(&self, machine_id: &str) -> Result<Vec<Session>> {
         self.read(|c| {
             all(
                 c,
                 "SELECT * FROM sessions WHERE machine_id = ?1 AND origin = 'external'
-                   AND agent IN ('claude','codex') AND transcript_path IS NOT NULL",
+                   AND agent IN ('claude','codex') AND transcript_path IS NOT NULL
+                   AND parent_session_id IS NULL",
                 params![machine_id],
                 session_row,
             )

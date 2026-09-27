@@ -208,6 +208,16 @@ impl Adapter for Claude {
             st = State::default();
         }
         let mut launch = Launches::resume(st.launch.take(), st.pos.line);
+        // A subagent inherits its parent's entrypoint and has one prompt: it
+        // is scripted only when its parent's transcript is (the parent may
+        // not be stored yet when this file is read first).
+        if parent.is_some()
+            && !launch.settled()
+            && let Some(main) = parent_transcript(&src.path)
+            && matches!(super::transcript_is_headless("claude", &main), Ok(false))
+        {
+            launch.run(false);
+        }
         launch.report(false, sink, &asid);
         let mut meta = SessionMeta {
             parent: parent.clone(),
@@ -252,6 +262,14 @@ impl Adapter for Claude {
         c.retry = lines.partial || reread;
         Ok(c)
     }
+}
+
+/// `<dir>/<sessionId>.jsonl` for a subagent transcript
+/// `<dir>/<sessionId>/subagents/agent-<id>.jsonl`.
+fn parent_transcript(path: &Path) -> Option<PathBuf> {
+    let session_dir = path.parent()?.parent()?;
+    let name = session_dir.file_name()?.to_string_lossy();
+    Some(session_dir.with_file_name(format!("{name}.jsonl")))
 }
 
 fn subagent_title(path: &Path) -> Option<String> {
