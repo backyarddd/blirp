@@ -314,7 +314,10 @@ async fn patch(
         axum::http::Method::PATCH,
         &path,
         json,
-        |c, owner| c.title = owner.title,
+        |c, owner| {
+            c.title = owner.title;
+            c.title_updated_at = owner.title_updated_at;
+        },
     )
     .await?;
     if let Some((resp, _)) = forwarded {
@@ -346,7 +349,10 @@ async fn move_session(
         axum::http::Method::POST,
         &path,
         json,
-        |c, owner| c.project_id = owner.project_id,
+        |c, owner| {
+            c.project_id = owner.project_id;
+            c.project_updated_at = owner.project_updated_at;
+        },
     )
     .await?;
     if let Some((resp, updated)) = forwarded {

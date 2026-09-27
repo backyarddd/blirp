@@ -947,7 +947,14 @@ impl Store {
             for c in &changes {
                 super::apply_move_in(tx, c)?;
             }
-            Ok(s)
+            // As stored, with the move's edit time (§10).
+            Ok(one(
+                tx,
+                "SELECT * FROM sessions WHERE id = ?1",
+                params![session_id],
+                super::sessions::session_row,
+            )?
+            .unwrap_or(s))
         })
     }
 

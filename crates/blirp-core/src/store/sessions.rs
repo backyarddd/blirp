@@ -202,8 +202,10 @@ impl Store {
 
     /// Apply to the copy of another machine's session here a change that
     /// machine made (a rename or move forwarded to it). Never queued: the
-    /// owner replicates its row. Returns the row before and after, or None
-    /// when there is no copy here.
+    /// owner replicates its row. `f` must carry the owner's edit times with
+    /// a title or project: each keeps its newest edit (§10), so a copy
+    /// changed without them could lose to the value it replaces. Returns the
+    /// row before and as stored after, or None when there is no copy here.
     pub fn update_remote_copy(
         &self,
         id: &str,
@@ -222,6 +224,13 @@ impl Store {
             let mut after = before.clone();
             f(&mut after);
             write_row(tx, &Change::Session(after.clone()))?;
+            let after = one(
+                tx,
+                "SELECT * FROM sessions WHERE id = ?1",
+                params![id],
+                session_row,
+            )?
+            .unwrap_or(after);
             Ok(Some((before, after)))
         })
     }
@@ -267,7 +276,15 @@ impl Store {
                 }
             }
             apply_in(tx, &change)?;
-            Ok(s)
+            // As stored: a rename is stamped with its edit time (§10), which
+            // a caller forwarding the row to a remote copy must carry.
+            Ok(one(
+                tx,
+                "SELECT * FROM sessions WHERE id = ?1",
+                params![id],
+                session_row,
+            )?
+            .unwrap_or(s))
         })
     }
 
@@ -647,14 +664,37 @@ pub(super) mod tests {
             ..session("r1", "p", 1)
         };
         store.cache_remote_session(&copy).unwrap();
+        // The owner answers with the row as it stored it: the rename is
+        // stamped with its edit time, which the copy takes along (a title
+        // that sorts before the old one still wins, §10).
+        let (_o, owner) = temp_store();
+        owner.insert_session(&copy).unwrap();
+        let renamed = owner
+            .modify_session("r1", |s| s.title = Some("a rename".into()))
+            .unwrap();
+        assert!(renamed.title_updated_at > copy.title_updated_at);
+        assert_eq!(owner.get_session("r1").unwrap().unwrap(), renamed);
         let (before, after) = store
-            .update_remote_copy("r1", |s| s.title = Some("renamed".into()))
+            .update_remote_copy("r1", |s| {
+                s.title.clone_from(&renamed.title);
+                s.title_updated_at = renamed.title_updated_at;
+            })
             .unwrap()
             .unwrap();
         assert_eq!(before, copy);
-        assert_eq!(after.title.as_deref(), Some("renamed"));
+        assert_eq!(after.title.as_deref(), Some("a rename"));
         assert_eq!(store.get_session("r1").unwrap().unwrap(), after);
         assert_eq!(store.outbox_head().unwrap(), head);
+
+        // A stale answer (an older edit time) never overrides a newer title.
+        let (_, after) = store
+            .update_remote_copy("r1", |s| {
+                s.title = Some("zzz stale".into());
+                s.title_updated_at = 1;
+            })
+            .unwrap()
+            .unwrap();
+        assert_eq!(after.title.as_deref(), Some("a rename"));
         assert!(store.update_remote_copy("gone", |_| {}).unwrap().is_none());
     }
 
