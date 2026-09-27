@@ -8,6 +8,7 @@ repository.workspace = true
 description = "blirp machine-to-hub pairing and replication"
 
 [dependencies]
+blake3.workspace = true
 blirp-core.workspace = true
 data-encoding.workspace = true
 futures-util.workspace = true
@@ -22,6 +23,7 @@ spake2.workspace = true
 thiserror.workspace = true
 tokio.workspace = true
 tracing.workspace = true
+zstd.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true

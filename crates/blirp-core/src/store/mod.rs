@@ -6,6 +6,7 @@
 //! same transaction. Typed helpers for non-replicated tables write directly.
 
 mod engine;
+mod file_hub;
 mod files;
 mod ingest;
 mod memory;
@@ -19,6 +20,7 @@ pub use engine::{
     BY_DISTILLER, BriefApply, DistillEvents, DistillOutcome, DistillPlan, MACHINE_ID_KEY,
     norm_title,
 };
+pub use file_hub::{CommitInput, CommitOutcome, CommitRefused, MAX_CONFLICT_COPIES};
 pub use files::{Base, FileCopy, REJECTED_DELETE};
 pub use ingest::IngestTx;
 pub use memory::RecordFilter;

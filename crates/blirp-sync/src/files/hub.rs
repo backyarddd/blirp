@@ -1,0 +1,495 @@
+//! The hub's file service: roots, index, blobs, compare-and-set commits,
+//! quota and garbage collection. The `blirp/files/1` server serves nodes
+//! with it; the hub's own file engine calls it in-process. Every method
+//! blocks (SQLite and disk); async callers use the blocking pool.
+
+use super::blobs::{BlobError, BlobReader, BlobStore};
+use blirp_core::files::{
+    FileChange, FilesMode, GitManifest, IndexEntry, RootInfo, is_hash, is_root_id,
+};
+use blirp_core::store::{CommitInput, CommitOutcome, CommitRefused, Store, StoreError};
+use std::collections::HashMap;
+use std::path::Path;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicI64, AtomicU64, Ordering};
+use std::time::Duration;
+use tokio::sync::broadcast;
+
+/// Tombstones are kept this long (design §4).
+pub const TOMBSTONE_MS: i64 = 90 * 24 * 3600 * 1000;
+/// Blobs younger than this are never collected: a commit using them may be
+/// on its way.
+pub const BLOB_GRACE_MS: i64 = 3600 * 1000;
+/// Partial uploads untouched this long are dropped.
+pub const PART_AGE: Duration = Duration::from_secs(24 * 3600);
+/// History rows dropped per step when the quota is tight.
+const QUOTA_PRUNE_STEP: usize = 500;
+
+#[derive(Debug, thiserror::Error)]
+pub enum HubError {
+    #[error("the hub's storage for project files is full")]
+    Quota,
+    #[error("{0}")]
+    Blob(#[from] BlobError),
+    #[error("{0}")]
+    Store(#[from] StoreError),
+    #[error("{0}")]
+    Invalid(String),
+    #[error("the hub has no such root")]
+    UnknownRoot,
+    #[error("turn file sync off for this project before deleting its hub copy")]
+    NotPaused,
+}
+
+impl HubError {
+    /// Stable code for the wire and the API.
+    pub fn code(&self) -> &'static str {
+        match self {
+            Self::Quota => "hub_quota",
+            Self::Blob(BlobError::Mismatch) => "hash_mismatch",
+            Self::Blob(BlobError::Offset { .. }) => "bad_offset",
+            Self::Blob(BlobError::BadHash) | Self::Invalid(_) => "invalid_request",
+            Self::Blob(BlobError::Io(_)) | Self::Store(_) => "internal",
+            Self::UnknownRoot => "unknown_root",
+            Self::NotPaused => "files_on",
+        }
+    }
+}
+
+/// A root changed: its new head (-1 when it was deleted).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RootChanged {
+    pub root_id: String,
+    pub head: i64,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct GcStats {
+    pub history: usize,
+    pub tombstones: usize,
+    pub blobs: usize,
+}
+
+pub struct HubFiles {
+    store: Arc<Store>,
+    blobs: BlobStore,
+    quota: AtomicU64,
+    keep_ms: AtomicI64,
+    changed: broadcast::Sender<RootChanged>,
+}
+
+impl std::fmt::Debug for HubFiles {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("HubFiles")
+            .field("dir", &self.blobs.dir())
+            .finish()
+    }
+}
+
+impl HubFiles {
+    /// `dir` is `BLIRP_HOME/files`; `quota` in bytes, `keep_ms` how long
+    /// replaced versions stay.
+    pub fn new(store: Arc<Store>, dir: &Path, quota: u64, keep_ms: i64) -> Self {
+        Self {
+            store,
+            blobs: BlobStore::new(dir),
+            quota: AtomicU64::new(quota),
+            keep_ms: AtomicI64::new(keep_ms),
+            changed: broadcast::channel(256).0,
+        }
+    }
+
+    pub fn set_limits(&self, quota: u64, keep_ms: i64) {
+        self.quota.store(quota, Ordering::Relaxed);
+        self.keep_ms.store(keep_ms, Ordering::Relaxed);
+    }
+
+    pub fn quota(&self) -> u64 {
+        self.quota.load(Ordering::Relaxed)
+    }
+
+    pub fn usage(&self) -> Result<u64, HubError> {
+        Ok(u64::try_from(self.store.hub_blob_usage()?).unwrap_or(0))
+    }
+
+    /// Roots with their totals, and every project's mode.
+    pub fn roots(&self) -> Result<(Vec<RootInfo>, HashMap<String, FilesMode>), HubError> {
+        Ok((self.store.hub_file_roots()?, self.store.hub_file_modes()?))
+    }
+
+    pub fn modes(&self) -> Result<HashMap<String, FilesMode>, HubError> {
+        Ok(self.store.hub_file_modes()?)
+    }
+
+    pub fn set_mode(&self, project: &str, mode: FilesMode) -> Result<(), HubError> {
+        if !blirp_core::is_safe_id(project) {
+            return Err(HubError::Invalid("invalid project id".into()));
+        }
+        self.store.hub_set_file_mode(project, mode)?;
+        Ok(())
+    }
+
+    pub fn index(
+        &self,
+        root: &str,
+        after: i64,
+        limit: usize,
+    ) -> Result<(Vec<IndexEntry>, i64), HubError> {
+        if !is_root_id(root) {
+            return Err(HubError::Invalid("invalid root id".into()));
+        }
+        self.store
+            .hub_file_index(root, after, limit)?
+            .ok_or(HubError::UnknownRoot)
+    }
+
+    /// For each hash the hub does not have: how many bytes of it arrived
+    /// already (resume offset).
+    pub fn missing(&self, hashes: &[String]) -> Result<Vec<(String, u64)>, HubError> {
+        if let Some(bad) = hashes.iter().find(|h| !is_hash(h)) {
+            return Err(HubError::Invalid(format!("invalid hash {bad:.16}")));
+        }
+        let known = self.store.hub_blobs_known(hashes)?;
+        Ok(hashes
+            .iter()
+            .filter(|h| !known.contains(*h) || !self.blobs.has(h))
+            .map(|h| (h.clone(), self.blobs.part_len(h)))
+            .collect())
+    }
+
+    /// Make room for `len` more bytes: drop the oldest history until the
+    /// blobs fit under the quota, else refuse.
+    fn reserve(&self, len: u64) -> Result<(), HubError> {
+        let quota = self.quota();
+        loop {
+            if self.usage()?.saturating_add(len) <= quota {
+                return Ok(());
+            }
+            let dropped = self.store.hub_prune_oldest_history(QUOTA_PRUNE_STEP)?;
+            self.collect(blirp_core::now_ms())?;
+            if dropped == 0 {
+                return if self.usage()?.saturating_add(len) <= quota {
+                    Ok(())
+                } else {
+                    Err(HubError::Quota)
+                };
+            }
+        }
+    }
+
+    /// Start (or resume) an upload of `len` bytes: returns the offset to
+    /// continue from. Checks the quota first.
+    pub fn begin_put(&self, hash: &str, len: u64) -> Result<u64, HubError> {
+        if !is_hash(hash) {
+            return Err(HubError::Invalid("invalid hash".into()));
+        }
+        let have = self.blobs.part_len(hash);
+        if have > len {
+            self.blobs.discard_part(hash);
+            return self.begin_put(hash, len);
+        }
+        self.reserve(len - have)?;
+        Ok(have)
+    }
+
+    pub fn put_chunk(&self, hash: &str, offset: u64, raw: &[u8]) -> Result<u64, HubError> {
+        Ok(self.blobs.append(hash, offset, raw)?)
+    }
+
+    /// The part of `hash` holds `len` bytes: verify and store it.
+    pub fn finish_put(&self, hash: &str, len: u64) -> Result<(), HubError> {
+        let stored = self.blobs.finish(hash, len)?;
+        self.store.hub_blob_added(
+            hash,
+            i64::try_from(len).unwrap_or(i64::MAX),
+            i64::try_from(stored).unwrap_or(i64::MAX),
+            blirp_core::now_ms(),
+        )?;
+        Ok(())
+    }
+
+    /// The hub's own engine: store a local file as `hash` (verified).
+    pub fn import(&self, hash: &str, src: &Path, len: u64) -> Result<(), HubError> {
+        if self.store.hub_blob_size(hash)?.is_some() && self.blobs.has(hash) {
+            return Ok(());
+        }
+        self.reserve(len)?;
+        let (size, stored) = self.blobs.import(hash, src)?;
+        self.store.hub_blob_added(
+            hash,
+            i64::try_from(size).unwrap_or(i64::MAX),
+            i64::try_from(stored).unwrap_or(i64::MAX),
+            blirp_core::now_ms(),
+        )?;
+        Ok(())
+    }
+
+    /// Raw length and content of a stored blob.
+    pub fn open(&self, hash: &str) -> Result<Option<(u64, BlobReader)>, HubError> {
+        if !is_hash(hash) {
+            return Err(HubError::Invalid("invalid hash".into()));
+        }
+        let Some(size) = self.store.hub_blob_size(hash)? else {
+            return Ok(None);
+        };
+        Ok(self
+            .blobs
+            .open(hash)?
+            .map(|r| (u64::try_from(size).unwrap_or(0), r)))
+    }
+
+    /// Apply a commit batch from `machine_id` (the authenticated writer).
+    #[allow(clippy::too_many_arguments)]
+    pub fn commit(
+        &self,
+        machine_id: &str,
+        machine_name: &str,
+        root_id: &str,
+        claim_path: Option<&str>,
+        manifest: Option<&GitManifest>,
+        changes: &[FileChange],
+    ) -> Result<Result<CommitOutcome, CommitRefused>, HubError> {
+        let out = self.store.hub_file_commit(&CommitInput {
+            root_id,
+            machine_id,
+            machine_name,
+            claim_path,
+            manifest,
+            changes,
+            now: blirp_core::now_ms(),
+        })?;
+        if let Ok(o) = &out {
+            let _ = self.changed.send(RootChanged {
+                root_id: root_id.to_string(),
+                head: o.head,
+            });
+        }
+        Ok(out)
+    }
+
+    /// "Delete hub copy": only when the project's file sync is off or the
+    /// origin machine was revoked. Blobs go with the next collection.
+    pub fn delete_root(&self, root_id: &str) -> Result<(), HubError> {
+        let info = self
+            .store
+            .hub_file_root(root_id)?
+            .ok_or(HubError::UnknownRoot)?;
+        let mode = self.store.hub_file_mode(&info.project_id)?;
+        if mode != FilesMode::Off && !info.origin_revoked {
+            return Err(HubError::NotPaused);
+        }
+        self.store.hub_delete_file_root(root_id)?;
+        let _ = self.changed.send(RootChanged {
+            root_id: root_id.to_string(),
+            head: -1,
+        });
+        Ok(())
+    }
+
+    /// Remove unreferenced blobs older than the grace period.
+    fn collect(&self, now: i64) -> Result<usize, HubError> {
+        let unused = self.store.hub_unreferenced_blobs(now - BLOB_GRACE_MS)?;
+        for h in &unused {
+            self.blobs.remove(h);
+        }
+        self.store.hub_forget_blobs(&unused)?;
+        Ok(unused.len())
+    }
+
+    /// Daily retention and mark-and-sweep: old history and tombstones,
+    /// unreferenced blobs, stale partial uploads and orphaned files.
+    pub fn gc(&self, now: i64) -> Result<GcStats, HubError> {
+        let keep = self.keep_ms.load(Ordering::Relaxed);
+        let (history, tombstones) = self.store.hub_prune_files(now - keep, now - TOMBSTONE_MS)?;
+        let blobs = self.collect(now)?;
+        self.blobs.sweep_parts(PART_AGE);
+        let store = self.store.clone();
+        self.blobs
+            .sweep_orphans(Duration::from_millis(BLOB_GRACE_MS as u64), &|h| {
+                store.hub_blob_size(h).ok().flatten().is_some()
+            });
+        Ok(GcStats {
+            history,
+            tombstones,
+            blobs,
+        })
+    }
+
+    pub fn subscribe(&self) -> broadcast::Receiver<RootChanged> {
+        self.changed.subscribe()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use blirp_core::files::{ChangeOp, ChangeResult, hash_bytes};
+
+    fn put(path: &str, base: i64, data: &[u8]) -> FileChange {
+        FileChange {
+            path: path.into(),
+            base_version: base,
+            op: ChangeOp::Put {
+                hash: hash_bytes(data),
+                size: data.len() as i64,
+                mode_x: false,
+                mtime: 0,
+            },
+        }
+    }
+
+    struct T {
+        _dir: tempfile::TempDir,
+        hub: HubFiles,
+        root: String,
+        folder: String,
+        src: std::path::PathBuf,
+    }
+
+    fn setup(quota: u64) -> T {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Arc::new(Store::open(&dir.path().join("db")).unwrap());
+        let folder = dir.path().join("p");
+        std::fs::create_dir(&folder).unwrap();
+        let p = store.register_project("m", &folder, None).unwrap();
+        let folder = store.project_paths(&p.id).unwrap()[0].path.clone();
+        let hub = HubFiles::new(store, &dir.path().join("files"), quota, 1000);
+        T {
+            root: blirp_core::files::root_id("m", &folder),
+            src: dir.path().join("src"),
+            _dir: dir,
+            hub,
+            folder,
+        }
+    }
+
+    impl T {
+        fn upload(&self, data: &[u8]) -> Result<(), HubError> {
+            std::fs::write(&self.src, data).unwrap();
+            self.hub
+                .import(&hash_bytes(data), &self.src, data.len() as u64)
+        }
+    }
+
+    #[test]
+    fn blobs_then_commit_then_gc() {
+        let t = setup(1 << 30);
+        let mut rx = t.hub.subscribe();
+        let a = b"version a".repeat(10);
+        // Resumable network upload.
+        let h = hash_bytes(&a);
+        assert_eq!(
+            t.hub.missing(std::slice::from_ref(&h)).unwrap(),
+            [(h.clone(), 0)]
+        );
+        assert_eq!(t.hub.begin_put(&h, a.len() as u64).unwrap(), 0);
+        t.hub.put_chunk(&h, 0, &a[..5]).unwrap();
+        assert_eq!(
+            t.hub.missing(std::slice::from_ref(&h)).unwrap(),
+            [(h.clone(), 5)]
+        );
+        assert_eq!(t.hub.begin_put(&h, a.len() as u64).unwrap(), 5);
+        t.hub.put_chunk(&h, 5, &a[5..]).unwrap();
+        t.hub.finish_put(&h, a.len() as u64).unwrap();
+        assert!(t.hub.missing(std::slice::from_ref(&h)).unwrap().is_empty());
+        let out = t
+            .hub
+            .commit(
+                "m",
+                "m",
+                &t.root,
+                Some(&t.folder),
+                None,
+                &[put("a.txt", 0, &a)],
+            )
+            .unwrap()
+            .unwrap();
+        assert_eq!(out.results, [ChangeResult::Ok { version: 1 }]);
+        assert_eq!(rx.try_recv().unwrap().head, 1);
+        let (len, mut r) = t.hub.open(&h).unwrap().unwrap();
+        let mut back = Vec::new();
+        std::io::Read::read_to_end(&mut r, &mut back).unwrap();
+        assert_eq!((len, back), (a.len() as u64, a.clone()));
+
+        // Replaced: kept in history until retention drops it, then collected.
+        t.upload(b"b").unwrap();
+        t.hub
+            .commit("m", "m", &t.root, None, None, &[put("a.txt", 1, b"b")])
+            .unwrap()
+            .unwrap();
+        let later = blirp_core::now_ms() + BLOB_GRACE_MS + 10_000;
+        let s = t.hub.gc(later).unwrap();
+        assert_eq!((s.history, s.blobs), (1, 1));
+        assert!(t.hub.open(&h).unwrap().is_none());
+    }
+
+    #[test]
+    fn quota_prunes_history_before_refusing() {
+        let t = setup(1_000);
+        // Random bytes do not compress: stored size ~ raw size.
+        let noise = |seed: &[u8], n: usize| {
+            let mut v = vec![0u8; n];
+            blake3::Hasher::new()
+                .update(seed)
+                .finalize_xof()
+                .fill(&mut v);
+            v
+        };
+        let big = noise(b"one", 600);
+        t.upload(&big).unwrap();
+        t.hub
+            .commit(
+                "m",
+                "m",
+                &t.root,
+                Some(&t.folder),
+                None,
+                &[put("f", 0, &big)],
+            )
+            .unwrap()
+            .unwrap();
+        // The file still uses the blob: nothing to prune, refused.
+        let big2 = noise(b"two", 700);
+        assert!(matches!(t.upload(&big2), Err(HubError::Quota)));
+        assert_eq!(
+            t.hub.begin_put(&hash_bytes(&big2), 700).unwrap_err().code(),
+            "hub_quota"
+        );
+        // Deleting a hub copy needs the project turned off first.
+        assert!(matches!(
+            t.hub.delete_root(&t.root),
+            Err(HubError::NotPaused)
+        ));
+        let project = t.hub.roots().unwrap().0[0].project_id.clone();
+        t.hub.set_mode(&project, FilesMode::Off).unwrap();
+        t.hub.delete_root(&t.root).unwrap();
+        assert!(matches!(
+            t.hub.index(&t.root, 0, 10),
+            Err(HubError::UnknownRoot)
+        ));
+    }
+
+    #[test]
+    fn bad_input_is_refused() {
+        let t = setup(1 << 20);
+        assert!(matches!(
+            t.hub.missing(&["../x".into()]),
+            Err(HubError::Invalid(_))
+        ));
+        assert!(matches!(
+            t.hub.begin_put("zz", 1),
+            Err(HubError::Invalid(_))
+        ));
+        assert!(matches!(t.hub.index("x", 0, 1), Err(HubError::Invalid(_))));
+        assert!(matches!(
+            t.hub.set_mode("../p", FilesMode::On),
+            Err(HubError::Invalid(_))
+        ));
+        // A blob whose bytes do not match is not stored.
+        let h = hash_bytes(b"real");
+        t.hub.begin_put(&h, 4).unwrap();
+        t.hub.put_chunk(&h, 0, b"fake").unwrap();
+        assert_eq!(t.hub.finish_put(&h, 4).unwrap_err().code(), "hash_mismatch");
+        assert_eq!(t.hub.missing(std::slice::from_ref(&h)).unwrap(), [(h, 0)]);
+    }
+}

@@ -6,6 +6,7 @@
 //! payloads are already JSON (`Change`) and stay debuggable; every frame is
 //! size-checked before it is read.
 
+pub mod files;
 pub mod identity;
 pub mod pair;
 pub mod proxy;
