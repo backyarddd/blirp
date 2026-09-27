@@ -1,7 +1,7 @@
 // Pure route table. Reactive state lives in router.svelte.ts.
 
-export type ProjectTab = 'overview' | 'sessions' | 'memory' | 'wiki' | 'resources' | 'files' | 'git';
-export const PROJECT_TABS: readonly ProjectTab[] = ['overview', 'sessions', 'memory', 'wiki', 'resources', 'files', 'git'];
+export type ProjectTab = 'overview' | 'sessions' | 'memory' | 'wiki' | 'resources' | 'files' | 'hub-files' | 'git';
+export const PROJECT_TABS: readonly ProjectTab[] = ['overview', 'sessions', 'memory', 'wiki', 'resources', 'files', 'hub-files', 'git'];
 
 export type SettingsSection = 'agents' | 'memory' | 'sync' | 'portal' | 'appearance' | 'about';
 export const SETTINGS_SECTIONS: readonly SettingsSection[] = ['agents', 'memory', 'sync', 'portal', 'appearance', 'about'];

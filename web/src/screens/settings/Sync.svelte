@@ -208,6 +208,27 @@
     else input.checked = settings.config.sync.lan_discovery;
   }
 
+  // Project file sync (`sync.project_files`, per machine) and the "Pause file sync" switch.
+  let savingFiles = $state(false);
+  async function setProjectFiles(on: boolean, input: HTMLInputElement): Promise<void> {
+    savingFiles = true;
+    const s = await app.saveSettings(
+      { config: { ...settings.config, sync: { ...settings.config.sync, project_files: on } }, base: settings.config },
+      on ? 'Project folders upload to the hub' : 'Project folders no longer upload to the hub',
+    );
+    savingFiles = false;
+    if (s) {
+      onsaved(s);
+      void app.refreshFiles();
+    } else input.checked = settings.config.sync.project_files;
+  }
+
+  async function setFilesPaused(on: boolean, input: HTMLInputElement): Promise<void> {
+    const o = await app.act(() => api.files.pause(on), on ? 'File sync paused' : 'File sync resumed');
+    if (o) app.files = o;
+    else input.checked = !on;
+  }
+
   async function copy(text: string, what: string): Promise<void> {
     try {
       await navigator.clipboard.writeText(text);
@@ -311,6 +332,34 @@
           connect.
         </p>
       </div>
+      {#if status.role !== 'standalone'}
+      <div class="gap" data-testid="project-files-settings">
+        <label class="check">
+          <input
+            type="checkbox"
+            checked={settings.config.sync.project_files}
+            disabled={!app.admin || savingFiles}
+            onchange={(e) => setProjectFiles(e.currentTarget.checked, e.currentTarget)}
+          />
+          Upload project folders to the hub
+        </label>
+        <p class="small muted">
+          Keeps a copy of this machine's project folders on the hub (including uncommitted changes), so cloud sessions and your
+          other machines can use them. Secrets, build output and ignored files stay here; each project can override this under
+          its Files on hub tab.
+        </p>
+        <label class="check">
+          <input
+            type="checkbox"
+            checked={app.files?.paused ?? false}
+            disabled={!app.control}
+            onchange={(e) => setFilesPaused(e.currentTarget.checked, e.currentTarget)}
+          />
+          Pause file sync on this machine
+        </label>
+        {#if app.files?.hub_error}<p class="small warn" role="alert">{app.files.hub_error}</p>{/if}
+      </div>
+      {/if}
       {#if app.admin && status.role === 'hub'}
         <button type="button" class="btn sm danger gap" onclick={disableHub} disabled={busy}>Disable hub</button>
       {:else if app.admin && status.role === 'node'}

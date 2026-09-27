@@ -2,7 +2,7 @@
 // a live shell session, memory, wiki, resources, files, git, search, settings, palette,
 // mobile layout, and no CSP violations along the way. Tests share one page and run in order.
 import { randomUUID } from 'node:crypto';
-import { existsSync, mkdirSync, readdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { expect, test, type Page } from '@playwright/test';
 import { e2eEnv } from './env';
@@ -1151,6 +1151,41 @@ test('sessions list: recent activity first, every machine labeled and filterable
 
   await page.unrouteAll({ behavior: 'wait' });
   await page.goto(`${env.url}/sessions`);
+test('files on hub: first-run banner, mode toggle, preview and a conflict badge', async () => {
+  const secret = join(env.repo, '.env');
+  const conflict = join(env.repo, 'notes.conflict-laptop-20260101-000000.md');
+  writeFileSync(secret, 'API_TOKEN=e2e-placeholder\n');
+  writeFileSync(conflict, 'kept by an earlier concurrent edit\n');
+  await apiCall('POST', '/api/sync/hub/enable');
+  await page.goto(`${env.url}${repoProjectUrl}/hub-files`);
+  // Uploads wait for the first-run grace period; the banner says what will go where.
+  const banner = page.getByTestId('files-banner');
+  await expect(banner).toContainText(/Uploading \d+ project folders? .*to /);
+
+  const modes = page.getByTestId('files-mode');
+  await modes.getByRole('radio', { name: 'Off' }).click();
+  await expect(modes.getByRole('radio', { name: 'Off' })).toHaveAttribute('aria-checked', 'true');
+  await expect(page.getByTestId('files-effective')).toContainText('Uploads stopped');
+  await modes.getByRole('radio', { name: 'Default' }).click();
+  await expect(page.getByTestId('files-effective')).toContainText('Follows each machine');
+
+  // The preview is a local dry run and names what stays behind.
+  const root = page.getByTestId('files-root').first();
+  await root.getByRole('button', { name: 'Preview' }).click();
+  const preview = page.getByTestId('files-preview');
+  await expect(preview).toContainText('would upload');
+  await preview.getByText('Secrets: 1').click();
+  await expect(preview).toContainText('.env');
+
+  const region = page.getByRole('region', { name: 'Project file sync' });
+  await region.getByRole('button', { name: 'Upload now' }).click();
+  await expect(region).toHaveCount(0);
+  await expect(page.getByTestId('conflict-badge')).toHaveText('1 conflict copy', { timeout: 30_000 });
+  await expect(root.getByTestId('files-state')).toHaveText('Up to date');
+
+  await apiCall('POST', '/api/sync/hub/disable');
+  rmSync(secret);
+  rmSync(conflict);
 });
 
 test('no CSP violations or unexpected console errors', async () => {

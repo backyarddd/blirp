@@ -6,10 +6,12 @@
   import { navigate } from '../router.svelte';
   import { href } from '../router';
   import { api, errorMessage } from '../api/client';
-  import type { AgentInfo, CloneJob, LaunchSession } from '../api/types.gen';
+  import type { AgentInfo, CloneJob, DownloadJob, LaunchSession, ProjectFiles } from '../api/types.gen';
   import { app } from '../app.svelte';
   import { agentLabel } from '../status';
   import { folderOn, recentFolders } from '../machines';
+  import { formatBytes, pickHubRoot } from '../files';
+  import { formatRelative } from '../time';
   import Modal from './Modal.svelte';
   import FolderPicker from './FolderPicker.svelte';
 
@@ -59,6 +61,67 @@
   const recents = $derived(remote ? recentFolders(app.sessions, app.projects, target) : []);
   const localFolder = $derived(project?.paths.find((p) => p.local)?.path ?? null);
 
+  // The project's folders on the hub (project file sync): a machine without a folder can
+  // download a copy, the hub can start from its own copy (includes uncommitted changes).
+  let hubFiles: ProjectFiles | null = $state.raw(null);
+  let hubFilesFor = '';
+  const hubRoot = $derived(synced && source === 'project' ? pickHubRoot(hubFiles) : null);
+  const runOn = $derived(target || (app.selfId ?? ''));
+  const localMissing = $derived(!remote && source === 'project' && project !== undefined && !project.paths.some((p) => p.local));
+  let download: DownloadJob | null = $state.raw(null);
+  let downloadError: string | null = $state(null);
+  let downloadPoll: ReturnType<typeof setTimeout> | undefined;
+
+  $effect(() => {
+    const id = projectId;
+    if (!open || !synced || !id || id === hubFilesFor) return;
+    untrack(() => {
+      hubFilesFor = id;
+      hubFiles = null;
+      api.files
+        .project(id)
+        .then((f) => {
+          if (hubFilesFor === id) hubFiles = f;
+        })
+        .catch((e: unknown) => console.warn('blirp: project files unavailable', e));
+    });
+  });
+
+  async function startDownload(): Promise<void> {
+    if (!hubRoot) return;
+    downloadError = null;
+    const machine = runOn;
+    try {
+      download = await api.files.download(machine, hubRoot.root_id, cloneParent || undefined);
+      pollDownload(download.id, machine);
+    } catch (e) {
+      app.noteForbidden(e);
+      downloadError = errorMessage(e);
+    }
+  }
+
+  function pollDownload(job: string, machine: string): void {
+    downloadPoll = setTimeout(async () => {
+      if (machine !== runOn || download?.id !== job) return;
+      try {
+        const j = await api.files.downloadJob(machine, job);
+        if (machine !== runOn || download?.id !== job) return;
+        download = j;
+        if (j.state === 'running') return pollDownload(job, machine);
+        if (j.state === 'done') {
+          // The copy is that machine's folder of this project now.
+          source = 'path';
+          path = j.dest;
+          app.toast(`Copied into ${j.dest} on ${app.machineName(machine)}${j.note ? ` (${j.note})` : ''}`, 'info');
+        } else {
+          downloadError = j.error ?? 'the download failed';
+        }
+      } catch (e) {
+        downloadError = `Lost track of the download: ${errorMessage(e)}`;
+      }
+    }, 1000);
+  }
+
   let browsing = $state(false);
   let clone: CloneJob | null = $state.raw(null);
   let cloneError: string | null = $state(null);
@@ -81,6 +144,9 @@
     cloneError = null;
     cloneParent = '';
     clearTimeout(clonePoll);
+    download = null;
+    downloadError = null;
+    clearTimeout(downloadPoll);
   }
 
   async function init(token: number): Promise<void> {
@@ -175,6 +241,8 @@
 
   function close(): void {
     clearTimeout(clonePoll);
+    clearTimeout(downloadPoll);
+    hubFilesFor = '';
     app.newSession = { open: false, projectId: null };
   }
 
@@ -339,6 +407,34 @@
             <span class="hint">For work in a folder elsewhere. It is added to the project, so sessions there, in blirp or not, belong to it.</span>
           </div>
         {/if}
+      {/if}
+      {#if hubRoot && project && !otherFolder && ((remote && targetFolder === null) || localMissing)}
+        {@const h = hubRoot.hub}
+        <div class="notice" data-testid="hub-copy-box">
+          <p>
+            {#if cloud}
+              <strong>Use hub copy</strong> (includes uncommitted changes): {targetName} makes its own copy of
+              {project.name} from the files on the hub{h ? ` (${h.files} files, ${formatBytes(h.bytes)}, from ${hubRoot.machine_name}, updated ${formatRelative(h.updated_at)})` : ''}.
+              Its edits sync back to the hub.
+            {:else}
+              <strong>Download from hub</strong>{h ? ` (${h.files} files, ${formatBytes(h.bytes)}, from ${hubRoot.machine_name}, updated ${formatRelative(h.updated_at)})` : ''}:
+              a copy of {project.name} on {targetName}, with git history when its remote can be cloned there.
+            {/if}
+          </p>
+          {#if download?.state === 'running'}
+            <p class="mono small" role="status">Copying into {download.dest}… {download.progress ?? ''}</p>
+          {:else if download?.state === 'done'}
+            <p class="small" role="status">Copied into <span class="mono">{download.dest}</span>.{download.note ? ` ${download.note}.` : ''}</p>
+          {:else}
+            <div class="row">
+              <button type="button" class="btn sm primary" onclick={startDownload} disabled={!app.control}
+                >{cloud ? 'Use hub copy' : `Download to ${targetName}`}</button
+              >
+              <span class="small faint ellipsis">into <span class="mono">{cloneParent || '~/blirp'}</span></span>
+            </div>
+          {/if}
+          {#if downloadError}<pre class="error small" role="alert">{downloadError}</pre>{/if}
+        </div>
       {/if}
       {#if remote && project && targetFolder === null && !folderless && !otherFolder}
         <div class="notice" data-testid="clone-box">

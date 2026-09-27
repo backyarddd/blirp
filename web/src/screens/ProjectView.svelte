@@ -16,6 +16,7 @@
   import Wiki from './project/Wiki.svelte';
   import Resources from './project/Resources.svelte';
   import Files from './project/Files.svelte';
+  import HubFiles from './project/HubFiles.svelte';
   import Git from './project/Git.svelte';
 
   let { projectId, tab, sub }: { projectId: string; tab: ProjectTab; sub: string | null } = $props();
@@ -29,12 +30,17 @@
     { id: 'wiki', label: 'Wiki' },
     { id: 'resources', label: 'Resources' },
     { id: 'files', label: 'Files' },
+    { id: 'hub-files', label: 'Files on hub' },
     { id: 'git', label: 'Git' },
   ];
   // Files and git read this machine's folders (or its blirp workspace); git only exists for folders that are repos.
   const hasLocal = $derived((project?.paths.some((p) => p.local) ?? false) || (project?.workspace ?? null) !== null);
   const hasGit = $derived(project?.paths.some((p) => p.local && p.is_git) ?? false);
-  const tabs = $derived(TABS.filter((t) => (t.id !== 'git' || hasGit) && (t.id !== 'files' || hasLocal)));
+  // Files on hub: only when this machine is a hub or paired with one.
+  const synced = $derived((app.sync?.role ?? app.health?.role ?? 'standalone') !== 'standalone');
+  const tabs = $derived(
+    TABS.filter((t) => (t.id !== 'git' || hasGit) && (t.id !== 'files' || hasLocal) && (t.id !== 'hub-files' || synced)),
+  );
 
   let renaming = $state(false);
   let newName = $state('');
@@ -210,6 +216,8 @@
           {:else}
             <p class="muted">This project has no folder on this machine.</p>
           {/if}
+        {:else if tab === 'hub-files'}
+          <HubFiles {project} />
         {:else if tab === 'git'}
           {#if hasGit}
             <Git {project} />

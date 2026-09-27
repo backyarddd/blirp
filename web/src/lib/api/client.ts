@@ -1,6 +1,7 @@
 // The only module that talks HTTP to the daemon. Everything else imports `api`.
 import type {
   AgentInfo,
+  AppliedFiles,
   Brief,
   BrowserInvite,
   CloneJob,
@@ -11,8 +12,13 @@ import type {
   CreateWikiPage,
   Device,
   DirListing,
+  DownloadJob,
   EventsPage,
   FileContent,
+  FilesIncoming,
+  FilesMode,
+  FilesOverview,
+  FilesPreview,
   GitDiff,
   GitStatus,
   Health,
@@ -27,6 +33,7 @@ import type {
   PatchDevice,
   PatchRecord,
   PatchResource,
+  ProjectFiles,
   ProjectMemory,
   ProjectSummary,
   PutWikiPage,
@@ -251,6 +258,34 @@ export const api = {
       request<DirListing>('GET', `${p(id)}/files`, undefined, { path, root: q.root }),
     fileContent: (id: string, path: string, q: Rooted = {}) =>
       request<FileContent>('GET', `${p(id)}/files/content`, undefined, { path, root: q.root }),
+  },
+  /** Project file sync through the hub (docs/project-files.md). */
+  files: {
+    status: () => request<FilesOverview>('GET', '/api/files/status'),
+    /** "Pause file sync" on this machine. */
+    pause: (paused: boolean) => request<FilesOverview>('POST', '/api/files/pause', { paused }),
+    /** End the first-run grace period now. */
+    startNow: () => request<FilesOverview>('POST', '/api/files/start-now'),
+    project: (id: string) => request<ProjectFiles>('GET', `${p(id)}/files-sync`),
+    /** Default / On / Off, stored on the hub for every machine. */
+    setMode: (id: string, mode: FilesMode) => request<ProjectFiles>('PUT', `${p(id)}/files-sync`, { mode }),
+    /** Local dry run: what uploading this folder would send. */
+    preview: (id: string, q: Rooted = {}) =>
+      request<FilesPreview>('GET', `${p(id)}/files-sync/preview`, undefined, { root: q.root }),
+    incoming: (id: string, root: string) =>
+      request<FilesIncoming>('GET', `${p(id)}/files-sync/incoming`, undefined, { root }),
+    /** "Update from hub" on a copy, "Bring changes here" on the origin folder. */
+    apply: (id: string, root: string) => request<AppliedFiles>('POST', `${p(id)}/files-sync/apply`, { root }),
+    /** "Delete hub copy" (409 `files_on` unless the project's file sync is off). */
+    deleteRoot: (id: string, rootId: string) => request<void>('DELETE', `${p(id)}/files-sync/roots/${enc(rootId)}`),
+    /** A copy of a root on that machine (202; relayed for another machine). */
+    download: (machine: string, rootId: string, parent?: string) =>
+      request<DownloadJob>('POST', `/api/machines/${enc(machine)}/files/download`, {
+        root_id: rootId,
+        ...(parent ? { parent } : {}),
+      }),
+    downloadJob: (machine: string, job: string) =>
+      request<DownloadJob>('GET', `/api/machines/${enc(machine)}/files/download/${enc(job)}`),
   },
   suggestions: {
     decide: (id: string, decision: 'accept' | 'reject' | 'dismiss') =>

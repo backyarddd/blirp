@@ -2,6 +2,7 @@ import { SvelteSet } from 'svelte/reactivity';
 import { ApiError, api, errorMessage, eventsWsPath, onUnauthorized, socketUrl } from './api/client';
 import type {
   AgentInfo,
+  FilesOverview,
   Health,
   LaunchSession,
   MachineInfo,
@@ -58,6 +59,7 @@ const EVENT_TYPES: ReadonlySet<string> = new Set([
   'project_updated',
   'memory_updated',
   'sync_updated',
+  'files_updated',
   'resync',
 ]);
 
@@ -69,7 +71,7 @@ function isServerEvent(v: unknown): v is ServerEvent {
   if (o.type === 'session_created' || o.type === 'session_updated') return typeof o.session === 'object' && o.session !== null;
   if (o.type === 'session_deleted') return typeof o.session_id === 'string';
   if (o.type === 'sync_updated') return typeof o.status === 'object' && o.status !== null;
-  if (o.type === 'resync') return true;
+  if (o.type === 'resync' || o.type === 'files_updated') return true;
   return typeof o.project_id === 'string';
 }
 
@@ -102,6 +104,10 @@ class AppState {
   awake: Record<string, boolean> = $state({});
   /** Bumped on every sync status change so views refetch machines and devices. */
   syncTick = $state(0);
+  /** Project file sync on this machine (first-run banner, pause); null until loaded. */
+  files: FilesOverview | null = $state.raw(null);
+  /** Bumped when file sync state changes (a root on the hub, a folder here). */
+  filesTick = $state(0);
   /** 403s seen since capabilities were last read (fallback for stale capabilities). */
   #denied: Denied = $state(NONE_DENIED);
   #rights = $derived(rightsFrom(this.health?.capabilities, this.#denied));
@@ -253,6 +259,14 @@ class AppState {
     this.awake = next;
   }
 
+  async refreshFiles(): Promise<void> {
+    try {
+      this.files = await api.files.status();
+    } catch (e) {
+      console.warn('blirp: file sync status unavailable', e);
+    }
+  }
+
   async refreshSync(): Promise<void> {
     try {
       this.setSync(await api.sync.status());
@@ -264,6 +278,7 @@ class AppState {
   setSync(status: SyncStatus): void {
     this.sync = status;
     this.syncTick++;
+    void this.refreshFiles();
     void this.refreshMachines();
     // Health carries the role shown in the top bar and used by the machine picker.
     if (this.health && this.health.role !== status.role) void this.refreshHealth();
@@ -692,6 +707,10 @@ class AppState {
         break;
       case 'sync_updated':
         this.setSync(msg.status);
+        break;
+      case 'files_updated':
+        this.filesTick++;
+        void this.refreshFiles();
         break;
       case 'resync':
         // The daemon dropped events for this client; everything may be stale.

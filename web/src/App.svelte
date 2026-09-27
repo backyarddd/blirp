@@ -9,6 +9,7 @@
   import { groupSessions } from './lib/status';
   import { forgetOpenSession } from './lib/machines';
   import TopBar from './lib/components/TopBar.svelte';
+  import FilesBanner from './lib/components/FilesBanner.svelte';
   import CommandPalette from './lib/components/CommandPalette.svelte';
   import NewSessionDialog from './lib/components/NewSessionDialog.svelte';
   import Toasts from './lib/components/Toasts.svelte';
@@ -100,7 +101,10 @@
 {#if app.auth === 'ok'}
   <div class="shell">
     <TopBar />
-    <UpdateBanner />
+    <div class="banners">
+      <UpdateBanner />
+      <FilesBanner />
+    </div>
     <main class="main">
       {#if route.name === 'sessions'}
         <SessionsView sessionId={route.sessionId} />
@@ -157,7 +161,7 @@
 <style>
   .shell {
     display: grid;
-    /* The middle row is the update banner's; empty without one. */
+    /* The middle row holds the update and file sync banners; empty without them. */
     grid-template-rows: var(--topbar-h) auto minmax(0, 1fr);
     height: 100%;
   }
