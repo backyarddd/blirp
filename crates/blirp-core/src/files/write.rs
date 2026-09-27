@@ -268,7 +268,7 @@ impl Target<'_> {
                 Err(_) => {}
             }
         }
-        std::fs::rename(tmp, target).map_err(io(wire))
+        retry_busy(|| std::fs::rename(tmp, target)).map_err(io(wire))
     }
 
     /// Create or replace a symlink (unix; Windows links are not recreated).
@@ -296,7 +296,7 @@ impl Target<'_> {
             Err(refused(wire, "symlinks are not recreated on this system"));
         made?;
         let result = if self.matches(wire, &target, expect)? {
-            std::fs::rename(&tmp, &target).map_err(io(wire))
+            retry_busy(|| std::fs::rename(&tmp, &target)).map_err(io(wire))
         } else {
             Err(WriteError::Changed(wire.to_string()))
         };
@@ -323,10 +323,26 @@ impl Target<'_> {
         if !self.matches(wire, &target, expect)? {
             return Err(WriteError::Changed(wire.to_string()));
         }
-        match std::fs::remove_file(&target) {
+        match retry_busy(|| std::fs::remove_file(&target)) {
             Ok(()) => Ok(()),
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
             Err(e) => Err(io(wire)(e)),
+        }
+    }
+}
+
+/// Windows refuses to replace or delete a file another process has open
+/// without delete sharing (virus scanners and indexers open fresh files
+/// briefly): retry a few times before reporting it.
+fn retry_busy<T>(mut f: impl FnMut() -> std::io::Result<T>) -> std::io::Result<T> {
+    let mut left = if cfg!(windows) { 20 } else { 0 };
+    loop {
+        match f() {
+            Err(e) if e.kind() == std::io::ErrorKind::PermissionDenied && left > 0 => {
+                left -= 1;
+                std::thread::sleep(std::time::Duration::from_millis(50));
+            }
+            r => return r,
         }
     }
 }
