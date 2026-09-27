@@ -1154,6 +1154,8 @@ test('sessions list: recent activity first, every machine labeled and filterable
 
   await page.unrouteAll({ behavior: 'wait' });
   await page.goto(`${env.url}/sessions`);
+});
+
 test('files on hub: first-run banner, mode toggle, preview and a conflict badge', async () => {
   const secret = join(env.repo, '.env');
   const conflict = join(env.repo, 'notes.conflict-laptop-20260101-000000.md');
