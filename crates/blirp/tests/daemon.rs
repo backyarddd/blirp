@@ -959,6 +959,7 @@ const MUTATING_ROUTES: &[(&str, &str, Need)] = &[
     ("POST", "/api/files/start-now", Need::Control),
     ("PUT", "/api/projects/p1/files-sync", Need::Control),
     ("POST", "/api/projects/p1/files-sync/apply", Need::Control),
+    ("POST", "/api/projects/p1/files-sync/held", Need::Control),
     (
         "DELETE",
         "/api/projects/p1/files-sync/roots/r1",

@@ -367,3 +367,73 @@ async fn receivers_refuse_unsafe_paths_and_keep_what_they_cannot_hold() {
         );
     }
 }
+
+#[tokio::test]
+async fn many_disappearing_files_are_held_until_confirmed_or_restored() {
+    let w = world(0).await;
+    let (e, c) = &w.writers[0];
+    let root = PathBuf::from(&c.key);
+    for i in 0..80 {
+        std::fs::write(root.join(format!("f{i:02}.txt")), format!("file {i}")).unwrap();
+    }
+    copy::upload(e, c).await.unwrap();
+    let live = |w: &World| {
+        let (entries, _) = w
+            .store
+            .hub_file_index(&c.root_id, 0, 1000)
+            .unwrap()
+            .unwrap();
+        entries.iter().filter(|e| e.content.is_some()).count()
+    };
+    assert_eq!(live(&w), 81);
+
+    // A few deletes go through as usual.
+    for i in 0..3 {
+        std::fs::remove_file(root.join(format!("f{i:02}.txt"))).unwrap();
+    }
+    let r = copy::upload(e, c).await.unwrap();
+    assert!(r.held_deletes.is_empty());
+    assert_eq!(live(&w), 78);
+
+    // 60 at once (> 50 and > 30%): nothing is committed, not even edits.
+    for i in 3..63 {
+        std::fs::remove_file(root.join(format!("f{i:02}.txt"))).unwrap();
+    }
+    std::fs::write(root.join("f70.txt"), "edited meanwhile").unwrap();
+    let r = copy::upload(e, c).await.unwrap();
+    assert_eq!(r.held_deletes.len(), 60);
+    assert_eq!(r.sent, 0);
+    assert_eq!(live(&w), 78);
+    // Still held on the next pass (left paused).
+    assert_eq!(copy::upload(e, c).await.unwrap().held_deletes.len(), 60);
+
+    // Restore from hub brings exactly the missing files back.
+    let restored = copy::restore_missing(e, c).await.unwrap();
+    assert_eq!((restored.written, restored.failed.len()), (60, 0));
+    assert_eq!(
+        std::fs::read_to_string(root.join("f10.txt")).unwrap(),
+        "file 10"
+    );
+    assert!(
+        !root.join("f01.txt").exists(),
+        "a confirmed delete stays deleted"
+    );
+    let r = copy::upload(e, c).await.unwrap();
+    assert!(r.held_deletes.is_empty());
+    assert_eq!(r.sent, 1, "the edit uploads once the folder is whole again");
+
+    // Delete on hub too: the same deletes, confirmed.
+    for i in 3..63 {
+        std::fs::remove_file(root.join(format!("f{i:02}.txt"))).unwrap();
+    }
+    assert_eq!(copy::upload(e, c).await.unwrap().held_deletes.len(), 60);
+    let r = copy::upload_with(e, c, copy::Deletes::Confirm)
+        .await
+        .unwrap();
+    assert_eq!(r.sent, 60);
+    assert_eq!(live(&w), 18);
+
+    // Restoring needs the folder itself.
+    std::fs::remove_dir_all(&root).unwrap();
+    assert!(copy::restore_missing(e, c).await.is_err());
+}

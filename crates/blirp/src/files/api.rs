@@ -18,8 +18,8 @@ use axum::{Json, Router};
 use blirp_core::files::{FilesMode, RootInfo};
 use blirp_core::model::{
     AppliedFiles, ApplyFiles, CopyState, DownloadFiles, FilesIncoming, FilesOverview, FilesPreview,
-    FilesRoot, IncomingAction, IncomingFile, LocalFiles, MachineRole, PauseFiles, ProjectFiles,
-    SetFilesMode,
+    FilesRoot, HeldAction, IncomingAction, IncomingFile, LocalFiles, MachineRole, PauseFiles,
+    ProjectFiles, ResolveHeld, SetFilesMode,
 };
 use serde::Deserialize;
 use std::collections::HashMap;
@@ -35,6 +35,7 @@ pub fn routes() -> Router<SharedState> {
         .route("/api/projects/{id}/files-sync/preview", get(preview))
         .route("/api/projects/{id}/files-sync/incoming", get(incoming))
         .route("/api/projects/{id}/files-sync/apply", post(apply))
+        .route("/api/projects/{id}/files-sync/held", post(resolve_held))
         .route(
             "/api/projects/{id}/files-sync/roots/{root}",
             delete(delete_root),
@@ -206,6 +207,7 @@ fn default_local(key: &str, origin: bool) -> LocalFiles {
         pending: 0,
         excluded: Vec::new(),
         reincluded_secrets: Vec::new(),
+        held_deletes: 0,
     }
 }
 
@@ -456,6 +458,60 @@ async fn apply(
             .map(|(p, why)| format!("{p}: {why}"))
             .collect(),
     }))
+}
+
+/// `POST /api/projects/:id/files-sync/held {root, action}`: after the
+/// mass-delete guard held a folder's upload, "Delete on hub too" (upload
+/// with the deletes) or "Restore from hub" (write the missing files back,
+/// only while the folder exists). Leaving it alone keeps it paused.
+async fn resolve_held(
+    State(s): State<SharedState>,
+    ApiPath(id): ApiPath<String>,
+    Control(_): Control,
+    _files: FilesAccess,
+    ApiJson(body): ApiJson<ResolveHeld>,
+) -> ApiResult<Json<AppliedFiles>> {
+    let e = need_engine(&s)?;
+    let st = s.clone();
+    let (e2, id2, root) = (e.clone(), id.clone(), body.root.clone());
+    let copy = blocking(move || local_copy(&e2, &st, &id2, Some(&root))).await?;
+    let out = {
+        let _work = e.work.lock().await;
+        match body.action {
+            HeldAction::Delete => {
+                let r = copy::upload_with(&e.env, &copy, copy::Deletes::Confirm)
+                    .await
+                    .map_err(files_error)?;
+                tracing::info!(files = r.sent, "confirmed deleting files on the hub");
+                AppliedFiles {
+                    written: 0,
+                    deleted: i64::try_from(r.sent).unwrap_or(0),
+                    conflicts: Vec::new(),
+                    skipped: Vec::new(),
+                    failed: Vec::new(),
+                }
+            }
+            HeldAction::Restore => {
+                let r = copy::restore_missing(&e.env, &copy)
+                    .await
+                    .map_err(files_error)?;
+                tracing::info!(files = r.written, "restored files from the hub");
+                AppliedFiles {
+                    written: i64::try_from(r.written).unwrap_or(0),
+                    deleted: 0,
+                    conflicts: Vec::new(),
+                    skipped: Vec::new(),
+                    failed: r
+                        .failed
+                        .into_iter()
+                        .map(|(p, why)| format!("{p}: {why}"))
+                        .collect(),
+                }
+            }
+        }
+    };
+    e.touch(&copy.key);
+    Ok(Json(out))
 }
 
 /// `DELETE /api/projects/:id/files-sync/roots/:root`: "Delete hub copy"

@@ -1080,9 +1080,11 @@ remote: string | null, branch: string | null, head_sha: string | null, upstream_
  * What the file engine is doing with one folder here: `waiting` for
  * the first-run grace period or the hub, `off` when the project's file
  * sync is off, `paused` by "Pause file sync", `never_synced` for
- * folders that never sync (see the message).
+ * folders that never sync (see the message), `held_deletes` when many
+ * files disappeared at once (nothing uploads until the user confirms
+ * the delete or restores them).
  */
-export type CopyState = "waiting" | "scanning" | "idle" | "uploading" | "paused" | "off" | "too_large" | "busy" | "error" | "never_synced";
+export type CopyState = "waiting" | "scanning" | "idle" | "uploading" | "paused" | "off" | "too_large" | "busy" | "error" | "never_synced" | "held_deletes";
 
 /**
  * This machine's working copy of a root: its own folder (the origin,
@@ -1096,7 +1098,11 @@ message: string | null, last_upload_at: number | null, files: number, bytes: num
 /**
  * Changes not on the hub yet.
  */
-pending: number, excluded: Array<ExcludedGroup>, reincluded_secrets: Array<string>, };
+pending: number, excluded: Array<ExcludedGroup>, reincluded_secrets: Array<string>, 
+/**
+ * Files that disappeared at once (state `held_deletes`).
+ */
+held_deletes: number, };
 
 /**
  * One folder of a project that syncs (or could sync) through the hub.
@@ -1211,6 +1217,17 @@ export type DownloadJob = { id: string, machine_id: string, root_id: string, des
  * E.g. that unpushed commits appear as local changes.
  */
 note: string | null, started_at: number, finished_at: number | null, };
+
+/**
+ * What to do with files held by the mass-delete guard.
+ */
+export type HeldAction = "delete" | "restore";
+
+/**
+ * `POST /api/projects/:id/files-sync/held`: "Delete on hub too" or
+ * "Restore from hub" after many files disappeared from a folder.
+ */
+export type ResolveHeld = { root: string, action: HeldAction, };
 
 export type Summarizer = "auto" | "claude" | "codex" | "ollama" | "none";
 

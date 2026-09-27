@@ -35,8 +35,9 @@ Checked in this order, a later layer winning over an earlier one:
 
 ## Turning it on and off
 
-- **This machine**: `[sync] project_files` (default on), or **Settings > Machines & Sync > Upload project folders to the hub**. **Pause file sync** there stops all uploads from this machine until you resume.
-- **Per project** (on the project's **Files on hub** tab): **Default** follows each machine's setting, **On** uploads everywhere, **Off** stops uploads and keeps the hub copy readable. The choice is stored on the hub and applies to every machine.
+- **This machine**: `[sync] project_files` (default on), or **Settings > Machines & Sync > Upload project folders to the hub**. Off is a hard opt-out: this machine never uploads, whatever a project's setting says. **Pause file sync** there stops all uploads from this machine until you resume.
+- **Per project** (on the project's **Files on hub** tab): **Default** and **On** upload from every machine that has file sync on, **Off** stops uploads everywhere and keeps the hub copy readable. The choice is stored on the hub and applies to every machine.
+- **Many files disappear at once** (more than 50 and more than 30% of a folder's synced files in one pass, e.g. an emptied or swapped folder): nothing uploads from that folder and its tab says "N files disappeared". **Restore from hub** writes those files back (only while the folder exists), **Delete on hub too** confirms the delete; until you choose, the folder stays paused.
 - **First run**: after upgrading or pairing, uploads wait 10 minutes. A banner says how many folders and how much will go to which hub, with **Review exclusions**, **Upload now** and **Turn off**.
 - **Delete hub copy** (only while the project is Off, or its origin machine was revoked) removes the files and their history from the hub. Folders on your machines stay as they are; copies elsewhere stop syncing.
 

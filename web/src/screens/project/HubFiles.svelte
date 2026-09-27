@@ -9,6 +9,7 @@
     FilesMode,
     FilesPreview,
     FilesRoot,
+    HeldAction,
     ProjectSummary,
   } from '../../lib/api/types.gen';
   import { app } from '../../lib/app.svelte';
@@ -94,6 +95,19 @@
     void files.reload();
   }
 
+  let resolving = $state(false);
+  async function resolveHeld(path: string, action: HeldAction): Promise<void> {
+    if (action === 'delete' && !confirm('Delete these files on the hub too? Other machines drop them on their next update; the hub keeps them in its history for a while.')) return;
+    resolving = true;
+    const r = await app.act(
+      () => api.files.resolveHeld(pid, path, action),
+      action === 'delete' ? 'Deleted on the hub too' : 'Restored from the hub',
+    );
+    resolving = false;
+    if (r) applied = r;
+    void files.reload();
+  }
+
   async function deleteHubCopy(r: FilesRoot): Promise<void> {
     const msg =
       `Delete the hub copy of ${r.path} (${r.machine_name})? Its files and history on the hub are removed. ` +
@@ -151,7 +165,7 @@
             {#if f.mode === 'default'}
               Follows each machine's setting; here file sync is {f.global ? 'on' : 'off'}.
             {:else if f.mode === 'on'}
-              Uploads on every machine.
+              Uploads on every machine that has file sync on (a machine that turned it off never uploads).
             {:else}
               Uploads stopped; the hub copy stays readable.
             {/if}
@@ -216,6 +230,22 @@
                 {/if}
               {/if}
             </dl>
+            {#if local?.state === 'held_deletes'}
+              <div class="notice warn" role="alert" data-testid="held-deletes">
+                <span class="grow">
+                  {local.held_deletes} files disappeared from this folder at once, so nothing uploads until you decide. Leave it
+                  paused to look first.
+                </span>
+                {#if app.control}
+                  <button type="button" class="btn sm" disabled={resolving} onclick={() => resolveHeld(local.path, 'restore')}
+                    >Restore from hub</button
+                  >
+                  <button type="button" class="btn sm danger" disabled={resolving} onclick={() => resolveHeld(local.path, 'delete')}
+                    >Delete on hub too</button
+                  >
+                {/if}
+              </div>
+            {/if}
             <div class="row wrap actions">
               {#if origin && local}
                 <button type="button" class="btn sm" onclick={() => showPreview(local.path)} aria-expanded={previewFor === local.path}
@@ -345,6 +375,7 @@
   }
   .notice {
     display: flex;
+    flex-wrap: wrap;
     gap: 6px;
     align-items: center;
     padding: 8px 10px;
@@ -352,6 +383,9 @@
     border-radius: 8px;
     background: var(--panel-2);
     margin: 8px 0 0;
+  }
+  .grow {
+    flex: 1 1 240px;
   }
   .notice.warn {
     border-color: var(--waiting);

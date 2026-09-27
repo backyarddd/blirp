@@ -1300,7 +1300,9 @@ str_enum!(
     /// What the file engine is doing with one folder here: `waiting` for
     /// the first-run grace period or the hub, `off` when the project's file
     /// sync is off, `paused` by "Pause file sync", `never_synced` for
-    /// folders that never sync (see the message).
+    /// folders that never sync (see the message), `held_deletes` when many
+    /// files disappeared at once (nothing uploads until the user confirms
+    /// the delete or restores them).
     CopyState {
         Waiting = "waiting",
         Scanning = "scanning",
@@ -1312,6 +1314,7 @@ str_enum!(
         Busy = "busy",
         Error = "error",
         NeverSynced = "never_synced",
+        HeldDeletes = "held_deletes",
     }
 );
 
@@ -1331,6 +1334,8 @@ pub struct LocalFiles {
     pub pending: i64,
     pub excluded: Vec<ExcludedGroup>,
     pub reincluded_secrets: Vec<String>,
+    /// Files that disappeared at once (state `held_deletes`).
+    pub held_deletes: i64,
 }
 
 /// One folder of a project that syncs (or could sync) through the hub.
@@ -1416,6 +1421,23 @@ pub struct IncomingFile {
 pub struct FilesIncoming {
     pub root: String,
     pub files: Vec<IncomingFile>,
+}
+
+str_enum!(
+    /// What to do with files held by the mass-delete guard.
+    HeldAction {
+        Delete = "delete",
+        Restore = "restore",
+    }
+);
+
+/// `POST /api/projects/:id/files-sync/held`: "Delete on hub too" or
+/// "Restore from hub" after many files disappeared from a folder.
+#[derive(Debug, Clone, Serialize, Deserialize, TS)]
+#[serde(deny_unknown_fields)]
+pub struct ResolveHeld {
+    pub root: String,
+    pub action: HeldAction,
 }
 
 /// `POST /api/projects/:id/files-sync/apply` ("Update from hub" on a copy,
@@ -1594,6 +1616,7 @@ mod tests {
             crate::files::FilesMode, crate::files::RootInfo, crate::files::GitManifest, CopyState,
             LocalFiles, FilesRoot, ProjectFiles, SetFilesMode, FilesOverview, PauseFiles, IncomingAction,
             IncomingFile, FilesIncoming, ApplyFiles, AppliedFiles, DownloadFiles, DownloadJob,
+            HeldAction, ResolveHeld,
             Summarizer, BriefMode, MemoryConfig, SyncConfig, PortalConfig, UpdateConfig, FilesConfig,
         );
         let body = format!(

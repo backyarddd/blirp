@@ -146,6 +146,29 @@ pub struct UploadReport {
     pub pending: usize,
     /// The root's head after the last commit.
     pub head: Option<i64>,
+    /// Files that disappeared in numbers too large to be an edit: nothing
+    /// was committed; the user confirms the delete or restores them.
+    pub held_deletes: Vec<String>,
+}
+
+/// Mass-delete guard: a pass that would delete more than this many of a
+/// root's synced files ...
+pub const MASS_DELETE_MIN: usize = 50;
+/// ... and more than this share of them (percent) commits nothing.
+pub const MASS_DELETE_PERCENT: usize = 30;
+
+/// Whether deleting `deletes` of `synced` files needs a confirmation.
+pub fn mass_delete(deletes: usize, synced: usize) -> bool {
+    deletes > MASS_DELETE_MIN.max(synced.saturating_mul(MASS_DELETE_PERCENT) / 100)
+}
+
+/// How an upload treats many deletions at once.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Deletes {
+    /// Hold them (the default).
+    Guard,
+    /// The user confirmed: delete on the hub too.
+    Confirm,
 }
 
 /// A change to send, with where its content is.
@@ -275,6 +298,15 @@ fn machine_names(store: &Store) -> HashMap<String, String> {
 /// Scan, hash and upload `copy`'s changes. `claim` is the origin's folder
 /// (registers the root on the hub).
 pub async fn upload(env: &Env, copy: &Copy) -> Result<UploadReport, CopyError> {
+    upload_with(env, copy, Deletes::Guard).await
+}
+
+/// [`upload`], with the mass-delete guard on or confirmed.
+pub async fn upload_with(
+    env: &Env,
+    copy: &Copy,
+    deletes: Deletes,
+) -> Result<UploadReport, CopyError> {
     let root = copy.root();
     let ls: LocalScan = {
         let _permit = env
@@ -323,6 +355,26 @@ pub async fn upload(env: &Env, copy: &Copy) -> Result<UploadReport, CopyError> {
     }
     let mut plan = planned.changes;
     if plan.is_empty() {
+        return Ok(report);
+    }
+    // An emptied or swapped folder, not an edit: commit nothing until the
+    // user says what happened.
+    let doomed: Vec<String> = plan
+        .iter()
+        .filter(|p| p.change.op == ChangeOp::Delete)
+        .map(|p| p.change.path.clone())
+        .collect();
+    let synced = bases
+        .values()
+        .filter(|b| b.content.is_some() && !b.skipped)
+        .count();
+    if deletes == Deletes::Guard && mass_delete(doomed.len(), synced) {
+        tracing::warn!(
+            files = doomed.len(),
+            synced,
+            "many files disappeared from a synced folder; holding the upload"
+        );
+        report.held_deletes = doomed;
         return Ok(report);
     }
 
@@ -765,6 +817,40 @@ pub struct ApplyReport {
     pub head: i64,
 }
 
+/// "Restore from hub" after the mass-delete guard held: write back the
+/// hub's version of every file that is missing here but unchanged on the
+/// hub since this copy last synced it. Only while the folder itself exists.
+pub async fn restore_missing(env: &Env, copy: &Copy) -> Result<ApplyReport, CopyError> {
+    let root = copy.root();
+    if !std::fs::symlink_metadata(&root).is_ok_and(|m| m.is_dir()) {
+        return Err(local("the folder is gone; nothing was restored"));
+    }
+    let (entries, head) = env.hub.index(&copy.root_id, 0).await?;
+    let (store, key) = (env.store.clone(), copy.key.clone());
+    let bases = blocking(move || store.file_bases(&key).map_err(local)).await?;
+    let mut report = ApplyReport {
+        head,
+        ..Default::default()
+    };
+    for e in entries {
+        let Some(b) = bases.get(&e.path) else {
+            continue;
+        };
+        if e.content.is_none() || b.skipped || b.version != e.version || b.content != e.content {
+            continue;
+        }
+        let (r, p) = (root.clone(), e.path.clone());
+        if blocking(move || Ok(local_state(&r, &p))).await? != Local::Missing {
+            continue;
+        }
+        match write_entry_at(env, &root, &e, &e.path, &Expect::Absent).await {
+            Ok(()) => report.written += 1,
+            Err(err) => report.failed.push((e.path.clone(), err.to_string())),
+        }
+    }
+    Ok(report)
+}
+
 /// Take the hub's changes into `copy`: fast-forward what is unchanged
 /// since its base, keep local changes and write the hub's versions next to
 /// them. `fresh` for a copy being created (the hub wins over the clone).
@@ -1011,6 +1097,30 @@ mod tests {
             decide(&e, None, &Local::Other, false),
             Some(Act::Skip("a folder is in the way".into()))
         );
+    }
+
+    #[test]
+    fn mass_delete_threshold() {
+        // At least 50, and more than 30% of the synced files.
+        assert!(!mass_delete(50, 10));
+        assert!(mass_delete(51, 10));
+        assert!(!mass_delete(300, 1000));
+        assert!(mass_delete(301, 1000));
+        assert!(!mass_delete(0, 0));
+    }
+
+    proptest::proptest! {
+        // Deletes the guard lets through are never a large share of a
+        // larger folder, and small edits always go through.
+        #[test]
+        fn mass_delete_guard_bounds(deletes in 0usize..5000, synced in 0usize..20000) {
+            if !mass_delete(deletes, synced) {
+                proptest::prop_assert!(deletes <= 50 || deletes * 100 <= synced * 30);
+            }
+            if deletes <= 50 {
+                proptest::prop_assert!(!mass_delete(deletes, synced));
+            }
+        }
     }
 
     #[test]

@@ -19,6 +19,7 @@ import type {
   FilesMode,
   FilesOverview,
   FilesPreview,
+  HeldAction,
   GitDiff,
   GitStatus,
   Health,
@@ -276,6 +277,9 @@ export const api = {
       request<FilesIncoming>('GET', `${p(id)}/files-sync/incoming`, undefined, { root }),
     /** "Update from hub" on a copy, "Bring changes here" on the origin folder. */
     apply: (id: string, root: string) => request<AppliedFiles>('POST', `${p(id)}/files-sync/apply`, { root }),
+    /** After many files disappeared at once: "Delete on hub too" or "Restore from hub". */
+    resolveHeld: (id: string, root: string, action: HeldAction) =>
+      request<AppliedFiles>('POST', `${p(id)}/files-sync/held`, { root, action }),
     /** "Delete hub copy" (409 `files_on` unless the project's file sync is off). */
     deleteRoot: (id: string, rootId: string) => request<void>('DELETE', `${p(id)}/files-sync/roots/${enc(rootId)}`),
     /** A copy of a root on that machine (202; relayed for another machine). */

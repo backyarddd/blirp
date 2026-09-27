@@ -167,6 +167,7 @@ impl Engine {
             pending: 0,
             excluded: Vec::new(),
             reincluded_secrets: Vec::new(),
+            held_deletes: 0,
         });
         f(e);
     }
@@ -294,13 +295,22 @@ impl Engine {
         match result {
             Ok(r) => {
                 let now = blirp_core::now_ms();
+                let held = r.held_deletes.len();
+                if held > 0 {
+                    tracing::warn!(files = held, "upload held: many files disappeared at once");
+                }
                 self.set_status(&key, |s| {
+                    s.held_deletes = i64::try_from(held).unwrap_or(i64::MAX);
                     s.state = match r.state {
+                        _ if held > 0 => CopyState::HeldDeletes,
                         Some(ScanState::TooLarge) => CopyState::TooLarge,
                         Some(ScanState::Busy) => CopyState::Busy,
                         _ => CopyState::Idle,
                     };
                     s.message = match r.state {
+                        _ if held > 0 => Some(format!(
+                            "{held} files disappeared: confirm the delete or restore them from the hub"
+                        )),
                         Some(ScanState::TooLarge) => Some(
                             "too large to sync: add a .blirpignore to leave big folders out".into(),
                         ),

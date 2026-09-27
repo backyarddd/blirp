@@ -32,6 +32,7 @@ export const STATE_LABELS: Record<CopyState, string> = {
   busy: 'Waiting for git',
   error: 'Error',
   never_synced: 'Never synced',
+  held_deletes: 'Paused: files disappeared',
 };
 
 /**
