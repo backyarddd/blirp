@@ -70,7 +70,7 @@ Opens `http://127.0.0.1:<port>/#token=...` in the default browser. The UI stores
 blirp sessions [--project <PROJECT_ID>] [--limit <N>]
 ```
 
-Recent sessions (default 20), newest first: id, status, agent, title or folder.
+Recent sessions (default 20), running ones first, then by most recent activity: id, status, agent, title or folder.
 
 ## blirp stop
 

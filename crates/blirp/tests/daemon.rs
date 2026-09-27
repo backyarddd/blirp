@@ -785,6 +785,37 @@ async fn subagent_children_are_filtered_and_counted() {
         let body: serde_json::Value = r.json().await.unwrap();
         assert_eq!(body["error"]["code"], "machine_unreachable", "{path}");
     }
+
+    // The list holds every machine's sessions, live ones first, then by
+    // last activity; `machine=` narrows it and cursors walk every page.
+    store
+        .modify_session("fork", |s| s.last_activity_at = 10)
+        .unwrap();
+    assert_eq!(
+        ids(h.get("/api/sessions").await),
+        ["live", "fork", "theirs"]
+    );
+    let mine = &h.daemon.state.machine.id;
+    assert_eq!(
+        ids(h.get(&format!("/api/sessions?machine={mine}")).await),
+        ["live", "fork"]
+    );
+    let p1: SessionsPage = h.get("/api/sessions?limit=2").await;
+    let cursor = p1.next_cursor.clone().unwrap();
+    assert_eq!(ids(p1), ["live", "fork"]);
+    let p2: SessionsPage = h
+        .get(&format!("/api/sessions?limit=2&cursor={cursor}"))
+        .await;
+    assert!(p2.next_cursor.is_none());
+    assert_eq!(ids(p2), ["theirs"]);
+    let r = h
+        .http
+        .get(h.url("/api/sessions?cursor=5:theirs"))
+        .bearer_auth(&h.token)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(r.status(), 400);
     h.daemon.shutdown().await.unwrap();
 }
 

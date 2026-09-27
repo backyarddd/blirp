@@ -79,6 +79,21 @@ pub struct SessionFilter {
 /// sessions also carry a parent but are the user's own (origin `blirp`).
 const IS_CHILD: &str = "(origin = 'external' AND parent_session_id IS NOT NULL)";
 
+/// SQL for [`SessionStatus::is_live`] as 1/0.
+const LIVE: &str = "(status IN ('starting','working','idle','waiting'))";
+
+/// `live:last_activity_at:id` from [`Store::list_sessions`].
+fn parse_cursor(c: &str) -> Option<(i64, i64, String)> {
+    let (live, rest) = c.split_once(':')?;
+    let (ts, id) = rest.split_once(':')?;
+    let live = match live {
+        "0" => 0,
+        "1" => 1,
+        _ => return None,
+    };
+    Some((live, ts.parse().ok()?, id.to_string()))
+}
+
 fn like_escape(s: &str) -> String {
     let mut out = String::with_capacity(s.len() + 2);
     out.push('%');
@@ -283,9 +298,13 @@ impl Store {
         })
     }
 
-    /// Newest first, keyset-paginated on `(started_at, id)`.
+    /// Live sessions first (a process is attached, so the user can act on
+    /// them even after hours of idling), then by most recent activity,
+    /// keyset-paginated on `(live, last_activity_at, id)`. A session whose
+    /// activity moves it ahead of a cursor already handed out is not
+    /// repeated on later pages; clients see it through `session_updated`.
     pub fn list_sessions(&self, f: &SessionFilter) -> Result<SessionsPage> {
-        let mut sql = String::from("SELECT * FROM sessions WHERE 1=1");
+        let mut sql = format!("SELECT *, {LIVE} AS live FROM sessions WHERE 1=1");
         let mut args: Vec<Value> = Vec::new();
         let mut push = |clause: &str, v: Value, sql: &mut String| {
             args.push(v);
@@ -320,26 +339,41 @@ impl Store {
                 &mut sql,
             );
             push(" OR cwd LIKE ? ESCAPE '\\'", pat.clone().into(), &mut sql);
+            push(
+                " OR branch LIKE ? ESCAPE '\\'",
+                pat.clone().into(),
+                &mut sql,
+            );
             push(" OR agent LIKE ? ESCAPE '\\')", pat.into(), &mut sql);
         }
         if let Some(cursor) = &f.cursor {
-            let (ts, id) = cursor
-                .split_once(':')
-                .and_then(|(t, id)| Some((t.parse::<i64>().ok()?, id.to_string())))
-                .ok_or_else(|| StoreError::Invalid("invalid cursor".into()))?;
-            push(" AND (started_at < ?", ts.into(), &mut sql);
-            push(" OR (started_at = ?", ts.into(), &mut sql);
-            push(" AND id < ?))", id.into(), &mut sql);
+            let (live, ts, id) =
+                parse_cursor(cursor).ok_or_else(|| StoreError::Invalid("invalid cursor".into()))?;
+            push(&format!(" AND ({LIVE} < ?"), live.into(), &mut sql);
+            push(&format!(" OR ({LIVE} = ?"), live.into(), &mut sql);
+            push(" AND (last_activity_at < ?", ts.into(), &mut sql);
+            push(" OR (last_activity_at = ?", ts.into(), &mut sql);
+            push(" AND id < ?))))", id.into(), &mut sql);
         }
         let limit = f.limit.clamp(1, 500);
+        // ponytail: sorts every matching row (no index covers the live
+        // expression); fine for thousands of sessions, add a stored `live`
+        // column with an index if lists get slow.
         sql.push_str(&format!(
-            " ORDER BY started_at DESC, id DESC LIMIT {}",
+            " ORDER BY live DESC, last_activity_at DESC, id DESC LIMIT {}",
             limit + 1
         ));
         let mut items = self.read(|c| all(c, &sql, params_from_iter(args), session_row))?;
         let next_cursor = if items.len() as i64 > limit {
             items.truncate(limit as usize);
-            items.last().map(|s| format!("{}:{}", s.started_at, s.id))
+            items.last().map(|s| {
+                format!(
+                    "{}:{}:{}",
+                    i64::from(s.status.is_live()),
+                    s.last_activity_at,
+                    s.id
+                )
+            })
         } else {
             None
         };
@@ -582,6 +616,93 @@ pub(super) mod tests {
             .unwrap();
         assert_eq!(m.status, SessionStatus::Completed);
         assert_eq!(store.live_sessions_on("m").unwrap().len(), 5);
+    }
+
+    #[test]
+    fn list_sessions_pins_live_then_orders_by_activity_across_pages() {
+        let (_d, store) = temp_store();
+        // (id, machine, started_at, last_activity_at, status)
+        let rows = [
+            ("old-live", "pc", 10, 20, SessionStatus::Idle),
+            ("new-ended", "mac", 900, 950, SessionStatus::Completed),
+            ("long-running", "pc", 100, 1000, SessionStatus::Completed),
+            ("tie-a", "mac", 300, 500, SessionStatus::Completed),
+            ("tie-b", "pc", 400, 500, SessionStatus::Failed),
+            ("working", "mac", 50, 60, SessionStatus::Working),
+            ("oldest", "pc", 1, 2, SessionStatus::Detached),
+        ];
+        for (id, machine, started, active, status) in rows {
+            let mut s = session(id, "p", started);
+            s.machine_id = machine.into();
+            s.last_activity_at = active;
+            s.status = status;
+            store.insert_session(&s).unwrap();
+        }
+        let expected = [
+            "working",
+            "old-live",
+            "long-running",
+            "new-ended",
+            "tie-b",
+            "tie-a",
+            "oldest",
+        ];
+        let all_pages = |f: SessionFilter| -> Vec<String> {
+            let mut f = f;
+            let mut out = Vec::new();
+            loop {
+                let page = store.list_sessions(&f).unwrap();
+                out.extend(page.items.into_iter().map(|s| s.id));
+                match page.next_cursor {
+                    Some(c) => f.cursor = Some(c),
+                    None => return out,
+                }
+            }
+        };
+        for limit in [1, 2, 3, 50] {
+            assert_eq!(
+                all_pages(SessionFilter {
+                    limit,
+                    ..Default::default()
+                }),
+                expected,
+                "limit {limit}"
+            );
+        }
+        // Every machine's sessions are listed; `machine` narrows to one.
+        assert_eq!(
+            all_pages(SessionFilter {
+                machine_id: Some("pc".into()),
+                limit: 2,
+                ..Default::default()
+            }),
+            ["old-live", "long-running", "tie-b", "oldest"]
+        );
+        // Search also matches the branch.
+        store
+            .modify_session("tie-a", |s| s.branch = Some("feature/zebra".into()))
+            .unwrap();
+        assert_eq!(
+            all_pages(SessionFilter {
+                q: Some("ZEBRA".into()),
+                limit: 10,
+                ..Default::default()
+            }),
+            ["tie-a"]
+        );
+        // Cursors of the old `started_at:id` form are rejected, not misread.
+        for bad in ["100:s1", "2:1:x", "1:x:y", ""] {
+            assert!(
+                store
+                    .list_sessions(&SessionFilter {
+                        cursor: Some(bad.into()),
+                        limit: 10,
+                        ..Default::default()
+                    })
+                    .is_err(),
+                "{bad}"
+            );
+        }
     }
 
     #[test]

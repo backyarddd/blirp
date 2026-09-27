@@ -80,6 +80,11 @@ so every tag needs one.
   folders: the temp folder, the Windows folder, hidden tool folders in the
   home directory (`~/.codex`, ...) and Codex desktop chat folders
   (`~/Documents/Codex/<date>/<chat>`). They go to the machine's Home project.
+- The Sessions list is ordered by most recent activity, with running
+  sessions on top, instead of by start time, so a long session that is
+  working now is not buried under newer finished ones. `GET /api/sessions`
+  (and `blirp sessions`) use the same order; cursors from 0.1.0 are
+  rejected with 400.
   Projects created for them earlier are merged into Home once, unless you
   renamed, used or edited them.
 - Transcripts of a folder that no longer exists no longer create a second
