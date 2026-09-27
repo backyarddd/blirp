@@ -249,8 +249,9 @@ test('reopening the app restores the open session, reattached, and shows keep-aw
   await expect(page).toHaveURL(`${env.url}/sessions/${sessionId}`);
   // macOS and Windows always grant the assertion. On Linux logind may refuse
   // systemd-inhibit (polkit, outside a login session as on CI runners): then
-  // the daemon must say why and the top bar must not claim it.
-  const refused = /cannot keep this machine awake/;
+  // the daemon must say why and the top bar must not claim it. A slow refusal
+  // lands after the helper's settle window and is logged as an ended assertion.
+  const refused = /cannot keep this machine awake|sleep prevention ended unexpectedly.* error=/;
   if (process.platform === 'linux' && !(await apiCall<{ keep_awake: boolean }>('GET', '/api/health')).keep_awake) {
     await expect.poll(daemonLog, { timeout: 15_000 }).toMatch(refused);
     await expect(page.getByTestId('keep-awake')).toHaveCount(0);
