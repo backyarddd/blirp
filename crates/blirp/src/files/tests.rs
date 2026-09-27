@@ -933,3 +933,19 @@ async fn a_file_over_the_hubs_limit_does_not_hold_up_its_folder() {
         .unwrap_err();
     assert_eq!(err.code(), "too_large");
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn an_empty_file_syncs_with_the_rest_of_its_folder() {
+    let w = world(1).await;
+    let (e0, c0) = w.writer(0).unwrap();
+    std::fs::write(Path::new(&c0.key).join("empty.txt"), "").unwrap();
+    std::fs::write(Path::new(&c0.key).join("next.txt"), "next").unwrap();
+    let r = copy::upload(&e0, &c0).await.unwrap();
+    assert_eq!((r.sent, r.pending), (2, 0), "{r:?}");
+    let (e1, c1) = w.writer(1).unwrap();
+    let a = copy::apply(&e1, &c1, false).await.unwrap();
+    assert!(a.failed.is_empty(), "{:?}", a.failed);
+    let files = files_of(Path::new(&c1.key));
+    assert_eq!(files.get("empty.txt").map(String::as_str), Some(""));
+    assert_eq!(files.get("next.txt").map(String::as_str), Some("next"));
+}

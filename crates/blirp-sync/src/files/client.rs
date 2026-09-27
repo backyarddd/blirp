@@ -323,14 +323,7 @@ impl RemoteHub {
             .acquire()
             .await
             .map_err(|e| SyncError::Unavailable(e.to_string()))?;
-        // The part exists from here on, so empty content (no chunk) verifies.
-        let (parts, h) = (self.parts.clone(), hash.to_string());
-        let mut have = blocking(move || {
-            parts
-                .start_part(&h)
-                .map_err(|e| SyncError::Unavailable(e.to_string()))
-        })
-        .await?;
+        let mut have = self.parts.part_len(hash);
         let conn = self.connection().await?;
         let (mut send, mut recv) = conn.open_bi().await.map_err(SyncError::connection)?;
         write_frame(
@@ -351,6 +344,14 @@ impl RemoteHub {
             Reply::Error { code, message } => return Err(remote(&code, message)),
             other => return Err(SyncError::Protocol(format!("unexpected {other:?}"))),
         };
+        // The part exists from here on, so empty content (no chunk) verifies.
+        let (parts, h) = (self.parts.clone(), hash.to_string());
+        blocking(move || {
+            parts
+                .start_part(&h)
+                .map_err(|e| SyncError::Unavailable(e.to_string()))
+        })
+        .await?;
         while let Some(raw) = read_chunk(&mut recv).await? {
             if have + raw.len() as u64 > len {
                 self.parts.discard_part(hash);

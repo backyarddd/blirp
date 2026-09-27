@@ -246,6 +246,14 @@ async fn empty_content_uploads_and_downloads() {
     );
     let got = fh.download(&h).await.unwrap();
     assert_eq!(std::fs::read(&got).unwrap(), b"");
+    // Asking for content the hub lacks leaves no part behind.
+    let none = hash_bytes(b"not on the hub");
+    let err = fh.download(&none).await.unwrap_err();
+    assert!(
+        matches!(&err, SyncError::Remote { code, .. } if code == "not_found"),
+        "{err}"
+    );
+    assert!(!r.parts.part_path(&none).unwrap().exists());
     r.node_ep.close().await;
     r.hub_ep.close().await;
 }

@@ -299,13 +299,17 @@ impl HubFiles {
         if len > self.max_file() {
             return Err(HubError::TooLarge);
         }
-        // The part exists from here on, so empty content (no chunk) finishes.
-        let have = self.blobs.start_part(hash)?;
+        let have = self.blobs.part_len(hash);
         if have > len {
             self.blobs.discard_part(hash);
             return self.begin_put(hash, len);
         }
         self.reserve(hash, len)?;
+        // The part exists from here on, so empty content (no chunk) finishes.
+        if let Err(e) = self.blobs.start_part(hash) {
+            self.release(hash);
+            return Err(e.into());
+        }
         Ok(have)
     }
 
@@ -620,6 +624,8 @@ mod tests {
             t.hub.begin_put(&hash_bytes(&big2), 700).unwrap_err().code(),
             "hub_quota"
         );
+        // A refused upload leaves no part behind.
+        assert!(!t.hub.blobs.part_path(&hash_bytes(&big2)).unwrap().exists());
         // Deleting a hub copy needs the project turned off first.
         assert!(matches!(
             t.hub.delete_root(&t.root),
