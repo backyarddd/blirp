@@ -81,14 +81,14 @@
     const byId = new Map<string, Session>();
     for (const s of found) byId.set(s.id, app.sessionById.get(s.id) ?? s);
     for (const s of app.topSessions) if (matches(s)) byId.set(s.id, s);
-    return [...byId.values()].filter((s) => !app.deletedSessions.has(s.id) && matches(s)).sort(sessionOrder(app.selfId));
+    return [...byId.values()].filter((s) => !app.deletedSessions.has(s.id) && matches(s)).sort(sessionOrder(app.liveContext()));
   });
   const groups = $derived.by(() => {
-    const now = Date.now();
+    const ctx = app.liveContext();
     return groupSessions(list, app.projectById).map((g) => ({
       ...g,
       open: expanded.has(g.projectId),
-      preview: previewSessions(g.sessions, expanded.has(g.projectId) ? Infinity : GROUP_PREVIEW, selectedId, app.selfId, now),
+      preview: previewSessions(g.sessions, expanded.has(g.projectId) ? Infinity : GROUP_PREVIEW, selectedId, ctx),
     }));
   });
   // Previous/next session shortcuts walk the cards as shown here.

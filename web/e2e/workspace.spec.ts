@@ -1006,8 +1006,9 @@ test('sessions list: recent activity first, every machine labeled and filterable
 
   // Pretend this machine is paired with a hub that has one session of its own.
   const me = await apiCall<{ machine: { id: string; name: string } }>('GET', '/api/health');
-  const hub = { id: 'e2e-hub', name: 'Studio Mac', os: 'macos', role: 'hub', last_seen: now, revoked: false };
-  const self = { ...me.machine, os: 'windows', role: 'node', last_seen: now, revoked: false };
+  // The hub went offline with a session it last reported as working.
+  const hub = { id: 'e2e-hub', name: 'Studio Mac', os: 'macos', role: 'hub', last_seen: now - 600_000, revoked: false, online: false };
+  const self = { ...me.machine, os: 'windows', role: 'node', last_seen: now, revoked: false, online: true };
   await page.route(`${env.url}/api/sync/status`, (r) =>
     r.fulfill({
       json: {
@@ -1031,7 +1032,7 @@ test('sessions list: recent activity first, every machine labeled and filterable
     machine_id: hub.id,
     project_id: 'e2e-remote-project',
     title: 'Remote order check',
-    status: 'completed',
+    status: 'working',
     origin: 'external',
     parent_session_id: null,
     worktree: null,
@@ -1057,6 +1058,8 @@ test('sessions list: recent activity first, every machine labeled and filterable
   await expect(group.getByTestId('machine-badge').first()).toHaveText(me.machine.name);
   const remote = sidebar.locator('a[href="/sessions/e2e-remote"]');
   await expect(remote.getByTestId('machine-badge')).toHaveText(hub.name);
+  // Its last report is not trusted: the chip says the machine is offline.
+  await expect(remote.locator('.chip')).toHaveText('Offline');
 
   const pick = sidebar.getByRole('combobox', { name: 'Machine' });
   await pick.selectOption(hub.id);

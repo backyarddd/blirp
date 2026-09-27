@@ -7,7 +7,8 @@ import {
   groupSessions,
   hasTerminal,
   isLive,
-  isStale,
+  remoteLiveState,
+  type LiveContext,
   isSubagent,
   notifiableTransition,
   previewSessions,
@@ -131,7 +132,7 @@ describe('groupSessions', () => {
       at('tie-b', 'completed', 50),
       at('working', 'working', 2),
     ];
-    expect([...list].sort(sessionOrder('m', 100)).map((s) => s.id)).toEqual([
+    expect([...list].sort(sessionOrder({ selfId: 'm', machines: new Map(), now: 100 })).map((s) => s.id)).toEqual([
       'working',
       'idle-live',
       'long-running',
@@ -144,15 +145,16 @@ describe('groupSessions', () => {
     const list = ['1', '2', '3', '4', '5'].map((id) => ({ ...mk(id, 'a'), status: 'completed' as const }));
     const live = { ...mk('6', 'a'), status: 'waiting' as const };
     const all = [...list, live];
-    const p = previewSessions(all, 2, '4', 'm', 0);
+    const p = previewSessions(all, 2, '4', { selfId: 'm', machines: new Map(), now: 0 });
     expect(p.shown.map((s) => s.id)).toEqual(['1', '2', '4', '6']);
     expect(p.hidden).toBe(2);
-    expect(previewSessions(all, 10, null, 'm', 0)).toEqual({ shown: all, hidden: 0 });
-    // Another machine's live session with no update for a long time is not kept on screen.
-    const staleRemote = { ...live, machine_id: 'other', last_activity_at: 0 };
-    expect(previewSessions([...list, staleRemote], 2, null, 'm', REMOTE_LIVE_MS + 1).hidden).toBe(4);
+    expect(previewSessions(all, 10, null, { selfId: 'm', machines: new Map(), now: 0 })).toEqual({ shown: all, hidden: 0 });
+    // A live session of a machine that is offline is not kept on screen.
+    const offline = { ...live, machine_id: 'other' };
+    const ctx = { selfId: 'm', machines: new Map([['other', { online: false }]]), now: 0 };
+    expect(previewSessions([...list, offline], 2, null, ctx).hidden).toBe(4);
   });
-  it("unpins another machine's live session after REMOTE_LIVE_MS without an update", () => {
+  it("trusts another machine's live status while it is online, not once it is offline", () => {
     const now = 10 * REMOTE_LIVE_MS;
     const s = (id: string, machine_id: string, last: number, status: SessionStatus = 'working'): Session => ({
       ...mk(id, 'a'),
@@ -160,16 +162,30 @@ describe('groupSessions', () => {
       status,
       last_activity_at: last,
     });
+    const ctx = (machines: Record<string, boolean | null>, selfId: string | null = 'm'): LiveContext => ({
+      selfId,
+      machines: new Map(Object.entries(machines).map(([id, online]) => [id, { online }])),
+      now,
+    });
     const mineIdle = s('mine', 'm', 0, 'idle');
-    const theirsFresh = s('fresh', 'other', now - REMOTE_LIVE_MS);
-    const theirsStale = s('stale', 'other', now - REMOTE_LIVE_MS - 1);
+    const quiet = s('quiet', 'other', now - REMOTE_LIVE_MS - 1);
+    const fresh = s('fresh', 'other', now - 1);
     const ended = s('ended', 'm', now - 10, 'completed');
-    expect(isStale(mineIdle, 'm', now)).toBe(false);
-    expect(isStale(theirsFresh, 'm', now)).toBe(false);
-    expect(isStale(theirsStale, 'm', now)).toBe(true);
-    expect(isStale(theirsStale, null, now)).toBe(false);
-    expect(isStale({ ...theirsStale, status: 'completed' }, 'm', now)).toBe(false);
-    const order = [ended, theirsStale, mineIdle, theirsFresh].sort(sessionOrder('m', now)).map((x) => x.id);
-    expect(order).toEqual(['fresh', 'mine', 'ended', 'stale']);
+    // Online: an idle terminal quiet for hours is still running.
+    expect(remoteLiveState(quiet, ctx({ other: true }))).toBeNull();
+    // Offline: even a fresh report is only the last one it sent.
+    expect(remoteLiveState(fresh, ctx({ other: false }))).toBe('offline');
+    // Unknown presence: the activity window decides.
+    expect(remoteLiveState(quiet, ctx({ other: null }))).toBe('stale');
+    expect(remoteLiveState(quiet, ctx({}))).toBe('stale');
+    expect(remoteLiveState(fresh, ctx({}))).toBeNull();
+    // This machine, ended sessions and an unknown self never count.
+    expect(remoteLiveState(mineIdle, ctx({ m: false }))).toBeNull();
+    expect(remoteLiveState({ ...quiet, status: 'completed' }, ctx({ other: false }))).toBeNull();
+    expect(remoteLiveState(quiet, ctx({ other: false }, null))).toBeNull();
+    const order = (c: LiveContext): string[] => [ended, quiet, mineIdle, fresh].sort(sessionOrder(c)).map((x) => x.id);
+    expect(order(ctx({ other: true }))).toEqual(['fresh', 'quiet', 'mine', 'ended']);
+    expect(order(ctx({ other: false }))).toEqual(['mine', 'fresh', 'ended', 'quiet']);
+    expect(order(ctx({}))).toEqual(['fresh', 'mine', 'ended', 'quiet']);
   });
 });

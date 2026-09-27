@@ -113,23 +113,37 @@ export function groupSessions(sessions: readonly Session[], projects: ReadonlyMa
 }
 
 /**
- * How long another machine's live session counts as live without a replicated update (the
- * daemon's `REMOTE_LIVE_MS`): a replica cannot tell a quiet session from a machine that went away.
+ * With a machine's presence unknown (standalone, not connected to the hub, or an older hub), how
+ * long its live session counts as live without a replicated update (the daemon's `REMOTE_LIVE_MS`).
  */
 export const REMOTE_LIVE_MS = 30 * 60_000;
 
-/** A live status reported by another machine that has not been updated for `REMOTE_LIVE_MS`. */
-export function isStale(
-  s: Pick<Session, 'status' | 'machine_id' | 'last_activity_at'>,
-  selfId: string | null,
-  now: number,
-): boolean {
-  return isLive(s.status) && selfId !== null && s.machine_id !== selfId && now - s.last_activity_at > REMOTE_LIVE_MS;
+/** What decides whether another machine's live status is current. */
+export interface LiveContext {
+  selfId: string | null;
+  /** Presence by machine id (`GET /api/machines`); `online` null or missing: unknown. */
+  machines: ReadonlyMap<string, { online: boolean | null }>;
+  now: number;
 }
 
-/** Sorts first in lists: live, and (on another machine) recently updated. */
-export function isPinned(s: Session, selfId: string | null, now: number): boolean {
-  return isLive(s.status) && !isStale(s, selfId, now);
+/**
+ * Why another machine's live status cannot be trusted: `offline` (its machine is not connected to
+ * the hub, so nothing corrects the last status it reported) or `stale` (presence unknown and no
+ * update for `REMOTE_LIVE_MS`); null when it can, or the session is not live.
+ */
+export function remoteLiveState(
+  s: Pick<Session, 'status' | 'machine_id' | 'last_activity_at'>,
+  ctx: LiveContext,
+): 'offline' | 'stale' | null {
+  if (!isLive(s.status) || ctx.selfId === null || s.machine_id === ctx.selfId) return null;
+  const online = ctx.machines.get(s.machine_id)?.online ?? null;
+  if (online !== null) return online ? null : 'offline';
+  return ctx.now - s.last_activity_at > REMOTE_LIVE_MS ? 'stale' : null;
+}
+
+/** Sorts first in lists: live, with a status that can be trusted. */
+export function isPinned(s: Session, ctx: LiveContext): boolean {
+  return isLive(s.status) && remoteLiveState(s, ctx) === null;
 }
 
 /**
@@ -137,9 +151,9 @@ export function isPinned(s: Session, selfId: string | null, now: number): boolea
  * attached and the user can act on them even after hours of idling, then most recent activity
  * (a long-running session started yesterday but working now is not buried), then id.
  */
-export function sessionOrder(selfId: string | null, now = Date.now()): (a: Session, b: Session) => number {
+export function sessionOrder(ctx: LiveContext): (a: Session, b: Session) => number {
   return (a, b) => {
-    const pinned = Number(isPinned(b, selfId, now)) - Number(isPinned(a, selfId, now));
+    const pinned = Number(isPinned(b, ctx)) - Number(isPinned(a, ctx));
     if (pinned !== 0) return pinned;
     if (a.last_activity_at !== b.last_activity_at) return b.last_activity_at - a.last_activity_at;
     return a.id < b.id ? 1 : a.id > b.id ? -1 : 0;
@@ -157,9 +171,8 @@ export function previewSessions(
   sessions: readonly Session[],
   limit: number,
   keepId: string | null,
-  selfId: string | null,
-  now = Date.now(),
+  ctx: LiveContext,
 ): { shown: Session[]; hidden: number } {
-  const shown = sessions.filter((s, i) => i < limit || s.id === keepId || isPinned(s, selfId, now));
+  const shown = sessions.filter((s, i) => i < limit || s.id === keepId || isPinned(s, ctx));
   return { shown, hidden: sessions.length - shown.length };
 }

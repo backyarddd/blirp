@@ -444,7 +444,11 @@
                 {#if m.id === status?.machine_id}<span class="badge accent">this machine</span>{/if}
                 {#if m.revoked}<span class="badge">revoked</span>{/if}
               </div>
-              <span class="small muted">Last seen {m.last_seen ? formatRelative(m.last_seen) : 'never'}</span>
+              <span class="small muted"
+                >{#if m.online === true}Online{:else if m.online === false}Offline · last seen {m.last_seen
+                    ? formatRelative(m.last_seen)
+                    : 'never'}{:else}Last seen {m.last_seen ? formatRelative(m.last_seen) : 'never'}{/if}</span
+              >
             </div>
             {#if app.admin && role === 'hub' && !m.revoked && m.id !== status?.machine_id}
               <button type="button" class="btn sm danger" onclick={() => revokeMachine(m)}>Revoke</button>

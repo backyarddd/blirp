@@ -4,7 +4,7 @@ import type {
   AgentInfo,
   Health,
   LaunchSession,
-  Machine,
+  MachineInfo,
   ProjectSummary,
   ServerEvent,
   Session,
@@ -13,7 +13,7 @@ import type {
   SyncStatus,
 } from './api/types.gen';
 import { backoffDelay } from './terminal/protocol';
-import { hasTerminal, isSubagent, sessionOrder, sessionTitle } from './status';
+import { hasTerminal, isSubagent, sessionOrder, sessionTitle, type LiveContext } from './status';
 import { readPref, writePref } from './prefs';
 import {
   EVENT_TEXT,
@@ -95,8 +95,8 @@ class AppState {
   /** Pushed by `sync_updated`; null until loaded. */
   sync: SyncStatus | null = $state.raw(null);
   /** Paired machines (replicated); empty when this machine is standalone. */
-  machines: Machine[] = $state.raw([]);
-  machineById: Map<string, Machine> = $derived(new Map(this.machines.map((m) => [m.id, m])));
+  machines: MachineInfo[] = $state.raw([]);
+  machineById: Map<string, MachineInfo> = $derived(new Map(this.machines.map((m) => [m.id, m])));
   /** Machines currently holding a sleep-prevention assertion for live sessions, by id. */
   awake: Record<string, boolean> = $state({});
   /** Bumped on every sync status change so views refetch machines and devices. */
@@ -191,6 +191,11 @@ class AppState {
     return hub && hub !== this.selfId ? hub : null;
   }
 
+  /** Whose live statuses are current, for ordering and status chips (now). */
+  liveContext(): LiveContext {
+    return { selfId: this.selfId, machines: this.machineById, now: Date.now() };
+  }
+
   /** Badge data for the machine a session runs on; null for this machine. */
   remote(machineId: string): RemoteMachine | null {
     return remoteMachine(machineId, this.selfId, this.machineById, this.sync?.hub ?? null);
@@ -207,6 +212,8 @@ class AppState {
     }
     try {
       this.machines = (await api.machines.list()).filter((m) => !m.revoked);
+      // Presence decides which live sessions stay on top.
+      this.sessions = [...this.sessions].sort(sessionOrder(this.liveContext()));
     } catch (e) {
       console.warn('blirp: machines unavailable', e);
     }
@@ -264,7 +271,7 @@ class AppState {
   async refreshSessions(): Promise<void> {
     try {
       const page = await api.sessions.list({ limit: SIDEBAR_LIMIT });
-      this.sessions = [...page.items].sort(sessionOrder(this.selfId));
+      this.sessions = [...page.items].sort(sessionOrder(this.liveContext()));
       this.sessionsCursor = page.next_cursor;
       this.sessionsError = null;
     } catch (e) {
@@ -284,7 +291,7 @@ class AppState {
       // A refresh meanwhile started the list over; this page belongs to the old one.
       if (this.sessionsCursor !== cursor) return;
       const known = this.sessionById;
-      this.sessions = [...this.sessions, ...page.items.filter((s) => !known.has(s.id))].sort(sessionOrder(this.selfId));
+      this.sessions = [...this.sessions, ...page.items.filter((s) => !known.has(s.id))].sort(sessionOrder(this.liveContext()));
       this.sessionsCursor = page.next_cursor;
     } catch (e) {
       this.toast(`Could not load more sessions: ${errorMessage(e)}`);
@@ -320,7 +327,7 @@ class AppState {
     // A session started or ended somewhere: keep-awake follows within a status tick.
     if (!prev || hasTerminal(prev) !== hasTerminal(s)) this.#awakeSoon();
     // Activity and status move a session within the list, not only its arrival.
-    this.sessions = (prev ? this.sessions.map((x) => (x.id === s.id ? s : x)) : [s, ...this.sessions]).sort(sessionOrder(this.selfId));
+    this.sessions = (prev ? this.sessions.map((x) => (x.id === s.id ? s : x)) : [s, ...this.sessions]).sort(sessionOrder(this.liveContext()));
     if (prev) this.#maybeNotify(prev, s);
     // Answered somewhere else: it no longer waits for anyone.
     if (s.status === 'working' || s.status === 'starting') this.#seen(s.id);

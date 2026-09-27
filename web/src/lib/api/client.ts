@@ -20,7 +20,7 @@ import type {
   JoinPreview,
   LaunchSession,
   LeftHub,
-  Machine,
+  MachineInfo,
   MachineDirs,
   OpenTarget,
   PatchDevice,
@@ -194,7 +194,7 @@ export const api = {
   /** 202: the updater runs and restarts the daemon; loopback listener only (404 on the portal). */
   updateApply: () => request<void>('POST', '/api/update/apply'),
   machines: {
-    list: () => request<Machine[]>('GET', '/api/machines'),
+    list: () => request<MachineInfo[]>('GET', '/api/machines'),
     revoke: (id: string) => request<void>('DELETE', `/api/machines/${enc(id)}`),
     /** Another machine's answers are relayed through the hub. */
     health: (id: string) => request<Health>('GET', `/api/machines/${enc(id)}/health`),

@@ -2,18 +2,25 @@
   import type { Session } from '../api/types.gen';
   import { app } from '../app.svelte';
   import { formatRelative } from '../time';
-  import { isStale, sessionStatusInfo } from '../status';
+  import { remoteLiveState, sessionStatusInfo, type StatusInfo } from '../status';
 
   let { session }: { session: Pick<Session, 'status' | 'stopped_by_user' | 'machine_id' | 'last_activity_at'> } = $props();
-  // Another machine's live status without an update for a long time may be left over from a
-  // machine that went offline: say so instead of claiming it still works.
-  const stale = $derived(isStale(session, app.selfId, Date.now()));
-  const info = $derived(stale ? { label: 'No update', tone: 'detached', pulse: false } : sessionStatusInfo(session));
-  const title = $derived(
-    stale
-      ? `${sessionStatusInfo(session).label} on ${app.machineName(session.machine_id)}, no update since ${formatRelative(session.last_activity_at)}; it may be offline`
-      : undefined,
-  );
+  // Another machine's live status is only its last report: once that machine is offline (or,
+  // with its presence unknown, silent for long) say so instead of claiming it still works.
+  const remote = $derived(remoteLiveState(session, app.liveContext()));
+  const OFFLINE: StatusInfo = { label: 'Offline', tone: 'detached', pulse: false };
+  const NO_UPDATE: StatusInfo = { label: 'No update', tone: 'detached', pulse: false };
+  const info = $derived(remote === 'offline' ? OFFLINE : remote === 'stale' ? NO_UPDATE : sessionStatusInfo(session));
+  const title = $derived.by(() => {
+    if (remote === null) return undefined;
+    const last = sessionStatusInfo(session).label;
+    const name = app.machineName(session.machine_id);
+    if (remote === 'offline') {
+      const seen = app.machineById.get(session.machine_id)?.last_seen;
+      return `${last} when ${name} went offline${seen ? ` (last seen ${formatRelative(seen)})` : ''}`;
+    }
+    return `${last} on ${name}, no update since ${formatRelative(session.last_activity_at)}; it may be offline`;
+  });
 </script>
 
 <span class="chip {info.tone}" {title}>
