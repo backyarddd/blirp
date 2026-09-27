@@ -15,8 +15,9 @@ use axum::routing::{delete, get, post};
 use axum::{Json, Router};
 use blirp_core::files::{FilesMode, RootInfo};
 use blirp_core::model::{
-    AppliedFiles, ApplyFiles, CopyState, DownloadFiles, FilesIncoming, FilesPreview, FilesRoot,
-    IncomingAction, IncomingFile, LocalFiles, ProjectFiles,
+    AppliedFiles, ApplyFiles, CopyState, DownloadFiles, FilesIncoming, FilesOverview, FilesPreview,
+    FilesRoot, IncomingAction, IncomingFile, LocalFiles, MachineRole, PauseFiles, ProjectFiles,
+    SetFilesMode,
 };
 use serde::Deserialize;
 use std::collections::HashMap;
@@ -25,7 +26,10 @@ use std::sync::Arc;
 
 pub fn routes() -> Router<SharedState> {
     Router::new()
-        .route("/api/projects/{id}/files-sync", get(project))
+        .route("/api/files/status", get(overview))
+        .route("/api/files/pause", post(pause))
+        .route("/api/files/start-now", post(start_now))
+        .route("/api/projects/{id}/files-sync", get(project).put(set_mode))
         .route("/api/projects/{id}/files-sync/preview", get(preview))
         .route("/api/projects/{id}/files-sync/incoming", get(incoming))
         .route("/api/projects/{id}/files-sync/apply", post(apply))
@@ -100,6 +104,87 @@ fn paused(s: &SharedState) -> bool {
         .flatten()
         .and_then(|v| v.as_bool())
         .unwrap_or(false)
+}
+
+/// `GET /api/files/status`.
+async fn overview(State(s): State<SharedState>) -> ApiResult<Json<FilesOverview>> {
+    let cfg = s.config();
+    let engine = super::engine(&s);
+    let st = s.clone();
+    let (paused, grace) = blocking(move || Ok((paused(&st), engine::grace_until(&st)))).await?;
+    let hub_name = match cfg.sync.role {
+        MachineRole::Hub => Some(cfg.machine.name.clone()),
+        MachineRole::Node => {
+            let (store, hub) = (s.store.clone(), cfg.sync.hub.clone());
+            blocking(move || {
+                Ok(hub
+                    .and_then(|h| store.get_machine(&h).ok().flatten())
+                    .map(|m| m.name))
+            })
+            .await?
+        }
+        MachineRole::Standalone => None,
+    };
+    let mut folders = 0;
+    let mut bytes = 0;
+    if let Some(e) = &engine {
+        for t in e
+            .tracked()
+            .iter()
+            .filter(|t| t.effective && t.never.is_none())
+        {
+            folders += 1;
+            bytes += e.status_of(&t.copy.key).map_or(0, |l| l.bytes);
+        }
+    }
+    Ok(Json(FilesOverview {
+        available: engine.is_some(),
+        enabled: cfg.sync.project_files,
+        paused,
+        grace_until: grace.filter(|g| *g > blirp_core::now_ms()),
+        hub_name,
+        folders,
+        bytes,
+        hub_error: engine.and_then(|e| e.hub_error()),
+    }))
+}
+
+/// `POST /api/files/pause`: "Pause file sync" on this machine.
+async fn pause(
+    State(s): State<SharedState>,
+    Control(_): Control,
+    ApiJson(body): ApiJson<PauseFiles>,
+) -> ApiResult<Json<FilesOverview>> {
+    let st = s.clone();
+    blocking(move || {
+        Ok(st
+            .store
+            .set_setting(engine::PAUSED_KEY, &serde_json::json!(body.paused))?)
+    })
+    .await?;
+    tracing::info!(paused = body.paused, "file sync pause switched");
+    if let Some(e) = super::engine(&s) {
+        e.rescan();
+    }
+    overview(State(s)).await
+}
+
+/// `POST /api/files/start-now`: end the first-run grace period.
+async fn start_now(
+    State(s): State<SharedState>,
+    Control(_): Control,
+) -> ApiResult<Json<FilesOverview>> {
+    let st = s.clone();
+    blocking(move || {
+        Ok(st
+            .store
+            .set_setting(engine::GRACE_KEY, &serde_json::json!(blirp_core::now_ms()))?)
+    })
+    .await?;
+    if let Some(e) = super::engine(&s) {
+        e.rescan();
+    }
+    overview(State(s)).await
 }
 
 fn default_local(key: &str, origin: bool) -> LocalFiles {
@@ -192,6 +277,27 @@ async fn project(
     State(s): State<SharedState>,
     ApiPath(id): ApiPath<String>,
 ) -> ApiResult<Json<ProjectFiles>> {
+    project_files(&s, &id).await.map(Json)
+}
+
+/// `PUT /api/projects/:id/files-sync {mode}`: Default / On / Off, stored on
+/// the hub for every machine.
+async fn set_mode(
+    State(s): State<SharedState>,
+    ApiPath(id): ApiPath<String>,
+    Control(_): Control,
+    ApiJson(body): ApiJson<SetFilesMode>,
+) -> ApiResult<Json<ProjectFiles>> {
+    let e = need_engine(&s)?;
+    let (store, pid) = (s.store.clone(), id.clone());
+    blocking(move || Ok(store.live_project(&pid).map(|_| ())?)).await?;
+    e.env
+        .hub
+        .set_mode(&id, body.mode)
+        .await
+        .map_err(|err| files_error(err.into()))?;
+    tracing::info!(mode = body.mode.as_str(), "project file sync mode changed");
+    e.rescan();
     project_files(&s, &id).await.map(Json)
 }
 
