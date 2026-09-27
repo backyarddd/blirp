@@ -963,7 +963,7 @@ export type TerminalClientMessage = { "type": "input", data: string, } | { "type
 /**
  * User configuration. Every section and key is optional; missing values take defaults.
  */
-export type Config = { daemon: DaemonConfig, machine: MachineConfig, agents: AgentsConfig, sessions: SessionsConfig, memory: MemoryConfig, sync: SyncConfig, portal: PortalConfig, update: UpdateConfig, };
+export type Config = { daemon: DaemonConfig, machine: MachineConfig, agents: AgentsConfig, sessions: SessionsConfig, memory: MemoryConfig, sync: SyncConfig, portal: PortalConfig, update: UpdateConfig, files: FilesConfig, };
 
 export type DaemonConfig = { 
 /**
@@ -989,6 +989,40 @@ export type SessionsConfig = { worktree_default: boolean,
  * Unset: on for the hub role (cloud sessions), off otherwise.
  */
 keep_awake?: boolean, };
+
+/**
+ * State of the last scan of a folder: `busy` while a git operation
+ * holds the index, `too_large` over the caps (paused until a
+ * `.blirpignore` shrinks it).
+ */
+export type FilesScanState = "ok" | "busy" | "too_large";
+
+/**
+ * Excluded paths of one reason: how many, and the first 50 (folders end
+ * with `/`).
+ */
+export type ExcludedGroup = { reason: Reason, count: number, paths: Array<string>, };
+
+/**
+ * `GET /api/projects/:id/files-sync/preview?root=`: what uploading this
+ * folder would send, computed locally (a dry run: nothing leaves the
+ * machine).
+ */
+export type FilesPreview = { root: string, state: FilesScanState, 
+/**
+ * Why this folder is never synced (Home, scratch, removable drive...),
+ * null when it can be.
+ */
+never_synced: string | null, files: number, bytes: number, excluded: Array<ExcludedGroup>, 
+/**
+ * Secrets that `.blirpignore` re-includes: they are uploaded.
+ */
+reincluded_secrets: Array<string>, };
+
+/**
+ * Why a path is not synced.
+ */
+export type Reason = "ignored" | "secret" | "too_large" | "unsupported";
 
 export type Summarizer = "auto" | "claude" | "codex" | "ollama" | "none";
 
@@ -1035,3 +1069,30 @@ export type UpdateConfig = {
  * Ask GitHub once a day whether a newer release exists (`GET /api/update`).
  */
 check: boolean, };
+
+/**
+ * Project file sync through the hub (docs/project-files.md).
+ */
+export type FilesConfig = { 
+/**
+ * Larger files are skipped and listed.
+ */
+max_file_mb: number, 
+/**
+ * A folder with more synced bytes than this (or more than 100 000
+ * files) is paused as too large.
+ */
+max_root_gb: number, 
+/**
+ * Hub: disk space for file contents; 0 = half of the free space when
+ * file sync first ran on the hub.
+ */
+hub_quota_gb: number, 
+/**
+ * Upload bandwidth limit per machine; 0 = unlimited.
+ */
+upload_kbps: number, 
+/**
+ * Hub: how long replaced versions are kept.
+ */
+keep_versions_days: number, };

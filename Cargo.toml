@@ -16,6 +16,7 @@ blirp-sync = { path = "crates/blirp-sync" }
 anyhow = "1"
 axum = { version = "0.8", features = ["ws"] }
 axum-server = { version = "0.8", features = ["tls-rustls-no-provider"] }
+blake3 = "1.8.7"
 bytes = "1"
 chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
 clap = { version = "4", features = ["derive"] }
@@ -28,6 +29,7 @@ hex = "0.4"
 hmac = "0.13"
 iroh = "1.2"
 iroh-mdns-address-lookup = "0.5"
+ignore = "0.4.33"
 hyper = { version = "1", features = ["client", "http1", "server"] }
 hyper-util = { version = "0.1", features = ["tokio", "service"] }
 libc = "0.2"
@@ -35,6 +37,7 @@ minisign-verify = "0.2"
 notify-debouncer-full = "0.7"
 portable-pty = "0.9"
 rcgen = "0.14"
+proptest = "1.11"
 regex = "1"
 reqwest = { version = "0.13", default-features = false, features = ["json"] }
 rusqlite = { version = "0.40", features = ["bundled"] }

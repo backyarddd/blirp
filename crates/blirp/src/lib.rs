@@ -6,6 +6,7 @@ pub mod api;
 pub mod cli;
 pub mod clone;
 pub mod daemon;
+pub mod files;
 pub mod hooks;
 pub mod ingest;
 pub mod keep_awake;

@@ -32,6 +32,7 @@ pub struct Config {
     pub sync: SyncConfig,
     pub portal: PortalConfig,
     pub update: UpdateConfig,
+    pub files: FilesConfig,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
@@ -221,6 +222,36 @@ impl Default for UpdateConfig {
     }
 }
 
+/// Project file sync through the hub (docs/project-files.md).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
+#[serde(default, deny_unknown_fields)]
+pub struct FilesConfig {
+    /// Larger files are skipped and listed.
+    pub max_file_mb: u32,
+    /// A folder with more synced bytes than this (or more than 100 000
+    /// files) is paused as too large.
+    pub max_root_gb: u32,
+    /// Hub: disk space for file contents; 0 = half of the free space when
+    /// file sync first ran on the hub.
+    pub hub_quota_gb: u32,
+    /// Upload bandwidth limit per machine; 0 = unlimited.
+    pub upload_kbps: u32,
+    /// Hub: how long replaced versions are kept.
+    pub keep_versions_days: u32,
+}
+
+impl Default for FilesConfig {
+    fn default() -> Self {
+        Self {
+            max_file_mb: 50,
+            max_root_gb: 2,
+            hub_quota_gb: 0,
+            upload_kbps: 0,
+            keep_versions_days: 30,
+        }
+    }
+}
+
 impl Config {
     /// Whether live sessions keep this machine awake (`sessions.keep_awake`,
     /// default on for a hub).
@@ -371,6 +402,16 @@ impl Config {
             && self.sync.hub.as_deref().is_none_or(|h| h.trim().is_empty())
         {
             return bad("sync.hub is required when sync.role = \"node\"".into());
+        }
+        let f = &self.files;
+        if !(1..=1024).contains(&f.max_file_mb) {
+            return bad("files.max_file_mb must be 1-1024".into());
+        }
+        if !(1..=1024).contains(&f.max_root_gb) {
+            return bad("files.max_root_gb must be 1-1024".into());
+        }
+        if f.keep_versions_days == 0 {
+            return bad("files.keep_versions_days must be > 0".into());
         }
         if self.portal.lan_port == 0 {
             return bad("portal.lan_port must be > 0".into());
@@ -535,6 +576,41 @@ mod tests {
         assert_eq!(c.daemon.port, 47770);
         assert_eq!(c.memory.distill_max_chars, 60_000);
         assert_eq!(c.agents.default, "claude");
+    }
+
+    #[test]
+    fn files_section() {
+        let c = parse(
+            "[files]
+max_file_mb = 10
+hub_quota_gb = 5
+",
+        )
+        .unwrap();
+        assert_eq!(
+            (
+                c.files.max_file_mb,
+                c.files.max_root_gb,
+                c.files.hub_quota_gb
+            ),
+            (10, 2, 5)
+        );
+        for bad in [
+            "max_file_mb = 0",
+            "max_root_gb = 0",
+            "keep_versions_days = 0",
+            "nope = 1",
+        ] {
+            assert!(
+                parse(&format!(
+                    "[files]
+{bad}
+"
+                ))
+                .is_err(),
+                "{bad}"
+            );
+        }
     }
 
     #[test]

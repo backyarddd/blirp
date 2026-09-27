@@ -4,7 +4,7 @@
 use rusqlite::Connection;
 
 /// Index `i` holds the migration that moves the schema from version `i` to `i + 1`.
-pub(crate) const MIGRATIONS: &[&str] = &[V1, V2, V3, V4, V5, V6, V7, V8, V9, V10];
+pub(crate) const MIGRATIONS: &[&str] = &[V1, V2, V3, V4, V5, V6, V7, V8, V9, V10, V11];
 
 /// Schema of §5. Note on the FTS tables: they are external-content tables keyed
 /// by the implicit rowid of `events`/`records`. blirp never runs `VACUUM`
@@ -324,6 +324,109 @@ CREATE TABLE hub_pulls(
 const V10: &str = r#"
 ALTER TABLE projects ADD COLUMN chats INTEGER NOT NULL DEFAULT 0;
 ALTER TABLE projects ADD COLUMN merged_into TEXT;
+"#;
+
+/// Project file sync through the hub (docs/project-files.md). New tables
+/// only, none replicated through `hub_log`.
+///
+/// Hub: `file_roots` (one per origin folder; `head` is the root's sequence),
+/// `file_entries` (current version of every path, `hash` and `link` both
+/// NULL for a tombstone), `file_history` (replaced versions, kept
+/// `files.keep_versions_days`), `file_blobs` (content-addressed blobs in
+/// `BLIRP_HOME/files/blobs`, `stored` = compressed bytes on disk) and
+/// `file_projects` (per-project Default/On/Off).
+///
+/// Every machine: `file_copies` (its working copies of roots: its own
+/// origin folders and downloaded copies; `seen` is the root version up to
+/// which it compared the hub's entries), `file_base` (per path the version
+/// it last agreed on with the hub; `skipped` paths it cannot hold,
+/// `rejected` content the hub refused as a conflict that an origin keeps
+/// until "Bring changes here", `-` for a refused delete) and `file_hashes`
+/// (hash cache).
+///
+/// `devices.can_access_files`: the portal "Files" permission, off by default.
+const V11: &str = r#"
+CREATE TABLE file_roots(
+    root_id       TEXT PRIMARY KEY,
+    machine_id    TEXT NOT NULL,
+    path          TEXT NOT NULL,
+    project_id    TEXT NOT NULL,
+    head          INTEGER NOT NULL DEFAULT 0,
+    manifest_json TEXT NULL,
+    created_at    INTEGER NOT NULL,
+    updated_at    INTEGER NOT NULL
+);
+CREATE TABLE file_entries(
+    root_id    TEXT NOT NULL,
+    path       TEXT NOT NULL,
+    version    INTEGER NOT NULL,
+    hash       TEXT NULL,
+    link       TEXT NULL,
+    size       INTEGER NOT NULL,
+    mode_x     INTEGER NOT NULL,
+    mtime      INTEGER NOT NULL,
+    by_machine TEXT NOT NULL,
+    at         INTEGER NOT NULL,
+    PRIMARY KEY(root_id, path)
+);
+CREATE INDEX file_entries_version ON file_entries(root_id, version);
+CREATE INDEX file_entries_hash ON file_entries(hash) WHERE hash IS NOT NULL;
+CREATE TABLE file_history(
+    root_id     TEXT NOT NULL,
+    path        TEXT NOT NULL,
+    version     INTEGER NOT NULL,
+    hash        TEXT NULL,
+    link        TEXT NULL,
+    size        INTEGER NOT NULL,
+    mode_x      INTEGER NOT NULL,
+    mtime       INTEGER NOT NULL,
+    by_machine  TEXT NOT NULL,
+    at          INTEGER NOT NULL,
+    replaced_at INTEGER NOT NULL,
+    PRIMARY KEY(root_id, path, version)
+);
+CREATE INDEX file_history_replaced ON file_history(replaced_at);
+CREATE INDEX file_history_hash ON file_history(hash) WHERE hash IS NOT NULL;
+CREATE TABLE file_blobs(
+    hash       TEXT PRIMARY KEY,
+    size       INTEGER NOT NULL,
+    stored     INTEGER NOT NULL,
+    created_at INTEGER NOT NULL
+);
+CREATE TABLE file_projects(
+    project_id TEXT PRIMARY KEY,
+    mode       TEXT NOT NULL CHECK(mode IN ('default','on','off'))
+);
+CREATE TABLE file_copies(
+    path       TEXT PRIMARY KEY,
+    root_id    TEXT NOT NULL,
+    origin     INTEGER NOT NULL,
+    mode       TEXT NOT NULL CHECK(mode IN ('on_demand','keep_synced')),
+    seen       INTEGER NOT NULL DEFAULT 0,
+    created_at INTEGER NOT NULL
+);
+CREATE TABLE file_base(
+    copy     TEXT NOT NULL,
+    path     TEXT NOT NULL,
+    version  INTEGER NOT NULL,
+    hash     TEXT NULL,
+    link     TEXT NULL,
+    skipped  INTEGER NOT NULL DEFAULT 0,
+    rejected TEXT NULL,
+    PRIMARY KEY(copy, path)
+);
+CREATE TABLE file_hashes(
+    copy       TEXT NOT NULL,
+    path       TEXT NOT NULL,
+    size       INTEGER NOT NULL,
+    mtime_ns   INTEGER NOT NULL,
+    file_id    INTEGER NOT NULL,
+    hash       TEXT NOT NULL,
+    secret     INTEGER NOT NULL,
+    checked_at INTEGER NOT NULL,
+    PRIMARY KEY(copy, path)
+);
+ALTER TABLE devices ADD COLUMN can_access_files INTEGER NOT NULL DEFAULT 0;
 "#;
 
 #[derive(Debug, thiserror::Error)]

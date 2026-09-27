@@ -43,6 +43,8 @@ pub struct AppState {
     pub clones: crate::clone::CloneJobs,
     /// Release checks and the Update now button (`/api/update*`).
     pub updates: crate::update::Updates,
+    /// Project file sync through the hub.
+    pub files: crate::files::FilesState,
 }
 
 impl AppState {
@@ -75,6 +77,7 @@ impl AppState {
             keep_awake: crate::keep_awake::KeepAwake::default(),
             clones: crate::clone::CloneJobs::default(),
             updates: crate::update::Updates::default(),
+            files: crate::files::FilesState::default(),
         }
     }
 

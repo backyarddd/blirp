@@ -3,6 +3,7 @@
 
 pub mod claude_token;
 pub mod config;
+pub mod files;
 pub mod git;
 pub mod model;
 pub mod paths;

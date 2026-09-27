@@ -336,6 +336,7 @@ fn build(state: SharedState, listener: Listener) -> Router {
         .merge(projects::routes())
         .merge(memory::routes())
         .merge(files::routes())
+        .merge(crate::files::api::routes())
         .merge(sessions::routes())
         .merge(open::routes())
         .merge(integration::routes())
