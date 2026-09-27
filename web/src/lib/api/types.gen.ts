@@ -1115,9 +1115,10 @@ remote: string | null, branch: string | null, head_sha: string | null, upstream_
  * sync is off, `paused` by "Pause file sync", `never_synced` for
  * folders that never sync (see the message), `held_deletes` when many
  * files disappeared at once (nothing uploads until the user confirms
- * the delete or restores them).
+ * the delete or restores them), `missing` while the folder is not on
+ * disk (skipped until it is back).
  */
-export type CopyState = "waiting" | "scanning" | "idle" | "uploading" | "paused" | "off" | "too_large" | "busy" | "error" | "never_synced" | "held_deletes";
+export type CopyState = "waiting" | "scanning" | "idle" | "uploading" | "paused" | "off" | "too_large" | "busy" | "error" | "never_synced" | "held_deletes" | "missing";
 
 /**
  * This machine's working copy of a root: its own folder (the origin,

@@ -1325,7 +1325,8 @@ str_enum!(
     /// sync is off, `paused` by "Pause file sync", `never_synced` for
     /// folders that never sync (see the message), `held_deletes` when many
     /// files disappeared at once (nothing uploads until the user confirms
-    /// the delete or restores them).
+    /// the delete or restores them), `missing` while the folder is not on
+    /// disk (skipped until it is back).
     CopyState {
         Waiting = "waiting",
         Scanning = "scanning",
@@ -1338,6 +1339,7 @@ str_enum!(
         Error = "error",
         NeverSynced = "never_synced",
         HeldDeletes = "held_deletes",
+        Missing = "missing",
     }
 );
 

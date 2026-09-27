@@ -81,6 +81,7 @@ The tab shows a **conflict copies** badge per folder.
 ## Troubleshooting
 
 - **"update the hub to sync project files"**: the hub runs an older blirp. Everything else keeps syncing; update the hub.
+- **Folder missing**: the project's folder is not on this machine any more (deleted, moved, or on a drive that is not mounted). Nothing uploads from it and the hub copy stays as it was; when the folder is back, it syncs again within 10 minutes. To stop tracking it, remove the folder from the project.
 - **Waiting for git**: a git operation (`index.lock`, rebase) is in progress; scanning resumes when it ends.
 - **Too large**: see [Limits](#limits).
 - **The hub's storage for project files is full**: raise `hub_quota_gb` on the hub, or delete hub copies you no longer need.

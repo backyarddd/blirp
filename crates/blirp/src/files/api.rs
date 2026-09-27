@@ -131,11 +131,7 @@ async fn overview(
     let mut folders = 0;
     let mut bytes = 0;
     if let Some(e) = &engine {
-        for t in e
-            .tracked()
-            .iter()
-            .filter(|t| t.effective && t.never.is_none())
-        {
+        for t in e.tracked().iter().filter(|t| t.syncs()) {
             folders += 1;
             bytes += e.status_of(&t.copy.key).map_or(0, |l| l.bytes);
         }
@@ -438,6 +434,13 @@ async fn apply(
         Ok((t, pending))
     })
     .await?;
+    if tracked.missing {
+        // Never makes a vanished folder again behind the user's back.
+        return Err(ApiError::conflict(
+            "root_missing",
+            "the folder is not on this machine",
+        ));
+    }
     let copy = tracked.copy.clone();
     let report = if pending {
         // An unfinished download: write the hub's files, then it syncs.
@@ -454,8 +457,7 @@ async fn apply(
         // Local changes go up first, but only where uploads may run now
         // (the machine's switch, the project's mode, Pause, the grace
         // period): taking the hub's changes never uploads behind them.
-        if tracked.effective
-            && tracked.never.is_none()
+        if tracked.syncs()
             && e.gate().is_ok()
             && let Err(err) = copy::upload(&e.env, &copy).await
         {

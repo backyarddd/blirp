@@ -402,6 +402,9 @@
   .state.too_large {
     color: var(--danger);
   }
+  .state.missing {
+    color: var(--waiting);
+  }
   .state.idle {
     color: var(--completed);
   }

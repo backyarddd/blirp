@@ -33,6 +33,7 @@ export const STATE_LABELS: Record<CopyState, string> = {
   error: 'Error',
   never_synced: 'Never synced',
   held_deletes: 'Paused: files disappeared',
+  missing: 'Folder missing',
 };
 
 /**

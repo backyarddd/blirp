@@ -36,6 +36,8 @@ const GC_EVERY: Duration = Duration::from_secs(24 * 3600);
 pub const GRACE_KEY: &str = "files.grace_until";
 /// First-run grace period.
 pub const GRACE_MS: i64 = 10 * 60 * 1000;
+/// Status message of a folder that is not on disk.
+const MISSING: &str = "the folder is not on this machine; it syncs again once it is back";
 /// `settings` key: "Pause file sync" on this machine.
 pub const PAUSED_KEY: &str = "files.paused";
 
@@ -59,6 +61,16 @@ pub struct Tracked {
     pub project_id: String,
     pub never: Option<String>,
     pub effective: bool,
+    /// The folder is not on disk (deleted, moved, an unmounted drive): it
+    /// is skipped until it is back.
+    pub missing: bool,
+}
+
+impl Tracked {
+    /// Whether this folder uploads (and takes the hub's changes) now.
+    pub fn syncs(&self) -> bool {
+        self.effective && self.never.is_none() && !self.missing
+    }
 }
 
 pub struct Engine {
@@ -210,11 +222,22 @@ impl Engine {
         let global = st.config().sync.project_files;
         let s = st.clone();
         let tracked = tokio::task::spawn_blocking(move || {
-            tracked_folders(&s, &modes, global, roots.as_deref())
+            tracked_folders(
+                &s.store,
+                &s.machine.id,
+                &s.paths,
+                &modes,
+                global,
+                roots.as_deref(),
+            )
         })
         .await;
         match tracked {
-            Ok(Ok(t)) => *lock(&self.tracked) = t,
+            Ok(Ok(t)) => {
+                let mut cur = lock(&self.tracked);
+                log_missing(&cur, &t);
+                *cur = t;
+            }
             Ok(Err(e)) => tracing::warn!(error = %e, "listing folders for file sync failed"),
             Err(e) => tracing::warn!(error = %e, "listing folders for file sync failed"),
         }
@@ -246,6 +269,13 @@ impl Engine {
         let key = t.copy.key.clone();
         let origin = t.copy.origin;
         self.set_status(&key, |s| s.origin = origin);
+        if t.missing {
+            self.set_status(&key, |s| {
+                s.state = CopyState::Missing;
+                s.message = Some(MISSING.into());
+            });
+            return;
+        }
         if let Some(why) = &t.never {
             self.set_status(&key, |s| {
                 s.state = CopyState::NeverSynced;
@@ -411,8 +441,14 @@ impl Engine {
                 *lock(&self.hub_error) = Some(e.to_string());
                 (CopyState::Error, Some(e.to_string()))
             }
+            // The folder went away since the last reconcile (a watched
+            // folder deleted): the rescan marks it missing and logs it once.
+            "local_error" if !root_exists(key).await => {
+                let _ = self.kick.send(Kick::Rescan);
+                (CopyState::Missing, Some(MISSING.into()))
+            }
             _ => {
-                tracing::warn!(code = e.code(), error = %e, "project file upload failed");
+                tracing::warn!(path = %key, code = e.code(), error = %e, "project file upload failed");
                 (CopyState::Error, Some(e.to_string()))
             }
         };
@@ -428,6 +464,33 @@ impl Engine {
     fn copy_for(&self, path: &Path) -> Option<String> {
         let tracked = lock(&self.tracked);
         event_copy(tracked.iter().map(|t| t.copy.key.as_str()), path)
+    }
+}
+
+async fn root_exists(key: &str) -> bool {
+    let p = PathBuf::from(key);
+    tokio::task::spawn_blocking(move || p.is_dir())
+        .await
+        .unwrap_or(true)
+}
+
+/// Log folders that went missing or came back since the last reconcile
+/// (`old`), once per change rather than on every pass.
+fn log_missing(old: &[Tracked], new: &[Tracked]) {
+    let was: HashSet<&str> = old
+        .iter()
+        .filter(|t| t.missing)
+        .map(|t| t.copy.key.as_str())
+        .collect();
+    for t in new {
+        match (t.missing, was.contains(t.copy.key.as_str())) {
+            (true, false) => tracing::warn!(
+                path = %t.copy.key,
+                "a project folder is missing; it is skipped until it is back"
+            ),
+            (false, true) => tracing::info!(path = %t.copy.key, "a missing project folder is back"),
+            _ => {}
+        }
     }
 }
 
@@ -484,12 +547,13 @@ pub(crate) fn check_roots(
 /// bases are void. An origin then starts over (every file uploads again, a
 /// deleted hub copy is made anew); any other copy detaches.
 fn tracked_folders(
-    st: &SharedState,
+    store: &blirp_core::store::Store,
+    machine_id: &str,
+    paths: &blirp_core::paths::Paths,
     modes: &HashMap<String, FilesMode>,
     global: bool,
     roots: Option<&[RootInfo]>,
 ) -> Result<Vec<Tracked>, blirp_core::store::StoreError> {
-    let store = &st.store;
     if let Some(roots) = roots {
         check_roots(store, roots)?;
     }
@@ -500,14 +564,14 @@ fn tracked_folders(
         .collect();
     let mut out = Vec::new();
     let mut live = HashSet::new();
-    for s in store.list_project_summaries(&st.machine.id)? {
+    for s in store.list_project_summaries(machine_id)? {
         if s.is_home || s.project.chats {
             continue;
         }
         // A project without folders works in this machine's workspace (§5):
         // it syncs like a folder once it exists.
         let workspace = (s.paths.is_empty())
-            .then(|| st.paths.workspace_dir(&s.project.id).ok())
+            .then(|| paths.workspace_dir(&s.project.id).ok())
             .flatten()
             .filter(|w| w.is_dir())
             .map(|w| dunce::canonicalize(&w).unwrap_or(w).display().to_string());
@@ -522,9 +586,12 @@ fn tracked_folders(
             let p = &path;
             live.insert(p.clone());
             let row = rows.get(p);
+            // Skipped, not forgotten: its row and bases stay, so a folder
+            // that comes back unchanged uploads nothing again.
+            let missing = !Path::new(p).is_dir();
             let origin = row.is_none_or(|r| r.origin);
             let root_id = row.map_or_else(
-                || blirp_core::files::root_id(&st.machine.id, p),
+                || blirp_core::files::root_id(machine_id, p),
                 |r| r.root_id.clone(),
             );
             let never = match row.map(|r| r.mode) {
@@ -534,14 +601,15 @@ fn tracked_folders(
                 Some(CopyMode::Pending) => {
                     Some("the download did not finish: Update from hub completes it".to_string())
                 }
-                _ => super::local::never_synced(store, st.paths.home(), &s.project, Path::new(p)),
+                _ if missing => None,
+                _ => super::local::never_synced(store, paths.home(), &s.project, Path::new(p)),
             };
             let effective = modes
                 .get(&s.project.id)
                 .copied()
                 .unwrap_or_default()
                 .effective(global);
-            if origin && effective && never.is_none() && row.is_none() {
+            if origin && effective && never.is_none() && !missing && row.is_none() {
                 store.put_file_copy(&FileCopy {
                     path: p.clone(),
                     root_id: root_id.clone(),
@@ -562,6 +630,7 @@ fn tracked_folders(
                 project_id: s.project.id.clone(),
                 never,
                 effective,
+                missing,
             });
         }
     }
@@ -726,8 +795,13 @@ async fn run(
             }
         }
         if full || refresh {
-            let before: HashSet<String> =
-                engine.tracked().into_iter().map(|t| t.copy.key).collect();
+            // A folder that was missing is scanned as soon as it is back.
+            let before: HashSet<String> = engine
+                .tracked()
+                .into_iter()
+                .filter(|t| !t.missing)
+                .map(|t| t.copy.key)
+                .collect();
             let scan_all = full;
             full = false;
             refresh = false;
@@ -737,7 +811,7 @@ async fn run(
             if let Some(w) = watcher.as_mut() {
                 let want: HashSet<PathBuf> = tracked
                     .iter()
-                    .filter(|t| t.effective && t.never.is_none())
+                    .filter(|t| t.syncs())
                     .map(|t| t.copy.root())
                     .collect();
                 for p in watched.difference(&want) {
@@ -753,7 +827,7 @@ async fn run(
                             watched.insert(p);
                         }
                         Err(e) => {
-                            tracing::warn!(error = %e, "cannot watch a project folder; relying on rescans")
+                            tracing::warn!(path = %p.display(), error = %e, "cannot watch a project folder; relying on rescans")
                         }
                     }
                 }
@@ -761,6 +835,7 @@ async fn run(
             pending.extend(
                 tracked
                     .into_iter()
+                    .filter(|t| !t.missing)
                     .map(|t| t.copy.key)
                     .filter(|k| scan_all || !before.contains(k)),
             );
@@ -820,5 +895,39 @@ mod tests {
         assert_eq!(event_copy(roots(), &root.join("out/x.o")), None);
         assert_eq!(event_copy(roots(), &root.join(".git/index")), None);
         assert_eq!(event_copy(roots(), &base.join("elsewhere/a.rs")), None);
+    }
+
+    #[test]
+    fn a_missing_folder_is_skipped_until_it_is_back() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = blirp_core::store::Store::open(&dir.path().join("db")).unwrap();
+        let paths = blirp_core::paths::Paths::at(dir.path().join("home"));
+        let p = store.create_project("p", None).unwrap();
+        let folder = dir.path().join("proj");
+        std::fs::create_dir(&folder).unwrap();
+        let key = store
+            .add_project_folder(&p.id, "m", &folder)
+            .unwrap()
+            .display()
+            .to_string();
+        let track = || tracked_folders(&store, "m", &paths, &HashMap::new(), true, None).unwrap();
+
+        // Gone before it ever synced: tracked as missing, no copy row made.
+        std::fs::remove_dir(&folder).unwrap();
+        let t = track();
+        assert_eq!((t.len(), t[0].copy.key.as_str()), (1, key.as_str()));
+        assert!(t[0].missing && !t[0].syncs() && t[0].never.is_none());
+        assert!(store.file_copy(&key).unwrap().is_none());
+
+        // Back: it syncs and gets its row.
+        std::fs::create_dir(&folder).unwrap();
+        let t = track();
+        assert!(!t[0].missing && t[0].syncs());
+        assert!(store.file_copy(&key).unwrap().is_some());
+
+        // Gone again: skipped, but its row (and bases) stay for its return.
+        std::fs::remove_dir(&folder).unwrap();
+        assert!(track()[0].missing);
+        assert!(store.file_copy(&key).unwrap().is_some());
     }
 }

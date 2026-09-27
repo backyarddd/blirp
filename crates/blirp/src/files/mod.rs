@@ -200,8 +200,7 @@ pub async fn fast_forward(state: &SharedState, cwd: &std::path::Path) {
     }
     let Some(t) = e.tracked().into_iter().find(|t| {
         !t.copy.origin
-            && t.effective
-            && t.never.is_none()
+            && t.syncs()
             && key.starts_with(blirp_core::paths::path_key(std::path::Path::new(
                 &t.copy.key,
             )))
