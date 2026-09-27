@@ -64,7 +64,7 @@ The tab shows a **conflict copies** badge per folder.
 
 `[files]` in config.toml ([configuration.md](configuration.md#files)):
 
-- Files over `max_file_mb` (50) are skipped and listed.
+- Files over `max_file_mb` (50) are skipped and listed; the hub's own `max_file_mb` applies too.
 - A folder over `max_root_gb` (2) or 100 000 files is paused as too large: add a `.blirpignore`.
 - `hub_quota_gb` (0 = half of the hub's free disk when file sync first ran there): old versions are dropped first; then new uploads are refused (`hub_quota`) while existing copies stay readable.
 - `upload_kbps` (0 = unlimited) limits uploads; at most 4 transfers run at once. Interrupted transfers resume.

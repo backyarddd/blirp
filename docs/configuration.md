@@ -135,7 +135,7 @@ Project file sync through the hub ([project-files.md](project-files.md)). Change
 
 | Key | Type | Default | Description |
 |---|---|---|---|
-| `max_file_mb` | integer 1-1024 | `50` | Larger files are skipped and listed. On the hub, also the largest upload it accepts. |
+| `max_file_mb` | integer 1-1024 | `50` | Larger files are skipped and listed. On the hub, also the largest upload it accepts; nodes skip files over the smaller of theirs and the hub's. |
 | `max_root_gb` | integer 1-1024 | `2` | A folder with more synced data (or more than 100 000 files) is paused as too large. |
 | `hub_quota_gb` | integer | `0` | Hub: disk space for file contents; `0` = half of the free space when file sync first ran on the hub. Old versions are dropped first, then new uploads are refused (`hub_quota`). |
 | `upload_kbps` | integer | `0` | Upload limit of this machine in kilobits per second; `0` = unlimited. |
