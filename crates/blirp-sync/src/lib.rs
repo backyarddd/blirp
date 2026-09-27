@@ -39,8 +39,9 @@ pub const PROTOCOL_VERSIONS: &[u32] = &[1];
 /// changes a replicated field bumps the version and speaks only the new one,
 /// and older peers are refused until they update (§10). 3 = the schema of
 /// migrations 10 (`projects.chats`, `projects.merged_into`), 14
-/// (`sessions.title_updated_at`, `sessions.project_updated_at`) and 16
-/// (`sessions.compacted_at`).
+/// (`sessions.title_updated_at`, `sessions.project_updated_at`), 16
+/// (`sessions.compacted_at`) and 17 (`Change::TruncateEvents`, table
+/// `event_floors`).
 pub const SYNC_VERSIONS: &[u32] = &[3];
 
 /// mDNS service name blirp endpoints advertise on the local network.
@@ -161,9 +162,10 @@ mod tests {
             Change::Brief(_) => 10,
             Change::WikiPage(_) => 11,
             Change::Resource(_) => 12,
+            Change::TruncateEvents { .. } => 13,
         }
     }
-    const VARIANTS: usize = 13;
+    const VARIANTS: usize = 14;
 
     /// One change of every variant, every field set.
     fn samples() -> Vec<Change> {
@@ -235,6 +237,10 @@ mod tests {
                 text: s(),
                 meta: Some(serde_json::json!({})),
             }),
+            Change::TruncateEvents {
+                session_id: s(),
+                below_seq: 0,
+            },
             Change::Record(Record {
                 id: s(),
                 project_id: s(),
@@ -308,6 +314,7 @@ distilled_through_seq tokens_in tokens_out cost_usd parent_session_id stopped_by
 title_updated_at project_updated_at compacted_at
 delete_session (sessions delete): id
 event (events insert): session_id seq ts kind text meta
+truncate_events (event_floors upsert): session_id below_seq
 record (records upsert): id project_id kind title body status pinned source_session_id \
 created_at updated_at updated_by
 delete_record (records delete): id
@@ -352,6 +359,7 @@ table brief_history: id project_id body_md updated_at updated_by machine_id
 table briefs: project_id body_md version updated_at updated_by history_id machine_id
 table deleted_records: id deleted_at
 table deleted_sessions: id deleted_at
+table event_floors: session_id below_seq
 table events: session_id seq ts kind text meta_json
 table machines: id name os role last_seen revoked
 table project_paths: project_id machine_id path git_remote

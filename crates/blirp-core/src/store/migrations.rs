@@ -5,7 +5,7 @@ use rusqlite::Connection;
 
 /// Index `i` holds the migration that moves the schema from version `i` to `i + 1`.
 pub(crate) const MIGRATIONS: &[&str] = &[
-    V1, V2, V3, V4, V5, V6, V7, V8, V9, V10, V11, V12, V13, V14, V15, V16,
+    V1, V2, V3, V4, V5, V6, V7, V8, V9, V10, V11, V12, V13, V14, V15, V16, V17,
 ];
 
 /// Schema of §5. Note on the FTS tables: they are external-content tables keyed
@@ -500,6 +500,15 @@ ALTER TABLE file_copies ADD COLUMN identity TEXT NULL;
 /// would scan every event once, for sessions that are mostly over).
 const V16: &str = r#"
 ALTER TABLE sessions ADD COLUMN compacted_at INTEGER NULL;
+"#;
+
+/// `event_floors`: per session, events below `below_seq` were dropped
+/// (`Change::TruncateEvents`, replicated) and are ignored when they arrive.
+const V17: &str = r#"
+CREATE TABLE event_floors(
+    session_id TEXT PRIMARY KEY,
+    below_seq  INTEGER NOT NULL
+);
 "#;
 
 #[derive(Debug, thiserror::Error)]

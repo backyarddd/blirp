@@ -274,6 +274,20 @@ fn check_owner(
             Some(s) => invalid(format!("event of a session of machine {}", s.machine_id)),
             None => invalid("event of an unknown session".into()),
         },
+        Change::TruncateEvents {
+            session_id,
+            below_seq,
+        } => match session(&session_id)? {
+            Some(s) if !foreign(&s.machine_id) => Ok(Change::TruncateEvents {
+                session_id,
+                below_seq,
+            }),
+            Some(s) => invalid(format!(
+                "event truncation of a session of machine {}",
+                s.machine_id
+            )),
+            None => invalid("event truncation of an unknown session".into()),
+        },
         other => Ok(other),
     }
 }
@@ -2590,6 +2604,65 @@ mod tests {
         s.events_page(session, 0, 1000).unwrap().0
     }
 
+    fn seqs(s: &Store, session: &str) -> Vec<i64> {
+        events_of(s, session).into_iter().map(|e| e.seq).collect()
+    }
+
+    // The owner drops a session's first events; every replica drops them
+    // too and keeps them out, also when a copy arrives later. Only the
+    // owner may do it.
+    #[test]
+    fn event_truncation_reaches_replicas_and_keeps_old_events_out() {
+        let (_h, hub) = temp_store();
+        let (_a, a) = temp_store();
+        let (_b, b) = temp_store();
+        a.apply(project("p", "shared")).unwrap();
+        a.apply(Change::Session(session_of("s1", "A"))).unwrap();
+        for seq in [1, 2, 3072] {
+            a.apply(Change::Event(event("s1", seq))).unwrap();
+        }
+        push(&a, "A", &hub, "H");
+        pull(&b, "B", &hub, "H");
+        assert_eq!(seqs(&b, "s1"), [1, 2, 3072]);
+
+        let cut = Change::TruncateEvents {
+            session_id: "s1".into(),
+            below_seq: 3072,
+        };
+        assert!(a.apply(cut.clone()).unwrap());
+        assert!(a.apply(cut.clone()).unwrap(), "idempotent");
+        assert_eq!(seqs(&a, "s1"), [3072]);
+        push(&a, "A", &hub, "H");
+        pull(&b, "B", &hub, "H");
+        for s in [&a, &hub, &b] {
+            assert_eq!(seqs(s, "s1"), [3072]);
+        }
+
+        // A copy of an old event (an older build of the owner, a replay)
+        // stays out everywhere; newer events still arrive.
+        assert!(!a.apply(Change::Event(event("s1", 2))).unwrap());
+        for s in [&hub, &b] {
+            assert!(!s.apply_remote(&Change::Event(event("s1", 1))).unwrap());
+        }
+        a.apply(Change::Event(event("s1", 4096))).unwrap();
+        push(&a, "A", &hub, "H");
+        pull(&b, "B", &hub, "H");
+        for s in [&a, &hub, &b] {
+            assert_eq!(seqs(s, "s1"), [3072, 4096]);
+        }
+
+        // Another machine may not truncate A's session.
+        b.apply(Change::TruncateEvents {
+            session_id: "s1".into(),
+            below_seq: 10_000,
+        })
+        .unwrap();
+        push(&b, "B", &hub, "H");
+        pull(&a, "A", &hub, "H");
+        assert_eq!(seqs(&hub, "s1"), [3072, 4096], "refused by the hub");
+        assert_eq!(seqs(&a, "s1"), [3072, 4096]);
+    }
+
     /// (hub_seq, entity, payload stripped) of every logged row.
     fn log_rows(hub: &Store) -> Vec<(i64, String, bool)> {
         hub.read(|c| {
@@ -3035,7 +3108,8 @@ mod tests {
                      ALTER TABLE sessions DROP COLUMN title_updated_at;
                      ALTER TABLE sessions DROP COLUMN project_updated_at;
                      ALTER TABLE file_copies DROP COLUMN identity;
-                     ALTER TABLE sessions DROP COLUMN compacted_at;",
+                     ALTER TABLE sessions DROP COLUMN compacted_at;
+                     DROP TABLE event_floors;",
                 )?;
                 Ok(tx.pragma_update(None, "user_version", 11)?)
             })
@@ -3491,7 +3565,8 @@ mod tests {
                  ALTER TABLE sessions DROP COLUMN title_updated_at;
                  ALTER TABLE sessions DROP COLUMN project_updated_at;
                  ALTER TABLE file_copies DROP COLUMN identity;
-                 ALTER TABLE sessions DROP COLUMN compacted_at;",
+                 ALTER TABLE sessions DROP COLUMN compacted_at;
+                 DROP TABLE event_floors;",
             )?;
             Ok(tx.pragma_update(None, "user_version", 13)?)
         })

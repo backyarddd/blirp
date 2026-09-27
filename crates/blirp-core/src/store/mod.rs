@@ -87,8 +87,17 @@ pub enum Change {
     DeleteSession {
         id: String,
     },
-    /// Append-only; a duplicate `(session_id, seq)` is ignored.
+    /// Append-only; a duplicate `(session_id, seq)` is ignored, and so is
+    /// an event below its session's [`Change::TruncateEvents`] floor.
     Event(Event),
+    /// Drops a session's events below `below_seq` everywhere and keeps them
+    /// out for good (a floor that only rises; events arriving later below
+    /// it are ignored). Written by the session's machine only, e.g. to drop
+    /// the parent's history a codex fork copied (§8).
+    TruncateEvents {
+        session_id: String,
+        below_seq: i64,
+    },
     Record(Record),
     DeleteRecord {
         id: String,
@@ -118,6 +127,9 @@ impl Change {
             Change::Session(s) => ("sessions", "upsert", s.id.clone()),
             Change::DeleteSession { id } => ("sessions", "delete", id.clone()),
             Change::Event(e) => ("events", "insert", format!("{}\n{}", e.session_id, e.seq)),
+            Change::TruncateEvents { session_id, .. } => {
+                ("event_floors", "upsert", session_id.clone())
+            }
             Change::Record(r) => ("records", "upsert", r.id.clone()),
             Change::DeleteRecord { id } => ("records", "delete", id.clone()),
             Change::Brief(b) => ("briefs", "upsert", b.project_id.clone()),
@@ -523,7 +535,10 @@ fn apply_inner(tx: &Transaction<'_>, change: &Change, moving: bool) -> Result<bo
     if written == 0
         && matches!(
             change,
-            Change::Event(_) | Change::Session(_) | Change::Record(_)
+            Change::Event(_)
+                | Change::Session(_)
+                | Change::Record(_)
+                | Change::TruncateEvents { .. }
         )
     {
         // A duplicate event, or a write of a deleted session or record:
@@ -559,6 +574,7 @@ pub(crate) fn check_ids(change: &Change) -> Result<()> {
             s.parent_session_id.as_deref(),
         ],
         Change::Event(e) => vec![Some(&e.session_id)],
+        Change::TruncateEvents { session_id, .. } => vec![Some(session_id)],
         Change::Record(r) => vec![
             Some(&r.id),
             Some(&r.project_id),
@@ -689,6 +705,10 @@ fn write_row(tx: &Transaction<'_>, change: &Change) -> Result<usize> {
                 &format!("DELETE FROM events WHERE session_id IN ({DOOMED})"),
                 params![id],
             )?;
+            tx.execute(
+                &format!("DELETE FROM event_floors WHERE session_id IN ({DOOMED})"),
+                params![id],
+            )?;
             for table in ["records", "suggestions"] {
                 tx.execute(
                     &format!(
@@ -714,6 +734,28 @@ fn write_row(tx: &Transaction<'_>, change: &Change) -> Result<usize> {
             )?
         }
         Change::Event(e) if tombstoned(tx, "deleted_sessions", &e.session_id)? => 0,
+        Change::Event(e) if e.seq < event_floor_in(tx, &e.session_id)? => 0,
+        Change::TruncateEvents { session_id, .. }
+            if tombstoned(tx, "deleted_sessions", session_id)? =>
+        {
+            0
+        }
+        Change::TruncateEvents {
+            session_id,
+            below_seq,
+        } => {
+            // Idempotent: the floor only rises, and deleting again is a no-op.
+            tx.execute(
+                "INSERT INTO event_floors(session_id, below_seq) VALUES (?1, ?2)
+                 ON CONFLICT(session_id) DO UPDATE SET below_seq = max(below_seq, excluded.below_seq)",
+                params![session_id, below_seq],
+            )?;
+            tx.execute(
+                "DELETE FROM events WHERE session_id = ?1 AND seq < ?2",
+                params![session_id, below_seq],
+            )?;
+            1
+        }
         Change::Event(e) => tx.execute(
             "INSERT INTO events(session_id, seq, ts, kind, text, meta_json) VALUES (?1,?2,?3,?4,?5,?6)
              ON CONFLICT(session_id, seq) DO NOTHING",
@@ -793,6 +835,17 @@ fn write_row(tx: &Transaction<'_>, change: &Change) -> Result<usize> {
 
 /// Whether `id` has a tombstone in `table` (`deleted_sessions`, migration 7;
 /// `deleted_records`, migration 8).
+/// The session's [`Change::TruncateEvents`] floor (0: none).
+fn event_floor_in(c: &Connection, session_id: &str) -> Result<i64> {
+    Ok(one(
+        c,
+        "SELECT below_seq FROM event_floors WHERE session_id = ?1",
+        params![session_id],
+        |r| r.get(0),
+    )?
+    .unwrap_or(0))
+}
+
 fn tombstoned(c: &Connection, table: &str, id: &str) -> Result<bool> {
     Ok(one(
         c,

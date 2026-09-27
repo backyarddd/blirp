@@ -196,14 +196,14 @@ impl Store {
         Ok(raw.map(|s| serde_json::from_str(&s)).transpose()?)
     }
 
-    /// Forget a source's cursor: the next full pass reads it from the start.
-    pub fn delete_cursor(&self, adapter: &str, source: &str) -> Result<()> {
+    /// Forget a source's cursor: the next full pass reads it from the start
+    /// (events already stored are deduplicated). Returns whether it had one.
+    pub fn delete_cursor(&self, adapter: &str, source: &str) -> Result<bool> {
         self.write(|tx| {
-            tx.execute(
+            Ok(tx.execute(
                 "DELETE FROM ingest_cursors WHERE adapter = ?1 AND source = ?2",
                 params![adapter, source],
-            )?;
-            Ok(())
+            )? > 0)
         })
     }
 

@@ -3,7 +3,7 @@
 //! rows still go through [`apply_in`], so every write lands in the outbox.
 
 use super::sessions::session_row;
-use super::{BY_DISTILLER, Change, Result, Store, all, apply_in, one};
+use super::{Change, Result, Store, all, apply_in, one};
 use crate::model::{Session, SessionOrigin};
 use rusqlite::{Connection, Transaction, params};
 use serde_json::Value as JsonValue;
@@ -20,6 +20,39 @@ pub struct HeadlessCleanup {
     pub records_kept: usize,
     /// Projects deleted because nothing else was in them.
     pub projects: Vec<String>,
+}
+
+/// A record as the distiller wrote it: unpinned and never edited by a user.
+// `'distiller'` is [`super::BY_DISTILLER`].
+const DISTILLER_ONLY: &str = "r.pinned = 0 AND r.updated_by = 'distiller'";
+
+/// Records the distiller wrote from one of `sessions` ([`DISTILLER_ONLY`])
+/// that no other session relied on: none in the record's project, outside
+/// `sessions`, was distilled after the record was created. The distiller
+/// adds no second record with the title of an active one, so such a run had
+/// the record in its prompt and may have left out a duplicate of it. The one
+/// rule for removing what removed sessions produced (the scripted-run
+/// cleanup and the codex subagent repair, §8).
+pub(crate) fn distiller_records_only_of_in(
+    c: &Connection,
+    sessions: &[String],
+) -> Result<Vec<String>> {
+    all(
+        c,
+        &format!(
+            "SELECT r.id FROM records r
+             WHERE r.source_session_id IN (SELECT value FROM json_each(?1))
+               AND {DISTILLER_ONLY}
+               AND NOT EXISTS (
+                 SELECT 1 FROM sessions s
+                 WHERE s.project_id = r.project_id
+                   AND s.id NOT IN (SELECT value FROM json_each(?1))
+                   AND json_extract(s.summary_json, '$.distilled_at') > r.created_at)
+             ORDER BY r.id"
+        ),
+        params![serde_json::to_string(sessions)?],
+        |r| r.get(0),
+    )
 }
 
 fn by_agent_id(c: &Connection, agent: &str, agent_session_id: &str) -> Result<Option<Session>> {
@@ -153,6 +186,24 @@ impl Store {
         })
     }
 
+    /// Events of `session_id` below `below_seq` (what a
+    /// [`Change::TruncateEvents`] would drop).
+    pub fn count_events_below(&self, session_id: &str, below_seq: i64) -> Result<i64> {
+        self.read(|c| {
+            Ok(c.query_row(
+                "SELECT count(*) FROM events WHERE session_id = ?1 AND seq < ?2",
+                params![session_id, below_seq],
+                |r| r.get(0),
+            )?)
+        })
+    }
+
+    /// Records only the distiller wrote from one of `sessions` that no other
+    /// session relied on ([`distiller_records_only_of_in`]).
+    pub fn distiller_records_only_of(&self, sessions: &[String]) -> Result<Vec<String>> {
+        self.read(|c| distiller_records_only_of_in(c, sessions))
+    }
+
     /// Remove sessions of scripted runs (§8) that ingest stored before it
     /// skipped them, the way a user delete does (tombstones and outbox, so
     /// every machine drops them): of `ids`, the rows still external sessions
@@ -212,34 +263,24 @@ impl Store {
                     projects.push(p);
                 }
             }
-            for s in &doomed {
-                let records: Vec<(String, String, i64)> = all(
-                    tx,
-                    "SELECT id, project_id, created_at FROM records WHERE source_session_id = ?1
-                       AND updated_by = ?2 AND pinned = 0",
-                    params![s.id, BY_DISTILLER],
-                    |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
-                )?;
-                for (id, project_id, created_at) in records {
-                    // The distiller adds no second record with the title of
-                    // an active one: a session that stays and was distilled
-                    // after this record existed may have found it too, so
-                    // the record is kept (its source is cleared with the
-                    // session).
-                    let later: Vec<String> = all(
-                        tx,
-                        "SELECT id FROM sessions WHERE project_id = ?1
-                           AND json_extract(summary_json, '$.distilled_at') > ?2",
-                        params![project_id, created_at],
-                        |r| r.get(0),
-                    )?;
-                    if later.iter().any(|id| !gone.contains(id.as_str())) {
-                        out.records_kept += 1;
-                        continue;
-                    }
-                    apply_in(tx, &Change::DeleteRecord { id })?;
-                    out.records += 1;
-                }
+            // Records a remaining session may have relied on are kept (their
+            // source is cleared with the session).
+            let gone_ids: Vec<String> = doomed.iter().map(|s| s.id.clone()).collect();
+            let deletable = distiller_records_only_of_in(tx, &gone_ids)?;
+            let all_records: i64 = tx.query_row(
+                &format!(
+                    "SELECT count(*) FROM records r WHERE r.source_session_id IN
+                       (SELECT value FROM json_each(?1)) AND {DISTILLER_ONLY}"
+                ),
+                params![serde_json::to_string(&gone_ids)?],
+                |r| r.get(0),
+            )?;
+            out.records_kept = usize::try_from(all_records)
+                .unwrap_or(0)
+                .saturating_sub(deletable.len());
+            for id in deletable {
+                apply_in(tx, &Change::DeleteRecord { id })?;
+                out.records += 1;
             }
             for s in &doomed {
                 if get(&s.id)?.is_some() {
