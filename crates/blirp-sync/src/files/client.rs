@@ -89,6 +89,8 @@ impl Rate {
 pub struct Welcome {
     pub quota: u64,
     pub used: u64,
+    /// Largest file the hub accepts (0: not known).
+    pub max_file: u64,
     pub project_modes: HashMap<String, FilesMode>,
 }
 
@@ -166,11 +168,13 @@ impl RemoteHub {
             Reply::Welcome {
                 quota,
                 used,
+                max_file,
                 project_modes,
                 ..
             } => Welcome {
                 quota,
                 used,
+                max_file,
                 project_modes,
             },
             Reply::Error { code, message } => return Err(remote(&code, message)),
@@ -306,6 +310,7 @@ impl RemoteHub {
             .parts
             .part_path(hash)
             .map_err(|e| SyncError::Protocol(e.to_string()))?;
+        let _part = self.parts.lock_part(hash).await;
         let _permit = self
             .streams
             .acquire()
@@ -352,7 +357,8 @@ impl RemoteHub {
     }
 }
 
-/// Check a finished download against its hash; a bad one is dropped.
+/// Check a finished download against its hash and hand it over as a file
+/// of the caller's own; a bad one is dropped. Runs under the part's lock.
 async fn verify_part(parts: &BlobStore, hash: &str, part: PathBuf, len: u64) -> Result<PathBuf> {
     let (p, h) = (part.clone(), hash.to_string());
     let ok = blocking(move || {
@@ -361,7 +367,9 @@ async fn verify_part(parts: &BlobStore, hash: &str, part: PathBuf, len: u64) -> 
     })
     .await?;
     if ok {
-        Ok(part)
+        parts
+            .take_part(hash)
+            .map_err(|e| SyncError::Unavailable(e.to_string()))
     } else {
         parts.discard_part(hash);
         Err(remote(
@@ -420,6 +428,7 @@ impl FileHub {
                     Ok(Welcome {
                         quota: h.quota(),
                         used: h.usage().map_err(hub_err)?,
+                        max_file: h.max_file(),
                         project_modes: h.modes().map_err(hub_err)?,
                     })
                 })
@@ -554,6 +563,7 @@ impl FileHub {
                 let part = parts
                     .part_path(hash)
                     .map_err(|e| SyncError::Protocol(e.to_string()))?;
+                let _part = l.parts.lock_part(hash).await;
                 let (p, len) = blocking(move || {
                     let (len, mut reader) = h
                         .open(&id)
@@ -563,8 +573,9 @@ impl FileHub {
                         std::fs::create_dir_all(parent)
                             .map_err(|e| SyncError::Unavailable(e.to_string()))?;
                     }
-                    let mut out = std::fs::File::create(&part)
-                        .map_err(|e| SyncError::Unavailable(e.to_string()))?;
+                    let mut out =
+                        blirp_core::files::write::retry_busy(|| std::fs::File::create(&part))
+                            .map_err(|e| SyncError::Unavailable(e.to_string()))?;
                     std::io::copy(&mut reader, &mut out)
                         .map_err(|e| SyncError::Unavailable(e.to_string()))?;
                     Ok((part, len))
@@ -581,6 +592,7 @@ impl FileHub {
         &self,
         root_id: &str,
         root_path: Option<&str>,
+        incarnation: Option<&str>,
         manifest: Option<&GitManifest>,
         changes: Vec<FileChange>,
     ) -> Result<Committed> {
@@ -589,6 +601,7 @@ impl FileHub {
                 .request(&Req::Commit {
                     root_id: root_id.to_string(),
                     root_path: root_path.map(str::to_string),
+                    incarnation: incarnation.map(str::to_string),
                     manifest: manifest.cloned(),
                     changes,
                 })
@@ -607,9 +620,10 @@ impl FileHub {
             },
             Self::Local(l) => {
                 let l = l.clone();
-                let (root, path, manifest) = (
+                let (root, path, inc, manifest) = (
                     root_id.to_string(),
                     root_path.map(str::to_string),
+                    incarnation.map(str::to_string),
                     manifest.cloned(),
                 );
                 blocking(move || {
@@ -620,6 +634,7 @@ impl FileHub {
                             &l.machine_name,
                             &root,
                             path.as_deref(),
+                            inc.as_deref(),
                             manifest.as_ref(),
                             &changes,
                         )

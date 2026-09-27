@@ -33,6 +33,10 @@ pub enum CommitRefused {
     Pending,
     #[error("file sync is off for this project")]
     Off,
+    /// The writer's copy belongs to an earlier incarnation of the root (the
+    /// hub copy was deleted and made again): nothing was applied.
+    #[error("the hub copy was made again")]
+    Replaced,
 }
 
 impl CommitRefused {
@@ -42,6 +46,7 @@ impl CommitRefused {
             Self::BadRoot(_) => "bad_root",
             Self::Pending => "root_pending",
             Self::Off => "files_off",
+            Self::Replaced => "root_replaced",
         }
     }
 }
@@ -56,6 +61,9 @@ pub struct CommitInput<'a> {
     pub machine_name: &'a str,
     /// Origin only: its folder, registering the root on first commit.
     pub claim_path: Option<&'a str>,
+    /// The incarnation the writer's bases belong to (None: it has none
+    /// yet). Any other current incarnation refuses the batch.
+    pub incarnation: Option<&'a str>,
     pub manifest: Option<&'a GitManifest>,
     pub changes: &'a [FileChange],
     pub now: i64,
@@ -528,6 +536,18 @@ impl Store {
                 Some((_, _, _, h, _, Some(_))) => (None, Some(h)),
                 None => (None, None),
             };
+            // Bases from another incarnation mean nothing here: refused
+            // before anything is applied. Only a writer without one (an
+            // origin starting over) makes a deleted root again.
+            if let Some(expected) = input.incarnation.filter(|i| !i.is_empty())
+                && root.as_ref().is_none_or(|r| r.4 != expected)
+            {
+                return Ok(Err(if root.is_none() && deleted_head.is_none() {
+                    CommitRefused::UnknownRoot
+                } else {
+                    CommitRefused::Replaced
+                }));
+            }
             let (origin_machine, origin_path, stored_project, head, incarnation) = match (
                 root,
                 input.claim_path,
@@ -807,13 +827,15 @@ impl Store {
     }
 
     /// Bytes on disk of blobs no current entry uses (history only, or
-    /// nothing): what dropping all history could free at most.
-    pub fn hub_blob_reclaimable(&self) -> Result<i64> {
+    /// nothing) and old enough to be collected (added before `before`):
+    /// what dropping all history could free at most right now.
+    pub fn hub_blob_reclaimable(&self, before: i64) -> Result<i64> {
         self.read(|c| {
             Ok(c.query_row(
                 "SELECT coalesce(sum(stored), 0) FROM file_blobs b
-                 WHERE NOT EXISTS (SELECT 1 FROM file_entries e WHERE e.hash = b.hash)",
-                [],
+                 WHERE created_at < ?1
+                   AND NOT EXISTS (SELECT 1 FROM file_entries e WHERE e.hash = b.hash)",
+                params![before],
                 |r| r.get(0),
             )?)
         })
@@ -902,6 +924,7 @@ mod tests {
                     machine_id: machine,
                     machine_name: machine,
                     claim_path: claim.then_some(self.folder.as_str()),
+                    incarnation: None,
                     manifest: None,
                     changes,
                     now: 1_767_323_045_000,
@@ -960,6 +983,32 @@ mod tests {
         // Only the new incarnation's files are in the index.
         let paths: Vec<&str> = slice.entries.iter().map(|e| e.path.as_str()).collect();
         assert_eq!(paths, ["x"]);
+        // A writer whose bases belong to the old one is refused before
+        // anything is applied, the origin included.
+        for (machine, claim) in [("copy", false), ("origin", true)] {
+            let out = h
+                .store
+                .hub_file_commit(&CommitInput {
+                    root_id: &h.root,
+                    machine_id: machine,
+                    machine_name: machine,
+                    claim_path: claim.then_some(h.folder.as_str()),
+                    incarnation: Some(&first.incarnation),
+                    manifest: None,
+                    changes: &[put("y", 0, "b")],
+                    now: 1,
+                })
+                .unwrap();
+            assert_eq!(out.unwrap_err(), CommitRefused::Replaced);
+        }
+        assert_eq!(
+            h.store
+                .hub_file_index(&h.root, 0, 10)
+                .unwrap()
+                .unwrap()
+                .head,
+            3
+        );
     }
 
     #[test]
@@ -1052,6 +1101,7 @@ mod tests {
                     machine_id: "origin",
                     machine_name: "origin",
                     claim_path: Some(claim),
+                    incarnation: None,
                     manifest: None,
                     changes: &[put("n.md", 0, "a")],
                     now: 1,

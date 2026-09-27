@@ -268,7 +268,8 @@ impl Engine {
                 if permit.is_err() {
                     return;
                 }
-                let (store, k, cfg) = (env.store.clone(), key.clone(), env.scan.clone());
+                let cfg = super::copy::scan_config(&env).await;
+                let (store, k) = (env.store.clone(), key.clone());
                 let scanned = tokio::task::spawn_blocking(move || {
                     let root = PathBuf::from(&k);
                     super::local::scan_copy(&store, &k, &root, &cfg)
@@ -421,13 +422,12 @@ impl Engine {
         });
     }
 
+    /// The copy a watcher event under `path` wakes, if any: only paths
+    /// below the copy's root are filtered (a project that itself lives in
+    /// a folder named `build` or `out` still syncs).
     fn copy_for(&self, path: &Path) -> Option<String> {
-        let key = blirp_core::paths::path_key(path);
-        lock(&self.tracked)
-            .iter()
-            .filter(|t| key.starts_with(blirp_core::paths::path_key(Path::new(&t.copy.key))))
-            .max_by_key(|t| t.copy.key.len())
-            .map(|t| t.copy.key.clone())
+        let tracked = lock(&self.tracked);
+        event_copy(tracked.iter().map(|t| t.copy.key.as_str()), path)
     }
 }
 
@@ -605,7 +605,24 @@ fn start_watcher(tx: mpsc::UnboundedSender<Kick>) -> Option<Watcher> {
     }
 }
 
+/// Of the copies at `roots`, the innermost holding `path`, unless the
+/// event is one that never syncs (judged below that copy's root only).
+fn event_copy<'a>(roots: impl Iterator<Item = &'a str>, path: &Path) -> Option<String> {
+    let key = blirp_core::paths::path_key(path);
+    let (root, rel) = roots
+        .filter_map(|r| {
+            let rel = key
+                .strip_prefix(blirp_core::paths::path_key(Path::new(r)))
+                .ok()?
+                .to_path_buf();
+            Some((r, rel))
+        })
+        .max_by_key(|(r, _)| r.len())?;
+    relevant(&rel).then(|| root.to_string())
+}
+
 /// Paths blirp writes itself or that never sync do not wake the engine.
+/// `p` is relative to the copy's root.
 fn relevant(p: &Path) -> bool {
     // Build output and caches (the denylist's folders) change all the time
     // during builds and never sync: their events wake nothing.
@@ -699,7 +716,7 @@ async fn run(
                     Some(Kick::Rescan) => full = true,
                     Some(Kick::Copy(key)) => { pending.insert(key); }
                     Some(Kick::Paths(paths)) => {
-                        for p in paths.iter().filter(|p| relevant(p)) {
+                        for p in &paths {
                             if let Some(k) = engine.copy_for(p) {
                                 pending.insert(k);
                             }
@@ -768,7 +785,7 @@ async fn run(
                         pending.insert(key);
                     }
                     Kick::Paths(paths) => {
-                        for p in paths.iter().filter(|p| relevant(p)) {
+                        for p in &paths {
                             if let Some(k) = engine.copy_for(p) {
                                 pending.insert(k);
                             }
@@ -783,4 +800,25 @@ async fn run(
     }
     grace_tick.abort();
     drop(watcher);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn events_are_filtered_below_the_copy_root_only() {
+        let base = std::env::temp_dir();
+        let root = base.join("out").join("proj");
+        let key = root.display().to_string();
+        let roots = || std::iter::once(key.as_str());
+        // A project inside a folder named like build output still syncs.
+        assert_eq!(
+            event_copy(roots(), &root.join("src/a.rs")),
+            Some(key.clone())
+        );
+        assert_eq!(event_copy(roots(), &root.join("out/x.o")), None);
+        assert_eq!(event_copy(roots(), &root.join(".git/index")), None);
+        assert_eq!(event_copy(roots(), &base.join("elsewhere/a.rs")), None);
+    }
 }

@@ -140,6 +140,18 @@ fn base_of(e: &IndexEntry) -> Base {
     }
 }
 
+/// This machine's scan settings, with files larger than the hub accepts
+/// left out as too large (they would only fail to upload).
+pub async fn scan_config(env: &Env) -> ScanConfig {
+    let mut cfg = env.scan.clone();
+    if let Ok(w) = env.hub.welcome().await
+        && w.max_file > 0
+    {
+        cfg.max_file_bytes = cfg.max_file_bytes.min(w.max_file);
+    }
+    cfg
+}
+
 /// Result of one upload pass.
 #[derive(Debug, Clone, Default)]
 pub struct UploadReport {
@@ -217,11 +229,11 @@ struct UploadPlan {
 }
 
 /// Whether `path` exists under exactly this name. On case-insensitive
-/// filesystems a file renamed only in case still answers to its old name;
-/// that old name is gone (a delete), not excluded.
+/// filesystems a file or folder renamed only in case still answers to its
+/// old name; that old name is gone (a delete), not excluded, so every
+/// component is compared exactly.
 fn exists_exact(root: &Path, path: &str) -> std::io::Result<bool> {
-    let full = wpath::to_local(root, path);
-    match std::fs::symlink_metadata(&full) {
+    match std::fs::symlink_metadata(wpath::to_local(root, path)) {
         Ok(_) => {}
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(false),
         Err(e) => return Err(e),
@@ -229,29 +241,37 @@ fn exists_exact(root: &Path, path: &str) -> std::io::Result<bool> {
     if !case_insensitive_fs() {
         return Ok(true);
     }
-    let name = path.rsplit('/').next().unwrap_or(path);
-    let Some(parent) = full.parent() else {
-        return Ok(true);
-    };
-    for e in std::fs::read_dir(parent)? {
-        if e?.file_name().to_str() == Some(name) {
-            return Ok(true);
+    let mut dir = root.to_path_buf();
+    for part in path.split('/') {
+        let mut found = false;
+        for e in std::fs::read_dir(&dir)? {
+            if e?.file_name().to_str() == Some(part) {
+                found = true;
+                break;
+            }
         }
+        if !found {
+            return Ok(false);
+        }
+        dir.push(part);
     }
-    Ok(false)
+    Ok(true)
 }
 
 /// Changes of `files` (what the scan found) against `bases`. Paths that
 /// could not be read this time, or lie in a folder that could not be
-/// listed, are left alone. A vanished path that still exists on disk is
-/// excluded now: the origin stops syncing it for everyone, a copy only
-/// forgets it here. Only a path confirmed gone is deleted.
+/// listed, are left alone. A vanished path the scan left out (`excluded`:
+/// paths, folders ending in `/`) is excluded now: the origin stops syncing
+/// it for everyone, a copy only leaves it out here. One that exists but the
+/// scan did not see at all appeared after it: the next pass takes it. Only
+/// a path confirmed gone is deleted.
 fn plan_upload(
     root: &Path,
     files: &[Hashed],
     bases: &HashMap<String, Base>,
     unreadable: &HashSet<String>,
     unreadable_dirs: &[String],
+    excluded: &[String],
     origin: bool,
 ) -> UploadPlan {
     let mut out = UploadPlan::default();
@@ -268,8 +288,9 @@ fn plan_upload(
         };
         if let Some(b) = base {
             // A skipped path found under its exact name (no longer left out
-            // here, or made by hand) uploads like any change: compared and
-            // set against the version this copy skipped.
+            // here, or made by hand) uploads as new (base 0): this copy never
+            // held the hub's version, so the hub keeps it and the local one
+            // becomes a conflict copy, never a silent overwrite.
             if b.content.as_ref() == Some(&content) && b.mode_x == mode_x {
                 continue;
             }
@@ -295,7 +316,7 @@ fn plan_upload(
         out.changes.push(Planned {
             change: FileChange {
                 path: f.path.clone(),
-                base_version: base.map_or(0, |b| b.version),
+                base_version: base.filter(|b| !b.skipped).map_or(0, |b| b.version),
                 op,
             },
             local: Some(Hashed {
@@ -312,7 +333,11 @@ fn plan_upload(
         .collect();
     gone.sort_by(|a, b| a.0.cmp(b.0));
     for (path, b) in gone {
+        let left_out = excluded
+            .iter()
+            .any(|e| e == path || (e.ends_with('/') && path.starts_with(e.as_str())));
         let op = match exists_exact(root, path) {
+            Ok(true) if !left_out => continue,
             Ok(true) if origin => ChangeOp::Forget,
             Ok(true) => {
                 out.left_out.push(path.clone());
@@ -355,18 +380,14 @@ pub async fn upload_with(
 ) -> Result<UploadReport, CopyError> {
     let _work = env.work.lock().await;
     let root = copy.root();
+    let cfg = scan_config(env).await;
     let ls: LocalScan = {
         let _permit = env
             .gate
             .acquire()
             .await
             .map_err(|e| local(format!("file scanner stopped: {e}")))?;
-        let (store, key, r, cfg) = (
-            env.store.clone(),
-            copy.key.clone(),
-            root.clone(),
-            env.scan.clone(),
-        );
+        let (store, key, r) = (env.store.clone(), copy.key.clone(), root.clone());
         blocking(move || local::scan_copy(&store, &key, &r, &cfg).map_err(local)).await?
     };
     // Temp files a crash left behind; nothing else would remove them.
@@ -399,15 +420,38 @@ pub async fn upload_with(
     let bases = blocking(move || store.file_bases(&key).map_err(local)).await?;
     let unreadable: HashSet<String> = ls.hashed.unreadable.iter().cloned().collect();
     let dirs = ls.scan.unreadable.clone();
+    let excluded: Vec<String> = ls
+        .scan
+        .excluded
+        .iter()
+        .map(|e| {
+            if e.dir {
+                format!("{}/", e.path)
+            } else {
+                e.path.clone()
+            }
+        })
+        .chain(ls.hashed.secrets.iter().cloned())
+        .collect();
     let (r, files, origin) = (root.clone(), ls.hashed.files.clone(), copy.origin);
     let b2 = bases.clone();
-    let planned =
-        blocking(move || Ok(plan_upload(&r, &files, &b2, &unreadable, &dirs, origin))).await?;
+    let planned = blocking(move || {
+        Ok(plan_upload(
+            &r,
+            &files,
+            &b2,
+            &unreadable,
+            &dirs,
+            &excluded,
+            origin,
+        ))
+    })
+    .await?;
     report.pending += planned.held.len();
     if !planned.left_out.is_empty() {
         // Marked skipped, not dropped: without a base the next apply would
         // see the hub's file as new here and make a conflict copy of it
-        // with every pass.
+        // with every pass. Should it sync again, it uploads as new.
         let marks: Vec<(String, Option<Base>)> = planned
             .left_out
             .into_iter()
@@ -469,31 +513,24 @@ pub async fn upload_with(
             continue;
         }
         let changes: Vec<FileChange> = batch.iter().map(|p| p.change.clone()).collect();
-        let out = env
+        let expected = (!copy.incarnation.is_empty()).then_some(copy.incarnation.as_str());
+        let out = match env
             .hub
             .commit(
                 &copy.root_id,
                 claim.as_deref(),
+                expected,
                 if i == 0 { manifest.as_ref() } else { None },
                 changes,
             )
-            .await?;
+            .await
+        {
+            Err(SyncError::Remote { code, .. }) if code == "root_replaced" => {
+                return Err(replaced(env, copy).await);
+            }
+            r => r?,
+        };
         report.head = Some(out.head);
-        if !copy.incarnation.is_empty() && out.incarnation != copy.incarnation {
-            // The hub copy was made again under us: every base here belongs
-            // to the old one. Start over (all files upload again).
-            let (store, key, inc) = (env.store.clone(), copy.key.clone(), out.incarnation.clone());
-            blocking(move || {
-                store
-                    .set_file_copy_incarnation(&key, &inc, true)
-                    .map_err(local)
-            })
-            .await?;
-            return Err(CopyError::Hub {
-                code: "root_replaced".into(),
-                message: "the hub copy was made again; uploading everything".into(),
-            });
-        }
         if copy.incarnation.is_empty() {
             let (store, key, inc) = (env.store.clone(), copy.key.clone(), out.incarnation.clone());
             blocking(move || {
@@ -586,9 +623,16 @@ async fn upload_blobs(
     for (hash, r) in results {
         match r {
             Ok(()) => {}
+            // This file only (it changed while uploading, or is larger than
+            // the hub accepts now): it waits, the rest of the folder goes on.
             Err(SyncError::Remote { code, .. })
-                if code == "file_changed" || code == "hash_mismatch" =>
+                if code == "file_changed" || code == "hash_mismatch" || code == "too_large" =>
             {
+                if code == "too_large"
+                    && let Some((path, _)) = sources.get(&hash)
+                {
+                    tracing::warn!(path = %path.display(), "the hub refused a file as too large");
+                }
                 failed.insert(hash);
             }
             Err(e) => return Err(e.into()),
@@ -1011,14 +1055,44 @@ fn plan_incoming(
 /// The hub's index of `copy`'s root, checked against the incarnation its
 /// bases belong to.
 async fn root_index(env: &Env, copy: &Copy) -> Result<blirp_sync::files::RootIndex, CopyError> {
-    let index = env.hub.index(&copy.root_id, 0).await?;
+    let index = match env.hub.index(&copy.root_id, 0).await {
+        Err(SyncError::Remote { code, .. }) if code == "root_replaced" => {
+            return Err(replaced(env, copy).await);
+        }
+        r => r?,
+    };
     if !copy.incarnation.is_empty() && index.incarnation != copy.incarnation {
-        return Err(CopyError::Hub {
-            code: "root_replaced".into(),
-            message: "the hub copy was made again".into(),
-        });
+        return Err(replaced(env, copy).await);
     }
     Ok(index)
+}
+
+/// The hub copy was deleted and made again: every base of `copy` belongs
+/// to the old one. An origin starts over (everything uploads again, with
+/// no incarnation until the hub names the new one); any other copy
+/// detaches, keeping its files.
+async fn replaced(env: &Env, copy: &Copy) -> CopyError {
+    let (store, key, origin) = (env.store.clone(), copy.key.clone(), copy.origin);
+    let r = blocking(move || {
+        if origin {
+            store.set_file_copy_incarnation(&key, "", true)
+        } else {
+            store.detach_file_copy(&key)
+        }
+        .map_err(local)
+    })
+    .await;
+    match r {
+        Ok(()) => CopyError::Hub {
+            code: "root_replaced".into(),
+            message: if origin {
+                "the hub copy was made again; uploading everything".into()
+            } else {
+                "the hub copy was made again; this copy no longer syncs".into()
+            },
+        },
+        Err(e) => e,
+    }
 }
 
 /// The hub's changes this copy has not taken, and the root's head.
@@ -1531,6 +1605,38 @@ mod tests {
     }
 
     #[test]
+    fn skipped_paths_upload_as_new_and_case_renames_are_deletes() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        // Skipped here (a collision, a folder in the way): the hub's version
+        // was never held, so the file found there now goes up as new.
+        let bases = HashMap::from([(
+            "held.txt".to_string(),
+            Base {
+                skipped: true,
+                ..base(9, "hub")
+            },
+        )]);
+        let files = [Hashed {
+            path: "held.txt".into(),
+            size: 1,
+            mtime_ns: 2_000_000,
+            mode_x: false,
+            content: Content::Blob("mine".into()),
+        }];
+        let plan = plan_upload(root, &files, &bases, &HashSet::new(), &[], &[], false);
+        assert_eq!(plan.changes.len(), 1);
+        assert_eq!(plan.changes[0].change.base_version, 0);
+        // A folder renamed only in case: its old name is gone.
+        std::fs::create_dir_all(root.join("Sub")).unwrap();
+        std::fs::write(root.join("Sub/f.txt"), "x").unwrap();
+        assert!(exists_exact(root, "Sub/f.txt").unwrap());
+        if case_insensitive_fs() {
+            assert!(!exists_exact(root, "sub/f.txt").unwrap());
+        }
+    }
+
+    #[test]
     fn upload_plan() {
         let dir = tempfile::tempdir().unwrap();
         let root = dir.path();
@@ -1565,7 +1671,8 @@ mod tests {
         ];
         let unreadable = HashSet::from(["unreadable".to_string()]);
         let dirs = vec!["locked".to_string()];
-        let plan = plan_upload(root, &files, &bases, &unreadable, &dirs, true);
+        let excluded = ["excluded.log".to_string()];
+        let plan = plan_upload(root, &files, &bases, &unreadable, &dirs, &excluded, true);
         assert!(plan.left_out.is_empty());
         // A path whose last change the hub refused waits.
         assert_eq!(plan.held, ["refused"]);
@@ -1593,11 +1700,24 @@ mod tests {
         );
         // A copy's own exclusions are only left out here; the hub keeps
         // the file.
-        let plan = plan_upload(root, &files, &bases, &unreadable, &dirs, false);
+        let plan = plan_upload(root, &files, &bases, &unreadable, &dirs, &excluded, false);
         assert_eq!(plan.left_out, ["excluded.log"]);
         assert!(!plan.changes.iter().any(|p| p.change.path == "refused"));
+        // On disk but not seen by the scan, and not left out: made after
+        // the scan. Neither forgotten nor deleted; the next pass takes it.
+        let plan = plan_upload(root, &files, &bases, &unreadable, &dirs, &[], true);
+        assert!(!plan.changes.iter().any(|p| p.change.path == "excluded.log"));
+        assert!(plan.left_out.is_empty());
         // A folder the scan could not list at all deletes nothing.
-        let plan = plan_upload(root, &[], &bases, &HashSet::new(), &[String::new()], true);
+        let plan = plan_upload(
+            root,
+            &[],
+            &bases,
+            &HashSet::new(),
+            &[String::new()],
+            &[],
+            true,
+        );
         assert!(plan.changes.is_empty(), "{:?}", plan.changes);
     }
 }

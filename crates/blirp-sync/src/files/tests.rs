@@ -160,6 +160,7 @@ async fn uploads_commits_downloads_and_resumes() {
             &r.root,
             Some(&r.folder),
             None,
+            None,
             vec![FileChange {
                 path: "data/big.bin".into(),
                 base_version: 0,
@@ -205,6 +206,7 @@ async fn uploads_commits_downloads_and_resumes() {
     let out = fh
         .commit(
             &r.root,
+            None,
             None,
             None,
             vec![FileChange {

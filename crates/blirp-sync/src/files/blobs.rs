@@ -6,9 +6,14 @@
 //! downloads.
 
 use blirp_core::files::is_hash;
+use blirp_core::files::write::retry_busy;
+use std::collections::HashMap;
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex, Weak};
 use std::time::{Duration, SystemTime};
+
+type PartLocks = Arc<Mutex<HashMap<String, Weak<tokio::sync::Mutex<()>>>>>;
 
 /// zstd level for blobs at rest and on the wire.
 pub const ZSTD_LEVEL: i32 = 3;
@@ -31,11 +36,50 @@ pub enum BlobError {
 #[derive(Debug, Clone)]
 pub struct BlobStore {
     dir: PathBuf,
+    /// One writer per partial transfer (shared by the clones of a store).
+    locks: PartLocks,
 }
 
 impl BlobStore {
     pub fn new(dir: impl Into<PathBuf>) -> Self {
-        Self { dir: dir.into() }
+        Self {
+            dir: dir.into(),
+            locks: PartLocks::default(),
+        }
+    }
+
+    /// Exclusive use of the part of `hash` until the guard drops: two
+    /// downloads of the same content never append to one file.
+    pub async fn lock_part(&self, hash: &str) -> tokio::sync::OwnedMutexGuard<()> {
+        let lock = {
+            let mut locks = self
+                .locks
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            locks.retain(|_, w| w.strong_count() > 0);
+            match locks.get(hash).and_then(Weak::upgrade) {
+                Some(l) => l,
+                None => {
+                    let l = Arc::new(tokio::sync::Mutex::new(()));
+                    locks.insert(hash.to_string(), Arc::downgrade(&l));
+                    l
+                }
+            }
+        };
+        lock.lock_owned().await
+    }
+
+    /// Move the finished part of `hash` to a file of its own (the caller's
+    /// to use and remove), so the next download of the same content starts
+    /// a fresh part.
+    pub fn take_part(&self, hash: &str) -> Result<PathBuf, BlobError> {
+        let part = self.part_path(hash)?;
+        let own = self.dir.join("tmp").join(format!(
+            "{hash}.{}.dl",
+            blirp_core::random_hex::<6>().map_err(BlobError::Io)?
+        ));
+        retry_busy(|| std::fs::rename(&part, &own))?;
+        Ok(own)
     }
 
     pub fn dir(&self) -> &Path {
@@ -82,10 +126,13 @@ impl BlobStore {
         if let Some(p) = part.parent() {
             std::fs::create_dir_all(p)?;
         }
-        let mut f = std::fs::OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(&part)?;
+        // A part just removed can linger as "delete pending" on Windows.
+        let mut f = retry_busy(|| {
+            std::fs::OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(&part)
+        })?;
         let have = f.metadata()?.len();
         if have != offset {
             return Err(BlobError::Offset { offset, have });
@@ -187,14 +234,20 @@ impl BlobStore {
         }
     }
 
-    /// Bytes held by partial transfers.
-    pub fn parts_bytes(&self) -> u64 {
-        std::fs::read_dir(self.dir.join("tmp")).map_or(0, |rd| {
-            rd.flatten()
-                .filter_map(|e| e.metadata().ok())
-                .map(|m| m.len())
-                .sum()
-        })
+    /// Partial transfers: (hash, bytes so far).
+    pub fn parts(&self) -> Vec<(String, u64)> {
+        std::fs::read_dir(self.dir.join("tmp")).map_or_else(
+            |_| Vec::new(),
+            |rd| {
+                rd.flatten()
+                    .filter_map(|e| {
+                        let name = e.file_name().to_str()?.to_string();
+                        let hash = name.strip_suffix(".part")?.to_string();
+                        Some((hash, e.metadata().ok()?.len()))
+                    })
+                    .collect()
+            },
+        )
     }
 
     /// Remove partial transfers not touched for `age`.

@@ -53,6 +53,9 @@ pub enum Req {
         root_id: String,
         /// Origin only: its folder, registering the root.
         root_path: Option<String>,
+        /// The incarnation the writer's bases belong to.
+        #[serde(default)]
+        incarnation: Option<String>,
         manifest: Option<GitManifest>,
         changes: Vec<FileChange>,
     },
@@ -79,6 +82,9 @@ pub enum Reply {
         version: u32,
         quota: u64,
         used: u64,
+        /// Largest file the hub accepts (0: not said).
+        #[serde(default)]
+        max_file: u64,
         project_modes: HashMap<String, FilesMode>,
     },
     RootList {

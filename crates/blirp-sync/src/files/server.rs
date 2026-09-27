@@ -128,15 +128,17 @@ async fn stream(
                 return Ok(());
             };
             let h = hub.clone();
-            let welcome = match run(move || Ok((h.quota(), h.usage()?, h.modes()?))).await? {
-                Ok((quota, used, project_modes)) => Reply::Welcome {
-                    version,
-                    quota,
-                    used,
-                    project_modes,
-                },
-                Err(e) => err(&e),
-            };
+            let welcome =
+                match run(move || Ok((h.quota(), h.usage()?, h.max_file(), h.modes()?))).await? {
+                    Ok((quota, used, max_file, project_modes)) => Reply::Welcome {
+                        version,
+                        quota,
+                        used,
+                        max_file,
+                        project_modes,
+                    },
+                    Err(e) => err(&e),
+                };
             write_frame(&mut send, &welcome).await?;
             control(send, recv, hub, machine_id, machine_name).await
         }
@@ -222,6 +224,7 @@ async fn control(
             Req::Commit {
                 root_id,
                 root_path,
+                incarnation,
                 manifest,
                 changes,
             } => {
@@ -235,6 +238,7 @@ async fn control(
                         &name,
                         &root_id,
                         root_path.as_deref(),
+                        incarnation.as_deref(),
                         manifest.as_ref(),
                         &changes,
                     )

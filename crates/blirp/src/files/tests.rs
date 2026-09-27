@@ -9,7 +9,7 @@ use blirp_core::store::{Base, CopyMode, FileCopy, Store};
 use blirp_sync::files::blobs::BlobStore;
 use blirp_sync::files::{FileHub, HubFiles, LocalHub};
 use proptest::prelude::*;
-use std::collections::{BTreeMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
@@ -320,6 +320,7 @@ fn foreign_put(w: &World, path: &str, data: &[u8]) -> bool {
             &root,
             None,
             None,
+            None,
             &[FileChange {
                 path: path.into(),
                 base_version: base,
@@ -457,8 +458,10 @@ async fn run(ops: Vec<Op>) {
         }
     }
     // Quiet: everyone uploads and takes the hub's changes until nothing moves.
+    // Quiet means no copy changed and the hub took nothing new in a round.
     let mut last: Vec<BTreeMap<String, String>> = Vec::new();
-    for _ in 0..8 {
+    let mut last_hub = BTreeMap::new();
+    for _ in 0..12 {
         for i in 0..w.writers.len() {
             w.reconcile();
             let Some((e, c)) = w.writer(i) else { continue };
@@ -471,6 +474,13 @@ async fn run(ops: Vec<Op>) {
             seen.extend(committed(&w, before));
         }
         let on_hub: HashSet<String> = w.index().into_iter().map(|e| e.path).collect();
+        // Names the hub holds in more than one case (a twin and, later,
+        // conflict copies of each): a case-insensitive copy holds one.
+        let mut folded: HashMap<String, usize> = HashMap::new();
+        for p in &on_hub {
+            *folded.entry(p.to_lowercase()).or_default() += 1;
+        }
+        let ci = blirp_core::files::path::case_insensitive_fs();
         let now: Vec<BTreeMap<String, String>> = (0..w.writers.len())
             .filter_map(|i| w.writer(i))
             .map(|(_, c)| {
@@ -483,17 +493,23 @@ async fn run(ops: Vec<Op>) {
                 if expired {
                     f.retain(|p, _| on_hub.contains(p));
                 }
-                if excluded || (twin && blirp_core::files::path::case_insensitive_fs()) {
+                if excluded || (twin && ci) {
                     f.remove("c.txt");
                     f.remove("C.txt");
+                }
+                if ci {
+                    f.retain(|p, _| folded.get(&p.to_lowercase()).is_none_or(|n| *n < 2));
                 }
                 f
             })
             .collect();
-        if now == last {
+        let hub: BTreeMap<String, i64> =
+            w.index().into_iter().map(|e| (e.path, e.version)).collect();
+        if now == last && hub == last_hub {
             break;
         }
         last = now;
+        last_hub = hub;
     }
     // Converged: every copy still syncing holds the same files.
     for other in last.iter().skip(1) {
@@ -569,6 +585,7 @@ async fn receivers_refuse_unsafe_paths_and_keep_what_they_cannot_hold() {
             "linux",
             "linux",
             &c1.root_id,
+            None,
             None,
             None,
             &[
@@ -839,4 +856,56 @@ async fn forgotten_and_expired_paths_are_not_uploaded_again() {
     copy::apply(&e1, &c1, false).await.unwrap();
     copy::upload(&e1, &c1).await.unwrap();
     assert!(w.index().iter().all(|e| e.path != "gone.txt"));
+}
+
+#[tokio::test]
+async fn a_copy_racing_a_remade_root_detaches_without_committing() {
+    let w = world(1).await;
+    let (e0, c0) = w.writer(0).unwrap();
+    // Taken before the hub copy is deleted and made again: its bases and
+    // incarnation belong to the old one, and no reconcile runs between.
+    let (e1, c1) = w.writer(1).unwrap();
+    let project = w.hub.roots().unwrap().0[0].project_id.clone();
+    w.hub.set_mode(&project, FilesMode::Off).unwrap();
+    w.hub.delete_root(&c0.root_id).unwrap();
+    w.hub.set_mode(&project, FilesMode::Default).unwrap();
+    // The origin notices at its next commit and starts over.
+    std::fs::write(Path::new(&c0.key).join("a.txt"), "origin edit").unwrap();
+    let err = copy::upload(&e0, &c0).await.unwrap_err();
+    assert_eq!(err.code(), "root_replaced");
+    let (e0, c0) = w.writer(0).unwrap();
+    assert!(c0.incarnation.is_empty());
+    copy::upload(&e0, &c0).await.unwrap();
+    let (_, c0) = w.writer(0).unwrap();
+    assert!(!c0.incarnation.is_empty() && c0.incarnation != c1.incarnation);
+    // The copy's edit is refused before anything is applied, and it
+    // detaches with its files kept.
+    std::fs::write(Path::new(&c1.key).join("late.txt"), "late edit").unwrap();
+    let err = copy::upload(&e1, &c1).await.unwrap_err();
+    assert_eq!(err.code(), "root_replaced");
+    assert!(w.writer(1).is_none());
+    assert!(w.index().iter().all(|e| e.path != "late.txt"));
+    assert!(Path::new(&c1.key).join("late.txt").exists());
+}
+
+#[tokio::test]
+async fn a_file_over_the_hubs_limit_does_not_hold_up_its_folder() {
+    let w = world(0).await;
+    let (e0, c0) = w.writer(0).unwrap();
+    w.hub.set_max_file(100);
+    std::fs::write(Path::new(&c0.key).join("big.bin"), vec![b'x'; 1000]).unwrap();
+    std::fs::write(Path::new(&c0.key).join("small.txt"), "small").unwrap();
+    let r = copy::upload(&e0, &c0).await.unwrap();
+    assert_eq!(r.sent, 1, "{r:?}");
+    let paths: Vec<String> = w.index().into_iter().map(|e| e.path).collect();
+    assert!(paths.contains(&"small.txt".to_string()));
+    assert!(!paths.contains(&"big.bin".to_string()));
+    // The hub itself refuses it too, whatever a node's settings say.
+    let src = w.dir.path().join("big-src");
+    std::fs::write(&src, vec![b'x'; 1000]).unwrap();
+    let err = w
+        .hub
+        .import(&hash_bytes(&[b'x'; 1000]), &src, 1000)
+        .unwrap_err();
+    assert_eq!(err.code(), "too_large");
 }

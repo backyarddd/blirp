@@ -45,6 +45,8 @@ pub enum HubError {
     Store(#[from] StoreError),
     #[error("{0}")]
     Invalid(String),
+    #[error("the file is larger than the hub accepts")]
+    TooLarge,
     #[error("the hub has no such root")]
     UnknownRoot,
     #[error("turn file sync off for this project before deleting its hub copy")]
@@ -60,6 +62,7 @@ impl HubError {
             Self::Blob(BlobError::Offset { .. }) => "bad_offset",
             Self::Blob(BlobError::BadHash) | Self::Invalid(_) => "invalid_request",
             Self::Blob(BlobError::Io(_)) | Self::Store(_) => "internal",
+            Self::TooLarge => "too_large",
             Self::UnknownRoot => "unknown_root",
             Self::NotPaused => "files_on",
         }
@@ -96,6 +99,9 @@ pub struct HubFiles {
     reserved: std::sync::Mutex<HashMap<String, u64>>,
     /// Largest file the hub accepts (`files.max_file_mb`).
     max_file: AtomicU64,
+    /// Tests move the clock forward to age blobs past the grace period.
+    #[cfg(test)]
+    skew_ms: AtomicI64,
 }
 
 impl std::fmt::Debug for HubFiles {
@@ -121,12 +127,25 @@ impl HubFiles {
             stored: AtomicI64::new(store_usage(&store_for_usage)),
             reserved: std::sync::Mutex::new(HashMap::new()),
             max_file: AtomicU64::new(DEFAULT_MAX_FILE),
+            #[cfg(test)]
+            skew_ms: AtomicI64::new(0),
         }
+    }
+
+    fn now(&self) -> i64 {
+        #[cfg(test)]
+        return blirp_core::now_ms() + self.skew_ms.load(Ordering::Relaxed);
+        #[cfg(not(test))]
+        blirp_core::now_ms()
     }
 
     /// Largest upload accepted, in bytes.
     pub fn set_max_file(&self, bytes: u64) {
         self.max_file.store(bytes, Ordering::Relaxed);
+    }
+
+    pub fn max_file(&self) -> u64 {
+        self.max_file.load(Ordering::Relaxed)
     }
 
     fn reserved_guard(&self) -> std::sync::MutexGuard<'_, HashMap<String, u64>> {
@@ -163,8 +182,24 @@ impl HubFiles {
 
     /// Bytes the stored blobs take plus what running uploads set aside.
     pub fn usage(&self) -> Result<u64, HubError> {
-        let reserved: u64 = self.reserved_guard().values().sum();
-        Ok(self.stored_bytes().saturating_add(reserved))
+        let reserved = self.reserved_guard();
+        Ok(self
+            .stored_bytes()
+            .saturating_add(self.pending_bytes(&reserved)))
+    }
+
+    /// Disk taken or set aside by uploads: a running one counts what it
+    /// reserved, a stopped one what its part holds (until it resumes or
+    /// the daily sweep drops it).
+    fn pending_bytes(&self, reserved: &HashMap<String, u64>) -> u64 {
+        let parts: u64 = self
+            .blobs
+            .parts()
+            .into_iter()
+            .filter(|(h, _)| !reserved.contains_key(h))
+            .map(|(_, n)| n)
+            .sum();
+        parts.saturating_add(reserved.values().sum())
     }
 
     fn stored_bytes(&self) -> u64 {
@@ -215,36 +250,43 @@ impl HubFiles {
             .collect())
     }
 
-    /// Set aside `len` bytes for `hash` (atomic with other uploads). When
-    /// they do not fit, old history is dropped, step by step and only as
-    /// far as needed, and only if dropping all of it could make room at all.
+    /// Set aside `len` bytes for `hash`: checked and recorded under the
+    /// reservation lock, so parallel uploads cannot overrun the quota
+    /// together. When they do not fit, old history is dropped, step by step
+    /// and only as far as needed, and only if dropping all of it could make
+    /// room at all. Pruning runs without the reservation lock (collecting
+    /// takes the blob lock, which stores hold while they release), and the
+    /// check is made again after every step.
     fn reserve(&self, hash: &str, len: u64) -> Result<(), HubError> {
         let quota = self.quota();
-        let mut reserved = self.reserved_guard();
-        let others: u64 = reserved
-            .iter()
-            .filter(|(h, _)| h.as_str() != hash)
-            .map(|(_, n)| *n)
-            .sum();
-        let fits = |stored: u64| stored.saturating_add(others).saturating_add(len) <= quota;
-        if !fits(self.stored_bytes()) {
-            let reclaimable = u64::try_from(self.store.hub_blob_reclaimable()?).unwrap_or(0);
-            if !fits(self.stored_bytes().saturating_sub(reclaimable)) {
+        let mut checked_reclaimable = false;
+        loop {
+            {
+                let mut reserved = self.reserved_guard();
+                reserved.remove(hash);
+                let used = self
+                    .stored_bytes()
+                    .saturating_add(self.pending_bytes(&reserved));
+                if used.saturating_add(len) <= quota {
+                    reserved.insert(hash.to_string(), len);
+                    return Ok(());
+                }
+                if !checked_reclaimable {
+                    let before = self.now() - BLOB_GRACE_MS;
+                    let reclaimable =
+                        u64::try_from(self.store.hub_blob_reclaimable(before)?).unwrap_or(0);
+                    if used.saturating_sub(reclaimable).saturating_add(len) > quota {
+                        return Err(HubError::Quota);
+                    }
+                    checked_reclaimable = true;
+                }
+            }
+            let dropped = self.store.hub_prune_oldest_history(QUOTA_PRUNE_STEP)?;
+            let collected = self.collect(self.now())?;
+            if dropped == 0 && collected == 0 {
                 return Err(HubError::Quota);
             }
-            loop {
-                let dropped = self.store.hub_prune_oldest_history(QUOTA_PRUNE_STEP)?;
-                self.collect(blirp_core::now_ms())?;
-                if fits(self.stored_bytes()) {
-                    break;
-                }
-                if dropped == 0 {
-                    return Err(HubError::Quota);
-                }
-            }
         }
-        reserved.insert(hash.to_string(), len);
-        Ok(())
     }
 
     /// Start (or resume) an upload of `len` bytes: returns the offset to
@@ -253,10 +295,8 @@ impl HubFiles {
         if !is_hash(hash) {
             return Err(HubError::Invalid("invalid hash".into()));
         }
-        if len > self.max_file.load(Ordering::Relaxed) {
-            return Err(HubError::Invalid(
-                "the file is larger than the hub accepts".into(),
-            ));
+        if len > self.max_file() {
+            return Err(HubError::TooLarge);
         }
         let have = self.blobs.part_len(hash);
         if have > len {
@@ -279,13 +319,32 @@ impl HubFiles {
 
     /// The part of `hash` holds `len` bytes: verify and store it.
     pub fn finish_put(&self, hash: &str, len: u64) -> Result<(), HubError> {
-        let _g = self.blob_guard();
-        let done = self.blobs.finish(hash, len);
+        let result = self.store_locked(
+            || {
+                let stored = self.blobs.finish(hash, len)?;
+                Ok((len, stored))
+            },
+            hash,
+        );
+        // Released only after the blob lock is dropped: `reserve` holds the
+        // reservation lock while it may collect (which takes the blob lock).
         self.release(hash);
-        let stored = i64::try_from(done?).unwrap_or(i64::MAX);
+        result
+    }
+
+    /// Run `put` (writing blob `hash`, returning its raw and stored size)
+    /// and record it, under the blob lock.
+    fn store_locked(
+        &self,
+        put: impl FnOnce() -> Result<(u64, u64), HubError>,
+        hash: &str,
+    ) -> Result<(), HubError> {
+        let _g = self.blob_guard();
+        let (size, stored) = put()?;
+        let stored = i64::try_from(stored).unwrap_or(i64::MAX);
         if self.store.hub_blob_added(
             hash,
-            i64::try_from(len).unwrap_or(i64::MAX),
+            i64::try_from(size).unwrap_or(i64::MAX),
             stored,
             blirp_core::now_ms(),
         )? {
@@ -301,21 +360,13 @@ impl HubFiles {
                 .hub_touch_blobs(&[hash.to_string()], blirp_core::now_ms())?;
             return Ok(());
         }
-        self.reserve(hash, len)?;
-        let _g = self.blob_guard();
-        let imported = self.blobs.import(hash, src);
-        self.release(hash);
-        let (size, stored) = imported?;
-        let stored = i64::try_from(stored).unwrap_or(i64::MAX);
-        if self.store.hub_blob_added(
-            hash,
-            i64::try_from(size).unwrap_or(i64::MAX),
-            stored,
-            blirp_core::now_ms(),
-        )? {
-            self.count_stored(stored);
+        if len > self.max_file() {
+            return Err(HubError::TooLarge);
         }
-        Ok(())
+        self.reserve(hash, len)?;
+        let result = self.store_locked(|| Ok(self.blobs.import(hash, src)?), hash);
+        self.release(hash);
+        result
     }
 
     /// Raw length and content of a stored blob.
@@ -340,6 +391,7 @@ impl HubFiles {
         machine_name: &str,
         root_id: &str,
         claim_path: Option<&str>,
+        incarnation: Option<&str>,
         manifest: Option<&GitManifest>,
         changes: &[FileChange],
     ) -> Result<Result<CommitOutcome, CommitRefused>, HubError> {
@@ -348,6 +400,7 @@ impl HubFiles {
             machine_id,
             machine_name,
             claim_path,
+            incarnation,
             manifest,
             changes,
             now: blirp_core::now_ms(),
@@ -500,6 +553,7 @@ mod tests {
                 &t.root,
                 Some(&t.folder),
                 None,
+                None,
                 &[put("a.txt", 0, &a)],
             )
             .unwrap()
@@ -514,7 +568,15 @@ mod tests {
         // Replaced: kept in history until retention drops it, then collected.
         t.upload(b"b").unwrap();
         t.hub
-            .commit("m", "m", &t.root, None, None, &[put("a.txt", 1, b"b")])
+            .commit(
+                "m",
+                "m",
+                &t.root,
+                None,
+                None,
+                None,
+                &[put("a.txt", 1, b"b")],
+            )
             .unwrap()
             .unwrap();
         let later = blirp_core::now_ms() + BLOB_GRACE_MS + 10_000;
@@ -544,6 +606,7 @@ mod tests {
                 &t.root,
                 Some(&t.folder),
                 None,
+                None,
                 &[put("f", 0, &big)],
             )
             .unwrap()
@@ -567,6 +630,60 @@ mod tests {
             t.hub.index(&t.root, 0, 10),
             Err(HubError::UnknownRoot)
         ));
+    }
+
+    #[test]
+    fn parallel_uploads_near_the_quota_never_deadlock() {
+        let t = Arc::new(setup(3_000));
+        let noise = |seed: &str| {
+            let mut v = vec![0u8; 400];
+            blake3::Hasher::new()
+                .update(seed.as_bytes())
+                .finalize_xof()
+                .fill(&mut v);
+            v
+        };
+        // Six versions of one file: five in history, one current.
+        for v in 0..6i64 {
+            let data = noise(&format!("v{v}"));
+            t.upload(&data).unwrap();
+            t.hub
+                .commit(
+                    "m",
+                    "m",
+                    &t.root,
+                    (v == 0).then_some(t.folder.as_str()),
+                    None,
+                    None,
+                    &[put("f", v, &data)],
+                )
+                .unwrap()
+                .unwrap();
+        }
+        // Past the grace period: history is reclaimable, so reservations
+        // prune and collect (blob lock) while others store (blob lock) and
+        // release (reservation lock).
+        t.hub.skew_ms.store(2 * BLOB_GRACE_MS, Ordering::Relaxed);
+        let (tx, rx) = std::sync::mpsc::channel();
+        for i in 0..8 {
+            let (t, tx) = (t.clone(), tx.clone());
+            std::thread::spawn(move || {
+                for j in 0..3 {
+                    let data = noise(&format!("t{i}-{j}"));
+                    let src = t.src.with_extension(format!("{i}-{j}"));
+                    std::fs::write(&src, &data).unwrap();
+                    let r = t.hub.import(&hash_bytes(&data), &src, data.len() as u64);
+                    assert!(matches!(r, Ok(()) | Err(HubError::Quota)), "{r:?}");
+                }
+                tx.send(()).unwrap();
+            });
+        }
+        drop(tx);
+        for _ in 0..8 {
+            rx.recv_timeout(Duration::from_secs(60))
+                .expect("uploads deadlocked");
+        }
+        assert!(t.hub.usage().unwrap() <= 3_000);
     }
 
     #[test]

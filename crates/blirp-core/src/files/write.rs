@@ -355,19 +355,27 @@ impl Target<'_> {
 
 /// Windows refuses to replace or delete a file another process has open
 /// without delete sharing (virus scanners and indexers open fresh files
-/// briefly): retry a few times before reporting it.
-fn retry_busy<T>(mut f: impl FnMut() -> std::io::Result<T>) -> std::io::Result<T> {
-    let mut left = if cfg!(windows) { 20 } else { 0 };
+/// briefly, sometimes for over a second under load): retry with a growing
+/// pause, for up to about 5 seconds, before reporting it.
+pub fn retry_busy<T>(mut f: impl FnMut() -> std::io::Result<T>) -> std::io::Result<T> {
+    let mut waited = std::time::Duration::ZERO;
+    let mut pause = std::time::Duration::from_millis(20);
+    let limit = if cfg!(windows) {
+        std::time::Duration::from_secs(5)
+    } else {
+        std::time::Duration::ZERO
+    };
     loop {
         match f() {
             // Access denied, or ERROR_SHARING_VIOLATION / ERROR_LOCK_VIOLATION.
             Err(e)
-                if left > 0
+                if waited < limit
                     && (e.kind() == std::io::ErrorKind::PermissionDenied
                         || matches!(e.raw_os_error(), Some(32 | 33))) =>
             {
-                left -= 1;
-                std::thread::sleep(std::time::Duration::from_millis(50));
+                std::thread::sleep(pause);
+                waited += pause;
+                pause = (pause * 2).min(std::time::Duration::from_millis(250));
             }
             r => return r,
         }
