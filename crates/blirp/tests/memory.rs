@@ -24,7 +24,15 @@ struct Harness {
 
 impl Harness {
     async fn start() -> Harness {
+        Self::start_with("").await
+    }
+
+    /// With `config` as `config.toml`.
+    async fn start_with(config: &str) -> Harness {
         let home = tempfile::tempdir().unwrap();
+        if !config.is_empty() {
+            std::fs::write(home.path().join("config.toml"), config).unwrap();
+        }
         let daemon = Daemon::start(DaemonOptions {
             paths: Paths::at(home.path()),
             port: Some(0),
@@ -243,7 +251,14 @@ fn urlencode(s: &str) -> String {
 
 #[tokio::test]
 async fn continue_from_builds_a_handoff_and_distill_endpoint() {
-    let h = Harness::start().await;
+    // No summarizer: the launch cannot refresh the source's summary and
+    // says so in the pack (a real one would be called otherwise).
+    let h = Harness::start_with(
+        "[memory]
+summarizer = \"none\"
+",
+    )
+    .await;
     let (dir, _pid) = h.project("handoff").await;
     let r = h
         .hook(
@@ -301,6 +316,10 @@ async fn continue_from_builds_a_handoff_and_distill_endpoint() {
     let handoff = std::fs::read_to_string(launch.join("handoff.md")).unwrap();
     assert!(handoff.contains("# blirp handoff"), "{handoff}");
     assert!(handoff.contains("**User:** implement the frobnicator"));
+    assert!(
+        handoff.contains("not refreshed for this handoff (the summarizer is off)"),
+        "{handoff}"
+    );
     let memory = std::fs::read_to_string(launch.join("memory.md")).unwrap();
     assert!(memory.starts_with("# blirp memory: handoff") && memory.contains("# blirp handoff"));
     // The UI's memory panel shows exactly what was injected.

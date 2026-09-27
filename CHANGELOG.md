@@ -10,6 +10,17 @@ so every tag needs one.
 
 ## [Unreleased]
 
+### Added
+
+- Continue in / Start new session from this session summarizes the source
+  session first when it has moved on since its last summary, so the handoff
+  carries a current summary instead of one up to 5 minutes old (or none).
+  The launch waits at most 90 s and the button reads "Summarizing
+  session..." meanwhile; when the summary cannot be refreshed (summarizer
+  off or paused, daily budget used up, failure, timeout, or a session of
+  another machine, which that machine summarizes) the session starts anyway
+  and the handoff says why.
+
 ### Changed
 
 - The sync protocol version now also versions what is replicated: hub and

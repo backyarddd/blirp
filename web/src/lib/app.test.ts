@@ -1,5 +1,5 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
-import type { Session, SessionsPage } from './api/types.gen';
+import type { LaunchSession, Session, SessionsPage } from './api/types.gen';
 import type { SessionQuery } from './api/client';
 
 // The store reads the browser's location and storage when it is created.
@@ -10,12 +10,14 @@ vi.hoisted(() => {
   g.window = { innerWidth: 1280, addEventListener: noop, removeEventListener: noop, scrollTo: noop };
   g.document = { addEventListener: noop, removeEventListener: noop };
   g.localStorage = { getItem: () => null, setItem: noop, removeItem: noop };
+  g.history = { pushState: noop, replaceState: noop };
 });
 
 const list = vi.hoisted(() => vi.fn<(q?: SessionQuery) => Promise<SessionsPage>>());
+const launch = vi.hoisted(() => vi.fn<(req: LaunchSession) => Promise<Session>>());
 vi.mock('./api/client', async (orig) => {
   const real = await orig<typeof import('./api/client')>();
-  return { ...real, api: { ...real.api, sessions: { ...real.api.sessions, list } } };
+  return { ...real, api: { ...real.api, sessions: { ...real.api.sessions, list, launch } } };
 });
 
 const { app } = await import('./app.svelte');
@@ -94,5 +96,25 @@ describe('loading more sessions', () => {
     expect(ids()).toEqual(['a', 'b']);
     expect(app.sessionsCursor).toBe('c1');
     expect(app.toasts.at(-1)?.text).toContain('Could not load more sessions');
+  });
+});
+
+describe('starting a session from another one', () => {
+  it('marks the source while the daemon prepares the handoff and never starts it twice', async () => {
+    const reply = deferred<Session>();
+    launch.mockReset();
+    launch.mockReturnValueOnce(reply.promise);
+    const first = app.launch({ continue_from: 'src', agent: 'claude' });
+    expect(app.handoffFrom.has('src')).toBe(true);
+    // A second click while the first handoff is pending does nothing.
+    expect(await app.launch({ continue_from: 'src', agent: 'codex' })).toBeUndefined();
+    expect(launch).toHaveBeenCalledTimes(1);
+    reply.resolve(mk('new', 50));
+    expect((await first)?.id).toBe('new');
+    expect(app.handoffFrom.has('src')).toBe(false);
+    // A failed launch clears the mark too.
+    launch.mockRejectedValueOnce(new Error('agent not installed'));
+    expect(await app.launch({ continue_from: 'src', agent: 'claude' })).toBeUndefined();
+    expect(app.handoffFrom.has('src')).toBe(false);
   });
 });

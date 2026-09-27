@@ -127,6 +127,8 @@ class AppState {
 
   paletteOpen = $state(false);
   newSession: { open: boolean; projectId: string | null } = $state({ open: false, projectId: null });
+  /** Sessions a launch with `continue_from` is waiting on (the daemon may summarize them first, §9). */
+  handoffFrom = new SvelteSet<string>();
   sidebarOpen = $state(false);
   // Defaults to open only where it fits beside the terminal; an explicit choice is remembered.
   memoryPanel = $state(MEMORY_PANEL_PREF === 'unset' ? window.innerWidth > 1100 : MEMORY_PANEL_PREF === 'open');
@@ -486,13 +488,27 @@ class AppState {
     }
   }
 
+  /**
+   * Start a session. With `continue_from` the daemon may first summarize the source (bounded, up
+   * to 90 s) before it answers; `handoffFrom` holds the source meanwhile, so its actions show that
+   * and do not start a second handoff.
+   */
   async launch(req: LaunchSession): Promise<Session | undefined> {
-    const s = await this.act(() => api.sessions.launch(req));
-    if (s) {
-      this.upsertSession(s);
-      navigate(href.sessions(s.id));
+    const from = req.continue_from;
+    if (from) {
+      if (this.handoffFrom.has(from)) return undefined;
+      this.handoffFrom.add(from);
     }
-    return s;
+    try {
+      const s = await this.act(() => api.sessions.launch(req));
+      if (s) {
+        this.upsertSession(s);
+        navigate(href.sessions(s.id));
+      }
+      return s;
+    } finally {
+      if (from) this.handoffFrom.delete(from);
+    }
   }
 
   openNewSession(projectId: string | null = null): void {

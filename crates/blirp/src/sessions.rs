@@ -313,6 +313,15 @@ pub async fn launch(state: &SharedState, req: LaunchSession) -> ApiResult<Sessio
     let prepared = crate::api::blocking(move || prepare(&st, &req2)).await?;
     // A copy downloaded from the hub takes the hub's changes first.
     crate::files::fast_forward(state, &prepared.cwd).await;
+    // §9: the pack carries the source's summary as of now, not as of its
+    // last idle distill (bounded; never fails the launch).
+    let stale = match &source {
+        Some(s) => {
+            crate::memory::handoff::refresh_summary(state, s, crate::memory::handoff::REFRESH_WAIT)
+                .await
+        }
+        None => None,
+    };
 
     let now = now_ms();
     let session = Session {
@@ -359,7 +368,15 @@ pub async fn launch(state: &SharedState, req: LaunchSession) -> ApiResult<Sessio
             return Err(e.into());
         }
         Ok(match src {
-            Some(s) => Some(crate::memory::render::render_handoff(&store, &s)?),
+            Some(s) => {
+                // Re-read: the refresh may have written a new summary.
+                let s = store.get_session(&s.id)?.unwrap_or(s);
+                Some(crate::memory::render::render_handoff(
+                    &store,
+                    &s,
+                    stale.as_deref(),
+                )?)
+            }
             None => None,
         })
     })

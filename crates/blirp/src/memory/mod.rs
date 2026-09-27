@@ -2,6 +2,7 @@
 //! per-launch agent integration.
 
 pub mod distill;
+pub mod handoff;
 pub mod launch;
 pub mod render;
 #[cfg(test)]

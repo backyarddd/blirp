@@ -24,7 +24,7 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, PoisonError};
 use std::time::Duration;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use tokio::sync::mpsc;
+use tokio::sync::{broadcast, mpsc};
 
 /// Summarizer process/HTTP timeout.
 pub const DISTILL_TIMEOUT: Duration = Duration::from_secs(180);
@@ -1261,6 +1261,8 @@ pub struct Distiller {
     budget_logged: Mutex<Option<String>>,
     /// Last [`resolve_auto`] answer, when and for what.
     pick_cache: Mutex<Option<(std::time::Instant, PickKey, SummarizerPick)>>,
+    /// Session ids of finished jobs (run or skipped), for [`Distiller::subscribe`].
+    done: broadcast::Sender<String>,
 }
 
 impl Default for Distiller {
@@ -1273,6 +1275,7 @@ impl Default for Distiller {
             breaker: Mutex::new(Breaker::default()),
             budget_logged: Mutex::new(None),
             pick_cache: Mutex::new(None),
+            done: broadcast::channel(64).0,
         }
     }
 }
@@ -1349,6 +1352,29 @@ impl Distiller {
         self.push(session_id, false, blirp_core::now_ms() + ENDED_DELAY_MS)
     }
 
+    /// Receives the session id of every job that finishes from now on.
+    /// Subscribe before [`Distiller::enqueue`] so the end of that job is seen.
+    pub fn subscribe(&self) -> broadcast::Receiver<String> {
+        self.done.subscribe()
+    }
+
+    /// A job of this session is queued or running.
+    pub fn is_queued(&self, session_id: &str) -> bool {
+        lock(&self.queued).contains(session_id)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn subscribers(&self) -> usize {
+        self.done.receiver_count()
+    }
+
+    /// The job of `session_id` is over: it may be queued again.
+    pub(crate) fn finished(&self, session_id: &str) {
+        lock(&self.queued).remove(session_id);
+        // No subscriber is fine.
+        let _ = self.done.send(session_id.to_string());
+    }
+
     fn push(&self, session_id: &str, manual: bool, not_before: i64) -> bool {
         let mut q = self.queued.lock().unwrap_or_else(PoisonError::into_inner);
         if !q.insert(session_id.to_string()) {
@@ -1392,12 +1418,7 @@ impl Distiller {
                     }
                 }
                 process(&worker_state, &job).await;
-                worker_state
-                    .distiller
-                    .queued
-                    .lock()
-                    .unwrap_or_else(PoisonError::into_inner)
-                    .remove(&job.session_id);
+                worker_state.distiller.finished(&job.session_id);
             }
         });
         let mut shutdown = state.shutdown.clone();

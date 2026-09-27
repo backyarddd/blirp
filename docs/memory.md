@@ -37,6 +37,8 @@ Distilling turns the new part of a session's transcript into memory.
 
 **When.** A session is distilled when it has been quiet for `memory.distill_idle_secs` (default 300 s) with a new prompt or reply since its last distill (tool output alone does not count), or shortly after it ends (process exit or the agent's session-end hook; the run waits 10 s so the last transcript lines are in, and both triggers make one run). A scheduler checks every 30 s. Only sessions active in the last 7 days are distilled automatically, so importing old history does not use up the budget.
 
+A session you continue in a new one (**Continue in...**, **Start new session from this session**) is also distilled right then when it has new prompts or replies, so the handoff carries a current summary; see [Continue in / fork](projects-and-sessions.md#continue-in--fork).
+
 **Which sessions.** Only sessions that ran on this machine: a session replicated from another machine is distilled there and its results arrive by sync. Subagent sessions are skipped (their task and final report are already in the parent's transcript); **Distill now** still works on them.
 
 **Budget.** At most `memory.daily_distill_limit` runs (default 40) per UTC day, counting manual runs. One run at a time.

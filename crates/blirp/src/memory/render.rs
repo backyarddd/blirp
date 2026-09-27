@@ -266,7 +266,13 @@ fn files_touched(summary: Option<&SessionSummary>, events: &[Event]) -> Vec<Stri
 
 /// §9 handoff pack for continuing `source` in a new session: brief, summary,
 /// last turns, files touched and open threads, capped at `HANDOFF_MAX_CHARS`.
-pub fn render_handoff(store: &Store, source: &Session) -> Result<String, StoreError> {
+/// `stale`: why the summary could not be refreshed for this handoff (see
+/// [`crate::memory::handoff`]), noted under the header.
+pub fn render_handoff(
+    store: &Store,
+    source: &Session,
+    stale: Option<&str>,
+) -> Result<String, StoreError> {
     let brief = store.get_brief(&source.project_id)?;
     let summary = parse_summary(source);
     let turns = store.last_events(&source.id, &["user", "assistant"], HANDOFF_TURNS)?;
@@ -287,6 +293,14 @@ pub fn render_handoff(store: &Store, source: &Session) -> Result<String, StoreEr
         date(source.started_at),
         source.cwd
     );
+    if let Some(why) = stale {
+        head.push_str(&format!(
+            "
+_The summary was not refreshed for this handoff ({}); the last turns below are current._
+",
+            one_line(why)
+        ));
+    }
     if let Some(text) = summary.as_ref().and_then(|s| s.summary.as_deref()) {
         head.push_str("\n## Summary\n");
         head.push_str(text.trim());
@@ -598,8 +612,14 @@ Tools: search older history with the blirp MCP tools (mem_search, mem_session, m
             5,
             false,
         );
-        let pack = render_handoff(&store, &src).unwrap();
+        let pack = render_handoff(&store, &src, None).unwrap();
         assert!(pack.chars().count() <= HANDOFF_MAX_CHARS);
+        assert!(!pack.contains("not refreshed"));
+        let stale = render_handoff(&store, &src, Some("the summarizer is off")).unwrap();
+        assert!(stale.contains(
+            "_The summary was not refreshed for this handoff (the summarizer is off); the last turns below are current._"
+        ));
+        assert!(stale.chars().count() <= HANDOFF_MAX_CHARS);
         assert!(pack.contains("Split the parser."));
         assert!(pack.contains("turn 40 "));
         assert!(!pack.contains("turn 1 "));

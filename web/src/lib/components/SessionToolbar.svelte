@@ -16,6 +16,7 @@
   import { remoteRefusal } from '../capabilities';
   import { agentLabel, canResume, isLive, sessionTitle } from '../status';
   import { formatElapsed } from '../time';
+  import { handoffPendingLabel } from '../handoff';
   import Menu, { type MenuItem } from './Menu.svelte';
   import Modal from './Modal.svelte';
   import MachineBadge from './MachineBadge.svelte';
@@ -33,11 +34,13 @@
   });
   const elapsed = $derived(formatElapsed((session.ended_at ?? (live ? now : session.last_activity_at)) - session.started_at));
 
+  // Set while a handoff from this session is being prepared (the daemon may summarize it first).
+  const handingOff = $derived(app.handoffFrom.has(session.id));
   const continueItems: MenuItem[] = $derived(
     app.agents.map((a) => ({
       label: a.display_name || agentLabel(a.id),
       hint: a.installed ? (a.id === session.agent ? 'same agent' : '') : 'not installed',
-      disabled: !a.installed,
+      disabled: !a.installed || handingOff,
       // No folder: the daemon starts it in the source session's folder when that exists here.
       onselect: () => void app.launch({ continue_from: session.id, agent: a.id }),
     })),
@@ -204,8 +207,12 @@
       class="btn sm"
       title="Start new session from this session: a fresh session that starts with this session's handoff"
       onclick={() => app.launch({ continue_from: session.id, agent: session.agent })}
+      disabled={handingOff}
+      aria-busy={handingOff}
     >
-      <GitFork size={15} aria-hidden="true" />Start new session from this session
+      <GitFork size={15} aria-hidden="true" />{handingOff
+        ? handoffPendingLabel(session, app.health?.machine.id)
+        : 'Start new session from this session'}
     </button>
   {/if}
   <button
