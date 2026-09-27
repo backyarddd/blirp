@@ -541,7 +541,7 @@ class AppState {
     });
     if (!d) return;
     const title = sessionTitle(next);
-    const project = this.projectById.get(next.project_id)?.name;
+    const project = this.projectById.has(next.project_id) ? this.projectLabel(next.project_id) : undefined;
     const open = (): void => {
       navigate(href.sessions(next.id));
       this.markSeen();

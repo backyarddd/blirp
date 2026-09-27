@@ -978,8 +978,9 @@ test('notifications: OS notification in the background, in-app toast and title b
   await setFocus(false);
   await hook('Notification');
   await expect.poll(async () => (await notes()).length).toBe(2);
-  // The body names the project once the UI has loaded it (a new project may still be on its way).
-  expect((await notes())[1]).toEqual({ title: 'Claude Code in notify-proj', body: expect.stringMatching(/^Needs your input( · notify-proj)?$/) });
+  // The body names where the session is filed once the UI has loaded it: a session outside blirp in
+  // the temp folder is a chat.
+  expect((await notes())[1]).toEqual({ title: 'Claude Code in notify-proj', body: expect.stringMatching(/^Needs your input( · Chats)?$/) });
   await expect(p).toHaveTitle('(1) blirp');
   const icon = p.locator('link[rel="icon"]').first();
   await expect(icon).toHaveAttribute('href', /^data:image\/png/);
