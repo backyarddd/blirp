@@ -31,6 +31,8 @@ pub(super) async fn serve(state: SharedState, stream: ProxyStream, p: ProxyPrinc
     let opted_in = sync.role != MachineRole::Node || sync.allow_hub_control;
     let principal = Principal {
         control: p.control && opted_in,
+        // The machine that relayed it checked its own caller's rights.
+        files: true,
         admin: false,
         device: None,
         label: p.via,

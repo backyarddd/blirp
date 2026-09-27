@@ -973,16 +973,21 @@ enum Need {
     Control,
 }
 
-/// A LAN portal browser device (never admin) and its cookie.
+/// A LAN portal browser device (never admin) and its cookie. It may read
+/// project files when it may control terminals (see the Files checks).
 fn portal_device(h: &Harness, control: bool) -> String {
+    portal_device_with(h, control, control)
+}
+
+fn portal_device_with(h: &Harness, control: bool, files: bool) -> String {
     use sha2::Digest as _;
-    let token = format!("{:064x}", u128::from(control) + 7);
+    let token = format!("{:064x}", u128::from(control) + 2 * u128::from(files) + 7);
     let now = blirp_core::now_ms();
     h.daemon
         .state
         .store
         .upsert_device(&blirp_core::model::Device {
-            id: format!("dev-{control}"),
+            id: format!("dev-{control}-{files}"),
             name: "phone".into(),
             kind: blirp_core::model::DeviceKind::Browser,
             token_hash: Some(hex::encode(sha2::Sha256::digest(token.as_bytes()))),
@@ -991,6 +996,7 @@ fn portal_device(h: &Harness, control: bool) -> String {
             last_seen: now,
             revoked: false,
             can_control_terminals: control,
+            can_access_files: files,
         })
         .unwrap();
     format!("blirp_device={token}")
@@ -1084,7 +1090,7 @@ async fn portal_devices_get_only_their_rights() {
         assert_eq!(status, 200);
         assert_eq!(
             body["capabilities"],
-            json!({"admin": false, "control_terminals": control, "local": false})
+            json!({"admin": false, "control_terminals": control, "local": false, "files": control})
         );
     }
     let local: Health = h.get("/api/health").await;
@@ -1093,9 +1099,44 @@ async fn portal_devices_get_only_their_rights() {
         blirp_core::model::Capabilities {
             admin: true,
             control_terminals: true,
-            local: true
+            local: true,
+            files: true,
         }
     );
+    // Project files need the Files permission, also for reading and for a
+    // device that may control terminals.
+    let no_files = portal_device_with(&h, true, false);
+    for (method, path) in [
+        ("GET", "/api/projects/p1/files"),
+        ("GET", "/api/projects/p1/files/content?path=a"),
+        ("GET", "/api/projects/p1/git/diff"),
+        ("GET", "/api/projects/p1/files-sync"),
+        ("GET", "/api/projects/p1/files-sync/preview"),
+        ("GET", "/api/files/status"),
+        ("POST", "/api/projects/p1/files-sync/apply"),
+        ("POST", "/api/machines/m1/files/download"),
+    ] {
+        for cookie in [&viewer, &no_files] {
+            let (status, body) = portal_call(&app, method, path, cookie).await;
+            if cookie == &viewer && method == "POST" {
+                assert_eq!(
+                    body["error"]["code"], "control_not_allowed",
+                    "{method} {path}"
+                );
+            } else {
+                assert_eq!(status, 403, "{method} {path}: {body}");
+                assert_eq!(
+                    body["error"]["code"], "files_not_allowed",
+                    "{method} {path}"
+                );
+            }
+        }
+        let (status, body) = portal_call(&app, method, path, &controller).await;
+        assert!(
+            status != 403 && status != 401,
+            "{method} {path}: {status} {body}"
+        );
+    }
     // The local client passes the admin checks.
     let r = h
         .send(reqwest::Method::PATCH, "/api/settings", json!({}))

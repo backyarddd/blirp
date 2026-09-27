@@ -140,7 +140,12 @@ export type Resource = { id: string, project_id: string, kind: ResourceKind, url
  */
 updated_at: number, deleted: boolean, };
 
-export type Device = { id: string, name: string, kind: DeviceKind, node_id: string | null, created_at: number, last_seen: number, revoked: boolean, can_control_terminals: boolean, };
+export type Device = { id: string, name: string, kind: DeviceKind, node_id: string | null, created_at: number, last_seen: number, revoked: boolean, can_control_terminals: boolean, 
+/**
+ * Portal browser device: may read project files (file browser, diffs,
+ * project file sync). Off by default.
+ */
+can_access_files: boolean, };
 
 export type ErrorBody = { error: ErrorDetail, };
 
@@ -766,7 +771,12 @@ control_terminals: boolean,
 /**
  * The client authenticated with this machine's runtime token.
  */
-local: boolean, };
+local: boolean, 
+/**
+ * Read project files and use project file sync: every client but
+ * portal devices without the Files permission.
+ */
+files: boolean, };
 
 export type DistillStatus = { 
 /**
@@ -939,9 +949,13 @@ ticket: string, };
 export type BrowserInvite = { url: string, expires_at: number, };
 
 /**
- * `PATCH /api/devices/:id`.
+ * `PATCH /api/devices/:id`: the fields given change.
  */
-export type PatchDevice = { can_control_terminals: boolean, };
+export type PatchDevice = { can_control_terminals?: boolean, 
+/**
+ * Portal browser devices: the Files permission.
+ */
+can_access_files?: boolean, };
 
 /**
  * Frames pushed on `/api/events/ws`.

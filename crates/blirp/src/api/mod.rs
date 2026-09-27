@@ -35,6 +35,9 @@ pub struct Principal {
     pub control: bool,
     /// May manage the hub, pairing and devices (local clients only).
     pub admin: bool,
+    /// May read project files and use project file sync (portal devices
+    /// only with the Files permission).
+    pub files: bool,
     /// Portal browser device id.
     pub device: Option<String>,
     /// Short description for logs and proxied requests.
@@ -46,6 +49,7 @@ impl Principal {
         Self {
             control: true,
             admin: true,
+            files: true,
             device: None,
             label: "local".into(),
         }
@@ -58,6 +62,19 @@ impl Principal {
             admin: self.admin,
             control_terminals: self.control,
             local: self.admin && self.device.is_none(),
+            files: self.files,
+        }
+    }
+
+    pub fn require_files(&self) -> ApiResult<()> {
+        if self.files {
+            Ok(())
+        } else {
+            Err(ApiError::new(
+                StatusCode::FORBIDDEN,
+                "files_not_allowed",
+                "this device may not read project files; allow Files for it in Settings > Machines & Sync > Devices",
+            ))
         }
     }
 
@@ -115,6 +132,22 @@ impl<S: Send + Sync> FromRequestParts<S> for Control {
     ) -> Result<Self, Self::Rejection> {
         let p = Principal::from_request_parts(parts, state).await?;
         p.require_control()?;
+        Ok(Self(p))
+    }
+}
+
+/// Extractor for routes that read project files or use project file sync:
+/// portal devices need the Files permission (403 `files_not_allowed`).
+pub struct FilesAccess(pub Principal);
+
+impl<S: Send + Sync> FromRequestParts<S> for FilesAccess {
+    type Rejection = ApiError;
+    async fn from_request_parts(
+        parts: &mut axum::http::request::Parts,
+        state: &S,
+    ) -> Result<Self, Self::Rejection> {
+        let p = Principal::from_request_parts(parts, state).await?;
+        p.require_files()?;
         Ok(Self(p))
     }
 }

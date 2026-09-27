@@ -287,6 +287,7 @@ pub async fn authenticate(state: &SharedState, token: String) -> ApiResult<Optio
         }
         Ok(Some(Principal {
             control: d.can_control_terminals,
+            files: d.can_access_files,
             admin: false,
             label: format!("browser {}", d.name),
             device: Some(d.id),
@@ -384,6 +385,7 @@ pub async fn device_login(
         last_seen: now,
         revoked: false,
         can_control_terminals: false,
+        can_access_files: false,
     };
     let store = state.store.clone();
     let name = device.name.clone();

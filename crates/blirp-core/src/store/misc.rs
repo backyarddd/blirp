@@ -28,6 +28,7 @@ pub(super) fn device_row(r: &Row<'_>) -> rusqlite::Result<Device> {
         last_seen: r.get("last_seen")?,
         revoked: r.get("revoked")?,
         can_control_terminals: r.get("can_control_terminals")?,
+        can_access_files: r.get("can_access_files")?,
     })
 }
 
@@ -155,13 +156,14 @@ impl Store {
         self.write(|tx| {
             tx.execute(
                 "INSERT INTO devices(id, name, kind, token_hash, node_id, created_at, last_seen, revoked,
-                   can_control_terminals) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9)
+                   can_control_terminals, can_access_files) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10)
                  ON CONFLICT(id) DO UPDATE SET name=excluded.name, kind=excluded.kind,
                    token_hash=excluded.token_hash, node_id=excluded.node_id, last_seen=excluded.last_seen,
-                   revoked=excluded.revoked, can_control_terminals=excluded.can_control_terminals",
+                   revoked=excluded.revoked, can_control_terminals=excluded.can_control_terminals,
+                   can_access_files=excluded.can_access_files",
                 params![
                     d.id, d.name, d.kind, d.token_hash, d.node_id, d.created_at, d.last_seen, d.revoked,
-                    d.can_control_terminals
+                    d.can_control_terminals, d.can_access_files
                 ],
             )?;
             Ok(())
@@ -246,6 +248,7 @@ mod tests {
             last_seen: 1,
             revoked: false,
             can_control_terminals: false,
+            can_access_files: false,
         };
         store.upsert_device(&d).unwrap();
         assert_eq!(store.device_by_token_hash("h").unwrap(), Some(d.clone()));

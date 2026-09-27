@@ -1996,6 +1996,7 @@ mod tests {
             last_seen: 1,
             revoked,
             can_control_terminals: true,
+            can_access_files: false,
         })
         .unwrap();
     }

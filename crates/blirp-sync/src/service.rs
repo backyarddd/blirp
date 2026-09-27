@@ -822,6 +822,7 @@ fn register_node(store: &Store, node_id: &str, meta: &MachineMeta) -> Result<()>
         last_seen: now,
         revoked: false,
         can_control_terminals: true,
+        can_access_files: false,
     })?;
     store.apply(Change::Machine(Machine {
         id: node_id.to_string(),

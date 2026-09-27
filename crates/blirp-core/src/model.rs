@@ -396,6 +396,9 @@ pub struct Device {
     pub last_seen: i64,
     pub revoked: bool,
     pub can_control_terminals: bool,
+    /// Portal browser device: may read project files (file browser, diffs,
+    /// project file sync). Off by default.
+    pub can_access_files: bool,
 }
 
 // ---------------------------------------------------------------- API
@@ -484,6 +487,9 @@ pub struct Capabilities {
     pub control_terminals: bool,
     /// The client authenticated with this machine's runtime token.
     pub local: bool,
+    /// Read project files and use project file sync: every client but
+    /// portal devices without the Files permission.
+    pub files: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, TS)]
@@ -1464,11 +1470,17 @@ pub struct DownloadJob {
     pub finished_at: Option<i64>,
 }
 
-/// `PATCH /api/devices/:id`.
+/// `PATCH /api/devices/:id`: the fields given change.
 #[derive(Debug, Clone, Serialize, Deserialize, TS)]
 #[serde(deny_unknown_fields)]
 pub struct PatchDevice {
-    pub can_control_terminals: bool,
+    #[serde(default)]
+    #[ts(optional)]
+    pub can_control_terminals: Option<bool>,
+    /// Portal browser devices: the Files permission.
+    #[serde(default)]
+    #[ts(optional)]
+    pub can_access_files: Option<bool>,
 }
 
 str_enum!(MemoryPart {

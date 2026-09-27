@@ -74,7 +74,7 @@
 
   $effect(() => {
     const id = projectId;
-    if (!open || !synced || !id || id === hubFilesFor) return;
+    if (!open || !synced || !app.canFiles || !id || id === hubFilesFor) return;
     untrack(() => {
       hubFilesFor = id;
       hubFiles = null;

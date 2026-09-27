@@ -1,7 +1,7 @@
 //! Read-only project files and git views. Every path stays inside a
 //! registered root of the project on this machine.
 
-use super::{ApiError, ApiPath, ApiQuery, ApiResult, blocking};
+use super::{ApiError, ApiPath, ApiQuery, ApiResult, FilesAccess, blocking};
 use crate::state::SharedState;
 use axum::extract::State;
 use axum::http::StatusCode;
@@ -147,6 +147,7 @@ fn mtime_ms(m: &std::fs::Metadata) -> Option<i64> {
 
 async fn list_dir(
     State(s): State<SharedState>,
+    _files: FilesAccess,
     ApiPath(id): ApiPath<String>,
     ApiQuery(q): ApiQuery<PathQuery>,
 ) -> ApiResult<Json<DirListing>> {
@@ -205,6 +206,7 @@ async fn list_dir(
 
 async fn read_file(
     State(s): State<SharedState>,
+    _files: FilesAccess,
     ApiPath(id): ApiPath<String>,
     ApiQuery(q): ApiQuery<PathQuery>,
 ) -> ApiResult<Json<FileContent>> {
@@ -308,6 +310,7 @@ async fn git_status(
 
 async fn git_diff(
     State(s): State<SharedState>,
+    _files: FilesAccess,
     ApiPath(id): ApiPath<String>,
     ApiQuery(q): ApiQuery<PathQuery>,
 ) -> ApiResult<Json<GitDiff>> {

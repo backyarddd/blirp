@@ -595,8 +595,14 @@ async fn patch_device(
         let d = store
             .get_device(&did)?
             .ok_or_else(|| ApiError::not_found("device"))?;
+        if body.can_control_terminals.is_none() && body.can_access_files.is_none() {
+            return Err(ApiError::bad_request("nothing to change"));
+        }
         let d = Device {
-            can_control_terminals: body.can_control_terminals,
+            can_control_terminals: body
+                .can_control_terminals
+                .unwrap_or(d.can_control_terminals),
+            can_access_files: body.can_access_files.unwrap_or(d.can_access_files),
             ..d
         };
         store.upsert_device(&d)?;

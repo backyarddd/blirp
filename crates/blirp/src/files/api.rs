@@ -6,7 +6,9 @@
 
 use super::copy::{self, Act, Copy, CopyError};
 use super::engine::{self, Engine};
-use crate::api::{ApiError, ApiJson, ApiPath, ApiQuery, ApiResult, Control, Principal, blocking};
+use crate::api::{
+    ApiError, ApiJson, ApiPath, ApiQuery, ApiResult, Control, FilesAccess, Principal, blocking,
+};
 use crate::state::SharedState;
 use axum::extract::State;
 use axum::http::{Method, StatusCode};
@@ -107,7 +109,10 @@ fn paused(s: &SharedState) -> bool {
 }
 
 /// `GET /api/files/status`.
-async fn overview(State(s): State<SharedState>) -> ApiResult<Json<FilesOverview>> {
+async fn overview(
+    State(s): State<SharedState>,
+    _files: FilesAccess,
+) -> ApiResult<Json<FilesOverview>> {
     let cfg = s.config();
     let engine = super::engine(&s);
     let st = s.clone();
@@ -153,6 +158,7 @@ async fn overview(State(s): State<SharedState>) -> ApiResult<Json<FilesOverview>
 async fn pause(
     State(s): State<SharedState>,
     Control(_): Control,
+    _files: FilesAccess,
     ApiJson(body): ApiJson<PauseFiles>,
 ) -> ApiResult<Json<FilesOverview>> {
     let st = s.clone();
@@ -166,13 +172,14 @@ async fn pause(
     if let Some(e) = super::engine(&s) {
         e.rescan();
     }
-    overview(State(s)).await
+    overview(State(s), FilesAccess(crate::api::Principal::local())).await
 }
 
 /// `POST /api/files/start-now`: end the first-run grace period.
 async fn start_now(
     State(s): State<SharedState>,
     Control(_): Control,
+    _files: FilesAccess,
 ) -> ApiResult<Json<FilesOverview>> {
     let st = s.clone();
     blocking(move || {
@@ -184,7 +191,7 @@ async fn start_now(
     if let Some(e) = super::engine(&s) {
         e.rescan();
     }
-    overview(State(s)).await
+    overview(State(s), FilesAccess(crate::api::Principal::local())).await
 }
 
 fn default_local(key: &str, origin: bool) -> LocalFiles {
@@ -275,6 +282,7 @@ async fn project_files(s: &SharedState, id: &str) -> ApiResult<ProjectFiles> {
 /// `GET /api/projects/:id/files-sync`.
 async fn project(
     State(s): State<SharedState>,
+    _files: FilesAccess,
     ApiPath(id): ApiPath<String>,
 ) -> ApiResult<Json<ProjectFiles>> {
     project_files(&s, &id).await.map(Json)
@@ -286,6 +294,7 @@ async fn set_mode(
     State(s): State<SharedState>,
     ApiPath(id): ApiPath<String>,
     Control(_): Control,
+    _files: FilesAccess,
     ApiJson(body): ApiJson<SetFilesMode>,
 ) -> ApiResult<Json<ProjectFiles>> {
     let e = need_engine(&s)?;
@@ -306,6 +315,7 @@ async fn set_mode(
 /// it computes stay in the local cache for the real upload.
 async fn preview(
     State(s): State<SharedState>,
+    _files: FilesAccess,
     ApiPath(id): ApiPath<String>,
     ApiQuery(q): ApiQuery<RootQuery>,
 ) -> ApiResult<Json<FilesPreview>> {
@@ -357,6 +367,7 @@ fn names(s: &SharedState) -> HashMap<String, String> {
 /// folder has not taken ("Hub has N newer files").
 async fn incoming(
     State(s): State<SharedState>,
+    _files: FilesAccess,
     ApiPath(id): ApiPath<String>,
     ApiQuery(q): ApiQuery<RootQuery>,
 ) -> ApiResult<Json<FilesIncoming>> {
@@ -405,6 +416,7 @@ async fn apply(
     State(s): State<SharedState>,
     ApiPath(id): ApiPath<String>,
     Control(_): Control,
+    _files: FilesAccess,
     ApiJson(body): ApiJson<ApplyFiles>,
 ) -> ApiResult<Json<AppliedFiles>> {
     let e = need_engine(&s)?;
@@ -453,6 +465,7 @@ async fn delete_root(
     State(s): State<SharedState>,
     ApiPath((id, root)): ApiPath<(String, String)>,
     Control(_): Control,
+    _files: FilesAccess,
 ) -> ApiResult<StatusCode> {
     let e = need_engine(&s)?;
     let known = e
@@ -549,6 +562,7 @@ async fn download(
     State(s): State<SharedState>,
     ApiPath(id): ApiPath<String>,
     Control(principal): Control,
+    _files: FilesAccess,
     ApiJson(body): ApiJson<DownloadFiles>,
 ) -> ApiResult<Response> {
     if id != s.machine.id {
@@ -604,6 +618,7 @@ async fn download(
 
 async fn download_job(
     State(s): State<SharedState>,
+    _files: FilesAccess,
     ApiPath((id, job)): ApiPath<(String, String)>,
     principal: Principal,
 ) -> ApiResult<Response> {

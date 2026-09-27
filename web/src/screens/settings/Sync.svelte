@@ -250,6 +250,12 @@
     if (ok) void devices.reload();
   }
 
+  async function setFiles(d: Device, on: boolean): Promise<void> {
+    const updated = await app.act(() => api.devices.patch(d.id, { can_access_files: on }));
+    if (updated) devices.data = (devices.data ?? []).map((x) => (x.id === updated.id ? updated : x));
+    else void devices.reload();
+  }
+
   async function setControl(d: Device, on: boolean): Promise<void> {
     const updated = await app.act(() => api.devices.patch(d.id, { can_control_terminals: on }));
     if (updated) devices.data = (devices.data ?? []).map((x) => (x.id === updated.id ? updated : x));
@@ -451,7 +457,10 @@
 
   <section class="card panel-pad">
     <h2 class="h">Devices</h2>
-    <p class="hint">Paired machines and signed-in browsers. Terminal control lets a device type into live sessions.</p>
+    <p class="hint">
+      Paired machines and signed-in browsers. Terminal control lets a device type into live sessions; Files lets a browser read
+      project files and diffs and use project file sync (a device with terminal control can run a shell here anyway).
+    </p>
     <Loadable loading={devices.loading && !devices.data} error={devices.error} empty={(devices.data?.length ?? 0) === 0} emptyText="No paired devices yet." onretry={() => devices.load()}>
       <ul class="list">
         {#each devices.data ?? [] as d (d.id)}
@@ -469,6 +478,12 @@
                 <input type="checkbox" checked={d.can_control_terminals} onchange={(e) => setControl(d, e.currentTarget.checked)} />
                 Terminal control
               </label>
+              {#if d.kind === 'browser'}
+                <label class="check small" title="Browse project files and diffs, use project file sync">
+                  <input type="checkbox" checked={d.can_access_files} onchange={(e) => setFiles(d, e.currentTarget.checked)} />
+                  Files
+                </label>
+              {/if}
               <button type="button" class="btn sm danger" onclick={() => revokeDevice(d)}>Revoke</button>
             {/if}
           </li>

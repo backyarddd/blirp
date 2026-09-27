@@ -8,15 +8,18 @@ export interface Rights {
   control: boolean;
   /** This machine's own client (runtime token): may stop the daemon. */
   local: boolean;
+  /** Read project files and use project file sync (portal devices need the Files permission). */
+  files: boolean;
 }
 
 /** Rights a 403 revoked since capabilities were last read. */
 export interface Denied {
   admin: boolean;
   control: boolean;
+  files: boolean;
 }
 
-export const NONE_DENIED: Denied = { admin: false, control: false };
+export const NONE_DENIED: Denied = { admin: false, control: false, files: false };
 
 /**
  * `GET /api/health` capabilities, narrowed by any 403 seen since: a device's rights can change
@@ -27,6 +30,7 @@ export function rightsFrom(caps: Capabilities | null | undefined, denied: Denied
     admin: (caps?.admin ?? false) && !denied.admin,
     control: (caps?.control_terminals ?? false) && !denied.control,
     local: (caps?.local ?? false) && !denied.admin,
+    files: (caps?.files ?? false) && !denied.files,
   };
 }
 
@@ -34,6 +38,7 @@ export function rightsFrom(caps: Capabilities | null | undefined, denied: Denied
 export function denyFor(code: string, denied: Denied): Denied {
   if (code === 'admin_only') return { ...denied, admin: true };
   if (code === 'control_not_allowed') return { ...denied, control: true };
+  if (code === 'files_not_allowed') return { ...denied, files: true };
   return denied;
 }
 

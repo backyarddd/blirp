@@ -117,6 +117,8 @@ class AppState {
   control = $derived(this.#rights.control);
   /** This machine's own client: may stop the daemon. */
   local = $derived(this.#rights.local);
+  /** Read project files and use project file sync (portal devices: the Files permission). */
+  canFiles = $derived(this.#rights.files);
 
   conn: ConnState = $state('connecting');
   /** Bumped per project when the daemon reports a memory change; views re-fetch on change. */
@@ -260,6 +262,7 @@ class AppState {
   }
 
   async refreshFiles(): Promise<void> {
+    if (!this.canFiles) return;
     try {
       this.files = await api.files.status();
     } catch (e) {

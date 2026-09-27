@@ -39,7 +39,14 @@
   // Files on hub: only when this machine is a hub or paired with one.
   const synced = $derived((app.sync?.role ?? app.health?.role ?? 'standalone') !== 'standalone');
   const tabs = $derived(
-    TABS.filter((t) => (t.id !== 'git' || hasGit) && (t.id !== 'files' || hasLocal) && (t.id !== 'hub-files' || synced)),
+    TABS.filter(
+      (t) =>
+        (t.id !== 'git' || hasGit) &&
+        (t.id !== 'files' || hasLocal) &&
+        (t.id !== 'hub-files' || synced) &&
+        // Portal devices without the Files permission read no project files.
+        (app.canFiles || !['files', 'hub-files', 'git'].includes(t.id)),
+    ),
   );
 
   let renaming = $state(false);
