@@ -23,6 +23,13 @@ so every tag needs one.
   `[sync] project_files` and a `[files]` config section. Portal browser
   devices need the new Files permission for project files.
 
+### Changed
+
+- LAN portal browser devices no longer read project files by default: the
+  project file browser, file contents, git diffs and project file sync need
+  the new **Files** permission (Settings > Machines & Sync > Devices; off for
+  existing and new devices), answering 403 `files_not_allowed` without it.
+
 ## [0.1.1] - 2026-09-26
 
 ### Added
