@@ -10,7 +10,7 @@ No. Agents run as their own CLIs with their own logins; blirp only adds flags, e
 Only in two cases you control: the summarizer (`claude` or `codex` CLI) sends redacted transcript excerpts to that provider, and sync sends redacted data to your own paired machines. Use `memory.summarizer = "ollama"` or `"none"` to keep everything local. See [security.md](security.md).
 
 **What does distilling cost?**
-With the `claude` summarizer each run is one Haiku request of up to roughly 15 000 input tokens, charged to your Claude plan's usage or your API key. `codex` uses Codex's default model. By default at most 40 runs per day. Ollama is free. See [memory.md](memory.md#summarizer-backends).
+With the `claude` summarizer each run is one Sonnet request of up to roughly 15 000 input tokens, charged to your Claude plan's usage or your API key. `codex` uses Codex's default model. By default at most 40 runs per day. Ollama is free. See [memory.md](memory.md#summarizer-backends).
 
 **Do I need git?**
 No. Any folder is a project. Git only adds branch display, the Git tab and optional per-session worktrees.

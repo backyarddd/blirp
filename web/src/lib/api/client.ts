@@ -42,6 +42,7 @@ import type {
   SettingsView,
   Suggestion,
   SuggestionStatus,
+  SummarizerPick,
   SyncInvite,
   SyncStatus,
   UpdateStatus,
@@ -286,6 +287,8 @@ export const api = {
      * `sync.hub` are never written here. `values` keys are set (null deletes).
      */
     patch: (patch: SettingsPatch) => request<SettingsView>('PATCH', '/api/settings', patch),
+    /** What `memory.summarizer = "auto"` resolves to now (runs local login probes, about a second). */
+    summarizer: () => request<SummarizerPick>('GET', '/api/settings/summarizer'),
   },
   sync: {
     status: () => request<SyncStatus>('GET', '/api/sync/status'),

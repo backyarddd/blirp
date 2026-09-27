@@ -42,7 +42,7 @@ Work as usual. When the session has been idle for 5 minutes (`memory.distill_idl
 - decisions, open threads and gotchas become **records** of the project,
 - the **project brief** (what the project is, how to build and run it, current priorities) is updated as a new version.
 
-The summarizer is picked automatically: your `claude` CLI if installed (runs Haiku), else `codex`, else a local Ollama server, else nothing. Change it in **Settings > Memory** or `config.toml` ([memory.md](memory.md#summarizer-backends)). Want to see the result now? Open the session's detail page and use **Distill now**.
+The summarizer is picked automatically: your default agent for new sessions if that is Claude Code (runs Sonnet) or Codex and it is signed in, else your `claude` CLI, else a local Ollama server, else nothing. **Settings > Memory** shows which one it uses and why. Change it in **Settings > Memory** or `config.toml` ([memory.md](memory.md#summarizer-backends)). Want to see the result now? Open the session's detail page and use **Distill now**.
 
 ## 4. Start the next session
 

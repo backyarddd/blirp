@@ -11,7 +11,7 @@ use serde_json::Value as JsonValue;
 use std::collections::BTreeMap;
 use ts_rs::TS;
 
-use crate::config::Config;
+use crate::config::{Config, Summarizer};
 
 /// Built-in agent ids (§7). Custom agents are `custom:<name>`.
 pub const BUILTIN_AGENTS: &[&str] = &[
@@ -1042,6 +1042,32 @@ pub struct DistillStatus {
     pub budget_limit: u32,
 }
 
+/// What `memory.summarizer = "auto"` resolves to on this machine right now
+/// (`GET /api/settings/summarizer`, §9).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+pub struct SummarizerPick {
+    /// `claude`, `codex` or `ollama`; null when none is available.
+    pub backend: Option<Summarizer>,
+    /// Model it runs (`sonnet`, the Ollama model); null for codex, which
+    /// uses its built-in default.
+    pub model: Option<String>,
+    /// `agents.default`, the agent preselected for new sessions.
+    pub default_agent: String,
+    /// Why the default agent's own summarizer is not used; null when it is.
+    pub fallback: Option<SummarizerFallback>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "snake_case")]
+pub enum SummarizerFallback {
+    /// The default agent has no summarizer backend (only claude and codex do).
+    NoBackend,
+    /// Its CLI is not on PATH.
+    NotInstalled,
+    /// Its CLI reports it is not logged in.
+    NotLoggedIn,
+}
+
 #[derive(Debug, Clone, Default, Serialize, Deserialize, TS)]
 #[serde(deny_unknown_fields)]
 pub struct SettingsPatch {
@@ -1270,7 +1296,7 @@ mod tests {
             GitStatusEntry, GitStatus, GitDiff, FileEntry, DirListing, FileContent, SessionsPage, SessionDetail,
             LaunchSession, PatchSession, RemoveWorktree, OpenTarget, OpenSession, UploadedFile, EventsPage, SearchHit, SearchResults, AgentInfo,
             AgentIntegration, AgentAuth, AgentToken, SetAgentToken, MachineDirs, MachineDir, CloneRepo, CloneJob, Injection, SummaryItem, DistillFailure, SessionSummary,
-            SettingsView, SettingsPatch, Capabilities, DistillStatus, DistillPause, SyncStatus, SyncInvite, JoinHub, JoinPreviewRequest, JoinPreview, LeftHub, WsTicketRequest, WsTicket, BrowserInvite, PatchDevice,
+            SettingsView, SettingsPatch, Capabilities, DistillStatus, DistillPause, SummarizerPick, SummarizerFallback, SyncStatus, SyncInvite, JoinHub, JoinPreviewRequest, JoinPreview, LeftHub, WsTicketRequest, WsTicket, BrowserInvite, PatchDevice,
             ServerEvent, TerminalServerMessage, TerminalClientMessage,
             Config, DaemonConfig, MachineConfig, AgentsConfig, CustomAgent, SessionsConfig,
             Summarizer, BriefMode, MemoryConfig, SyncConfig, PortalConfig, UpdateConfig,

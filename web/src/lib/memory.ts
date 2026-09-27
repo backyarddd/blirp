@@ -1,7 +1,8 @@
 // Typed views of the free-form JSON the daemon stores for memory: `Session.summary`
 // (distill output, §9) and `Suggestion.proposal`. Both arrive as parsed JSON of unknown
 // shape, so read them defensively: a malformed field degrades to empty, never a crash.
-import type { DistillFailure, JsonValue, SessionSummary, Suggestion, SummaryItem } from './api/types.gen';
+import type { DistillFailure, JsonValue, SessionSummary, Suggestion, SummarizerPick, SummaryItem } from './api/types.gen';
+import { agentLabel } from './status';
 
 type JsonObject = { [key in string]: JsonValue };
 
@@ -66,4 +67,27 @@ export function proposalMarkdown(s: Pick<Suggestion, 'target' | 'proposal'>): st
   if (s.target === 'brief') return str(p, 'body_md');
   if (s.target === 'wiki') return `### ${str(p, 'title')}\n\n${str(p, 'body_md')}`;
   return `**${str(p, 'title')}**\n\n${str(p, 'body')}`;
+}
+
+/** One line on what the `auto` summarizer uses now and why (Settings > Memory). */
+export function describeAutoSummarizer(p: SummarizerPick): string {
+  const agent = agentLabel(p.default_agent);
+  if (!p.backend) {
+    return 'Automatic finds no summarizer: install and sign in to Claude Code (or Codex as your default agent), or start Ollama.';
+  }
+  // claude's model is an alias (`sonnet`): shown as a name. Ollama tags stay as typed.
+  const model = p.backend === 'claude' && p.model ? p.model.charAt(0).toUpperCase() + p.model.slice(1) : p.model;
+  const name = `${p.backend === 'ollama' ? 'Ollama' : agentLabel(p.backend)} (${model ?? 'its default model'})`;
+  switch (p.fallback) {
+    case null:
+      return `Automatic uses ${name}, your default agent.`;
+    case 'no_backend':
+      return `Automatic uses ${name}: your default agent, ${agent}, has no summarizer.`;
+    case 'not_installed':
+      return `Automatic uses ${name}: your default agent, ${agent}, is not installed.`;
+    case 'not_logged_in':
+      return p.backend === p.default_agent
+        ? `Automatic uses ${name}, your default agent, but it is not signed in: distilling pauses until you sign in.`
+        : `Automatic uses ${name}: your default agent, ${agent}, is not signed in.`;
+  }
 }

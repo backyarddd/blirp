@@ -1,7 +1,9 @@
 <script lang="ts">
   import { untrack } from 'svelte';
-  import type { BriefMode, DistillPause, MemoryConfig, SettingsView, Summarizer } from '../../lib/api/types.gen';
+  import { api, errorMessage } from '../../lib/api/client';
+  import type { BriefMode, DistillPause, MemoryConfig, SettingsView, Summarizer, SummarizerPick } from '../../lib/api/types.gen';
   import { app } from '../../lib/app.svelte';
+  import { describeAutoSummarizer } from '../../lib/memory';
   import { agentLabel } from '../../lib/status';
   import { formatElapsed, formatTime } from '../../lib/time';
 
@@ -15,8 +17,8 @@
   let formError: string | null = $state(null);
 
   const SUMMARIZERS: { id: Summarizer; label: string }[] = [
-    { id: 'auto', label: 'Automatic (first available)' },
-    { id: 'claude', label: 'Claude Code (haiku)' },
+    { id: 'auto', label: 'Automatic (your default agent)' },
+    { id: 'claude', label: 'Claude Code (Sonnet)' },
     { id: 'codex', label: 'Codex' },
     { id: 'ollama', label: 'Ollama (local model)' },
     { id: 'none', label: 'Off (no distilling)' },
@@ -57,6 +59,23 @@
     return () => clearInterval(t);
   });
 
+  // What `auto` resolves to on this machine: fetched when it is selected (the daemon runs local
+  // login probes for it), again after a save.
+  let autoPick: SummarizerPick | null = $state(null);
+  let autoError: string | null = $state(null);
+  let autoLoading = false;
+  $effect(() => {
+    if (form.summarizer !== 'auto' || autoPick || autoError || autoLoading) return;
+    autoLoading = true;
+    api.settings
+      .summarizer()
+      .then(
+        (p) => (autoPick = p),
+        (e: unknown) => (autoError = errorMessage(e)),
+      )
+      .finally(() => (autoLoading = false));
+  });
+
   async function save(e: SubmitEvent): Promise<void> {
     e.preventDefault();
     formError = null;
@@ -77,7 +96,11 @@
       'Memory settings saved',
     );
     saving = false;
-    if (s) onsaved(s);
+    if (s) {
+      autoPick = null;
+      autoError = null;
+      onsaved(s);
+    }
   }
 </script>
 
@@ -113,6 +136,11 @@
     <select class="select" bind:value={form.summarizer}>
       {#each SUMMARIZERS as s (s.id)}<option value={s.id}>{s.label}</option>{/each}
     </select>
+    {#if form.summarizer === 'auto'}
+      <span class="hint" data-testid="auto-summarizer">
+        {#if autoPick}{describeAutoSummarizer(autoPick)}{:else if autoError}Could not check which summarizer Automatic uses: {autoError}{:else}Checking which summarizer Automatic uses…{/if}
+      </span>
+    {/if}
   </label>
   {#if form.summarizer === 'ollama' || form.summarizer === 'auto'}
     <label class="field">

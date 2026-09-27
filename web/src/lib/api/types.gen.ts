@@ -725,6 +725,31 @@ budget_used: number, budget_limit: number, };
 export type DistillPause = "auth" | "unavailable" | "rate_limited";
 
 /**
+ * What `memory.summarizer = "auto"` resolves to on this machine right now
+ * (`GET /api/settings/summarizer`, §9).
+ */
+export type SummarizerPick = { 
+/**
+ * `claude`, `codex` or `ollama`; null when none is available.
+ */
+backend: Summarizer | null, 
+/**
+ * Model it runs (`sonnet`, the Ollama model); null for codex, which
+ * uses its built-in default.
+ */
+model: string | null, 
+/**
+ * `agents.default`, the agent preselected for new sessions.
+ */
+default_agent: string, 
+/**
+ * Why the default agent's own summarizer is not used; null when it is.
+ */
+fallback: SummarizerFallback | null, };
+
+export type SummarizerFallback = "no_backend" | "not_installed" | "not_logged_in";
+
+/**
  * `GET /api/sync/status` (§10).
  */
 export type SyncStatus = { role: MachineRole, 

@@ -87,7 +87,7 @@ check = true
 
 | Key | Type | Default | Description |
 |---|---|---|---|
-| `summarizer` | `"auto"` \| `"claude"` \| `"codex"` \| `"ollama"` \| `"none"` | `"auto"` | Backend that distills sessions. `auto` = first available of `claude` on PATH, a reachable Ollama (`codex` only when chosen explicitly). `none` disables distilling. See [memory.md](memory.md#summarizer-backends). |
+| `summarizer` | `"auto"` \| `"claude"` \| `"codex"` \| `"ollama"` \| `"none"` | `"auto"` | Backend that distills sessions. `auto` = the summarizer of `agents.default` (`claude` or `codex`) when it is installed and logged in, else `claude`, else a reachable Ollama. `claude` runs Sonnet. `none` disables distilling. See [memory.md](memory.md#summarizer-backends). |
 | `ollama_model` | string | `"qwen2.5:7b"` | Ollama model; must be non-empty when `summarizer = "ollama"`. The Ollama URL comes from `OLLAMA_HOST` (default `http://127.0.0.1:11434`). |
 | `distill_idle_secs` | integer > 0 | `300` | A session idle this long with new events is distilled. |
 | `daily_distill_limit` | integer | `40` | Maximum distill runs per UTC day (automatic and manual). `0` stops all distilling. |

@@ -478,6 +478,34 @@ pub fn probe_claude_auth(path: &Path, token_env: Option<(String, String)>) -> Op
     }
 }
 
+/// `codex login status` (local only: reads the stored login, no model call).
+/// Exits 0 when logged in and 1 with "Not logged in" when not (codex
+/// 0.153); `None` for anything else, including a CLI without the command.
+pub fn probe_codex_auth(path: &Path) -> Option<bool> {
+    let cmd = wrap_for_platform(path, vec!["login".into(), "status".into()]).ok()?;
+    match process::run(cmd.std_command(), Duration::from_secs(10), 64 * 1024) {
+        Ok(out) => parse_codex_auth(&out),
+        Err(e) => {
+            tracing::debug!(error = %e, "codex login status failed");
+            None
+        }
+    }
+}
+
+fn parse_codex_auth(out: &process::Output) -> Option<bool> {
+    let text = format!(
+        "{}{}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    )
+    .to_lowercase();
+    match out.status {
+        Some(0) if text.contains("logged in") && !text.contains("not logged in") => Some(true),
+        Some(1) if text.contains("not logged in") => Some(false),
+        _ => None,
+    }
+}
+
 fn parse_claude_auth(stdout: &[u8]) -> Option<AgentAuth> {
     let v: serde_json::Value = serde_json::from_slice(stdout).ok()?;
     let logged_in = v.get("loggedIn")?.as_bool()?;
@@ -598,6 +626,33 @@ mod tests {
         );
         assert_eq!(parse_claude_auth(b"error: unknown command 'auth'"), None);
         assert_eq!(parse_claude_auth(br#"{"other": 1}"#), None);
+    }
+
+    // Output of `codex login status` 0.153.
+    #[test]
+    fn codex_login_status_is_parsed() {
+        let out = |status: i32, stdout: &str, stderr: &str| process::Output {
+            status: Some(status),
+            stdout: stdout.as_bytes().to_vec(),
+            stderr: stderr.as_bytes().to_vec(),
+        };
+        assert_eq!(
+            parse_codex_auth(&out(0, "Logged in using ChatGPT\n", "")),
+            Some(true)
+        );
+        assert_eq!(
+            parse_codex_auth(&out(0, "", "Logged in using an API key - sk-***\n")),
+            Some(true)
+        );
+        assert_eq!(
+            parse_codex_auth(&out(1, "Not logged in\n", "WARNING: ...\n")),
+            Some(false)
+        );
+        assert_eq!(
+            parse_codex_auth(&out(2, "", "error: unrecognized subcommand 'login'")),
+            None
+        );
+        assert_eq!(parse_codex_auth(&out(1, "", "failed to read auth")), None);
     }
 
     fn agent(id: &str, path: &str) -> Agent {

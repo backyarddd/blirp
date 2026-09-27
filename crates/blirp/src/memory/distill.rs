@@ -7,7 +7,8 @@ use crate::state::SharedState;
 use blirp_core::config::{BriefMode, MemoryConfig, Summarizer};
 use blirp_core::model::{
     DistillPause, DistillStatus, Event, EventKind, MemoryPart, Record, RecordKind, RecordStatus,
-    ServerEvent, Session, SessionOrigin, SessionSummary, SummaryItem,
+    ServerEvent, Session, SessionOrigin, SessionSummary, SummarizerFallback, SummarizerPick,
+    SummaryItem,
 };
 use blirp_core::paths::Paths;
 use blirp_core::process;
@@ -347,13 +348,54 @@ async fn ollama_up(base: &str) -> bool {
         .is_ok_and(|r| r.status().is_success())
 }
 
-/// `auto`: claude, else ollama. Codex is never picked automatically: it has
-/// no switch for "no tools", only one per tool (see [`codex_args`]), so a
-/// newer codex can bring a tool those do not cover; it runs only when chosen.
-fn pick_auto(claude: Option<Backend>, ollama: Option<Backend>) -> Result<Backend, String> {
-    claude.or(ollama).ok_or_else(|| {
-        "neither claude nor ollama is available (codex runs only when chosen explicitly)".into()
-    })
+/// Model the claude summarizer runs. Sonnet, not Haiku: summaries and the
+/// brief are read by every later session, so quality beats plan usage here
+/// (the daily run cap and `distill_max_chars` bound the cost).
+pub const CLAUDE_MODEL: &str = "sonnet";
+
+/// A summarizer CLI as `auto` sees it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Cli {
+    Missing,
+    /// On PATH, but its own status command says it is not logged in.
+    LoggedOut,
+    /// On PATH and logged in (or its login state is unknown).
+    Ready,
+}
+
+/// `auto`: the summarizer of `default_agent` (the agent new sessions
+/// preselect; only claude and codex have one), else claude, else a
+/// reachable ollama. Last resort, a logged-out CLI (the default agent's
+/// first): its run fails with its own sign-in error, which pauses
+/// distilling with that reason. Codex is picked only as the default agent:
+/// the user already runs it on these projects with every tool on, while
+/// the summarizer run turns off every tool it can (see [`codex_args`]).
+fn pick_auto(
+    default_agent: &str,
+    claude: Cli,
+    codex: Cli,
+    ollama: bool,
+) -> (Option<Summarizer>, Option<SummarizerFallback>) {
+    let own = match default_agent {
+        "claude" => Some((Summarizer::Claude, claude)),
+        "codex" => Some((Summarizer::Codex, codex)),
+        _ => None,
+    };
+    let fallback = match own {
+        None => Some(SummarizerFallback::NoBackend),
+        Some((_, Cli::Missing)) => Some(SummarizerFallback::NotInstalled),
+        Some((_, Cli::LoggedOut)) => Some(SummarizerFallback::NotLoggedIn),
+        Some((_, Cli::Ready)) => None,
+    };
+    let backend = match own {
+        Some((b, Cli::Ready)) => Some(b),
+        _ if claude == Cli::Ready => Some(Summarizer::Claude),
+        _ if ollama => Some(Summarizer::Ollama),
+        Some((b, Cli::LoggedOut)) => Some(b),
+        _ if claude == Cli::LoggedOut => Some(Summarizer::Claude),
+        _ => None,
+    };
+    (backend, fallback)
 }
 
 /// `codex exec` for a summarizer run: the user's `config.toml` is not
@@ -399,58 +441,174 @@ fn codex_args(last: &Path) -> Vec<OsString> {
     args
 }
 
-/// Resolve `memory.summarizer` to a runnable backend (see [`pick_auto`]).
-/// `Ok(None)` for `none`. CLI summarizers run in a fresh dir under
-/// `paths.distill_dir()`.
-pub async fn select_backend(cfg: &MemoryConfig, paths: &Paths) -> Result<Option<Backend>, String> {
-    let scratch = paths.distill_dir();
-    // PATH scans touch the filesystem: off the async runtime.
-    let (claude_exe, codex_exe) =
-        tokio::task::spawn_blocking(|| (process::which("claude"), process::which("codex")))
-            .await
-            .map_err(|e| format!("looking up summarizers: {e}"))?;
-    let claude = || {
-        claude_exe.clone().map(|exe| Backend::Claude {
-            exe,
-            paths: paths.clone(),
-        })
-    };
-    let codex = || {
-        codex_exe.clone().map(|exe| Backend::Codex {
-            exe,
-            scratch: scratch.clone(),
-        })
-    };
-    let base = ollama_base();
-    let ollama = Backend::Ollama {
-        base: base.clone(),
-        model: cfg.ollama_model.clone(),
-    };
+/// `claude -p` for a summarizer run: no tools, hooks, plugins, CLAUDE.md,
+/// MCP servers or persisted session.
+fn claude_args() -> Vec<OsString> {
+    [
+        "-p",
+        "--model",
+        CLAUDE_MODEL,
+        "--output-format",
+        "json",
+        "--safe-mode",
+        "--strict-mcp-config",
+        "--no-session-persistence",
+        "--tools",
+        "",
+    ]
+    .iter()
+    .map(OsString::from)
+    .collect()
+}
+
+/// Resolve `memory.summarizer` to a runnable backend (`auto`: see
+/// [`pick_auto`]). `Ok(None)` for `none`. CLI summarizers run in a fresh
+/// dir under `paths.distill_dir()`.
+pub async fn select_backend(
+    cfg: &MemoryConfig,
+    default_agent: &str,
+    paths: &Paths,
+) -> Result<Option<Backend>, String> {
+    let (claude_exe, codex_exe) = which_summarizers().await?;
     match cfg.summarizer {
         Summarizer::None => Ok(None),
-        Summarizer::Claude => claude()
-            .map(Some)
+        Summarizer::Claude => claude_exe
+            .map(|exe| Some(backend_claude(exe, paths)))
             .ok_or_else(|| "claude is not on PATH".into()),
-        Summarizer::Codex => codex()
-            .map(Some)
+        Summarizer::Codex => codex_exe
+            .map(|exe| Some(backend_codex(exe, paths)))
             .ok_or_else(|| "codex is not on PATH".into()),
         Summarizer::Ollama => {
+            let base = ollama_base();
             if ollama_up(&base).await {
-                Ok(Some(ollama))
+                Ok(Some(backend_ollama(base, cfg)))
             } else {
                 Err(format!("ollama is not reachable at {base}"))
             }
         }
         Summarizer::Auto => {
-            let claude = claude();
-            let ollama = if claude.is_none() && ollama_up(&base).await {
-                Some(ollama)
-            } else {
-                None
-            };
-            pick_auto(claude, ollama).map(Some)
+            let (backend, _) = resolve(cfg, default_agent, paths, claude_exe, codex_exe).await?;
+            backend.map(Some).ok_or_else(|| {
+                format!(
+                    "claude is not on PATH, ollama is not reachable at {}{}",
+                    ollama_base(),
+                    if default_agent == "codex" {
+                        ", codex is not on PATH"
+                    } else {
+                        " (codex runs only as the default agent or when chosen)"
+                    }
+                )
+            })
         }
     }
+}
+
+/// What `auto` resolves to now, for Settings (`GET /api/settings/summarizer`).
+pub async fn resolve_auto(
+    cfg: &MemoryConfig,
+    default_agent: &str,
+    paths: &Paths,
+) -> Result<SummarizerPick, String> {
+    let (claude_exe, codex_exe) = which_summarizers().await?;
+    Ok(resolve(cfg, default_agent, paths, claude_exe, codex_exe)
+        .await?
+        .1)
+}
+
+/// PATH scans touch the filesystem: off the async runtime.
+async fn which_summarizers() -> Result<(Option<PathBuf>, Option<PathBuf>), String> {
+    tokio::task::spawn_blocking(|| (process::which("claude"), process::which("codex")))
+        .await
+        .map_err(|e| format!("looking up summarizers: {e}"))
+}
+
+fn backend_claude(exe: PathBuf, paths: &Paths) -> Backend {
+    Backend::Claude {
+        exe,
+        paths: paths.clone(),
+    }
+}
+
+fn backend_codex(exe: PathBuf, paths: &Paths) -> Backend {
+    Backend::Codex {
+        exe,
+        scratch: paths.distill_dir(),
+    }
+}
+
+fn backend_ollama(base: String, cfg: &MemoryConfig) -> Backend {
+    Backend::Ollama {
+        base,
+        model: cfg.ollama_model.clone(),
+    }
+}
+
+/// [`pick_auto`] with the probes it needs, all local (no model call):
+/// codex's login only when it is the default agent, claude's only when
+/// that one is not ready, ollama only when no CLI is.
+async fn resolve(
+    cfg: &MemoryConfig,
+    default_agent: &str,
+    paths: &Paths,
+    claude_exe: Option<PathBuf>,
+    codex_exe: Option<PathBuf>,
+) -> Result<(Option<Backend>, SummarizerPick), String> {
+    // Unknown login state (older CLI, unparsable output) counts as ready.
+    let cli = |logged_in: Option<bool>| {
+        if logged_in == Some(false) {
+            Cli::LoggedOut
+        } else {
+            Cli::Ready
+        }
+    };
+    let codex = match &codex_exe {
+        Some(exe) if default_agent == "codex" => {
+            let exe = exe.clone();
+            cli(
+                tokio::task::spawn_blocking(move || crate::agents::probe_codex_auth(&exe))
+                    .await
+                    .map_err(|e| format!("checking the codex login: {e}"))?,
+            )
+        }
+        _ => Cli::Missing,
+    };
+    let claude = match &claude_exe {
+        // Not needed: codex, the default agent, is used.
+        _ if codex == Cli::Ready => Cli::Missing,
+        Some(exe) => {
+            let (exe, p) = (exe.clone(), paths.clone());
+            cli(tokio::task::spawn_blocking(move || {
+                crate::agents::probe_claude_auth(&exe, blirp_core::claude_token::launch_env(&p))
+                    .map(|a| a.logged_in)
+            })
+            .await
+            .map_err(|e| format!("checking the claude login: {e}"))?)
+        }
+        None => Cli::Missing,
+    };
+    let base = ollama_base();
+    let ollama = claude != Cli::Ready && codex != Cli::Ready && ollama_up(&base).await;
+    let (pick, fallback) = pick_auto(default_agent, claude, codex, ollama);
+    let backend = match pick {
+        Some(Summarizer::Claude) => claude_exe.map(|exe| backend_claude(exe, paths)),
+        Some(Summarizer::Codex) => codex_exe.map(|exe| backend_codex(exe, paths)),
+        Some(Summarizer::Ollama) => Some(backend_ollama(base, cfg)),
+        _ => None,
+    };
+    let model = match pick {
+        Some(Summarizer::Claude) => Some(CLAUDE_MODEL.to_string()),
+        Some(Summarizer::Ollama) => Some(cfg.ollama_model.clone()),
+        _ => None,
+    };
+    Ok((
+        backend,
+        SummarizerPick {
+            backend: pick,
+            model,
+            default_agent: default_agent.to_string(),
+            fallback,
+        },
+    ))
 }
 
 /// Output of a summarizer child process.
@@ -580,22 +738,8 @@ impl Backend {
                     tokio::task::spawn_blocking(move || blirp_core::claude_token::launch_env(&p))
                         .await
                         .map_err(|e| format!("reading the claude login token: {e}"))?;
-                let args: Vec<OsString> = [
-                    "-p",
-                    "--model",
-                    "haiku",
-                    "--output-format",
-                    "json",
-                    "--safe-mode",
-                    "--strict-mcp-config",
-                    "--no-session-persistence",
-                    "--tools",
-                    "",
-                ]
-                .iter()
-                .map(OsString::from)
-                .collect();
-                let out = run_process(path, args, login, prompt, dir.path(), timeout).await?;
+                let out =
+                    run_process(path, claude_args(), login, prompt, dir.path(), timeout).await?;
                 parse_claude_json(&out.stdout).map_err(|e| {
                     format!("{e} (exit {:?}; stderr: {})", out.code, tail(&out.stderr))
                 })
@@ -1188,7 +1332,8 @@ pub fn skip_reason(s: &Session, local_machine: &str, manual: bool) -> Option<&'s
 }
 
 async fn process(state: &SharedState, job: &Job) {
-    let cfg = state.config().memory;
+    let config = state.config();
+    let cfg = config.memory;
     if cfg.summarizer == Summarizer::None && !job.manual {
         return;
     }
@@ -1254,7 +1399,7 @@ async fn process(state: &SharedState, job: &Job) {
             return;
         }
     }
-    let result = match select_backend(&cfg, &state.paths).await {
+    let result = match select_backend(&cfg, &config.agents.default, &state.paths).await {
         Ok(Some(b)) => run_distill(state.store.clone(), &job.session_id, &b, &cfg).await,
         Ok(None) => Err(DistillError::NoBackend(
             "memory.summarizer = \"none\"".into(),
@@ -1427,18 +1572,83 @@ mod tests {
     }
 
     #[test]
-    fn codex_is_opt_in_and_runs_without_tools() {
-        let claude = Backend::Claude {
-            exe: "claude".into(),
-            paths: Paths::at("s"),
-        };
-        let ollama = Backend::Ollama {
-            base: "b".into(),
-            model: "m".into(),
-        };
-        assert_eq!(pick_auto(Some(claude), None).unwrap().name(), "claude");
-        assert_eq!(pick_auto(None, Some(ollama)).unwrap().name(), "ollama");
-        assert!(pick_auto(None, None).is_err());
+    fn auto_follows_the_default_agent_then_falls_back() {
+        use Cli::{LoggedOut as Out, Missing as No, Ready as Ok};
+        use Summarizer::{Claude, Codex, Ollama};
+        use SummarizerFallback::{NoBackend, NotInstalled, NotLoggedIn};
+        type Case = (
+            &'static str,
+            Cli,
+            Cli,
+            bool,
+            Option<Summarizer>,
+            Option<SummarizerFallback>,
+        );
+        #[rustfmt::skip]
+        let cases: &[Case] = &[
+            // default agent, claude, codex, ollama up -> backend, fallback
+            ("claude", Ok, Ok, true, Some(Claude), None),
+            ("claude", Ok, No, false, Some(Claude), None),
+            ("claude", No, Ok, true, Some(Ollama), Some(NotInstalled)),
+            ("claude", No, Ok, false, None, Some(NotInstalled)),
+            ("claude", Out, Ok, true, Some(Ollama), Some(NotLoggedIn)),
+            // Nothing else: its own sign-in error pauses distilling.
+            ("claude", Out, Ok, false, Some(Claude), Some(NotLoggedIn)),
+            ("codex", Ok, Ok, true, Some(Codex), None),
+            ("codex", No, Ok, false, Some(Codex), None),
+            ("codex", Ok, No, true, Some(Claude), Some(NotInstalled)),
+            ("codex", Ok, Out, true, Some(Claude), Some(NotLoggedIn)),
+            ("codex", No, Out, true, Some(Ollama), Some(NotLoggedIn)),
+            ("codex", No, Out, false, Some(Codex), Some(NotLoggedIn)),
+            ("codex", Out, Out, false, Some(Codex), Some(NotLoggedIn)),
+            ("codex", No, No, true, Some(Ollama), Some(NotInstalled)),
+            ("codex", No, No, false, None, Some(NotInstalled)),
+            // No summarizer of its own: claude, ollama, never codex.
+            ("opencode", Ok, Ok, true, Some(Claude), Some(NoBackend)),
+            ("opencode", No, Ok, true, Some(Ollama), Some(NoBackend)),
+            ("opencode", No, Ok, false, None, Some(NoBackend)),
+            ("opencode", Out, Ok, true, Some(Ollama), Some(NoBackend)),
+            ("opencode", Out, Ok, false, Some(Claude), Some(NoBackend)),
+            ("custom:mine", Ok, Ok, false, Some(Claude), Some(NoBackend)),
+            ("custom:mine", No, Ok, true, Some(Ollama), Some(NoBackend)),
+            ("custom:codex", No, Ok, false, None, Some(NoBackend)),
+        ];
+        for &(agent, claude, codex, ollama, backend, fallback) in cases {
+            assert_eq!(
+                pick_auto(agent, claude, codex, ollama),
+                (backend, fallback),
+                "{agent} claude={claude:?} codex={codex:?} ollama={ollama}"
+            );
+        }
+    }
+
+    #[test]
+    fn claude_runs_sonnet_without_tools() {
+        let args: Vec<String> = claude_args()
+            .into_iter()
+            .map(|a| a.to_string_lossy().into_owned())
+            .collect();
+        assert!(
+            args.windows(2)
+                .any(|w| w[0] == "--model" && w[1] == "sonnet"),
+            "{args:?}"
+        );
+        assert!(
+            args.windows(2)
+                .any(|w| w[0] == "--tools" && w[1].is_empty()),
+            "{args:?}"
+        );
+        for f in [
+            "--safe-mode",
+            "--strict-mcp-config",
+            "--no-session-persistence",
+        ] {
+            assert!(args.iter().any(|a| a == f), "{f}: {args:?}");
+        }
+    }
+
+    #[test]
+    fn codex_runs_without_tools() {
         let args: Vec<String> = codex_args(Path::new("last.txt"))
             .into_iter()
             .map(|a| a.to_string_lossy().into_owned())

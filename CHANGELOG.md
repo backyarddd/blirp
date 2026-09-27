@@ -44,6 +44,17 @@ so every tag needs one.
 - `blirp update` prints the version before and after and records each
   attempt in `logs/update.log`.
 
+### Changed
+
+- `memory.summarizer = "auto"` now uses your default agent for new sessions
+  (`agents.default`) when that is Claude Code or Codex and it is installed
+  and signed in; otherwise it falls back to `claude`, then Ollama, as
+  before. Settings > Memory shows what Automatic uses right now and why
+  (`GET /api/settings/summarizer`).
+- The `claude` summarizer runs Sonnet instead of Haiku, for better summaries
+  and briefs. Each run uses more of your Claude plan or API spend; the daily
+  run limit (`memory.daily_distill_limit`, default 40) still caps it.
+
 ### Fixed
 
 - The web UI header, sign-in screen and favicon show the same "b" logo as

@@ -11,7 +11,7 @@ use axum::response::Response;
 use axum::routing::{get, post};
 use blirp_core::model::{
     AgentInfo, DistillStatus, Health, Machine, SearchHitKind, SearchResults, ServerEvent,
-    SettingsPatch, SettingsView,
+    SettingsPatch, SettingsView, SummarizerPick,
 };
 use serde::Deserialize;
 use std::time::{Duration, Instant};
@@ -23,6 +23,7 @@ pub fn routes() -> Router<SharedState> {
         .route("/api/machines", get(machines))
         .route("/api/search", get(search))
         .route("/api/settings", get(get_settings).patch(patch_settings))
+        .route("/api/settings/summarizer", get(summarizer))
         .route("/api/agents", get(agents))
         .route("/api/events/ws", get(events_ws))
 }
@@ -102,6 +103,16 @@ async fn get_settings(State(s): State<SharedState>) -> ApiResult<Json<SettingsVi
         values,
         distill,
     }))
+}
+
+/// What `memory.summarizer = "auto"` resolves to now. Its own route, not
+/// part of `GET /api/settings`: it runs local login probes (about a second).
+async fn summarizer(State(s): State<SharedState>) -> ApiResult<Json<SummarizerPick>> {
+    let config = s.config();
+    crate::memory::distill::resolve_auto(&config.memory, &config.agents.default, &s.paths)
+        .await
+        .map(Json)
+        .map_err(|e| ApiError::internal("resolving the summarizer", e))
 }
 
 async fn patch_settings(

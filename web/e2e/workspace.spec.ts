@@ -798,6 +798,21 @@ test('memory injection toggle and per-agent opt-out persist; summarizer state sh
   await expect.poll(memoryConfig).toEqual(expect.objectContaining({ inject: true, inject_disabled_agents: [] }));
 });
 
+test('the automatic summarizer says what it uses and why', async () => {
+  // Answered here: the real route probes the claude and codex logins on this machine.
+  const route = '**/api/settings/summarizer';
+  await page.route(route, (r) =>
+    r.fulfill({ json: { backend: 'claude', model: 'sonnet', default_agent: 'codex', fallback: 'not_logged_in' } }),
+  );
+  await page.goto(`${env.url}/settings/memory`);
+  await expect(page.getByTestId('auto-summarizer')).toHaveCount(0);
+  await page.getByRole('combobox', { name: /^Summarizer/ }).selectOption('auto');
+  await expect(page.getByTestId('auto-summarizer')).toHaveText(
+    'Automatic uses Claude Code (Sonnet): your default agent, Codex, is not signed in.',
+  );
+  await page.unroute(route);
+});
+
 test('new session folder picker lists folders only, hidden ones on request', async () => {
   await page.goto(`${env.url}/sessions`);
   await page.getByRole('button', { name: 'New session' }).first().click();
