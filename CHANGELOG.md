@@ -23,6 +23,28 @@ so every tag needs one.
   hub's Chats as a normal project ("Chats (<hub>)") and lost which project a
   merged project went into. Every machine re-sends its projects once after
   updating, which repairs them.
+- Project file sync: an empty file no longer keeps its whole folder from
+  uploading, and copies made elsewhere get empty files too.
+- Project file sync: a project folder that is no longer on disk (deleted,
+  moved, an unplugged drive or a share that went away) shows "Folder
+  missing" instead of an error on every rescan. Nothing is watched,
+  uploaded or recorded for it, the log names it once, and it syncs again
+  when it is back. Bring changes here and Update from hub refuse it.
+- Project file sync: a folder that comes back emptied (for example a
+  project's workspace made again after it was deleted) never deletes
+  files on the hub on its own, even a single one: it waits for Restore
+  from hub or Delete on hub too. A workspace takes its files back from
+  the hub by itself.
+- Project file sync: a project deleted, or a folder removed, on another
+  machine stops syncing on this one at once instead of after the next
+  10 minute rescan.
+- Project file sync on Windows: files that real-time protection was still
+  scanning no longer fail to update with "Access is denied".
+- Project file sync: upload errors are logged when they start or change,
+  not on every pass, and name the folder.
+- The hub's storage quota no longer loses track of uploads that stop
+  midway or run twice at once, and partial downloads left by stopped
+  transfers are removed after a day.
 
 ## [0.2.0] - 2026-09-27
 
