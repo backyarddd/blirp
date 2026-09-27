@@ -50,6 +50,7 @@ No code-signing prompts appear: files fetched with `curl` or `irm` carry no quar
 | `--version X` | `-Version X` | `BLIRP_VERSION=X` | install release X instead of the latest (also downgrades) |
 | `--no-app` | `-NoApp` | `BLIRP_NO_APP=1` | CLI only |
 | `--service` | `-Service` | `BLIRP_SERVICE=1` | start the daemon at login (`blirp service install`) |
+| `--hub` | | `BLIRP_HUB=1` | server install (e.g. a VPS): CLI only, then `blirp hub setup` (autostart that survives logout, hub role, an invite); refuses to run as root ([vps.md](vps.md)) |
 | `--modify-path` | (default) | `BLIRP_MODIFY_PATH=1` | add the CLI folder to `PATH` in your shell startup file (`~/.zshrc`, `~/.bashrc` or `~/.bash_profile`, fish `conf.d/blirp.fish`, else `~/.profile`); marked `# added by the blirp installer` |
 | | `-NoModifyPath` | `BLIRP_NO_MODIFY_PATH=1` | Windows: leave the user `Path` alone |
 | | | `BLIRP_INSTALL_DIR=dir` | install the CLI (Windows: everything) into `dir` |
@@ -65,7 +66,7 @@ curl -fsSL https://raw.githubusercontent.com/backyarddd/blirp/main/install.sh | 
 $env:BLIRP_NO_APP = '1'; irm https://raw.githubusercontent.com/backyarddd/blirp/main/install.ps1 | iex
 ```
 
-`install.sh` needs `curl` (or `wget`), `tar` and `sha256sum` or `shasum`. The desktop app is installed even without a display (it is just a file); use `--no-app` on servers.
+`install.sh` needs `curl` (or `wget`), `tar` and `sha256sum` or `shasum`. The desktop app is installed even without a display (it is just a file); use `--no-app` on servers, or `--hub` to set up a server as your hub ([vps.md](vps.md)).
 
 ### How the scripts verify downloads
 

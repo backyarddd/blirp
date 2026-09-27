@@ -43,6 +43,23 @@ so every tag needs one.
   listener).
 - `blirp update` prints the version before and after and records each
   attempt in `logs/update.log`.
+- Run the hub on a VPS: `install.sh --hub` installs the CLI and runs the new
+  `blirp hub setup`, which installs the autostart service with systemd
+  linger (so the hub survives logout and reboots), turns LAN discovery off,
+  enables the hub and prints an invite and the next steps. It refuses to run
+  as root, and without systemd (containers) it says so and starts the daemon
+  directly. Guide: `docs/vps.md`.
+- `blirp backup <file>` writes a consistent copy of the database while the
+  daemon runs.
+- `blirp doctor` shows the sync role, the autostart service, systemd linger
+  (Linux) and whether a hub or node is reachable through a relay;
+  `GET /api/sync/status` reports the relay (`relay_url`).
+
+### Changed
+
+- `blirp service install` on Linux prints the `sudo loginctl enable-linger`
+  hint only when linger is off, naming the user, and finds the user's
+  systemd without `XDG_RUNTIME_DIR` (after `sudo -iu`) when linger is on.
 
 ### Changed
 

@@ -11,6 +11,7 @@
 | [Agents](agents.md) | what blirp does for each supported agent, custom agents |
 | [Agent skills](skills.md) | `blirp skills install`: teach your agents to check, link, update and search blirp |
 | [Cloud sessions](cloud-sessions.md) | run sessions on your hub (an always-on machine) from your PC, keep them through sleep and restarts, keep-awake, clone and pick folders on the hub |
+| [Hub on a VPS](vps.md) | no always-on machine at home: run the hub on a rented Linux server with one command, pairing, headless agent logins, firewall, backups, updates |
 | [Sync and hub](sync-and-hub.md) | self-hosting a hub (macOS, Linux, Windows), pairing, what syncs, conflicts, relays and privacy, remote sessions, revocation, backups |
 | [Web portal](portal.md) | LAN HTTPS portal, phone login via QR, certificate fingerprint, browser device permissions, Tailscale |
 

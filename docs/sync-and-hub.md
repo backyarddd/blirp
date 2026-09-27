@@ -24,7 +24,7 @@ It is not a cloud service: no accounts, and data goes only between your paired m
 
 ## Set up a hub
 
-Any machine that stays on and runs as your user works: a Mac mini, a small Linux box or VM, a Raspberry Pi 4/5 on a 64-bit OS, a desktop that never sleeps. The daemon idles at a few tens of MB of RAM; the database grows with your transcript history. Use the standalone `blirp` binary ([install.md](install.md)); the desktop app works too on a machine where you stay logged in.
+Any machine that stays on and runs as your user works: a Mac mini, a small Linux box or VM, a Raspberry Pi 4/5 on a 64-bit OS, a desktop that never sleeps. No such machine at home? Rent a small Linux server: [vps.md](vps.md) sets one up with one command. The daemon idles at a few tens of MB of RAM; the database grows with your transcript history. Use the standalone `blirp` binary ([install.md](install.md)); the desktop app works too on a machine where you stay logged in.
 
 Run the hub under your normal user account, never as root or a system service: summaries use your agent logins, and sessions started on the hub run as that user.
 
@@ -49,6 +49,8 @@ Run the hub under your normal user account, never as root or a system service: s
 5. `blirp hub enable` (below).
 
 ### Linux
+
+`blirp hub setup` does steps 2 to 4 below in one go (and turns LAN discovery off unless you pass `--lan`); `install.sh --hub` installs and runs it ([vps.md](vps.md)). By hand:
 
 1. Install the CLI for your architecture:
    ```sh
@@ -156,7 +158,7 @@ With sync, the new-session dialog has a **Run on** choice: this machine, **Cloud
 
 Everything is in `~/.blirp` on the hub:
 
-- `blirp.db`: all data. Back it up while the daemon runs with `sqlite3 ~/.blirp/blirp.db ".backup '/backups/blirp.db'"`, or stop the daemon and copy the file (with `blirp.db-wal` if present).
+- `blirp.db`: all data. Back it up while the daemon runs with `blirp backup /backups/blirp.db` (a consistent copy; it never overwrites a file), or stop the daemon and copy the file (with `blirp.db-wal` if present).
 - `identity.key`: the hub's identity (secret, mode 0600). Paired machines trust this key; losing it means pairing every machine again.
 - `config.toml`.
 

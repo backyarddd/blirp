@@ -131,6 +131,8 @@ Run blirp on an always-on machine (for example a Mac mini or a Linux box), turn 
 - **Cloud sessions:** choose **Run on > Cloud** to run a session on the hub; the hub stays awake while sessions run.
 - Connections use QUIC (iroh) with NAT traversal, so the hub needs no port forwarding. The public relay fallback can be disabled or replaced.
 
+No always-on machine? [Run the hub on a VPS](docs/vps.md): `install.sh --hub` sets up a small Linux server in one command.
+
 Guides: [sync and hub](docs/sync-and-hub.md), [cloud sessions](docs/cloud-sessions.md), [web portal](docs/portal.md).
 
 ## Supported agents
@@ -169,7 +171,7 @@ Threat model and details: [docs/security.md](docs/security.md). Report vulnerabi
 |---|---|
 | **Start** | [Getting started](docs/getting-started.md) · [Install](docs/install.md) · [FAQ](docs/faq.md) |
 | **Use** | [Projects and sessions](docs/projects-and-sessions.md) · [Memory](docs/memory.md) · [Agents](docs/agents.md) · [Agent skills](docs/skills.md) |
-| **Machines** | [Sync and hub](docs/sync-and-hub.md) · [Cloud sessions](docs/cloud-sessions.md) · [Web portal](docs/portal.md) |
+| **Machines** | [Sync and hub](docs/sync-and-hub.md) · [Hub on a VPS](docs/vps.md) · [Cloud sessions](docs/cloud-sessions.md) · [Web portal](docs/portal.md) |
 | **Reference** | [Configuration](docs/configuration.md) · [CLI](docs/cli.md) · [HTTP API](docs/api.md) · [Security](docs/security.md) · [Troubleshooting](docs/troubleshooting.md) |
 | **Develop** | [Development](docs/development.md) · [Architecture](docs/ARCHITECTURE.md) · [Contributing](CONTRIBUTING.md) |
 

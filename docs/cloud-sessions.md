@@ -32,7 +32,7 @@ Do this at the Mac itself (or over Screen Sharing), logged in as the user the ag
    - The display may sleep and the screen may lock; sessions keep running.
 5. Make it the hub: `blirp hub enable` (or **Settings > Machines & Sync > Enable hub**). It prints an invite and a pairing code.
 
-Linux and Windows hubs work the same way; see [sync-and-hub.md](sync-and-hub.md#set-up-a-hub) for `loginctl enable-linger` (Linux) and power settings (Windows).
+Linux and Windows hubs work the same way; see [sync-and-hub.md](sync-and-hub.md#set-up-a-hub) for `loginctl enable-linger` (Linux) and power settings (Windows). No always-on machine? A small Linux VPS works as the hub: [vps.md](vps.md), including headless logins for Claude Code and Codex.
 
 ## Pair your PC
 
