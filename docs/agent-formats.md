@@ -171,7 +171,7 @@ Distinct `(type, payload.type)` combinations observed:
 | `turn_context` | — | per-turn cwd, workspace_roots, sandbox/approval policy, model, collaboration_mode |
 | `world_state` | — | environment/skills/personality/multi-agent-mode snapshot |
 | `token_usage_record` | — | per-response + per-turn + per-thread token usage |
-| `compacted` | — | `{message, replacement_history[], window_number, window_id, previous_window_id, compaction_response_id, ...}`: the context was compacted and the history replaced (`message` is the summary; empty when compacted remotely, observed in 0.153). blirp stores a `summary` event and sets `compacted_at`. A fork (Codex Desktop subagent, `session_meta.forked_from_id`) starts with a copy of the parent's rollout: its own `session_meta`, the parent's second, then the parent's lines, `compacted` included, all stamped at the fork's start (within 1 ms observed); blirp ignores `compacted` lines within 1 s of a fork's start |
+| `compacted` | — | `{message, replacement_history[], window_number, window_id, previous_window_id, compaction_response_id, ...}`: the context was compacted and the history replaced (`message` is the summary; empty when compacted remotely, observed in 0.153). blirp stores a `summary` event and sets `compacted_at` (forks: see below the table) |
 | `inter_agent_communication_metadata` | — | multi-agent turn-trigger flag |
 | `response_item` | `message` | chat message (role, content[] of `{type:"output_text"/"input_text",text}`) |
 | `response_item` | `reasoning` | `{id, summary:[], encrypted_content}` — hidden reasoning, no plaintext |
@@ -184,6 +184,8 @@ Distinct `(type, payload.type)` combinations observed:
 | `event_msg` | `task_started` / `task_complete` / `turn_aborted` | turn lifecycle, timings |
 | `event_msg` | `item_completed` | mirrors a completed response item with timing |
 | `event_msg` | `token_count` | `{info:{total_token_usage,last_token_usage,model_context_window}, rate_limits:{...}}` |
+
+Subagents and forks (Codex Desktop, 0.153, observed on real data): a subagent's first `session_meta` has `thread_source: "subagent"`, `parent_thread_id` (also `source.subagent.thread_spawn.parent_thread_id`), `agent_nickname` and `agent_path`; its `session_id` is the parent's, `id` its own. A forked one (`forked_from_id`) starts with a copy of the parent's rollout: the parent's `session_meta` second, then the parent's history (messages, turn contexts, `compacted` lines; no token usage lines), all stamped at the fork's start, up to `subagent_history_start_ordinal` (lines carry `ordinal` = line index). Its own token totals start from its own first call (the copied context is billed to it once, not the parent's totals). blirp skips the copy (`ordinal` below that field; without the field, a fork recognized by the parent's `session_meta` in second place, lines stamped within 1 s of its start), and files a subagent as a child of `parent_thread_id` with the title `subagent (<nickname>): <last agent_path segment>`.
 
 Example `session_meta`:
 ```json

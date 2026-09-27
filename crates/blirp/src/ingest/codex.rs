@@ -48,17 +48,69 @@ struct State {
     calls: HashMap<String, String>,
     #[serde(default)]
     launch: Option<Launches>,
-    /// A fork (a Codex Desktop subagent): when it started. Its rollout
-    /// begins with a copy of the parent's (the parent's `session_meta`
-    /// second, then its history, compactions included).
+    /// A fork (`forked_from_id`, e.g. a Codex Desktop subagent) begins with
+    /// a copy of its parent's rollout: the parent's `session_meta` second,
+    /// then the parent's lines (messages, compactions; no token usage).
+    /// Lines with an `ordinal` below this (`subagent_history_start_ordinal`)
+    /// are that copy.
+    #[serde(default)]
+    fork_start: Option<i64>,
+    /// A fork without that field: when it started (see [`FORK_COPY_MS`]).
     #[serde(default)]
     fork_at: Option<i64>,
+    /// A subagent's parent (`parent_thread_id`) and title, kept for later
+    /// reads: the parent may be ingested after the subagent.
+    #[serde(default)]
+    parent: Option<String>,
+    #[serde(default)]
+    title: Option<String>,
 }
 
-/// Lines of a fork stamped within this of its start are the parent's copied
-/// history: the copy is written at once (observed: within 1 ms, codex
-/// 0.153), while a compaction of the fork's own needs model turns first.
+/// A fork without `subagent_history_start_ordinal`: lines stamped within
+/// this of its start are the parent's copy, which is written at once
+/// (observed within 1 ms, codex 0.153), before any turn of its own.
 const FORK_COPY_MS: i64 = 1_000;
+
+impl State {
+    /// A line of the parent's history copied into a fork.
+    fn copied(&self, ordinal: i64, ts: Option<i64>) -> bool {
+        match (self.fork_start, self.fork_at) {
+            (Some(start), _) => ordinal < start,
+            (None, Some(at)) => ts.is_none_or(|t| t - at < FORK_COPY_MS),
+            (None, None) => false,
+        }
+    }
+
+    /// Fork and subagent facts of the session's own (first) `session_meta`.
+    fn own_meta(&mut self, p: &Value, ts: Option<i64>) {
+        let s = |k: &str| p.get(k).and_then(Value::as_str);
+        if s("forked_from_id").is_some() {
+            let start = p.get("subagent_history_start_ordinal");
+            self.fork_start = start
+                .and_then(Value::as_i64)
+                .or_else(|| start.and_then(Value::as_str).and_then(|v| v.parse().ok()));
+            if self.fork_start.is_none() {
+                self.fork_at = ts;
+            }
+        }
+        if s("thread_source") == Some("subagent") {
+            self.parent = s("parent_thread_id")
+                .or_else(|| {
+                    p.pointer("/source/subagent/thread_spawn/parent_thread_id")
+                        .and_then(Value::as_str)
+                })
+                .or_else(|| s("forked_from_id"))
+                .map(str::to_string);
+            let task = s("agent_path")
+                .and_then(|a| a.rsplit('/').next())
+                .filter(|a| !a.is_empty());
+            self.title = s("agent_nickname").map(|n| match task {
+                Some(t) => format!("subagent ({n}): {t}"),
+                None => format!("subagent ({n})"),
+            });
+        }
+    }
+}
 
 #[derive(Debug, Default, Clone, Copy, Serialize, Deserialize)]
 struct Tokens {
@@ -186,6 +238,8 @@ impl Adapter for Codex {
             transcript_path: Some(src.path.display().to_string()),
             ..SessionMeta::default()
         };
+        meta.parent.clone_from(&st.parent);
+        meta.title.clone_from(&st.title);
         let mut reported = false;
         lines.for_each(|ix, raw| {
             let v: Value = match serde_json::from_slice(raw) {
@@ -197,36 +251,52 @@ impl Adapter for Codex {
             };
             let ty = v.get("type").and_then(Value::as_str).unwrap_or("");
             let p = v.get("payload").unwrap_or(&Value::Null);
-            if ty == "session_meta" && st.asid.is_none() {
-                st.asid = p
-                    .get("id")
-                    .or_else(|| p.get("session_id"))
-                    .and_then(Value::as_str)
-                    .map(str::to_string);
-            }
-            let before = launch.is_headless();
-            launch_line(&v, &mut launch);
-            launch.report(
-                before,
-                sink,
-                &st.asid.clone().unwrap_or_else(|| fallback.clone()),
-            );
             let ts = v.get("timestamp").and_then(parse_ts);
+            let id = p
+                .get("id")
+                .or_else(|| p.get("session_id"))
+                .and_then(Value::as_str);
+            if ty == "session_meta" && st.asid.is_none() {
+                // The session's own (first) `session_meta`.
+                st.asid = id.map(str::to_string);
+                st.own_meta(p, ts);
+                meta.parent.clone_from(&st.parent);
+                meta.title.clone_from(&st.title);
+            } else {
+                // The parent's history copied into a fork is the parent's:
+                // its events are in the parent's session already, and its
+                // runs and turns are not the fork's (§8 scripted runs).
+                let ordinal = v
+                    .get("ordinal")
+                    .and_then(Value::as_i64)
+                    .unwrap_or_else(|| i64::try_from(ix).unwrap_or(i64::MAX));
+                if st.asid.is_some() && st.copied(ordinal, ts) {
+                    return Ok(());
+                }
+            }
+            // The parent's `session_meta` heads that copy; it is not a run of
+            // this session either.
+            let parents_meta = ty == "session_meta" && id.is_some() && id != st.asid.as_deref();
+            if !parents_meta {
+                let before = launch.is_headless();
+                launch_line(&v, &mut launch);
+                launch.report(
+                    before,
+                    sink,
+                    &st.asid.clone().unwrap_or_else(|| fallback.clone()),
+                );
+            }
             if let Some(t) = ts {
                 meta.started_at = Some(meta.started_at.map_or(t, |s| s.min(t)));
             }
             match ty {
                 "session_meta" => {
-                    let id = p
-                        .get("id")
-                        .or_else(|| p.get("session_id"))
-                        .and_then(Value::as_str);
-                    if st.fork_at.is_none()
-                        && st.asid.is_some()
-                        && id.is_some()
-                        && id != st.asid.as_deref()
-                    {
-                        st.fork_at = ts.or(meta.started_at);
+                    if parents_meta {
+                        // A fork (older ones say so only here).
+                        if st.fork_start.is_none() && st.fork_at.is_none() {
+                            st.fork_at = ts;
+                        }
+                        return Ok(());
                     }
                     if let Some(c) = p.get("cwd").and_then(Value::as_str) {
                         meta.cwd = Some(c.to_string());
@@ -279,13 +349,7 @@ impl Adapter for Codex {
                 "compacted" => {
                     // Codex replaced its history with a compacted one (its
                     // context filled up). `message` is its summary; empty
-                    // when the model compacted remotely. A fork's copy of its
-                    // parent's compactions is not its own.
-                    if let Some(f) = st.fork_at
-                        && ts.is_none_or(|t| t - f < FORK_COPY_MS)
-                    {
-                        return Ok(());
-                    }
+                    // when the model compacted remotely.
                     let msg = p
                         .get("message")
                         .and_then(Value::as_str)

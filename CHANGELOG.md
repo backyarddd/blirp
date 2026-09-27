@@ -24,6 +24,9 @@ so every tag needs one.
   Codex, opencode, pi), the session page suggests starting a new session from it.
   Dismissible per session until the next compaction. Sessions carry the time
   of their latest compaction (`compacted_at`; database migration 12).
+- Codex Desktop subagents are listed under their parent session, and a
+  forked subagent no longer repeats its parent's conversation (the copy of
+  the parent's history at the start of its rollout is skipped).
 
 ### Changed
 

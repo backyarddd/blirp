@@ -133,7 +133,7 @@ When the agent of a running session compacts its context (Claude Code, Codex, op
 
 ### Subagents
 
-When an agent spawns subagents, blirp ingests them as child sessions of the parent: Claude Code `subagents/agent-*.jsonl`, opencode sessions with a parent, Gemini CLI `chats/<parentId>/`, Cursor `subagents/`. They do not clutter the session lists: the parent's card shows an expandable "N subagents" toggle that lists them. Subagents are not distilled on their own (the parent transcript already contains each subagent's task and final report), but they are searchable, and **Distill now** works on them manually.
+When an agent spawns subagents, blirp ingests them as child sessions of the parent: Claude Code `subagents/agent-*.jsonl`, opencode sessions with a parent, Gemini CLI `chats/<parentId>/`, Cursor `subagents/`, Codex Desktop subagents (a forked one without the parent's history it starts with). They do not clutter the session lists: the parent's card shows an expandable "N subagents" toggle that lists them. Subagents are not distilled on their own (the parent transcript already contains each subagent's task and final report), but they are searchable, and **Distill now** works on them manually.
 
 In the API, `GET /api/sessions?parent=<id>` lists a session's children, and `include_children` controls whether subagent sessions appear in a normal listing (see [api.md](api.md#sessions)). Continue-in and fork sessions also record their source as parent but are regular top-level sessions.
 

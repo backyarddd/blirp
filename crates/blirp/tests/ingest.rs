@@ -806,46 +806,149 @@ fn codex_compaction_marks_the_session() {
     assert_eq!(ev[n - 1].text, "Continuing after the compaction.");
 }
 
-// A fork (Codex Desktop subagent) starts with a copy of its parent's
-// rollout, the parent's compactions included (synthetic, in the format of
-// real codex 0.153 forks): only the fork's own compaction counts.
+// A fork (a Codex Desktop subagent) starts with a copy of its parent's
+// rollout (synthetic, in the format of real codex 0.153 forks): the parent's
+// `session_meta`, messages and compactions up to
+// `subagent_history_start_ordinal`. The fork holds only its own events and
+// hangs under its parent, also when the parent is ingested after it.
 #[test]
-fn codex_fork_ignores_the_parents_copied_compactions() {
+fn codex_fork_skips_the_parents_copied_history_and_links_to_it() {
     let h = H::new();
     let fork = "0198a1b2-c3d4-7e5f-8a9b-0c1d2e3f4f0f";
     let path = h.put(
         &format!(".codex/sessions/2026/01/02/rollout-2026-01-02T10-00-00-{fork}.jsonl"),
-        h.fill(&fixture("codex/fork.jsonl")).as_bytes(),
+        b"",
     );
-    let text = std::fs::read_to_string(&path).unwrap();
-    let head: String = text
-        .lines()
-        .take(6)
-        .map(|l| {
-            format!(
-                "{l}
-"
-            )
-        })
-        .collect();
-    std::fs::write(&path, head).unwrap();
+    let text = h.fill(&fixture("codex/fork.jsonl"));
+    let lines: Vec<&str> = text.lines().collect();
+    let first: String = lines[..7].iter().map(|l| format!("{l}\n")).collect();
+    std::fs::write(&path, first).unwrap();
     h.pass();
     let s = h.session("codex", fork);
+    assert_eq!(s.parent_session_id, None, "the parent is not known yet");
+    assert_eq!(s.title.as_deref(), Some("subagent (Feynman): rename_check"));
     assert_eq!(
         s.compacted_at, None,
         "the parent's compaction is not the fork's"
     );
-    std::fs::write(&path, text).unwrap();
+    let texts = |s: &Session| -> Vec<String> { h.events(s).into_iter().map(|e| e.text).collect() };
+    assert_eq!(texts(&s), ["Checking the scripts as the subagent."]);
+
+    // The parent shows up, then the fork goes on: linked, own events only.
+    h.put(
+        &format!(".codex/sessions/2026/01/02/rollout-2026-01-02T09-00-00-{CODEX_SID}.jsonl"),
+        h.fill(&fixture("codex/rollout.jsonl")).as_bytes(),
+    );
+    h.pass();
+    let parent = h.session("codex", CODEX_SID);
+    append(
+        &path,
+        lines[7..]
+            .iter()
+            .map(|l| format!("{l}\n"))
+            .collect::<String>()
+            .as_bytes(),
+    );
     h.pass();
     let s = h.session("codex", fork);
+    assert_eq!(s.parent_session_id.as_deref(), Some(parent.id.as_str()));
+    assert_eq!(s.project_id, parent.project_id);
     assert_eq!(s.compacted_at, Some(1_767_349_800_000)); // 2026-01-02T10:30:00Z
-    let summaries: Vec<String> = h
-        .events(&s)
-        .into_iter()
-        .filter(|e| e.kind == EventKind::Summary)
-        .map(|e| e.text)
+    assert_eq!(
+        texts(&s),
+        [
+            "Checking the scripts as the subagent.",
+            "The subagent renamed build.sh."
+        ]
+    );
+    assert_eq!(
+        (s.tokens_in, s.tokens_out),
+        (400, 20),
+        "the fork's own usage"
+    );
+    assert!(parent.title.is_some() && parent.parent_session_id.is_none());
+}
+
+// Forks of codex versions that do not write `subagent_history_start_ordinal`
+// are recognized by the parent's `session_meta` in second place; the copy is
+// stamped at the fork's start.
+#[test]
+fn codex_fork_without_a_start_ordinal_skips_the_copy_by_time() {
+    let h = H::new();
+    let fork = "0198a1b2-c3d4-7e5f-8a9b-0c1d2e3f4f0f";
+    let text = h
+        .fill(&fixture("codex/fork.jsonl"))
+        .replace(",\"subagent_history_start_ordinal\":5", "")
+        .replace(
+            "\"forked_from_id\":\"0198a1b2-c3d4-7e5f-8a9b-0c1d2e3f4a5b\",",
+            "",
+        );
+    assert!(!text.contains("subagent_history_start_ordinal") && !text.contains("forked_from_id"));
+    h.put(
+        &format!(".codex/sessions/2026/01/02/rollout-2026-01-02T10-00-00-{fork}.jsonl"),
+        text.as_bytes(),
+    );
+    h.pass();
+    let s = h.session("codex", fork);
+    let texts: Vec<String> = h.events(&s).into_iter().map(|e| e.text).collect();
+    assert_eq!(
+        texts,
+        [
+            "Checking the scripts as the subagent.",
+            "The subagent renamed build.sh."
+        ]
+    );
+    assert_eq!(s.compacted_at, Some(1_767_349_800_000));
+}
+
+// What a fork copied from its parent (the parent's `session_meta` and its
+// turns) is not a run or a turn of the fork: a `codex exec` fork with one
+// turn of its own is a scripted run, whatever its parent was.
+#[test]
+fn codex_fork_is_judged_by_its_own_runs_only() {
+    let h = H::new();
+    let fork = "0198a1b2-c3d4-7e5f-8a9b-0c1d2e3f4f0f";
+    let turn = |ordinal: u32, t: &str| {
+        format!(
+            r#"{{"timestamp":"2026-01-02T10:00:{t}Z","ordinal":{ordinal},"type":"turn_context","payload":{{"turn_id":"t{ordinal}","model":"gpt-5-codex"}}}}"#
+        )
+    };
+    let mut lines: Vec<String> = h
+        .fill(&fixture("codex/fork.jsonl"))
+        .replace(
+            r#""source":{"subagent":{"thread_spawn":{"parent_thread_id":"0198a1b2-c3d4-7e5f-8a9b-0c1d2e3f4a5b","depth":1}}}"#,
+            r#""source":"exec""#,
+        )
+        .lines()
+        .map(str::to_string)
         .collect();
-    assert_eq!(summaries, ["The subagent renamed build.sh."]);
+    assert!(lines[0].contains(r#""source":"exec""#) && lines[1].contains(r#""source":"vscode""#));
+    // The parent's copied turns, then the fork's one turn.
+    lines.insert(2, turn(2, "00.000"));
+    lines.insert(3, turn(3, "00.001"));
+    lines.insert(6, turn(6, "04.000"));
+    let text: String = lines.iter().map(|l| format!("{l}\n")).collect();
+    // With `subagent_history_start_ordinal`, and an older fork without it
+    // (told by the parent's `session_meta`, its copy by time).
+    let older = text
+        .replace(",\"subagent_history_start_ordinal\":5", "")
+        .replace(
+            "\"forked_from_id\":\"0198a1b2-c3d4-7e5f-8a9b-0c1d2e3f4a5b\",",
+            "",
+        );
+    assert!(!older.contains("subagent_history_start_ordinal"));
+    for (i, text) in [text, older].iter().enumerate() {
+        let id = format!("{}{i}", &fork[..fork.len() - 1]);
+        h.put(
+            &format!(".codex/sessions/2026/01/02/rollout-2026-01-02T10-00-00-{id}.jsonl"),
+            text.replace(fork, &id).as_bytes(),
+        );
+        h.pass();
+        assert!(
+            h.store.session_by_agent_id("codex", &id).unwrap().is_none(),
+            "{i}: the parent's interactive run and turns do not keep a scripted fork"
+        );
+    }
 }
 
 #[test]
