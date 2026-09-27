@@ -83,9 +83,10 @@ CSRF protection: a mutating request or WebSocket upgrade that carries an `Origin
 
 | Method and path | Description |
 |---|---|
-| `GET /api/projects` | `ProjectSummary[]`: `{project, paths[{machine_id, path, git_remote, is_git, local}], is_git, is_home, session_count, live_session_count, last_activity_at}` |
+| `GET /api/projects` | `ProjectSummary[]`: the project's fields (`id, name, created_at, updated_at, deleted, chats`) and `{paths[{machine_id, path, git_remote, is_git, local}], is_git, is_home, workspace, session_count, live_session_count, last_activity_at}`. `chats` marks a machine's Chats bucket (sessions that belong to no project; `is_home` for this machine's), which clients do not list as a project. `workspace` is set for a project without folders: this machine's blirp workspace, where its sessions start (it may not exist yet). |
 | `GET /api/projects/:id` | one `ProjectSummary` |
-| `POST /api/projects` | `{path, name?}`: register a folder on this machine; 201 `ProjectSummary` |
+| `POST /api/projects` | `{path?, name?, brief?}`: register a folder on this machine (`name` defaults to the folder name), or without `path` create a project without folders (`name` required, 400 otherwise); `brief` becomes its first brief version. 201 `ProjectSummary` |
+| `POST /api/projects/:id/folders/remove` | control. `{path}`: unregister one of this machine's folders of the project (as listed in `paths`); the project, its sessions and memory stay, also with no folder left. Returns the `ProjectSummary`; 404 when it is not a folder of the project on this machine. |
 | `PATCH /api/projects/:id` | `{name}`: rename |
 | `DELETE /api/projects/:id` | unregister its folders and hide it; 204 |
 | `POST /api/projects/:id/merge` | `{into}`: move everything into another project; returns the target |
@@ -95,7 +96,7 @@ CSRF protection: a mutating request or WebSocket upgrade that carries an `Origin
 | `GET /api/projects/:id/git?root=` | `{is_git, root, branch, head, upstream, ahead, behind, entries[{path, orig_path, index, worktree, conflicted}]}`; 404 `not_git` for plain folders |
 | `GET /api/projects/:id/git/diff?path=&root=` | `{path, diff, truncated}` (working tree diff, capped at 1 MiB) |
 
-Files and git are read-only and take paths relative to the project folder on this machine (`root` picks one when the project has several). Absolute paths, `..` and symlinks leading outside the folder are rejected, and so is anything inside blirp's own data folder (`BLIRP_HOME`, e.g. when the project folder is your home folder; session worktrees under `worktrees/` excepted): 403 `path_in_data_dir`.
+Files and git are read-only and take paths relative to the project folder on this machine (`root` picks one when the project has several). Absolute paths, `..` and symlinks leading outside the folder are rejected, and so is anything inside blirp's own data folder (`BLIRP_HOME`, e.g. when the project folder is your home folder; session worktrees under `worktrees/` and project workspaces under `workspaces/` excepted): 403 `path_in_data_dir`. For a project without folders they read its blirp workspace on this machine (created, empty, when missing).
 
 ### Memory
 
@@ -123,9 +124,10 @@ Text fields are limited to 256 KiB.
 | Method and path | Description |
 |---|---|
 | `GET /api/sessions?project=&status=&agent=&machine=&q=&parent=&include_children=&cursor=&limit=` | `{items: Session[], next_cursor}`: live sessions (starting, working, idle, waiting) first, except another machine's live sessions while that machine is offline (see `GET /api/machines`; with its presence unknown, while their `last_activity_at` is more than 30 minutes old), then by `last_activity_at`, newest first; `limit` default 50 (at most 500). Every machine's sessions are listed (paired machines' replicate here); `machine=<id>` narrows to one. `q` matches title, folder, branch and agent. `parent=<id>` returns the sessions whose `parent_session_id` is `<id>`; `include_children=true` includes subagent sessions (external sessions with a parent) in other listings, `false` leaves them out. Pass `next_cursor` back as `cursor` for the next page. The sort keys change while you page (activity, status), so a session can be skipped or returned twice across pages: dedupe by `id`, and follow `session_created`/`session_updated` on the event stream for sessions that moved. |
-| `POST /api/sessions` | control. Launch, body `LaunchSession`: `{agent, project_id?, cwd?, prompt?, worktree?, continue_from?, machine?, cols?, rows?}`. One of `project_id`/`cwd` is required unless `continue_from` is given. `machine` other than this one forwards the launch to that machine. 201 `Session`. |
+| `POST /api/sessions` | control. Launch, body `LaunchSession`: `{agent, project_id?, cwd?, add_folder?, prompt?, worktree?, continue_from?, machine?, cols?, rows?}`. One of `project_id`/`cwd` is required unless `continue_from` is given. With only `project_id` the session starts in the project's first folder on that machine, or, for a project without folders, in its blirp workspace there. With both, `cwd` must be inside one of the project's folders (or its workspace), unless `add_folder: true` registers `cwd` (its git top level in a repository) as a folder of the project first (409 when it is inside another project's folder). `machine` other than this one forwards the launch to that machine. 201 `Session`. |
 | `GET /api/sessions/:id` | `SessionDetail`: the `Session` plus `children_count` (its subagent sessions) |
 | `PATCH /api/sessions/:id` | `{title}` (up to 300 characters; `null` clears) |
+| `POST /api/sessions/:id/move` | control. `{project_id}`: file the session in another project, or with `null` in this machine's Chats. Its ingested subagent sessions and the records it produced in its old project move too; works for any machine's session. Returns the `Session`. |
 | `GET /api/sessions/:id/events?after=&limit=` | `{items: Event[], next_after}`; `Event {session_id, seq, ts, kind, text, meta}` with kind `user`, `assistant`, `tool_call`, `tool_result`, `system`, `file_edit`, `summary`; `limit` default 200 |
 | `POST /api/sessions/:id/stop` | control. 202; the final status arrives on the event stream. 409 `not_running` if blirp has no live process for it. Forwarded when the session runs on another machine. |
 | `POST /api/sessions/:id/resume` | control. Relaunch in the same row; returns `Session`. 409 `already_running`. |

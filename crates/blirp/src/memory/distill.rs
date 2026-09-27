@@ -965,10 +965,14 @@ pub async fn run_distill<S: Summarize>(
 ) -> Result<DistillOutcome, DistillError> {
     let (st, sid) = (store.clone(), session_id.to_string());
     let max = i64::from(cfg.distill_max_chars);
-    let (session, events, continued, brief, records) = blocking(move || {
+    let (session, events, continued, brief, records, chats) = blocking(move || {
         let session = st
             .get_session(&sid)?
             .ok_or(StoreError::NotFound("session"))?;
+        // A chat gets its summary only: Chats has no memory (§9).
+        let chats = st
+            .get_project(&session.project_id)?
+            .is_some_and(|p| p.chats);
         // Only what the last summary does not cover yet; with nothing new
         // (a manual re-run) the whole session again.
         let (head, tail) = (max / 5, max - max / 5);
@@ -977,15 +981,20 @@ pub async fn run_distill<S: Summarize>(
         if events.head.is_empty() {
             events = st.distill_events(&sid, 0, head, tail)?;
         }
-        let brief = st.get_brief(&session.project_id)?;
-        let records = st.list_records(
-            &session.project_id,
-            &RecordFilter {
-                status: Some(RecordStatus::Active),
-                kind: None,
-            },
-        )?;
-        Ok((session, events, continued, brief, records))
+        let (brief, records) = if chats {
+            (None, Vec::new())
+        } else {
+            let brief = st.get_brief(&session.project_id)?;
+            let records = st.list_records(
+                &session.project_id,
+                &RecordFilter {
+                    status: Some(RecordStatus::Active),
+                    kind: None,
+                },
+            )?;
+            (brief, records)
+        };
+        Ok((session, events, continued, brief, records, chats))
     })
     .await?;
     let through = events
@@ -1052,6 +1061,9 @@ pub async fn run_distill<S: Summarize>(
     ] {
         new_records.extend(list.iter().map(|i| (kind, i.title.clone(), i.body.clone())));
     }
+    if chats {
+        new_records.clear();
+    }
     let plan = DistillPlan {
         session_id: session.id.clone(),
         through_seq: through,
@@ -1060,7 +1072,7 @@ pub async fn run_distill<S: Summarize>(
         title: Some(out.title),
         new_records,
         resolve_record_ids: out.resolved_record_ids,
-        brief_md: Some(out.brief_md).filter(|b| !b.is_empty()),
+        brief_md: Some(out.brief_md).filter(|b| !chats && !b.is_empty()),
         brief_apply: match cfg.brief_mode {
             BriefMode::Auto => BriefApply::Write,
             BriefMode::Review => BriefApply::Suggest,
@@ -1915,6 +1927,34 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(out.records_created, 0);
+    }
+
+    // A chat (a session in Chats) gets its summary, and neither sees nor
+    // writes project memory; nothing is injected into chats either.
+    #[tokio::test]
+    async fn chats_get_a_summary_and_no_project_memory() {
+        let (_d, store, _pid) = seed();
+        let chats = store.move_session("s", None, "box").unwrap().project_id;
+        let fake = Fake::new(vec![Ok(reply(&[]))]);
+        let out = run_distill(store.clone(), "s", &fake, &cfg(BriefMode::Auto))
+            .await
+            .unwrap();
+        assert_eq!((out.records_created, out.brief_updated), (0, false));
+        assert!(
+            store
+                .list_records(&chats, &Default::default())
+                .unwrap()
+                .is_empty()
+        );
+        assert!(store.get_brief(&chats).unwrap().is_none());
+        assert!(fake.prompts()[0].contains("CURRENT BRIEF:\n(none)"));
+        let s = store.get_session("s").unwrap().unwrap();
+        assert_eq!(s.title.as_deref(), Some("Add LRU cache"));
+        assert!(
+            crate::memory::render::render_injection(&store, &chats, None, 8000)
+                .unwrap()
+                .is_empty()
+        );
     }
 
     // A re-distill sends only the events after the last summary (with that

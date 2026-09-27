@@ -47,7 +47,13 @@ export type Machine = { id: string, name: string, os: string, role: MachineRole,
  */
 export type MachineInfo = { online: boolean | null, id: string, name: string, os: string, role: MachineRole, last_seen: number, revoked: boolean, };
 
-export type Project = { id: string, name: string, created_at: number, updated_at: number, deleted: boolean, };
+export type Project = { id: string, name: string, created_at: number, updated_at: number, deleted: boolean, 
+/**
+ * A machine's Chats bucket (§5): sessions that belong to no project.
+ * Not listed among projects; its memory is never injected. Absent in
+ * rows from blirp 0.1.0.
+ */
+chats: boolean, };
 
 export type ProjectPath = { project_id: string, machine_id: string, path: string, 
 /**
@@ -234,11 +240,32 @@ local: boolean, };
 
 export type ProjectSummary = { paths: Array<ProjectPathInfo>, is_git: boolean, 
 /**
- * This machine's per-machine "Home" project (sessions started in `~` or `/`).
+ * This machine's Chats bucket (sessions that belong to no project).
  */
-is_home: boolean, session_count: number, live_session_count: number, last_activity_at: number | null, id: string, name: string, created_at: number, updated_at: number, deleted: boolean, };
+is_home: boolean, 
+/**
+ * Project without folders: this machine's blirp workspace
+ * (`BLIRP_HOME/workspaces/<id>`), where its sessions start. Set when the
+ * project has no folder on any machine; the folder may not exist yet.
+ */
+workspace: string | null, session_count: number, live_session_count: number, last_activity_at: number | null, id: string, name: string, created_at: number, updated_at: number, deleted: boolean, 
+/**
+ * A machine's Chats bucket (§5): sessions that belong to no project.
+ * Not listed among projects; its memory is never injected. Absent in
+ * rows from blirp 0.1.0.
+ */
+chats: boolean, };
 
-export type CreateProject = { path: string, name?: string, };
+export type CreateProject = { 
+/**
+ * Folder to register (absolute, on this machine). Without it the
+ * project has no folder and `name` is required.
+ */
+path?: string, name?: string, 
+/**
+ * Initial project brief (markdown).
+ */
+brief?: string, };
 
 export type PatchProject = { name: string, };
 
@@ -247,6 +274,21 @@ export type MergeProject = {
  * Project that receives this project's paths, sessions and memory.
  */
 into: string, };
+
+/**
+ * `POST /api/projects/:id/folders/remove`: unregister one of this
+ * machine's folders. The project stays, also without any folder.
+ */
+export type RemoveProjectFolder = { path: string, };
+
+/**
+ * `POST /api/sessions/:id/move`.
+ */
+export type MoveSession = { 
+/**
+ * Target project; null moves the session to Chats.
+ */
+project_id: string | null, };
 
 export type ProjectMemory = { brief: Brief | null, 
 /**
@@ -374,13 +416,21 @@ stopped_by_user: boolean, };
 
 export type LaunchSession = { 
 /**
- * Launch in this project's folder on this machine. One of `project_id`/`cwd` is required.
+ * Launch in this project's folder on this machine (a project without
+ * folders: its blirp workspace). One of `project_id`/`cwd` is required.
  */
 project_id?: string, 
 /**
  * Launch in this folder; the project is resolved (and created) from it.
+ * With `project_id` it must be inside one of the project's folders here,
+ * or `add_folder` is set.
  */
 cwd?: string, 
+/**
+ * With `project_id` and a `cwd` outside its folders: register `cwd` (its
+ * git top level inside a repository) as a folder of the project first.
+ */
+add_folder?: boolean, 
 /**
  * Agent id, e.g. `claude` or `custom:<name>`.
  */

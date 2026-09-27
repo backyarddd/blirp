@@ -21,6 +21,8 @@
   const pid = $derived(session.project_id);
   const injection = new Resource(() => api.inject(sid));
   const memory = new Resource(() => api.projects.memory(pid));
+  /** Chats have no project memory: nothing is injected, and a chat's summary stays with it. */
+  const chats = $derived(app.projectById.get(pid)?.chats === true);
 
   $effect(() => {
     void injection.load();
@@ -93,7 +95,7 @@
 <div class="panel">
   <header class="head">
     <h2>Memory</h2>
-    <a class="small" href={href.project(pid, 'memory')}>All memory</a>
+    {#if !chats}<a class="small" href={href.project(pid, 'memory')}>All memory</a>{/if}
     <button type="button" class="icon-btn sm" aria-label="Close memory panel" onclick={() => app.setMemoryPanel(false)}><X size={16} /></button>
   </header>
 
@@ -149,6 +151,12 @@
       {/if}
     </section>
 
+    {#if chats}
+      <p class="muted small" data-testid="chats-memory">
+        This session is a chat: it belongs to no project, so it gets no project memory and adds none. Move it to a project
+        (the folder icon above) when it turns out to be part of one.
+      </p>
+    {:else}
     <Loadable loading={memory.loading} error={memory.error} empty={!memory.data} onretry={() => memory.load()}>
       <section>
         <h3 class="section-title">Brief</h3>
@@ -203,6 +211,7 @@
         </section>
       {/if}
     </Loadable>
+    {/if}
   </div>
 </div>
 

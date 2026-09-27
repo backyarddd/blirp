@@ -1,10 +1,11 @@
 <script lang="ts">
-  import FolderPlus from '@lucide/svelte/icons/folder-plus';
+  import Plus from '@lucide/svelte/icons/plus';
   import { api, errorMessage } from '../lib/api/client';
   import { app } from '../lib/app.svelte';
   import { navigate } from '../lib/router.svelte';
   import { href } from '../lib/router';
   import { formatRelative } from '../lib/time';
+  import { projectPlace } from '../lib/status';
   import type { ProjectSummary } from '../lib/api/types.gen';
   import Loadable from '../lib/components/Loadable.svelte';
   import Modal from '../lib/components/Modal.svelte';
@@ -13,11 +14,12 @@
   let adding = $state(false);
   let path = $state('');
   let name = $state('');
+  let brief = $state('');
   let saving = $state(false);
   let formError: string | null = $state(null);
 
   const projects = $derived(
-    [...app.projects].sort((a, b) => (b.last_activity_at ?? b.updated_at) - (a.last_activity_at ?? a.updated_at)),
+    [...app.realProjects].sort((a, b) => (b.last_activity_at ?? b.updated_at) - (a.last_activity_at ?? a.updated_at)),
   );
 
   const machineCount = (p: ProjectSummary): number => new Set(p.paths.map((x) => x.machine_id)).size;
@@ -25,6 +27,7 @@
   function openAdd(): void {
     path = '';
     name = '';
+    brief = '';
     formError = null;
     adding = true;
   }
@@ -32,14 +35,19 @@
   async function add(e: SubmitEvent): Promise<void> {
     e.preventDefault();
     const p = path.trim();
-    if (!p) {
-      formError = 'Enter the folder path.';
+    const n = name.trim();
+    if (!p && !n) {
+      formError = 'Enter a name, a folder, or both.';
       return;
     }
     saving = true;
     formError = null;
     try {
-      const project = await api.projects.create(p, name.trim() || undefined);
+      const project = await api.projects.create({
+        ...(p ? { path: p } : {}),
+        ...(n ? { name: n } : {}),
+        ...(brief.trim() ? { brief: brief.trim() } : {}),
+      });
       app.upsertProject(project);
       adding = false;
       navigate(href.project(project.id));
@@ -56,11 +64,11 @@
     <div class="row head">
       <div>
         <h1 class="page-title">Projects</h1>
-        <p class="muted sub">Any folder is a project. Git is optional.</p>
+        <p class="muted sub">A project is a folder, several, or none at all. Git is optional.</p>
       </div>
       <span class="spacer"></span>
       {#if app.control}
-        <button type="button" class="btn primary" onclick={openAdd}><FolderPlus size={16} aria-hidden="true" />Add folder</button>
+        <button type="button" class="btn primary" onclick={openAdd}><Plus size={16} aria-hidden="true" />New project</button>
       {/if}
     </div>
 
@@ -68,7 +76,7 @@
       loading={!app.projectsLoaded}
       error={app.projectsError}
       empty={projects.length === 0}
-      emptyText="No projects yet. Add a folder, or just start an agent in any folder and blirp picks it up."
+      emptyText="No projects yet. Create one, or just start an agent in a project folder and blirp picks it up."
       onretry={() => app.refreshProjects()}
     >
       <ul class="cards">
@@ -83,9 +91,8 @@
               <ul class="paths">
                 {#each p.paths as path (path.machine_id + path.path)}
                   <li class="mono ellipsis" title={path.path}>{path.path}{path.local ? '' : ' (other machine)'}</li>
-                {:else}
-                  <li class="faint">{p.is_home ? 'Sessions started in your home folder' : 'No folders on this machine'}</li>
                 {/each}
+                {#if projectPlace(p)}<li class="faint">{projectPlace(p)}</li>{/if}
               </ul>
               <div class="row wrap foot small muted">
                 <span>{p.session_count} {p.session_count === 1 ? 'session' : 'sessions'}</span>
@@ -102,22 +109,29 @@
   </div>
 </div>
 
-<Modal open={adding} title="Add folder" onclose={() => (adding = false)}>
-  <form id="add-folder" onsubmit={add}>
+<Modal open={adding} title="New project" onclose={() => (adding = false)}>
+  <form id="new-project" onsubmit={add}>
     <label class="field">
-      <span>Folder path</span>
-      <input class="input mono" bind:value={path} placeholder="C:\Users\you\Documents\project" required spellcheck="false" />
-      <span class="hint">An absolute path on this machine. Works with or without git.</span>
+      <span>Name</span>
+      <input class="input" bind:value={name} placeholder={path.trim() ? 'Defaults to the folder name' : 'What is this project?'} maxlength="200" />
     </label>
     <label class="field">
-      <span>Name <span class="faint">(optional)</span></span>
-      <input class="input" bind:value={name} placeholder="Defaults to the folder name" />
+      <span>Folder <span class="faint">(optional)</span></span>
+      <input class="input mono" bind:value={path} placeholder="C:\Users\you\Documents\project" spellcheck="false" />
+      <span class="hint">
+        An absolute path on this machine, with or without git. Leave it empty for a project that lives elsewhere (for
+        example in a design tool reached through an MCP server): its sessions start in a private blirp workspace folder.
+      </span>
+    </label>
+    <label class="field">
+      <span>Brief <span class="faint">(optional)</span></span>
+      <textarea class="textarea" rows="3" bind:value={brief} placeholder="What it is, where its work lives, current priorities"></textarea>
     </label>
     {#if formError}<p class="err" role="alert">{formError}</p>{/if}
   </form>
   {#snippet footer()}
     <button type="button" class="btn" onclick={() => (adding = false)}>Cancel</button>
-    <button type="submit" form="add-folder" class="btn primary" disabled={saving}>{saving ? 'Adding…' : 'Add project'}</button>
+    <button type="submit" form="new-project" class="btn primary" disabled={saving}>{saving ? 'Creating…' : 'Create project'}</button>
   {/snippet}
 </Modal>
 

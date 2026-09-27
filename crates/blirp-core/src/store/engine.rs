@@ -153,10 +153,28 @@ impl Store {
             .and_then(|v| v.as_str().map(str::to_string)))
     }
 
-    /// Project whose registered folder on `machine_id` contains `path`, without
-    /// registering anything (read-only counterpart of `resolve_project`).
-    pub fn find_project_for_path(&self, machine_id: &str, path: &Path) -> Result<Option<Project>> {
+    /// Project whose registered folder on `machine_id` (or blirp workspace
+    /// in `workspaces`, §5) contains `path`, without registering anything
+    /// (read-only counterpart of `resolve_project`).
+    pub fn find_project_for_path(
+        &self,
+        machine_id: &str,
+        path: &Path,
+        workspaces: Option<&Path>,
+    ) -> Result<Option<Project>> {
         let path = dunce::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
+        let in_workspace = workspaces.and_then(|w| {
+            super::NonProjectDirs::default()
+                .with_workspaces(w)
+                .workspace_of(&path)
+        });
+        if let Some((id, _)) = in_workspace {
+            return self.read(|c| match live_project_in(c, &id) {
+                Ok(p) => Ok(Some(p).filter(|p| !p.chats)),
+                Err(StoreError::NotFound(_)) => Ok(None),
+                Err(e) => Err(e),
+            });
+        }
         self.read(|c| {
             let paths = live_local_paths(c, machine_id)?;
             match longest_prefix(&paths, &path) {

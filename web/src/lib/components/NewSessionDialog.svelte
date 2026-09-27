@@ -16,6 +16,10 @@
   let source: 'project' | 'path' = $state('project');
   let projectId = $state('');
   let path = $state('');
+  /** Project mode: start in another folder, which is then added to the project. */
+  let otherFolder = $state(false);
+  let folder = $state('');
+  let browsingFolder = $state(false);
   let agent = $state('');
   let prompt = $state('');
   let worktree = $state(false);
@@ -37,7 +41,9 @@
       .sort((a, b) => Number(b.id === app.cloudId) - Number(a.id === app.cloudId) || a.name.localeCompare(b.name)),
   );
   const project = $derived(app.projectById.get(projectId));
-  const showWorktree = $derived(source === 'project' && project?.is_git === true);
+  /** No folder on any machine: sessions start in the target machine's blirp workspace. */
+  const folderless = $derived(project !== undefined && project.paths.length === 0);
+  const showWorktree = $derived(source === 'project' && !otherFolder && project?.is_git === true);
 
   // Agents are detected on the machine that runs the session: another machine is asked through the hub.
   let remoteAgents: AgentInfo[] | null = $state.raw(null);
@@ -51,6 +57,7 @@
   const targetFolder = $derived(remote ? folderOn(project, target) : null);
   const cloneable = $derived(project?.paths.some((p) => p.local && p.git_remote !== null) === true);
   const recents = $derived(remote ? recentFolders(app.sessions, app.projects, target) : []);
+  const localFolder = $derived(project?.paths.find((p) => p.local)?.path ?? null);
 
   let browsing = $state(false);
   let clone: CloneJob | null = $state.raw(null);
@@ -68,6 +75,7 @@
 
   function resetTargetState(): void {
     browsing = false;
+    browsingFolder = false;
     pickingParent = false;
     clone = null;
     cloneError = null;
@@ -79,9 +87,11 @@
     formError = null;
     prompt = '';
     const preset = app.newSession.projectId;
-    source = app.projects.length === 0 ? 'path' : 'project';
-    projectId = preset ?? app.projects[0]?.id ?? '';
+    source = app.realProjects.length === 0 ? 'path' : 'project';
+    projectId = app.realProjects.find((p) => p.id === preset)?.id ?? app.realProjects[0]?.id ?? '';
     path = '';
+    otherFolder = false;
+    folder = '';
     target = '';
     agent = '';
     worktree = false;
@@ -115,7 +125,7 @@
       return;
     }
     // A project without a folder there and nothing to clone: start from a folder on that machine.
-    if (source === 'project' && folderOn(project, id) === null && !cloneable) source = 'path';
+    if (source === 'project' && !folderless && folderOn(project, id) === null && !cloneable) source = 'path';
     try {
       const list = await api.machines.agents(id);
       if (mine !== agentsSeq) return;
@@ -181,11 +191,19 @@
         formError = 'Pick a project.';
         return;
       }
-      if (remote && targetFolder === null) {
+      req.project_id = projectId;
+      if (otherFolder) {
+        const f = folder.trim();
+        if (!f) {
+          formError = `Enter or browse to a folder${remote ? ` on ${targetName}` : ''}.`;
+          return;
+        }
+        req.cwd = f;
+        req.add_folder = true;
+      } else if (remote && targetFolder === null && !folderless) {
         formError = `${project?.name ?? 'This project'} has no folder on ${targetName} yet. ${cloneable ? `Clone it there first.` : `Pick a folder on ${targetName}.`}`;
         return;
       }
-      req.project_id = projectId;
       if (showWorktree && worktree) req.worktree = true;
     } else {
       const p = path.trim();
@@ -259,7 +277,7 @@
         role="radio"
         aria-checked={source === 'project'}
         class:active={source === 'project'}
-        disabled={app.projects.length === 0}
+        disabled={app.realProjects.length === 0}
         onclick={() => (source = 'project')}>Project</button
       >
       <button
@@ -276,17 +294,53 @@
       <label class="field top">
         <span>Project</span>
         <select class="select" bind:value={projectId} required onchange={() => resetTargetState()}>
-          {#each app.projects as p (p.id)}
-            <option value={p.id}>{p.name}{p.is_git ? '' : ' (folder)'}</option>
+          {#each app.realProjects as p (p.id)}
+            <option value={p.id}>{p.name}{p.is_git ? '' : p.paths.length === 0 ? ' (no folder)' : ' (folder)'}</option>
           {/each}
         </select>
-        {#if remote}
+        {#if otherFolder}
+          <!-- The folder below is used instead. -->
+        {:else if folderless}
+          <span class="hint" data-testid="workspace-hint">
+            In {remote ? `${targetName}'s` : "this machine's"} blirp workspace{!remote && project?.workspace ? ':' : ''}
+            {#if !remote && project?.workspace}<span class="mono">{project.workspace}</span>{/if}
+          </span>
+        {:else if remote}
           {#if targetFolder}<span class="hint mono ellipsis">{targetFolder} on {targetName}</span>{/if}
-        {:else if project?.paths[0]}
-          <span class="hint mono ellipsis">{project.paths[0].path}</span>
+        {:else if localFolder}
+          <span class="hint mono ellipsis">{localFolder}</span>
         {/if}
       </label>
-      {#if remote && project && targetFolder === null}
+      {#if project && (folderless || !remote || targetFolder !== null)}
+        <label class="check field">
+          <input type="checkbox" bind:checked={otherFolder} />
+          <span>Start in another folder</span>
+        </label>
+        {#if otherFolder}
+          <div class="field">
+            <label class="label" for="ns-folder">Folder{remote ? ` on ${targetName}` : ''}</label>
+            <div class="row">
+              <input id="ns-folder" class="input mono grow" bind:value={folder} required spellcheck="false" />
+              <button type="button" class="btn" onclick={() => (browsingFolder = !browsingFolder)} aria-expanded={browsingFolder}>
+                {browsingFolder ? 'Close' : 'Browse…'}
+              </button>
+            </div>
+            {#if browsingFolder}
+              <FolderPicker
+                machineId={target || (app.selfId ?? '')}
+                machineName={targetName}
+                start={folder.trim()}
+                onpick={(p) => {
+                  folder = p;
+                  browsingFolder = false;
+                }}
+              />
+            {/if}
+            <span class="hint">For work in a folder elsewhere. It is added to the project, so sessions there, in blirp or not, belong to it.</span>
+          </div>
+        {/if}
+      {/if}
+      {#if remote && project && targetFolder === null && !folderless && !otherFolder}
         <div class="notice" data-testid="clone-box">
           {#if cloneable}
             <p>

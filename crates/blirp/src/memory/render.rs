@@ -170,6 +170,10 @@ pub fn render_injection(
     max_chars: usize,
 ) -> Result<String, StoreError> {
     let project = store.live_project(project_id)?;
+    // Chats are unrelated conversations: nothing to remember across them.
+    if project.chats {
+        return Ok(String::new());
+    }
     let brief = store.get_brief(project_id)?;
     let records = active_records(store, project_id)?;
     let machines = machine_names(store)?;

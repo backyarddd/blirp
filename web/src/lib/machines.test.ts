@@ -32,6 +32,8 @@ const project = (paths: { machine_id: string; path: string }[]): ProjectSummary 
   paths: paths.map((p) => ({ ...p, git_remote: null, is_git: false, local: false })),
   is_git: false,
   is_home: false,
+  workspace: null,
+  chats: false,
   session_count: 0,
   live_session_count: 0,
   last_activity_at: null,

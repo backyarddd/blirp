@@ -60,6 +60,8 @@ impl H {
         for d in [&home, &cwd, &blirp_home] {
             std::fs::create_dir_all(d).unwrap();
         }
+        // An actual project folder (§5): sessions there make a project.
+        std::fs::write(cwd.join("package.json"), "{}").unwrap();
         let store = Arc::new(Store::open(&blirp_home.join("blirp.db")).unwrap());
         let machine = Machine {
             id: blirp_core::new_id(),
@@ -78,7 +80,8 @@ impl H {
             machine,
             IngestEnv {
                 // `root/tmp` stands in for the temp folder.
-                non_projects: NonProjectDirs::auto(Some(home.clone()), vec![root.join("tmp")]),
+                non_projects: NonProjectDirs::auto(Some(home.clone()), vec![root.join("tmp")])
+                    .with_workspaces(&blirp_home.join("workspaces")),
                 ..IngestEnv::at_home(&home, &blirp_home)
             },
             Arc::new(move |e| sink.lock().unwrap().push(e)),
@@ -496,7 +499,7 @@ fn long_transcripts_are_filed_by_their_cwd() {
     let machine = h.store.machine_id().unwrap().unwrap();
     let project = h
         .store
-        .find_project_for_path(&machine, &h.cwd)
+        .find_project_for_path(&machine, &h.cwd, None)
         .unwrap()
         .expect("the cwd became a project");
     for asid in [CLAUDE_SID, late] {
@@ -786,6 +789,8 @@ fn codex_rollouts_in_scratch_folders_create_no_project() {
             true,
         ),
         (h.home.clone(), true),
+        // No git, no project marker: a chat.
+        (h.root.join("work").join("notes"), true),
         (h.cwd.clone(), false),
     ];
     let mut ids = Vec::new();
@@ -1660,4 +1665,35 @@ fn transcripts_of_other_machines_sessions_are_left_alone() {
             .is_none()
     );
     assert_eq!(h.outbox_len(), outbox);
+}
+
+// A project without folders works in blirp's workspace inside BLIRP_HOME:
+// its transcripts are ingested (unlike blirp's own runs there) and filed
+// under the project, before the scratch rules that would make a folder in
+// BLIRP_HOME a chat.
+#[test]
+fn workspace_transcripts_file_under_their_project() {
+    let h = H::new();
+    let project = h.store.create_project("Design", None).unwrap();
+    let ws = blirp_core::paths::Paths::at(h.root.join("blirp"))
+        .ensure_workspace(&project.id)
+        .unwrap();
+    let raw = ws.to_string_lossy().into_owned();
+    let json = serde_json::to_string(&raw).unwrap();
+    h.put(
+        &format!(".codex/sessions/2026/01/02/rollout-2026-01-02T09-00-00-{CODEX_SID}.jsonl"),
+        fixture("codex/rollout.jsonl")
+            .replace("{{CWD}}", &json[1..json.len() - 1])
+            .replace("{{SECRET}}", "x")
+            .as_bytes(),
+    );
+    h.pass();
+    let s = h.session("codex", CODEX_SID);
+    assert_eq!(s.project_id, project.id);
+    assert_eq!(Path::new(&s.cwd), ws);
+    // Still no folder rows: nothing for the cleanup to look at.
+    assert!(h.store.project_paths(&project.id).unwrap().is_empty());
+    h.engine.retire_non_projects();
+    assert!(!h.store.get_project(&project.id).unwrap().unwrap().deleted);
+    assert_eq!(h.session("codex", CODEX_SID).project_id, project.id);
 }

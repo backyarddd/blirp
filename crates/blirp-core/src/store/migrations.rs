@@ -4,7 +4,7 @@
 use rusqlite::Connection;
 
 /// Index `i` holds the migration that moves the schema from version `i` to `i + 1`.
-pub(crate) const MIGRATIONS: &[&str] = &[V1, V2, V3, V4, V5, V6, V7, V8, V9];
+pub(crate) const MIGRATIONS: &[&str] = &[V1, V2, V3, V4, V5, V6, V7, V8, V9, V10];
 
 /// Schema of §5. Note on the FTS tables: they are external-content tables keyed
 /// by the implicit rowid of `events`/`records`. blirp never runs `VACUUM`
@@ -314,6 +314,14 @@ CREATE TABLE hub_pulls(
     machine_id TEXT PRIMARY KEY,
     after      INTEGER NOT NULL
 );
+"#;
+
+/// Chats (§5): each machine's bucket for sessions that belong to no
+/// project is a project flagged `chats`, so every machine can tell it
+/// apart. The daemon flags an existing Home project at start
+/// (`Store::ensure_chats`), through `apply` so the flag replicates.
+const V10: &str = r#"
+ALTER TABLE projects ADD COLUMN chats INTEGER NOT NULL DEFAULT 0;
 "#;
 
 #[derive(Debug, thiserror::Error)]

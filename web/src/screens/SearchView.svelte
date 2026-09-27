@@ -57,7 +57,7 @@
       <input class="q" type="search" bind:value={text} placeholder="Search sessions and memory" aria-label="Search query" autofocus />
       <select class="select f" bind:value={projectSel} aria-label="Project">
         <option value="">All projects</option>
-        {#each app.projects as p (p.id)}<option value={p.id}>{p.name}</option>{/each}
+        {#each app.realProjects as p (p.id)}<option value={p.id}>{p.name}</option>{/each}
       </select>
       <select class="select f" bind:value={kindSel} aria-label="Result type">
         <option value="">Everything</option>
@@ -94,7 +94,7 @@
                     >{#each splitSnippet(h.snippet) as part, i (i)}{#if part.match}<mark>{part.text}</mark>{:else}{part.text}{/if}{/each}</span
                   >
                   <span class="small faint">
-                    {app.projectById.get(h.project_id)?.name ?? 'Unknown project'}{h.agent ? ` · ${agentLabel(h.agent)}` : ''} · {formatRelative(h.ts)}
+                    {app.projectLabel(h.project_id)}{h.agent ? ` · ${agentLabel(h.agent)}` : ''} · {formatRelative(h.ts)}
                   </span>
                 </span>
               </a>

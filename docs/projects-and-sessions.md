@@ -1,31 +1,56 @@
 # Projects and sessions
 
-## Projects are folders
+## Projects
 
-A project is one or more folders. Memory (brief, records, wiki, resources) belongs to the project, so every session started anywhere inside its folders shares it. Git is optional and only adds features: branch display, the Git tab (status and diffs), and per-session worktrees. A folder without `.git`, for example a design tool's MCP working folder or a notes directory, works fully: sessions, ingest, memory and sync are the same.
+A project is a place for related work and its memory (brief, records, wiki, resources): usually one or more folders, but a project can also have no folder at all. Every session in a project shares its memory. Git is optional and only adds features: branch display, the Git tab (status and diffs), and per-session worktrees. A folder without `.git`, for example a notes directory, works fully: sessions, ingest, memory and sync are the same.
 
-### How a folder becomes a project
+Sessions that are not part of an actual project are **chats**. They are listed under **Chats** in Sessions, not among projects (see [Chats](#chats)).
+
+### Projects without a folder
+
+Some work does not live in a folder on your computer: a design in a desktop app you drive through its MCP server, a game edited in its own editor, research that is only notes. Create such a project with **New project** on the Projects page and give it just a name (and optionally a brief); leave the folder empty. Through the API: `POST /api/projects {"name": "...", "brief": "..."}`.
+
+- An agent still needs a working directory, so sessions of the project start in a blirp workspace: `~/.blirp/workspaces/<project id>/`, an empty folder only you can read, created with the first session. The project page shows its path, labelled **blirp workspace**. Sessions started there outside blirp (from your own terminal) belong to the project too.
+- The workspace is per machine and is not synced: each machine, including the hub for cloud sessions, starts the project's sessions in its own workspace. The project itself and its memory sync like any other project.
+- The agents' MCP servers come from their own configuration, so a server you set up for your user (for example `claude mcp add --scope user`, or `[mcp_servers]` in `~/.codex/config.toml`) works in the workspace like anywhere else. For servers only this project should see, put the agent's project-level file into the workspace: `.mcp.json` for Claude Code, `.gemini/settings.json` for Gemini CLI, `.cursor/mcp.json` for Cursor, `opencode.json` for opencode. Open the folder from a session's toolbar (**Open folder**), or browse it on the project's **Files** tab.
+- To work in a real folder instead (say the folder an app saves the project in), tick **Start in another folder** in the New session dialog and pick it: the folder is added to the project, so later sessions there, in blirp or not, belong to it. A project that has a folder no longer uses the workspace; remove its folders again and it does.
+
+A project with folders can have them all removed (the **x** next to a folder on the project page, or `POST /api/projects/:id/folders/remove {"path": "..."}`): the project stays with its sessions and memory, and its new sessions start in the workspace. Only this machine's folders can be removed here; each machine removes its own.
+
+### How a session finds its project
 
 When a session starts (from blirp, or discovered in an agent's transcripts) blirp resolves its working directory:
 
-1. If the folder is inside a folder already registered on this machine, that project is used (nearest match wins).
-2. Else, if the folder is inside a git work tree, the repository's top level becomes the project root. If another machine already has a project with the same normalized remote (`host/owner/repo`), this folder joins that project, so a repo cloned on two machines shares one memory.
-3. Else the folder itself becomes a new project named after it.
-4. Your home directory and filesystem roots are never registered as project roots. Sessions there go to a per-machine project named `Home (<machine name>)`.
-5. Sessions started outside blirp (found in transcripts or reported by hooks) also go to `Home (<machine name>)`, instead of creating a project, when their folder is scratch space rather than a project: the temp folder, the Windows folder (`C:\Windows`, including `System32`), a hidden folder directly in your home directory (tool and agent data such as `~/.codex`, `~/.claude` or `~/.blirp`, and anything below them), or a Codex desktop chat folder (`~/Documents/Codex/<YYYY-MM-DD>/<chat>`, also in a Documents folder moved to OneDrive, which the Codex app creates for every chat that is not in a project). On macOS and Linux `/tmp` and `/var/tmp` count as temp folders too. Their transcripts stay searchable and are summarized like any other session. A folder you registered yourself (step 1) always wins, so **Add folder** makes a real project out of any of these places.
+1. A folder inside a project's blirp workspace belongs to that project.
+2. If the folder is inside a folder already registered on this machine, that project is used (nearest match wins).
+3. Else, if the folder is inside a git work tree, the repository's top level becomes the project root. If another machine already has a project with the same normalized remote (`host/owner/repo`), this folder joins that project, so a repo cloned on two machines shares one memory.
+4. Else, for a session you start from blirp with **Folder path**, the folder itself becomes a new project named after it: you picked it. A session found in transcripts or reported by hooks only makes a project of an actual project folder: the nearest folder from its working directory up that holds a project file (see below). Without one it is a chat.
+5. Your home directory and filesystem roots are never registered as project roots. For sessions started outside blirp neither are scratch places: the temp folder, the Windows folder (`C:\Windows`, including `System32`), a hidden folder directly in your home directory (tool and agent data such as `~/.codex`, `~/.claude` or `~/.blirp`, and anything below them), your Desktop, Downloads and Documents folders themselves, and Codex desktop chat folders (`~/Documents/Codex/<YYYY-MM-DD>/<chat>`, also in a Documents folder moved to OneDrive). On macOS and Linux `/tmp` and `/var/tmp` count as temp folders too. Sessions there are chats. A folder you registered yourself (step 2) always wins, so **New project** with a folder makes a real project out of any of these places.
 
-Worktree sessions resolve to their main repository's project. Transcripts whose folder no longer exists are matched by path prefix, or get a project at the recorded path; on Windows spellings of the same folder (case, `/` or `\`, a `\\?\` prefix, a trailing separator) match the same project.
+Project files (matched in any letter case): `package.json`, `deno.json`, `deno.jsonc`, `Cargo.toml`, `go.mod`, `pyproject.toml`, `setup.py`, `Pipfile`, `requirements.txt`, `pom.xml`, `build.gradle`, `build.gradle.kts`, `build.sbt`, `Gemfile`, `composer.json`, `mix.exs`, `Package.swift`, `pubspec.yaml`, `CMakeLists.txt`, `meson.build`, `stack.yaml`, `deps.edn`, `project.clj`, `project.godot`, `default.project.json`; files ending in `.sln`, `.csproj`, `.fsproj`, `.vbproj`, `.vcxproj`, `.cabal`, `.gemspec`, `.xcodeproj`, `.xcworkspace`, `.uproject`; other version control (`.hg`, `.svn`, `.jj`); and agent setup written for the folder (`.mcp.json`, `AGENTS.md`, `CLAUDE.md`).
 
-Projects that blirp 0.1.0 created for such scratch folders are merged into `Home (<machine name>)` once, shortly after the daemon first starts after upgrading (on a machine paired to a hub, after it has caught up with the hub): their sessions and summarized records move there and the project disappears from the list on every paired machine. Their briefs are not carried into Home. A project is left alone if you added it with **Add folder** (from this version on), renamed it, merged another project into it, started a session in it from blirp, pinned a record, or wrote any of its memory yourself (a record, a brief version, a wiki page or a resource), and also when it is a git repository with a remote or has no sessions; remove those with **Remove** if you do not want them.
+Worktree sessions resolve to their main repository's project. Transcripts whose folder no longer exists are matched by path prefix (or, for Codex, by the recorded git remote); otherwise they are chats, since a folder that is gone cannot show it was a project. On Windows spellings of the same folder (case, `/` or `\`, a `\\?\` prefix, a trailing separator) match the same project.
+
+Projects that earlier versions created for folders that are no actual project under these rules are merged into Chats once, shortly after the daemon first starts after upgrading (on a machine paired to a hub, after it has caught up with the hub): their sessions and summarized records move to Chats and the project disappears from the list on every paired machine. Their briefs are not carried over. A project is left alone if you added it with **Add folder** or **New project**, renamed it, merged another project into it, removed one of its folders, started a session in it from blirp, pinned a record, or wrote any of its memory yourself (a record, a brief version, a wiki page or a resource), and also when it is a git repository, has a project file, has no sessions, or its folder is gone or not reachable (an unmounted drive); remove those with **Delete** if you do not want them, or move their sessions.
+
+### Chats
+
+Chats are the sessions that belong to no project: everything you run in your home folder, a scratch folder or a folder that is no project. The Sessions list shows them in one **Chats** group (over all paired machines), search finds them, and they are summarized like other sessions, but:
+
+- chats share no memory: nothing is injected when one starts, and distilling a chat writes only its own summary (no brief, no records);
+- **Move** in the session toolbar (the folder icon) files a session into a project, into a **New project** (created without a folder), or back into Chats. Its subagent sessions and the records it produced move with it. Moving never registers the session's folder; run **Distill now** afterwards to add what the chat decided to the project's memory.
+
+Each machine keeps its chats in a bucket of its own (a project flagged `chats`, called `Chats (<machine name>)`, which blirp 0.1.0 called `Home (<machine name>)`); the UI never lists it among projects. API: `POST /api/sessions/:id/move {"project_id": "<id>" | null}`.
 
 ### Managing projects
 
-- **Add folder** on the Projects page registers a folder explicitly (any absolute path on this machine).
+- **New project** on the Projects page: a name, a folder (any absolute path on this machine), or both, and an optional brief.
 - **Rename** on the project page (pencil next to the name).
-- **Remove** unregisters the project's folders and hides it. Its sessions and memory stay in the database, but a new session in that folder creates a new, empty project.
-- **Merge** (API only for now: `POST /api/projects/:id/merge {"into": "<id>"}`) moves folders, sessions, records, wiki pages and resources into another project. Use it to join the same non-git folder on two machines, since those cannot be matched by remote.
+- **Remove folder** (the **x** next to one of this machine's folders): unregisters it, the project stays.
+- **Delete** unregisters the project's folders and hides it. Its sessions and memory stay in the database, but a new session in one of its folders starts a new project.
+- **Merge into…** moves folders, sessions, records, wiki pages and resources into another project. Use it to join the same non-git folder on two machines, since those cannot be matched by remote.
 
-The project page has tabs: Overview (brief, open threads, recent sessions, a prompt box to start a session), Sessions, Memory, Wiki, Resources, Files (read-only browser, text files up to 1 MiB) and Git (git projects only).
+The project page has tabs: Overview (brief, open threads, recent sessions, a prompt box to start a session), Sessions, Memory, Wiki, Resources, Files (read-only browser, text files up to 1 MiB; the workspace for a project without folders) and Git (git projects only).
 
 ## Sessions
 

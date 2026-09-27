@@ -29,7 +29,7 @@ The agents already save full transcripts on disk. blirp reads them, keeps a proj
 **Sessions**
 - **Real terminals.** Agents run in a pseudo-terminal (ConPTY on Windows) rendered with xterm.js. Tabs, a grid of all live sessions, a notification when a session needs input.
 - **Every session tracked.** Status (working, idle, waiting, completed, failed, ...), branch or folder, tokens and cost, transcript and summary. Sessions started outside blirp are picked up from the agents' own transcript stores, subagents included.
-- **Projects are folders.** Git is optional. For git projects, a session can run in its own worktree on a `blirp/<name>` branch.
+- **Projects are folders, or none.** Git is optional. For git projects, a session can run in its own worktree on a `blirp/<name>` branch. A project without a folder (work in a design tool's MCP server, say) runs its sessions in a private blirp workspace. Quick chats outside any project stay under Chats.
 - **Continue in / fork.** Start a new session, with any agent, from a handoff pack of an earlier one.
 
 **Memory**

@@ -58,10 +58,10 @@
       id: `s:${s.id}`,
       group: 'Sessions',
       label: sessionTitle(s),
-      hint: `${agentLabel(s.agent)} · ${app.projectById.get(s.project_id)?.name ?? ''} · ${sessionStatusInfo(s).label}`,
+      hint: `${agentLabel(s.agent)} · ${app.projectLabel(s.project_id)} · ${sessionStatusInfo(s).label}`,
       run: go(href.sessions(s.id)),
     }));
-    const projects: Item[] = app.projects.map((p) => ({
+    const projects: Item[] = app.realProjects.map((p) => ({
       id: `p:${p.id}`,
       group: 'Projects',
       label: p.name,

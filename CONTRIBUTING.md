@@ -19,7 +19,7 @@ If you change a type in `crates/blirp-core/src/model.rs`, regenerate the TypeScr
 
 - No `unwrap`/`expect` outside tests without a comment proving it cannot fail; no `unsafe` without a `SAFETY:` comment and a platform reason; no `any` in TypeScript.
 - Errors are handled or logged with context, never silently dropped. Logs never contain transcript text or secrets.
-- Projects are folders; never assume `.git` exists.
+- Projects are folders, or none; never assume `.git` exists or that a project has a folder.
 - Never edit a user's agent config or project files except through the explicit, reversible `blirp hooks install` flow. Hooks always exit 0 within 2 s.
 - Writes to replicated tables go through `Store::apply`. Redact before storing, syncing or summarizing.
 - Tests for every adapter, redaction rule, migration and protocol change.

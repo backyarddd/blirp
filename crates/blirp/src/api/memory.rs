@@ -50,7 +50,7 @@ pub fn routes() -> Router<SharedState> {
         .route("/api/suggestions/{id}/{action}", post(decide_suggestion))
 }
 
-fn check_len(field: &str, v: &str) -> ApiResult<()> {
+pub(super) fn check_len(field: &str, v: &str) -> ApiResult<()> {
     if v.len() > MAX_TEXT {
         return Err(ApiError::bad_request(format!(
             "{field} exceeds {} KiB",

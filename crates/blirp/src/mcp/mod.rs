@@ -149,7 +149,9 @@ impl BlirpMcp {
         let project = match project_env.filter(|p| !p.is_empty()) {
             Some(p) => Some(p),
             None => match (store.machine_id()?, cwd) {
-                (Some(m), Some(cwd)) => store.find_project_for_path(&m, cwd)?.map(|p| p.id),
+                (Some(m), Some(cwd)) => store
+                    .find_project_for_path(&m, cwd, Some(&paths.workspaces_dir()))?
+                    .map(|p| p.id),
                 _ => None,
             },
         };

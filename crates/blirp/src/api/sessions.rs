@@ -1,4 +1,4 @@
-//! Sessions: list, launch, detail, events, stop, resume, rename.
+//! Sessions: list, launch, detail, events, stop, resume, rename, move.
 
 use super::{ApiError, ApiJson, ApiPath, ApiQuery, ApiResult, Control, blocking};
 use crate::state::SharedState;
@@ -8,8 +8,8 @@ use axum::response::Response;
 use axum::routing::{get, post};
 use axum::{Json, Router};
 use blirp_core::model::{
-    EventsPage, LaunchSession, PatchSession, RemoveWorktree, ServerEvent, Session, SessionDetail,
-    SessionStatus, SessionsPage,
+    EventsPage, LaunchSession, MoveSession, PatchSession, RemoveWorktree, ServerEvent, Session,
+    SessionDetail, SessionStatus, SessionsPage,
 };
 use blirp_core::store::SessionFilter;
 use serde::Deserialize;
@@ -25,6 +25,7 @@ pub fn routes() -> Router<SharedState> {
         .route("/api/sessions/{id}/stop", post(stop))
         .route("/api/sessions/{id}/resume", post(resume))
         .route("/api/sessions/{id}/worktree/remove", post(remove_worktree))
+        .route("/api/sessions/{id}/move", post(move_session))
 }
 
 #[derive(Deserialize)]
@@ -245,5 +246,36 @@ async fn patch(
     s.emit(ServerEvent::SessionUpdated {
         session: session.clone(),
     });
+    Ok(Json(session))
+}
+
+/// POST /api/sessions/:id/move: file a session (any machine's: another
+/// machine may re-point a session's project, §10) in another project, or
+/// in Chats with `project_id: null`.
+async fn move_session(
+    State(s): State<SharedState>,
+    _: Control,
+    ApiPath(id): ApiPath<String>,
+    ApiJson(body): ApiJson<MoveSession>,
+) -> ApiResult<Json<Session>> {
+    let st = s.clone();
+    let (session, from) = blocking(move || {
+        let from = st
+            .store
+            .get_session(&id)?
+            .ok_or_else(|| ApiError::not_found("session"))?
+            .project_id;
+        let session = st
+            .store
+            .move_session(&id, body.project_id.as_deref(), &st.machine.name)?;
+        Ok((session, from))
+    })
+    .await?;
+    s.emit(ServerEvent::SessionUpdated {
+        session: session.clone(),
+    });
+    for project_id in [from, session.project_id.clone()] {
+        s.emit(ServerEvent::ProjectUpdated { project_id });
+    }
     Ok(Json(session))
 }

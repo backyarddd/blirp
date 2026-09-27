@@ -91,21 +91,41 @@ export function sessionTitle(s: Pick<Session, 'title' | 'agent' | 'cwd'>): strin
 }
 
 export interface SessionGroup {
-  projectId: string;
+  /** The project's id; `chats` for the Chats group. */
+  key: string;
+  /** Null for Chats (its sessions can sit in several machines' Chats buckets). */
+  projectId: string | null;
   name: string;
   project: ProjectSummary | undefined;
   sessions: Session[];
 }
 
-/** Groups sessions by project, preserving input order (groups ordered by their first session). */
+/** Sessions that belong to no project live in a machine's Chats bucket, never listed among projects. */
+export function isChats(projectId: string, projects: ReadonlyMap<string, ProjectSummary>): boolean {
+  return projects.get(projectId)?.chats === true;
+}
+
+/** Where a project's sessions start on this machine, for display. */
+export function projectPlace(p: ProjectSummary): string {
+  if (p.chats) return 'Sessions that belong to no project';
+  if (p.workspace !== null) return 'No folder · sessions start in a blirp workspace';
+  return p.paths.some((x) => x.local) ? '' : 'No folder on this machine';
+}
+
+/**
+ * Groups sessions by project, preserving input order (groups ordered by their first session). Sessions in
+ * any machine's Chats bucket form one Chats group.
+ */
 export function groupSessions(sessions: readonly Session[], projects: ReadonlyMap<string, ProjectSummary>): SessionGroup[] {
   const groups = new Map<string, SessionGroup>();
   for (const s of sessions) {
-    let g = groups.get(s.project_id);
+    const chats = isChats(s.project_id, projects);
+    const key = chats ? 'chats' : s.project_id;
+    let g = groups.get(key);
     if (!g) {
-      const project = projects.get(s.project_id);
-      g = { projectId: s.project_id, name: project?.name ?? 'Unknown project', project, sessions: [] };
-      groups.set(s.project_id, g);
+      const project = chats ? undefined : projects.get(s.project_id);
+      g = { key, projectId: chats ? null : s.project_id, name: chats ? 'Chats' : (project?.name ?? 'Unknown project'), project, sessions: [] };
+      groups.set(key, g);
     }
     g.sessions.push(s);
   }

@@ -89,7 +89,9 @@
         <Menu size={18} />
       </button>
       <nav class="crumbs ellipsis" aria-label="Breadcrumb">
-        {#if project}
+        {#if project?.chats}
+          <span>Chats</span>
+        {:else if project}
           <a href={href.project(project.id)}>{project.name}</a>
         {:else}
           <span>All projects</span>

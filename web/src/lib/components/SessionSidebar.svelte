@@ -126,10 +126,14 @@
       {#snippet emptyAction()}
         {#if !filtering && app.control}<button class="btn primary sm" type="button" onclick={() => app.openNewSession()}>New session</button>{/if}
       {/snippet}
-      {#each groups as g (g.projectId)}
+      {#each groups as g (g.key)}
         <section class="group" aria-label={g.name}>
           <header>
-            <a class="gname ellipsis" href={href.project(g.projectId)}>{g.name}</a>
+            {#if g.projectId === null}
+              <span class="gname ellipsis" title="Sessions that belong to no project">{g.name}</span>
+            {:else}
+              <a class="gname ellipsis" href={href.project(g.projectId)}>{g.name}</a>
+            {/if}
             {#if app.control}
               <button
                 type="button"

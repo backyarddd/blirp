@@ -1655,4 +1655,110 @@ async fn update_apply_needs_a_newer_release() {
         (409, Some("no_update"))
     );
     assert!(spawned.lock().unwrap().is_empty() && offline.lock().unwrap().is_empty());
+// A project without folders: created with a name and brief, its sessions
+// start in this machine's blirp workspace, a folder picked for a session
+// joins it, removing that folder keeps the project, and a session moves to
+// Chats and back.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn folderless_projects_start_in_their_workspace() {
+    let h = Harness::start().await;
+    let post = |path: String, body: serde_json::Value| {
+        let h = &h;
+        async move { h.send(reqwest::Method::POST, &path, body).await }
+    };
+    assert_eq!(post("/api/projects".into(), json!({})).await.status(), 400);
+    let r = post(
+        "/api/projects".into(),
+        json!({"name": "Design", "brief": "Screens for the app."}),
+    )
+    .await;
+    assert_eq!(r.status(), 201);
+    let p: ProjectSummary = r.json().await.unwrap();
+    assert!(p.paths.is_empty() && !p.project.chats);
+    let ws = Paths::at(h._home.path())
+        .workspace_dir(&p.project.id)
+        .unwrap();
+    assert_eq!(p.workspace.as_deref(), Some(ws.to_str().unwrap()));
+    let memory: ProjectMemory = h
+        .get(&format!("/api/projects/{}/memory", p.project.id))
+        .await;
+    assert_eq!(memory.brief.unwrap().body_md, "Screens for the app.");
+
+    let r = post(
+        "/api/sessions".into(),
+        json!({"project_id": p.project.id, "agent": "shell"}),
+    )
+    .await;
+    assert_eq!(r.status(), 201);
+    let s: Session = r.json().await.unwrap();
+    assert_eq!(s.project_id, p.project.id);
+    assert!(ws.is_dir());
+    assert_eq!(
+        dunce::canonicalize(&s.cwd).unwrap(),
+        dunce::canonicalize(&ws).unwrap()
+    );
+
+    // Another folder only with add_folder; it then belongs to the project.
+    let place = h._home.path().join("place");
+    std::fs::create_dir(&place).unwrap();
+    let launch = json!({"project_id": p.project.id, "cwd": place, "agent": "shell"});
+    assert_eq!(
+        post("/api/sessions".into(), launch.clone()).await.status(),
+        400
+    );
+    let mut with_add = launch;
+    with_add["add_folder"] = json!(true);
+    let r = post("/api/sessions".into(), with_add).await;
+    assert_eq!(r.status(), 201);
+    let s2: Session = r.json().await.unwrap();
+    let p2: ProjectSummary = h.get(&format!("/api/projects/{}", p.project.id)).await;
+    assert_eq!(p2.paths.len(), 1);
+    assert!(p2.workspace.is_none());
+
+    // Removing its only folder keeps the project; sessions use the workspace again.
+    let r = post(
+        format!("/api/projects/{}/folders/remove", p.project.id),
+        json!({"path": p2.paths[0].path}),
+    )
+    .await;
+    assert_eq!(r.status(), 200);
+    let p3: ProjectSummary = r.json().await.unwrap();
+    assert!(p3.paths.is_empty() && p3.workspace.is_some());
+    assert_eq!(
+        post(
+            format!("/api/projects/{}/folders/remove", p.project.id),
+            json!({"path": p2.paths[0].path}),
+        )
+        .await
+        .status(),
+        404
+    );
+
+    // To Chats and back.
+    let r = post(
+        format!("/api/sessions/{}/move", s2.id),
+        json!({"project_id": null}),
+    )
+    .await;
+    assert_eq!(r.status(), 200);
+    let moved: Session = r.json().await.unwrap();
+    let projects: Vec<ProjectSummary> = h.get("/api/projects").await;
+    let chats = projects
+        .iter()
+        .find(|x| x.project.id == moved.project_id)
+        .unwrap();
+    assert!(chats.project.chats && chats.is_home && chats.workspace.is_none());
+    let r = post(
+        format!("/api/sessions/{}/move", s2.id),
+        json!({"project_id": p.project.id}),
+    )
+    .await;
+    assert_eq!(r.json::<Session>().await.unwrap().project_id, p.project.id);
+
+    for id in [&s.id, &s2.id] {
+        post(format!("/api/sessions/{id}/stop"), json!({})).await;
+        wait_status(&h, id, SessionStatus::Completed).await;
+    }
+    let Harness { daemon, _home, .. } = h;
+    daemon.shutdown().await.unwrap();
 }

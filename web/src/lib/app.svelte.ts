@@ -132,6 +132,8 @@ class AppState {
   readonly deletedSessions = new SvelteSet<string>();
 
   projectById: Map<string, ProjectSummary> = $derived(new Map(this.projects.map((p) => [p.id, p])));
+  /** Projects as listed and picked: without the machines' Chats buckets. */
+  realProjects: ProjectSummary[] = $derived(this.projects.filter((p) => !p.chats));
   sessionById: Map<string, Session> = $derived(new Map(this.sessions.map((s) => [s.id, s])));
   liveSessions: Session[] = $derived(this.sessions.filter(hasTerminal));
   /** What lists show: subagent children sit under their parent's card instead. */
@@ -367,6 +369,13 @@ class AppState {
     this.projects = this.projectById.has(p.id)
       ? this.projects.map((x) => (x.id === p.id ? p : x))
       : [...this.projects, p];
+  }
+
+  /** A session's project for display: every machine's Chats bucket is just "Chats". */
+  projectLabel(id: string): string {
+    const p = this.projectById.get(id);
+    if (!p) return 'Unknown project';
+    return p.chats ? 'Chats' : p.name;
   }
 
   removeProject(id: string): void {

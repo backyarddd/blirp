@@ -9,6 +9,7 @@
   import Clock from '@lucide/svelte/icons/clock';
   import Trash from '@lucide/svelte/icons/trash-2';
   import FolderX from '@lucide/svelte/icons/folder-x';
+  import FolderInput from '@lucide/svelte/icons/folder-input';
   import { ApiError, api, errorMessage } from '../api/client';
   import type { Session } from '../api/types.gen';
   import { app } from '../app.svelte';
@@ -130,6 +131,47 @@
     }
   }
 
+  // Move: into another project, back to Chats, or into a new project without a folder.
+  const NEW = '+new';
+  const CHATS = '+chats';
+  let moving = $state(false);
+  let moveTo = $state('');
+  let newName = $state('');
+  const inChats = $derived(app.projectById.get(session.project_id)?.chats === true);
+  const moveTargets = $derived(
+    app.realProjects.filter((p) => p.id !== session.project_id).sort((a, b) => a.name.localeCompare(b.name)),
+  );
+
+  function openMove(): void {
+    moveTo = '';
+    newName = '';
+    moving = true;
+  }
+
+  async function move(e: SubmitEvent): Promise<void> {
+    e.preventDefault();
+    const name = newName.trim();
+    if (!moveTo || (moveTo === NEW && !name)) return;
+    busy = true;
+    const moved = await app.act(async () => {
+      let target: string | null = null;
+      if (moveTo === NEW) {
+        const p = await api.projects.create({ name });
+        app.upsertProject(p);
+        target = p.id;
+      } else if (moveTo !== CHATS) {
+        target = moveTo;
+      }
+      return api.sessions.move(session.id, target);
+    });
+    busy = false;
+    if (!moved) return;
+    moving = false;
+    app.upsertSession(moved);
+    const where = moveTo === CHATS ? undefined : app.projectById.get(moved.project_id);
+    app.toast(`Moved to ${where?.name ?? 'Chats'}`, 'info');
+  }
+
   async function resume(): Promise<void> {
     busy = true;
     const s = await onSession('resume the session', () => api.sessions.resume(session.id));
@@ -178,6 +220,11 @@
   >
     <Brain size={17} />
   </button>
+  {#if app.control}
+    <button type="button" class="icon-btn" aria-label="Move to project" title={inChats ? 'Move to a project' : 'Move to another project or Chats'} onclick={openMove} disabled={busy}>
+      <FolderInput size={17} />
+    </button>
+  {/if}
   {#if app.control && !live}
     {#if canRemoveWorktree}
       <button type="button" class="icon-btn" aria-label="Remove worktree" title="Remove worktree" onclick={() => removeWorktree(false)} disabled={busy}>
@@ -196,6 +243,32 @@
     <button type="button" class="btn sm primary" onclick={resume} disabled={busy}><Play size={12} fill="currentColor" aria-hidden="true" />Resume</button>
   {/if}
 </div>
+
+<Modal open={moving} title="Move session" onclose={() => (moving = false)}>
+  <form id="move-session" onsubmit={move}>
+    <label class="field">
+      <span>Move "{sessionTitle(session)}" to</span>
+      <select class="select" bind:value={moveTo} required>
+        <option value="" disabled>Pick a project</option>
+        {#if !inChats}<option value={CHATS}>Chats (no project)</option>{/if}
+        {#each moveTargets as p (p.id)}<option value={p.id}>{p.name}</option>{/each}
+        <option value={NEW}>New project…</option>
+      </select>
+    </label>
+    {#if moveTo === NEW}
+      <label class="field">
+        <span>Project name</span>
+        <input class="input" bind:value={newName} required maxlength="200" />
+        <span class="hint">A project without a folder; its new sessions start in a blirp workspace.</span>
+      </label>
+    {/if}
+    <p class="small muted">Its subagent sessions and the memory records it produced move along. The folder it ran in is not registered.</p>
+  </form>
+  {#snippet footer()}
+    <button type="button" class="btn" onclick={() => (moving = false)}>Cancel</button>
+    <button type="submit" form="move-session" class="btn primary" disabled={busy || !moveTo}>Move</button>
+  {/snippet}
+</Modal>
 
 <Modal open={dirty !== null} title="Uncommitted changes" onclose={() => (dirty = null)}>
   <p>Git reports: {dirty}.</p>

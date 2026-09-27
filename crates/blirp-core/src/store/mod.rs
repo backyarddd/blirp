@@ -511,12 +511,12 @@ fn write_row(tx: &Transaction<'_>, change: &Change) -> Result<usize> {
         }
         Change::Project(p) => {
             let n = tx.execute(
-                "INSERT INTO projects(id, name, created_at, updated_at, deleted) VALUES (?1,?2,?3,?4,?5)
+                "INSERT INTO projects(id, name, created_at, updated_at, deleted, chats) VALUES (?1,?2,?3,?4,?5,?6)
                  ON CONFLICT(id) DO UPDATE SET name=excluded.name, created_at=excluded.created_at,
-                   updated_at=excluded.updated_at, deleted=excluded.deleted
-                 WHERE (excluded.updated_at, excluded.deleted, excluded.name, excluded.created_at)
-                     > (projects.updated_at, projects.deleted, projects.name, projects.created_at)",
-                params![p.id, p.name, p.created_at, p.updated_at, p.deleted],
+                   updated_at=excluded.updated_at, deleted=excluded.deleted, chats=excluded.chats
+                 WHERE (excluded.updated_at, excluded.deleted, excluded.name, excluded.created_at, excluded.chats)
+                     > (projects.updated_at, projects.deleted, projects.name, projects.created_at, projects.chats)",
+                params![p.id, p.name, p.created_at, p.updated_at, p.deleted, p.chats],
             )?;
             if n > 0 && p.deleted {
                 // A deleted project has no folders. Every machine drops them
@@ -863,6 +863,7 @@ pub(crate) mod tests {
             created_at: 1,
             updated_at: 1,
             deleted: false,
+            chats: false,
         };
         assert!(store.apply(Change::Project(p.clone())).unwrap());
         let ob = store.outbox_after(0, 10).unwrap();

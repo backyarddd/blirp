@@ -3,6 +3,7 @@
   import Plus from '@lucide/svelte/icons/plus';
   import Trash from '@lucide/svelte/icons/trash-2';
   import Merge from '@lucide/svelte/icons/git-merge';
+  import X from '@lucide/svelte/icons/x';
   import { api } from '../lib/api/client';
   import { app } from '../lib/app.svelte';
   import { navigate } from '../lib/router.svelte';
@@ -30,8 +31,8 @@
     { id: 'files', label: 'Files' },
     { id: 'git', label: 'Git' },
   ];
-  // Files and git read this machine's folders; git only exists for folders that are repos.
-  const hasLocal = $derived(project?.paths.some((p) => p.local) ?? false);
+  // Files and git read this machine's folders (or its blirp workspace); git only exists for folders that are repos.
+  const hasLocal = $derived((project?.paths.some((p) => p.local) ?? false) || (project?.workspace ?? null) !== null);
   const hasGit = $derived(project?.paths.some((p) => p.local && p.is_git) ?? false);
   const tabs = $derived(TABS.filter((t) => (t.id !== 'git' || hasGit) && (t.id !== 'files' || hasLocal)));
 
@@ -47,6 +48,17 @@
       app.upsertProject(p);
       renaming = false;
     }
+  }
+
+  async function removeFolder(path: string): Promise<void> {
+    if (!project) return;
+    const last = project.paths.length === 1;
+    const msg =
+      `Remove ${path} from "${project.name}"? The folder itself is not touched, and the project keeps its sessions and memory.` +
+      (last ? ' With no folder left, its new sessions start in a blirp workspace.' : '');
+    if (!confirm(msg)) return;
+    const p = await app.act(() => api.projects.removeFolder(project.id, path), 'Folder removed');
+    if (p) app.upsertProject(p);
   }
 
   async function remove(): Promise<void> {
@@ -109,6 +121,16 @@
         </div>
       {/if}
     {:else}
+      {#if project.chats}
+        <div class="card panel-pad">
+          <h1 class="page-title">Chats</h1>
+          <p class="muted">
+            Sessions that belong to no project are chats. They are listed under Chats in Sessions, searchable and summarized, but get
+            no project memory. Move one into a project from its session toolbar.
+          </p>
+          <a class="btn" href={href.sessions()}>Sessions</a>
+        </div>
+      {:else}
       <nav class="crumbs small" aria-label="Breadcrumb"><a href={href.projects()}>Projects</a> / <span aria-current="page">{project.name}</span></nav>
       <div class="row wrap head">
         {#if renaming}
@@ -142,10 +164,27 @@
           <button type="button" class="btn primary" onclick={() => app.openNewSession(project.id)}><Plus size={16} aria-hidden="true" />New session</button>
         {/if}
       </div>
-      <ul class="paths small muted">
+      <ul class="paths small muted" aria-label="Folders">
         {#each project.paths as p (p.machine_id + p.path)}
-          <li class="mono ellipsis" title={p.path}>{p.path}{p.git_remote ? `  ·  ${p.git_remote}` : ''}</li>
+          <li class="row">
+            <span class="mono ellipsis" title={p.path}>{p.path}{p.git_remote ? `  ·  ${p.git_remote}` : ''}{p.local ? '' : ` (${app.machineName(p.machine_id)})`}</span>
+            {#if p.local && app.control}
+              <button type="button" class="icon-btn sm" aria-label="Remove folder {p.path}" title="Remove folder from project" onclick={() => removeFolder(p.path)}
+                ><X size={13} /></button
+              >
+            {/if}
+          </li>
         {/each}
+        {#if project.workspace !== null}
+          <li class="row" data-testid="workspace">
+            <span class="badge">blirp workspace</span>
+            <span class="mono ellipsis" title={project.workspace}>{project.workspace}</span>
+          </li>
+          <li class="faint">
+            No folder: sessions start in this machine's blirp workspace (created with the first one). Put agent settings there, such
+            as a <code>.mcp.json</code>.
+          </li>
+        {/if}
       </ul>
 
       <nav class="tabs" aria-label="Project sections">
@@ -179,6 +218,7 @@
           {/if}
         {/if}
       {/key}
+      {/if}
     {/if}
   </div>
 </div>
@@ -226,5 +266,12 @@
     list-style: none;
     padding: 0;
     margin: 6px 0 16px;
+  }
+  .paths li {
+    gap: 6px;
+    min-width: 0;
+  }
+  .paths .mono {
+    min-width: 0;
   }
 </style>

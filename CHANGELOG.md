@@ -43,6 +43,22 @@ so every tag needs one.
   listener).
 - `blirp update` prints the version before and after and records each
   attempt in `logs/update.log`.
+- Projects without a folder: **New project** takes just a name (and an
+  optional brief). Their sessions start in a private per-machine blirp
+  workspace (`~/.blirp/workspaces/<project id>`), where an agent's own
+  project MCP file (such as `.mcp.json`) can go; memory syncs as for any
+  project. A folder picked with **Start in another folder** joins the
+  project. `POST /api/projects {name, brief?}`, `LaunchSession.add_folder`.
+- Remove a folder from a project (the **x** next to it, or
+  `POST /api/projects/:id/folders/remove`); the project stays, also with no
+  folder left.
+- Chats: sessions that are part of no project are listed under **Chats** in
+  Sessions instead of as a project, are searchable and summarized, and share
+  no memory. Sessions found in transcripts join a project only in an actual
+  project folder (git, or a project file such as `package.json`,
+  `Cargo.toml` or `.mcp.json`); a folder you pick in blirp still becomes one.
+  Move a session into a project, a new project or back to Chats from its
+  toolbar (`POST /api/sessions/:id/move`).
 - Run the hub on a VPS: `install.sh --hub` installs the CLI and runs the new
   `blirp hub setup`, which installs the autostart service with systemd
   linger (so the hub survives logout and reboots), turns LAN discovery and
@@ -79,7 +95,10 @@ so every tag needs one.
 - Sessions found in transcripts no longer create a project for scratch
   folders: the temp folder, the Windows folder, hidden tool folders in the
   home directory (`~/.codex`, ...) and Codex desktop chat folders
-  (`~/Documents/Codex/<date>/<chat>`). They go to the machine's Home project.
+  (`~/Documents/Codex/<date>/<chat>`). They are chats now, as are sessions
+  in other folders that are no project. Projects created for them earlier are
+  merged into Chats once, unless you renamed, used or edited them. The
+  machine's Home project becomes its Chats.
 - The Sessions list is ordered by most recent activity, with running
   sessions on top, instead of by start time, so a long session that is
   working now is not buried under newer finished ones. Another machine's
@@ -99,8 +118,6 @@ so every tag needs one.
   machine it runs on, this machine's included, and a machine picker filters
   the list, so a mixed list no longer reads as if only the other machine's
   sessions were shown.
-  Projects created for them earlier are merged into Home once, unless you
-  renamed, used or edited them.
 - Transcripts of a folder that no longer exists no longer create a second
   project when the folder is spelled differently (case, separators, `\\?\`).
 - Notifications work in the desktop app: it shows native notifications

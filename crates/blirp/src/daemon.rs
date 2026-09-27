@@ -116,6 +116,10 @@ fn load_machine(store: &Store, config: &Config, id: String) -> anyhow::Result<Ma
         revoked: false,
     };
     store.upsert_machine(&machine)?;
+    // blirp 0.1.0's Home project is this machine's Chats (§5).
+    if store.ensure_chats(&machine.name)? {
+        tracing::info!("the Home project is now this machine's Chats");
+    }
     Ok(machine)
 }
 

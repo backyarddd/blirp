@@ -24,7 +24,7 @@ It reports the data directory, `config.toml`, the database, whether the daemon i
 ## 2. Start a session
 
 1. Click the orange **+** in the top bar (Ctrl+T on Windows/Linux, Cmd+T on macOS; inside a focused terminal on Windows/Linux use Ctrl+Shift+T, because Ctrl+T belongs to the shell).
-2. Choose **Project** (a folder blirp already knows) or **Folder path** (any absolute path; it becomes a project automatically). Git is optional.
+2. Choose **Project** (one blirp already knows) or **Folder path** (any absolute path; it becomes a project automatically). Git is optional.
 3. Pick an agent. Only agents found on the daemon's `PATH` can be selected; `Shell` always works. Custom commands from `config.toml` appear here too ([agents.md](agents.md#custom-agents)).
 4. Optional: type a first prompt. blirp types it into the agent once its output settles (and waits if the agent is showing a "trust this folder" dialog, so your answer to that dialog is not overwritten).
 5. For git projects you can tick **Run in a new git worktree**; the session then works on its own branch `blirp/<name>` in `~/.blirp/worktrees/`.
@@ -33,6 +33,18 @@ It reports the data directory, `config.toml`, the database, whether the daemon i
 In a terminal pane, copy with Ctrl+Shift+C (Cmd+C on macOS) and paste with Ctrl+Shift+V (Cmd+V on macOS; on Windows plain Ctrl+V too, as in Windows Terminal). On Linux and macOS plain Ctrl+V goes to the program in the terminal, as in native terminals. Pasting a screenshot or a copied file, or dropping files onto the pane, puts their paths into the terminal so the agent can attach them ([projects-and-sessions.md](projects-and-sessions.md#pasting-images-and-files)). The key choice follows the computer your browser or desktop app runs on, not the session's machine.
 
 The session opens as a tab with the live terminal. The sidebar lists sessions grouped by project, each with a status chip: Working, Idle, Waiting (the agent needs you), Completed, Failed, Detached.
+
+### A project without a folder
+
+Not every project lives in a folder. Say you work on a design in a desktop app that your agents reach through the app's MCP server, and the design itself is stored by that app:
+
+1. On **Projects**, click **New project**, name it (for example `Landing page redesign`), optionally write a brief ("Marketing site redesign in the design tool, file 'Landing v2'"), and leave **Folder** empty.
+2. Start a session in it. It runs in a private, empty folder blirp keeps for the project on this machine (`~/.blirp/workspaces/<project id>`), shown on the project page as **blirp workspace**.
+3. MCP servers you configured for your user work there as anywhere. For a server only this project should use, put the agent's project MCP file into the workspace, for Claude Code a `.mcp.json`.
+
+Memory works as for any project, and syncs to your other machines; each machine uses its own workspace. Details: [projects-and-sessions.md](projects-and-sessions.md#projects-without-a-folder).
+
+Sessions that are part of no project at all, such as a quick question asked in your home folder, are chats: they are listed under **Chats**, not as projects ([more](projects-and-sessions.md#chats)).
 
 ## 3. Let memory build up
 

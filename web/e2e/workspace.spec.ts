@@ -1,4 +1,4 @@
-// Drives the built SPA against the real daemon: auth, projects (git and plain folder),
+// Drives the built SPA against the real daemon: auth, projects (git, plain folder, no folder), chats,
 // a live shell session, memory, wiki, resources, files, git, search, settings, palette,
 // mobile layout, and no CSP violations along the way. Tests share one page and run in order.
 import { randomUUID } from 'node:crypto';
@@ -75,10 +75,10 @@ async function runInTerminal(id: string, command: string, marker: string): Promi
 
 async function addFolder(path: string): Promise<string> {
   await page.getByRole('navigation', { name: 'Main' }).getByRole('link', { name: 'Projects' }).click();
-  await page.getByRole('button', { name: 'Add folder' }).click();
-  const dialog = page.getByRole('dialog', { name: 'Add folder' });
-  await dialog.getByLabel('Folder path').fill(path);
-  await dialog.getByRole('button', { name: 'Add project' }).click();
+  await page.getByRole('button', { name: 'New project' }).click();
+  const dialog = page.getByRole('dialog', { name: 'New project' });
+  await dialog.getByLabel(/^Folder/).fill(path);
+  await dialog.getByRole('button', { name: 'Create project' }).click();
   await expect(page).toHaveURL(/\/projects\/[^/]+$/);
   return new URL(page.url()).pathname;
 }
@@ -811,6 +811,85 @@ test('the automatic summarizer says what it uses and why', async () => {
     'Automatic uses Claude Code (Sonnet): your default agent, Codex, is not signed in.',
   );
   await page.unroute(route);
+});
+
+test('creates a project without a folder; its session runs in the blirp workspace with memory', async () => {
+  await page.goto(`${env.url}/projects`);
+  await page.getByRole('button', { name: 'New project' }).click();
+  const dialog = page.getByRole('dialog', { name: 'New project' });
+  await dialog.getByLabel('Name', { exact: true }).fill('Design notes');
+  await dialog.getByLabel(/^Brief/).fill('Screens live in the design tool, reached through its MCP server.');
+  await dialog.getByRole('button', { name: 'Create project' }).click();
+  await expect(page).toHaveURL(/\/projects\/[^/]+$/);
+  const projectId = new URL(page.url()).pathname.split('/').pop() ?? '';
+  await expect(page.getByRole('heading', { level: 1, name: 'Design notes' })).toBeVisible();
+  const workspace = page.getByTestId('workspace');
+  await expect(workspace).toContainText('blirp workspace');
+  await expect(workspace).toContainText(projectId);
+  // The projects list shows it without a "missing folder" warning.
+  await page.getByRole('navigation', { name: 'Main' }).getByRole('link', { name: 'Projects' }).click();
+  const card = page.locator('.pcard', { hasText: 'Design notes' });
+  await expect(card).toContainText('No folder · sessions start in a blirp workspace');
+  await card.click();
+
+  await page.locator('.head').getByRole('button', { name: 'New session' }).click();
+  const ns = page.getByRole('dialog', { name: 'New session' });
+  await expect(ns.getByLabel('Project')).toHaveValue(projectId);
+  await expect(ns.getByTestId('workspace-hint')).toContainText(projectId);
+  await ns.getByLabel('Agent').selectOption('shell');
+  await page.waitForTimeout(500);
+  await ns.getByRole('button', { name: 'Start session' }).click();
+  await expect(page).toHaveURL(/\/sessions\/[^/]+$/);
+  const id = new URL(page.url()).pathname.split('/').pop() ?? '';
+  const session = await apiCall<{ cwd: string; project_id: string }>('GET', `/api/sessions/${id}`);
+  expect(session.project_id).toBe(projectId);
+  const dir = join(env.root, 'home', 'workspaces', projectId);
+  expect(existsSync(dir)).toBe(true);
+  expect(session.cwd.toLowerCase()).toContain(join('workspaces', projectId).toLowerCase());
+  // The shell really runs there.
+  await runInTerminal(id, isWindows ? '(Get-Location).Path' : 'pwd', projectId);
+
+  // The memory panel has the project's brief, as for any project.
+  const toggle = page.getByRole('button', { name: 'Memory panel', exact: true });
+  if ((await toggle.getAttribute('aria-pressed')) !== 'true') await toggle.click();
+  const panel = page.getByRole('complementary', { name: 'Memory' });
+  await expect(panel).toContainText('Screens live in the design tool');
+  await expect(panel.getByTestId('chats-memory')).toHaveCount(0);
+
+  await confirmNextDialog();
+  await page.getByRole('button', { name: 'Stop' }).click();
+  await expect(page.getByTestId('terminal-exit')).toContainText(STOPPED);
+});
+
+test('a session in no project is a chat, kept out of projects, and moves into one', async () => {
+  const projectsBefore = await apiCall<{ chats: boolean }[]>('GET', '/api/projects');
+  // The home folder is no project: a session there is a chat.
+  const chat = await apiCall<{ id: string; project_id: string }>('POST', '/api/sessions', { cwd: env.userHome, agent: 'shell' });
+  await page.goto(`${env.url}/sessions/${chat.id}`);
+  const sidebar = page.getByRole('complementary', { name: 'Sessions' });
+  const chats = sidebar.getByRole('region', { name: 'Chats' });
+  await expect(chats.locator(`a[href="/sessions/${chat.id}"]`)).toBeVisible();
+  await expect(page.getByRole('navigation', { name: 'Breadcrumb' })).toContainText('Chats');
+  const toggle = page.getByRole('button', { name: 'Memory panel', exact: true });
+  if ((await toggle.getAttribute('aria-pressed')) !== 'true') await toggle.click();
+  await expect(page.getByTestId('chats-memory')).toBeVisible();
+  // Chats is no project card.
+  await page.getByRole('navigation', { name: 'Main' }).getByRole('link', { name: 'Projects' }).click();
+  const realCount = (await apiCall<{ chats: boolean }[]>('GET', '/api/projects')).filter((p) => !p.chats).length;
+  expect(realCount).toBe(projectsBefore.filter((p) => !p.chats).length);
+  await expect(page.locator('.pcard')).toHaveCount(realCount);
+  await expect(page.locator('.pcard', { hasText: 'Chats' })).toHaveCount(0);
+
+  await page.goto(`${env.url}/sessions/${chat.id}`);
+  await page.getByRole('button', { name: 'Move to project' }).click();
+  const dialog = page.getByRole('dialog', { name: 'Move session' });
+  await dialog.getByRole('combobox').selectOption({ label: 'Design notes' });
+  await dialog.getByRole('button', { name: 'Move' }).click();
+  await expect(page.getByText('Moved to Design notes')).toBeVisible();
+  await expect(sidebar.getByRole('region', { name: 'Design notes' }).locator(`a[href="/sessions/${chat.id}"]`)).toBeVisible();
+  const moved = await apiCall<{ project_id: string }>('GET', `/api/sessions/${chat.id}`);
+  expect(moved.project_id).not.toBe(chat.project_id);
+  await apiCall('POST', `/api/sessions/${chat.id}/stop`);
 });
 
 test('new session folder picker lists folders only, hidden ones on request', async () => {

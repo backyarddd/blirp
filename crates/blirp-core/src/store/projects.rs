@@ -16,6 +16,7 @@ pub(super) fn project_row(r: &Row<'_>) -> rusqlite::Result<Project> {
         created_at: r.get("created_at")?,
         updated_at: r.get("updated_at")?,
         deleted: r.get("deleted")?,
+        chats: r.get("chats")?,
     })
 }
 
@@ -32,10 +33,88 @@ pub(super) fn path_row(r: &Row<'_>) -> rusqlite::Result<ProjectPath> {
 #[derive(Debug, Clone, PartialEq)]
 pub struct ResolvedProject {
     pub project: Project,
-    /// Project root on this machine; for the Home project, the cwd itself.
+    /// Project root on this machine; for Chats, the cwd itself.
     pub root: PathBuf,
+    /// Filed in this machine's Chats (no project).
     pub is_home: bool,
     pub created: bool,
+}
+
+/// Files and folders that make a folder an actual project for sessions
+/// blirp did not start (§5 step 3; git work trees count by `git`): build
+/// manifests, other version control, and agent configuration someone
+/// wrote for the folder. Matched case-insensitively.
+const PROJECT_MARKERS: &[&str] = &[
+    // Version control other than git.
+    ".hg",
+    ".svn",
+    ".jj",
+    // Agent configuration for this folder.
+    ".mcp.json",
+    "AGENTS.md",
+    "CLAUDE.md",
+    // Build manifests.
+    "package.json",
+    "deno.json",
+    "deno.jsonc",
+    "Cargo.toml",
+    "go.mod",
+    "pyproject.toml",
+    "setup.py",
+    "Pipfile",
+    "requirements.txt",
+    "pom.xml",
+    "build.gradle",
+    "build.gradle.kts",
+    "build.sbt",
+    "Gemfile",
+    "composer.json",
+    "mix.exs",
+    "Package.swift",
+    "pubspec.yaml",
+    "CMakeLists.txt",
+    "meson.build",
+    "stack.yaml",
+    "deps.edn",
+    "project.clj",
+    "project.godot",
+    "default.project.json",
+];
+
+/// File name extensions that mark a project the same way (.NET solutions
+/// and projects, Haskell, Ruby gems, Xcode, Unreal).
+const PROJECT_MARKER_EXTENSIONS: &[&str] = &[
+    "sln",
+    "csproj",
+    "fsproj",
+    "vbproj",
+    "vcxproj",
+    "cabal",
+    "gemspec",
+    "xcodeproj",
+    "xcworkspace",
+    "uproject",
+];
+
+fn has_project_marker(dir: &Path) -> bool {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return false;
+    };
+    entries.flatten().any(|e| {
+        let name = e.file_name();
+        let name = name.to_string_lossy();
+        PROJECT_MARKERS
+            .iter()
+            .any(|m| m.eq_ignore_ascii_case(&name))
+            || Path::new(name.as_ref())
+                .extension()
+                .map(|x| x.to_string_lossy())
+                .is_some_and(|x| {
+                    PROJECT_MARKER_EXTENSIONS
+                        .iter()
+                        .any(|m| m.eq_ignore_ascii_case(&x))
+                })
+    })
 }
 
 /// Folders that never become project roots (§5 step 3): the home folder,
@@ -44,8 +123,10 @@ pub struct ResolvedProject {
 /// run scratch work in: hidden folders directly under home (tool data such
 /// as `~/.codex`, `~/.claude`, `~/.blirp`), Codex desktop chat folders
 /// (`<Documents>/Codex/<YYYY-MM-DD>/<chat>`, one per chat, for each folder
-/// in `documents`) and `scratch` (temp and system folders). Registered
-/// folders always win: resolution matches them before these rules apply.
+/// in `documents`), `scratch` (temp and system folders) and the Desktop,
+/// Downloads and Documents folders themselves. Registered folders and
+/// blirp workspaces always win: resolution matches them before these rules
+/// apply.
 #[derive(Debug, Clone, Default)]
 pub struct NonProjectDirs {
     pub home: Option<PathBuf>,
@@ -54,9 +135,48 @@ pub struct NonProjectDirs {
     /// redirected, e.g. to OneDrive).
     pub documents: Vec<PathBuf>,
     pub auto: bool,
+    /// `BLIRP_HOME/workspaces`: a folder inside `<workspaces>/<project id>`
+    /// belongs to that project (a project without folders, §5), before
+    /// every other rule.
+    pub workspaces: Option<PathBuf>,
 }
 
 impl NonProjectDirs {
+    /// Map folders inside `dir` (`BLIRP_HOME/workspaces`) to their projects.
+    #[must_use]
+    pub fn with_workspaces(mut self, dir: &Path) -> Self {
+        self.workspaces = Some(canonical_or_same(dir));
+        self
+    }
+
+    /// `(project id, workspace root)` when `p` (absolute) is inside a
+    /// project's workspace. Project ids are lowercase, like `path_key`.
+    pub(super) fn workspace_of(&self, p: &Path) -> Option<(String, PathBuf)> {
+        use crate::paths::path_key;
+        let ws = self.workspaces.as_deref()?;
+        let rel = path_key(p).strip_prefix(path_key(ws)).ok()?.to_path_buf();
+        let id = rel.components().next()?.as_os_str().to_str()?.to_string();
+        crate::is_safe_id(&id).then(|| (id.clone(), ws.join(id)))
+    }
+
+    /// The folder a session in `cwd` (not in a git work tree) makes its
+    /// project root under the auto rules: the nearest folder from `cwd` up
+    /// with a [`PROJECT_MARKERS`] entry, stopping at the first folder that
+    /// [`Self::contains`] (home at the latest). None: the session is a chat.
+    fn marker_root(&self, cwd: &Path) -> Option<PathBuf> {
+        cwd.ancestors()
+            .take_while(|d| !self.contains(d))
+            .find(|d| has_project_marker(d))
+            .map(Path::to_path_buf)
+    }
+
+    /// Whether `dir` (existing, absolute) is an actual project folder for
+    /// sessions blirp did not start: in a git work tree, or at or below a
+    /// folder with a project marker.
+    fn is_project_folder(&self, dir: &Path) -> bool {
+        git::find_git_root_fs(dir).is_some() || self.marker_root(dir).is_some()
+    }
+
     /// For sessions the user starts in blirp: only home and roots.
     pub fn launch() -> Self {
         Self {
@@ -98,6 +218,7 @@ impl NonProjectDirs {
                 .map(|d| canonical_or_same(&d))
                 .collect(),
             auto: true,
+            workspaces: None,
         }
     }
 
@@ -122,6 +243,17 @@ impl NonProjectDirs {
                 .collect::<Vec<_>>()
         };
         if self.scratch.iter().any(|d| under(d).is_some()) {
+            return true;
+        }
+        // Desktop, Downloads and Documents themselves (not their subfolders).
+        let exact = |d: &Path| under(d).is_some_and(|rel| rel.as_os_str().is_empty());
+        if self
+            .home
+            .iter()
+            .flat_map(|h| [h.join("Desktop"), h.join("Downloads")])
+            .chain(self.documents.iter().cloned())
+            .any(|d| exact(&d))
+        {
             return true;
         }
         if let Some(h) = &self.home
@@ -197,6 +329,14 @@ fn lexical(p: &Path) -> PathBuf {
     out
 }
 
+fn check_name(name: &str) -> Result<&str> {
+    let name = name.trim();
+    if name.is_empty() || name.chars().count() > 200 {
+        return Err(StoreError::Invalid("name must be 1-200 characters".into()));
+    }
+    Ok(name)
+}
+
 fn canonical_dir(p: &Path) -> Result<PathBuf> {
     let c = dunce::canonicalize(p).map_err(|e| {
         StoreError::Invalid(format!("folder {} is not accessible: {e}", p.display()))
@@ -252,10 +392,10 @@ pub(super) fn live_project_in(c: &Connection, id: &str) -> Result<Project> {
         .ok_or(StoreError::NotFound("project"))
 }
 
-/// `registered`: added by the user (Add folder). Such a project starts
-/// with `updated_at = created_at + 1`, which tells it apart from one
-/// resolution created (`updated_at = created_at` until its first edit) for
-/// [`Store::retire_non_projects`] without a schema change.
+/// `registered`: made by the user (New project, Add folder). Such a
+/// project starts with `updated_at = created_at + 1`, which tells it apart
+/// from one resolution created (`updated_at = created_at` until its first
+/// edit) for [`Store::retire_non_projects`].
 fn new_project(tx: &Transaction<'_>, name: &str, registered: bool) -> Result<Project> {
     let now = crate::now_ms();
     let p = Project {
@@ -264,6 +404,7 @@ fn new_project(tx: &Transaction<'_>, name: &str, registered: bool) -> Result<Pro
         created_at: now,
         updated_at: now + i64::from(registered),
         deleted: false,
+        chats: false,
     };
     apply_in(tx, &Change::Project(p.clone()))?;
     Ok(p)
@@ -373,6 +514,8 @@ impl Store {
                     ProjectSummary {
                         is_git: paths.iter().any(|p| p.is_git || p.git_remote.is_some()),
                         is_home: home.as_deref() == Some(project.id.as_str()),
+                        // Filled in by the API, which knows BLIRP_HOME.
+                        workspace: None,
                         project,
                         paths,
                         session_count,
@@ -412,6 +555,9 @@ impl Store {
         dirs: &NonProjectDirs,
     ) -> Result<ResolvedProject> {
         let cwd = canonical_dir(cwd)?;
+        if let Some(r) = self.resolve_workspace(machine_name, dirs, &cwd)? {
+            return Ok(r);
+        }
         let found =
             |paths: &[ProjectPath], p: &Path, c: &Connection| -> Result<Option<ResolvedProject>> {
                 match longest_prefix(paths, p) {
@@ -450,11 +596,22 @@ impl Store {
                     }
                     (info.main_root.clone(), info.remote.clone())
                 }
+                // Sessions blirp did not start make a project only of an
+                // actual project folder; the rest are chats.
+                None if dirs.auto => match dirs.marker_root(&cwd) {
+                    Some(root) => {
+                        if let Some(r) = found(&paths, &root, tx)? {
+                            return Ok(r);
+                        }
+                        (root, None)
+                    }
+                    None => (PathBuf::new(), None),
+                },
                 None => (cwd.clone(), None),
             };
             // 3. Home dir, its ancestors (`C:\Users`, `/home`), filesystem
             // roots and (auto) scratch folders are never project roots.
-            if dirs.contains(&root) {
+            if root.as_os_str().is_empty() || dirs.contains(&root) {
                 return Ok(ResolvedProject {
                     project: home_project(tx, machine_name)?,
                     root: cwd.clone(),
@@ -514,6 +671,9 @@ impl Store {
         }
         let spelled = lexical(cwd);
         let cwd = &normalize(cwd);
+        if let Some(r) = self.resolve_workspace(machine_name, dirs, cwd)? {
+            return Ok(r);
+        }
         self.write(|tx| {
             let paths = live_local_paths(tx, machine_id)?;
             // Rows recorded before gone folders were canonicalized (0.1.0)
@@ -549,7 +709,8 @@ impl Store {
                     });
                 }
             }
-            if dirs.contains(cwd) {
+            // A gone folder cannot show it was a project (auto rules).
+            if dirs.auto || dirs.contains(cwd) {
                 return Ok(ResolvedProject {
                     project: home_project(tx, machine_name)?,
                     root: cwd.to_path_buf(),
@@ -586,9 +747,8 @@ impl Store {
     ) -> Result<Project> {
         let path = canonical_dir(path)?;
         let remote = git::repo_info(&path).ok().flatten().and_then(|r| r.remote);
-        let name = match name.map(str::trim) {
-            Some("") => return Err(StoreError::Invalid("name must not be empty".into())),
-            Some(n) => n.to_string(),
+        let name = match name {
+            Some(n) => check_name(n)?.to_string(),
             None => folder_name(&path),
         };
         self.write(|tx| {
@@ -610,11 +770,208 @@ impl Store {
         })
     }
 
-    pub fn rename_project(&self, id: &str, name: &str) -> Result<Project> {
-        let name = name.trim();
-        if name.is_empty() || name.chars().count() > 200 {
-            return Err(StoreError::Invalid("name must be 1-200 characters".into()));
+    /// A project without folders (New project): its sessions start in a
+    /// blirp workspace on each machine (§5). `brief` becomes its first brief
+    /// version, written by the user.
+    pub fn create_project(&self, name: &str, brief: Option<&str>) -> Result<Project> {
+        let name = check_name(name)?;
+        self.write(|tx| {
+            let p = new_project(tx, name, true)?;
+            if let Some(b) = brief.map(str::trim).filter(|b| !b.is_empty()) {
+                super::memory::put_brief_in(tx, &p.id, b, "user")?;
+            }
+            Ok(p)
+        })
+    }
+
+    /// Register `dir` (its git top level inside a repository) as a folder
+    /// of `project_id` on this machine, for a session the user starts there
+    /// in that project. Returns the registered root. A folder inside another
+    /// project's folder here is a conflict; one already inside this
+    /// project's folders is left as it is.
+    pub fn add_project_folder(
+        &self,
+        project_id: &str,
+        machine_id: &str,
+        dir: &Path,
+    ) -> Result<PathBuf> {
+        let dir = canonical_dir(dir)?;
+        let repo = git::repo_info(&dir).ok().flatten();
+        let (root, remote) = match repo {
+            Some(r) => (r.main_root, r.remote),
+            None => (dir, None),
+        };
+        if NonProjectDirs::launch().contains(&root) {
+            return Err(StoreError::Invalid(format!(
+                "{} cannot be a project folder (home folder or a filesystem root)",
+                root.display()
+            )));
         }
+        self.write(|tx| {
+            let p = live_project_in(tx, project_id)?;
+            if p.chats {
+                return Err(StoreError::Invalid("Chats has no folders".into()));
+            }
+            let paths = live_local_paths(tx, machine_id)?;
+            if let Some(pp) = longest_prefix(&paths, &root) {
+                if pp.project_id == project_id {
+                    return Ok(PathBuf::from(&pp.path));
+                }
+                let other = live_project_in(tx, &pp.project_id)?;
+                return Err(StoreError::Conflict(format!(
+                    "{} belongs to project \"{}\"; start the session there or merge the projects",
+                    root.display(),
+                    other.name
+                )));
+            }
+            attach_path(tx, project_id, machine_id, &root, remote)?;
+            Ok(root)
+        })
+    }
+
+    /// Unregister one of this machine's folders of a project. The project
+    /// stays, also when it has no folder left: its sessions and memory are
+    /// kept, and new sessions start in its blirp workspace.
+    pub fn remove_project_folder(
+        &self,
+        project_id: &str,
+        machine_id: &str,
+        path: &str,
+    ) -> Result<()> {
+        self.write(|tx| {
+            let mut p = live_project_in(tx, project_id)?;
+            let n: Option<i64> = one(
+                tx,
+                "SELECT 1 FROM project_paths WHERE project_id = ?1 AND machine_id = ?2 AND path = ?3",
+                params![project_id, machine_id, path],
+                |r| r.get(0),
+            )?;
+            if n.is_none() {
+                return Err(StoreError::NotFound(
+                    "folder of this project on this machine",
+                ));
+            }
+            apply_in(
+                tx,
+                &Change::DeleteProjectPath {
+                    machine_id: machine_id.to_string(),
+                    path: path.to_string(),
+                },
+            )?;
+            // Edited by the user: never retired as a scratch project.
+            p.updated_at = crate::now_ms();
+            apply_in(tx, &Change::Project(p))?;
+            Ok(())
+        })
+    }
+
+    /// Move a session (with its ingested subagents and the records it
+    /// produced in its old project) into `into`, or into this machine's
+    /// Chats with `None`.
+    pub fn move_session(
+        &self,
+        session_id: &str,
+        into: Option<&str>,
+        machine_name: &str,
+    ) -> Result<Session> {
+        self.write(|tx| {
+            let mut s = one(
+                tx,
+                "SELECT * FROM sessions WHERE id = ?1",
+                params![session_id],
+                super::sessions::session_row,
+            )?
+            .ok_or(StoreError::NotFound("session"))?;
+            let target = match into {
+                Some(id) => live_project_in(tx, id)?,
+                None => home_project(tx, machine_name)?,
+            };
+            if s.project_id == target.id {
+                return Ok(s);
+            }
+            let from = std::mem::replace(&mut s.project_id, target.id.clone());
+            let now = crate::now_ms();
+            let mut changes = vec![Change::Session(s.clone())];
+            for mut c in all(
+                tx,
+                "SELECT * FROM sessions WHERE parent_session_id = ?1 AND origin = 'external'
+                   AND project_id = ?2",
+                params![session_id, from],
+                super::sessions::session_row,
+            )? {
+                c.project_id.clone_from(&target.id);
+                changes.push(Change::Session(c));
+            }
+            for mut r in all(
+                tx,
+                "SELECT * FROM records WHERE source_session_id = ?1 AND project_id = ?2",
+                params![session_id, from],
+                super::memory::record_row,
+            )? {
+                r.project_id.clone_from(&target.id);
+                r.updated_at = now;
+                changes.push(Change::Record(r));
+            }
+            for c in &changes {
+                apply_in(tx, c)?;
+            }
+            Ok(s)
+        })
+    }
+
+    /// Flag this machine's Home project (blirp 0.1.0) as its Chats bucket,
+    /// renaming it while it has the default name. Through `apply`, so every
+    /// machine learns it. Returns whether anything changed.
+    pub fn ensure_chats(&self, machine_name: &str) -> Result<bool> {
+        let Some(id) = self.home_project_id()? else {
+            return Ok(false);
+        };
+        self.write(|tx| {
+            let Some(mut p) = get_project_in(tx, &id)?.filter(|p| !p.deleted && !p.chats) else {
+                return Ok(false);
+            };
+            p.chats = true;
+            if p.name == format!("Home ({machine_name})") {
+                p.name = chats_name(machine_name);
+            }
+            p.updated_at = crate::now_ms();
+            apply_in(tx, &Change::Project(p))?;
+            Ok(true)
+        })
+    }
+
+    /// A folder inside a blirp workspace: its live project, else (a removed
+    /// project) Chats.
+    fn resolve_workspace(
+        &self,
+        machine_name: &str,
+        dirs: &NonProjectDirs,
+        cwd: &Path,
+    ) -> Result<Option<ResolvedProject>> {
+        let Some((id, root)) = dirs.workspace_of(cwd) else {
+            return Ok(None);
+        };
+        self.write(|tx| {
+            let live = get_project_in(tx, &id)?.filter(|p| !p.deleted && !p.chats);
+            Ok(Some(match live {
+                Some(project) => ResolvedProject {
+                    project,
+                    root,
+                    is_home: false,
+                    created: false,
+                },
+                None => ResolvedProject {
+                    project: home_project(tx, machine_name)?,
+                    root: cwd.to_path_buf(),
+                    is_home: true,
+                    created: false,
+                },
+            }))
+        })
+    }
+
+    pub fn rename_project(&self, id: &str, name: &str) -> Result<Project> {
+        let name = check_name(name)?;
         self.write(|tx| {
             let mut p = live_project_in(tx, id)?;
             p.name = name.to_string();
@@ -651,15 +1008,18 @@ impl Store {
 
     /// Cleanup for projects that resolution created before `dirs` said
     /// their folder is no project (§5): each is merged into this machine's
-    /// Home project, where resolution now files such sessions, without its
-    /// folders or brief. Only projects that show no sign of the user:
-    /// created by resolution and never renamed or merged into (`updated_at
-    /// = created_at`; registered ones start one higher), named after their
+    /// Chats, where resolution now files such sessions, without its folders
+    /// or brief. Only projects that show no sign of the user: created by
+    /// resolution and never renamed or merged into (`updated_at =
+    /// created_at`; registered ones start one higher), named after their
     /// folder, at least one session and every session this machine's and
     /// not started in blirp, every folder on this machine, not git with a
     /// remote (another machine may have joined it by that remote) and
-    /// matched by `dirs`, no wiki pages or resources, and only unpinned
-    /// distiller records and distiller brief versions. Sessions, records and
+    /// either matched by `dirs` or (auto rules) existing and no actual
+    /// project folder (no git work tree, no project marker), no wiki pages
+    /// or resources, and only unpinned distiller records and distiller brief
+    /// versions. A folder that is gone (or not reachable, e.g. an unmounted
+    /// drive) cannot show it is no project, so its project stays. Sessions, records and
     /// suggestions move to Home; the project is soft-deleted, so every
     /// change replicates. Returns the merged projects (as they were).
     pub fn retire_non_projects(
@@ -679,7 +1039,7 @@ impl Store {
             let candidates = all(
                 tx,
                 "SELECT p.* FROM projects p
-                 WHERE p.deleted = 0 AND p.updated_at = p.created_at AND p.id != ?2
+                 WHERE p.deleted = 0 AND p.chats = 0 AND p.updated_at = p.created_at AND p.id != ?2
                    AND EXISTS (SELECT 1 FROM project_paths pp WHERE pp.project_id = p.id)
                    AND EXISTS (SELECT 1 FROM sessions s WHERE s.project_id = p.id)
                    AND NOT EXISTS (SELECT 1 FROM project_paths pp WHERE pp.project_id = p.id
@@ -706,11 +1066,11 @@ impl Store {
                 let named_after = paths
                     .iter()
                     .any(|pp| folder_name(Path::new(&pp.path)) == p.name);
-                if !named_after
-                    || !paths
-                        .iter()
-                        .all(|pp| dirs.contains(&normalize(Path::new(&pp.path))))
-                {
+                let chat_folder = |pp: &ProjectPath| {
+                    let p = normalize(Path::new(&pp.path));
+                    dirs.contains(&p) || (dirs.auto && p.is_dir() && !dirs.is_project_folder(&p))
+                };
+                if !named_after || !paths.iter().all(chat_folder) {
                     continue;
                 }
                 let home = home_project(tx, machine_name)?;
@@ -826,7 +1186,12 @@ fn merge_in(tx: &Transaction<'_>, from: &str, into: &str, retire: bool) -> Resul
     Ok(dst)
 }
 
-/// This machine's Home project, created on first use.
+fn chats_name(machine_name: &str) -> String {
+    format!("Chats ({machine_name})")
+}
+
+/// This machine's Chats project (called Home before 0.1.1), created on
+/// first use.
 fn home_project(tx: &Transaction<'_>, machine_name: &str) -> Result<Project> {
     let id: Option<String> = one(
         tx,
@@ -840,7 +1205,16 @@ fn home_project(tx: &Transaction<'_>, machine_name: &str) -> Result<Project> {
     {
         return Ok(p);
     }
-    let p = new_project(tx, &format!("Home ({machine_name})"), false)?;
+    let now = crate::now_ms();
+    let p = Project {
+        id: crate::new_id(),
+        name: chats_name(machine_name),
+        created_at: now,
+        updated_at: now,
+        deleted: false,
+        chats: true,
+    };
+    apply_in(tx, &Change::Project(p.clone()))?;
     tx.execute(
         "INSERT INTO settings(key, value_json) VALUES (?1, ?2)
          ON CONFLICT(key) DO UPDATE SET value_json = excluded.value_json",
@@ -893,6 +1267,8 @@ mod tests {
             .collect();
         for s in &scratch {
             std::fs::create_dir_all(s).unwrap();
+            // A project marker does not make scratch space a project.
+            std::fs::write(s.join("package.json"), "{}").unwrap();
             let r = store.resolve_project_with("m", "box", s, &dirs).unwrap();
             assert!(r.is_home && !r.created, "{}", s.display());
             // A folder that no longer exists behaves the same.
@@ -908,17 +1284,53 @@ mod tests {
         assert!(home_r.is_home);
         assert_eq!(store.list_project_summaries("m").unwrap().len(), 1);
 
-        // Real folders, also next to the Codex chats, are projects.
-        for real in [
-            home.join("code/app"),
-            home.join("Documents/Codex/notes"),
-            home.join("Documents/Game"),
+        // Actual project folders, also next to the Codex chats, are
+        // projects: a marker (any case) makes one.
+        for (real, marker) in [
+            (home.join("code/app"), "Cargo.toml"),
+            (home.join("Documents/Codex/notes"), "CLAUDE.md"),
+            (home.join("Documents/Game"), "game.SLN"),
+            (home.join("design"), ".mcp.json"),
         ] {
             std::fs::create_dir_all(&real).unwrap();
+            std::fs::write(real.join(marker), "").unwrap();
             let r = store
                 .resolve_project_with("m", "box", &real, &dirs)
                 .unwrap();
             assert!(r.created && !r.is_home, "{}", real.display());
+        }
+        // A subfolder files under the folder with the marker, found or new.
+        std::fs::create_dir_all(home.join("code/app/src/deep")).unwrap();
+        let r = store
+            .resolve_project_with("m", "box", &home.join("code/app/src/deep"), &dirs)
+            .unwrap();
+        assert!(!r.created && r.root == home.join("code/app"));
+        std::fs::create_dir_all(home.join("code/lib/src")).unwrap();
+        std::fs::write(home.join("code/lib/go.mod"), "").unwrap();
+        let r = store
+            .resolve_project_with("m", "box", &home.join("code/lib/src"), &dirs)
+            .unwrap();
+        assert!(r.created && r.root == home.join("code/lib"));
+        // Folders without git or a marker are chats, as are Desktop,
+        // Downloads and Documents themselves, even with a stray manifest.
+        for chat in [
+            home.join("notes"),
+            home.join("code"),
+            home.join("Desktop"),
+            home.join("Downloads"),
+            home.join("Documents"),
+        ] {
+            std::fs::create_dir_all(&chat).unwrap();
+            if chat.ends_with("Desktop")
+                || chat.ends_with("Downloads")
+                || chat.ends_with("Documents")
+            {
+                std::fs::write(chat.join("package.json"), "{}").unwrap();
+            }
+            let r = store
+                .resolve_project_with("m", "box", &chat, &dirs)
+                .unwrap();
+            assert!(r.is_home && !r.created, "{}", chat.display());
         }
 
         // Sessions the user starts in blirp keep the plain rules.
@@ -965,10 +1377,17 @@ mod tests {
     fn missing_folders_in_other_spellings_resolve_to_one_project() {
         let (_d, store, root, dirs) = auto_env();
         let gone = root.join("home/old-project");
+        std::fs::create_dir_all(&gone).unwrap();
         let first = store
-            .resolve_project_lenient("m", "box", &gone, None, &dirs)
+            .resolve_project_with("m", "box", &gone, &launch(&root.join("home")))
             .unwrap();
         assert!(first.created);
+        std::fs::remove_dir(&gone).unwrap();
+        // A gone folder that no project had cannot show it was one: Chats.
+        let chat = store
+            .resolve_project_lenient("m", "box", &root.join("home/other"), None, &dirs)
+            .unwrap();
+        assert!(chat.is_home && !chat.created);
         let s = gone.display().to_string();
         let mut spellings = vec![format!("{s}/"), format!("{s}/sub/../sub")];
         if cfg!(windows) {
@@ -985,7 +1404,7 @@ mod tests {
             assert_eq!(r.project.id, first.project.id, "{sp}");
             assert!(!r.created);
         }
-        assert_eq!(store.list_project_summaries("m").unwrap().len(), 1);
+        assert_eq!(store.list_project_summaries("m").unwrap().len(), 2);
     }
 
     /// A gone folder recorded by 0.1.0 in its lexical spelling (through a
@@ -1057,6 +1476,18 @@ mod tests {
         let launched = make("tmp/launched");
         let foreign_session = make("tmp/foreign-session");
         let real = make("home/code/app");
+        std::fs::write(root.join("home/code/app/package.json"), "{}").unwrap();
+        // Under a folder with a project marker: an actual project too.
+        std::fs::create_dir_all(root.join("home/code/lib")).unwrap();
+        std::fs::write(root.join("home/code/lib/Cargo.toml"), "").unwrap();
+        let sub = make("home/code/lib/src");
+        // A plain folder (no git, no marker) is no project under the new rules.
+        let notes = make("home/notes");
+        // Gone (or an unmounted drive): it cannot show it is no project.
+        let gone = make("home/gone");
+        std::fs::remove_dir(root.join("home/gone")).unwrap();
+        // Made by the user without a folder: never a candidate.
+        let bare = store.create_project("Bare", None).unwrap();
         let no_session = make("tmp/no-session");
         let remote = make("tmp/remote");
         // Another machine may have joined a project by its remote.
@@ -1091,6 +1522,10 @@ mod tests {
             &remote,
             &added,
             &odd,
+            &sub,
+            &notes,
+            &gone,
+            &bare,
         ]
         .into_iter()
         .enumerate()
@@ -1136,7 +1571,7 @@ mod tests {
             .map(|p| p.name)
             .collect();
         retired.sort();
-        assert_eq!(retired, ["chat", "run"]);
+        assert_eq!(retired, ["chat", "notes", "run"]);
         let home = store.home_project_id().unwrap().unwrap();
         for gone in [&chat, &tmp] {
             let p = store.get_project(&gone.id).unwrap().unwrap();
@@ -1150,7 +1585,8 @@ mod tests {
             .into_iter()
             .map(|s| s.id)
             .collect();
-        assert_eq!(moved.len(), 2);
+        assert_eq!(moved.len(), 3);
+        assert!(store.get_project(&home).unwrap().unwrap().chats);
         let recs = store.list_records(&home, &Default::default()).unwrap();
         assert_eq!(recs.len(), 1);
         // The retired projects' briefs stay behind.
@@ -1167,6 +1603,9 @@ mod tests {
             &remote,
             &added,
             &odd,
+            &sub,
+            &gone,
+            &bare,
         ] {
             assert!(!store.get_project(&kept.id).unwrap().unwrap().deleted);
         }
@@ -1236,8 +1675,8 @@ mod tests {
         let a = store
             .resolve_project_with("m1", "box", &home, &launch(&home))
             .unwrap();
-        assert!(a.is_home);
-        assert_eq!(a.project.name, "Home (box)");
+        assert!(a.is_home && a.project.chats);
+        assert_eq!(a.project.name, "Chats (box)");
         let root = home.ancestors().last().unwrap().to_path_buf();
         let b = store
             .resolve_project_with("m1", "box", &root, &launch(&home))
@@ -1416,5 +1855,242 @@ mod tests {
         store.delete_project(&pb.id).unwrap();
         assert!(store.project_paths(&pb.id).unwrap().is_empty());
         assert!(store.list_project_summaries("m").unwrap().is_empty());
+    }
+
+    /// Changes `from` queued since `after`, applied on `to` as replication
+    /// does.
+    fn replicate(from: &Store, after: i64, to: &Store) -> i64 {
+        let mut last = after;
+        for e in from.outbox_after(after, 1000).unwrap() {
+            let c: Change = serde_json::from_value(e.payload.clone()).unwrap();
+            to.apply_remote(&c).unwrap();
+            last = e.origin_seq;
+        }
+        last
+    }
+
+    #[test]
+    fn projects_without_folders_replicate_and_keep_their_memory() {
+        let (_d, store) = temp_store();
+        let (_d2, other) = temp_store();
+        store.set_replication(true).unwrap();
+        assert!(matches!(
+            store.create_project("  ", None),
+            Err(StoreError::Invalid(_))
+        ));
+        let p = store
+            .create_project(" Design ", Some("Screens for the app."))
+            .unwrap();
+        assert_eq!(p.name, "Design");
+        assert!(!p.chats);
+        // Made by the user: never retired as a scratch project.
+        assert_eq!(p.updated_at, p.created_at + 1);
+        let s = store.project_summary(&p.id, "m").unwrap();
+        assert!(s.paths.is_empty() && !s.is_git && !s.is_home);
+        assert_eq!(
+            store.get_brief(&p.id).unwrap().unwrap().body_md,
+            "Screens for the app."
+        );
+
+        replicate(&store, 0, &other);
+        let there = other.project_summary(&p.id, "m2").unwrap();
+        assert_eq!(there.project, p);
+        assert!(there.paths.is_empty());
+        assert_eq!(
+            other.get_brief(&p.id).unwrap().unwrap().body_md,
+            "Screens for the app."
+        );
+    }
+
+    #[test]
+    fn removing_the_last_folder_keeps_the_project() {
+        let (dir, store) = temp_store();
+        let a = dir.path().join("a");
+        std::fs::create_dir(&a).unwrap();
+        let p = store.register_project("m", &a, None).unwrap();
+        store.put_brief(&p.id, "kept", "user").unwrap();
+        let path = store.project_paths(&p.id).unwrap().remove(0).path;
+        assert!(matches!(
+            store.remove_project_folder(&p.id, "other-machine", &path),
+            Err(StoreError::NotFound(_))
+        ));
+        store.remove_project_folder(&p.id, "m", &path).unwrap();
+        let left = store.project_summary(&p.id, "m").unwrap();
+        assert!(left.paths.is_empty() && !left.project.deleted);
+        assert_eq!(store.get_brief(&p.id).unwrap().unwrap().body_md, "kept");
+        // The folder is no longer the project's: it resolves anew.
+        let r = store
+            .resolve_project_with("m", "box", &a, &NonProjectDirs::default())
+            .unwrap();
+        assert_ne!(r.project.id, p.id);
+    }
+
+    fn auto_dirs(root: &Path) -> NonProjectDirs {
+        NonProjectDirs::auto(Some(root.join("home")), vec![root.join("tmp")])
+    }
+
+    #[test]
+    fn workspaces_belong_to_their_project_before_every_other_rule() {
+        let (_d, store, root, dirs) = auto_env();
+        // BLIRP_HOME inside a hidden home folder, as by default.
+        let workspaces = root.join("home/.blirp/workspaces");
+        let dirs = dirs.with_workspaces(&workspaces);
+        let p = store.create_project("Design", None).unwrap();
+        let ws = workspaces.join(&p.id);
+        std::fs::create_dir_all(ws.join("sub")).unwrap();
+        let launch_ws = launch(&root.join("home")).with_workspaces(&workspaces);
+        for (cwd, d) in [
+            (ws.clone(), &dirs),
+            (ws.join("sub"), &dirs),
+            (ws.clone(), &launch_ws),
+        ] {
+            let r = store.resolve_project_with("m", "box", &cwd, d).unwrap();
+            assert_eq!(r.project.id, p.id, "{}", cwd.display());
+            assert!(!r.is_home && !r.created);
+            assert_eq!(r.root, ws);
+        }
+        // Also once the folder is gone, in another spelling.
+        let gone = ws.join("gone");
+        let spelled = if cfg!(windows) {
+            PathBuf::from(gone.display().to_string().to_uppercase())
+        } else {
+            gone.clone()
+        };
+        let r = store
+            .resolve_project_lenient("m", "box", &spelled, None, &dirs)
+            .unwrap();
+        assert_eq!(r.project.id, p.id);
+        // Read-only lookup (MCP, `blirp mem`, hooks).
+        let found = store
+            .find_project_for_path("m", &ws.join("sub"), Some(&workspaces))
+            .unwrap();
+        assert_eq!(found.map(|f| f.id), Some(p.id.clone()));
+        // Without the mapping it would be a hidden home folder: Chats.
+        let r = store
+            .resolve_project_with("m", "box", &ws, &auto_dirs(&root))
+            .unwrap();
+        assert!(r.is_home);
+        // No path rows: the cleanup never sees these projects.
+        assert!(store.project_paths(&p.id).unwrap().is_empty());
+        store.insert_session(&external("w1", &p.id, "m")).unwrap();
+        assert!(
+            store
+                .retire_non_projects("m", "box", &dirs)
+                .unwrap()
+                .is_empty()
+        );
+        // A removed project's workspace is Chats.
+        store.delete_project(&p.id).unwrap();
+        let r = store.resolve_project_with("m", "box", &ws, &dirs).unwrap();
+        assert!(r.is_home && r.project.chats);
+    }
+
+    #[test]
+    fn a_folder_added_for_a_session_joins_the_project() {
+        let (dir, store) = temp_store();
+        let p = store.create_project("Game", None).unwrap();
+        let place = dir.path().join("place");
+        std::fs::create_dir_all(place.join("sub")).unwrap();
+        let root = store
+            .add_project_folder(&p.id, "m", &place.join("sub"))
+            .unwrap();
+        assert_eq!(root, dunce::canonicalize(place.join("sub")).unwrap());
+        // Inside a folder it already has: nothing new.
+        assert_eq!(
+            store
+                .add_project_folder(&p.id, "m", &place.join("sub"))
+                .unwrap(),
+            root
+        );
+        assert_eq!(store.project_paths(&p.id).unwrap().len(), 1);
+        // Another project's folder is refused.
+        let q = store.create_project("Other", None).unwrap();
+        assert!(matches!(
+            store.add_project_folder(&q.id, "m", &place.join("sub")),
+            Err(StoreError::Conflict(_))
+        ));
+        // Chats have no folders.
+        let chats = store
+            .resolve_project_with("m", "box", dir.path(), &launch(dir.path()))
+            .unwrap()
+            .project;
+        assert!(matches!(
+            store.add_project_folder(&chats.id, "m", &place),
+            Err(StoreError::Invalid(_))
+        ));
+    }
+
+    #[test]
+    fn sessions_move_between_chats_and_projects_with_what_they_made() {
+        let (dir, store) = temp_store();
+        let chats = store
+            .resolve_project_with("m", "box", dir.path(), &launch(dir.path()))
+            .unwrap()
+            .project;
+        let p = store.create_project("Real", None).unwrap();
+        store
+            .insert_session(&external("s", &chats.id, "m"))
+            .unwrap();
+        let mut child = external("c", &chats.id, "m");
+        child.parent_session_id = Some("s".into());
+        store.insert_session(&child).unwrap();
+        let mut rec = record("r", &chats.id, BY_DISTILLER, false);
+        rec.source_session_id = Some("s".into());
+        store.create_record(rec).unwrap();
+        store
+            .create_record(record("other", &chats.id, BY_DISTILLER, false))
+            .unwrap();
+
+        let moved = store.move_session("s", Some(&p.id), "box").unwrap();
+        assert_eq!(moved.project_id, p.id);
+        assert_eq!(store.get_session("c").unwrap().unwrap().project_id, p.id);
+        let recs = store.list_records(&p.id, &Default::default()).unwrap();
+        assert_eq!(
+            recs.iter().map(|r| r.id.as_str()).collect::<Vec<_>>(),
+            ["r"]
+        );
+        assert!(matches!(
+            store.move_session("s", Some("nope"), "box"),
+            Err(StoreError::NotFound(_))
+        ));
+        // And back to Chats.
+        let back = store.move_session("s", None, "box").unwrap();
+        assert_eq!(back.project_id, chats.id);
+        assert_eq!(
+            store.get_session("c").unwrap().unwrap().project_id,
+            chats.id
+        );
+    }
+
+    #[test]
+    fn the_old_home_project_becomes_chats_everywhere() {
+        let (dir, store) = temp_store();
+        let (_d2, other) = temp_store();
+        store.set_replication(true).unwrap();
+        // A Home project as blirp 0.1.0 made it.
+        let home = store
+            .write(|tx| {
+                let p = new_project(tx, "Home (box)", false)?;
+                tx.execute(
+                    "INSERT INTO settings(key, value_json) VALUES (?1, ?2)",
+                    params![HOME_PROJECT_KEY, serde_json::to_string(&p.id)?],
+                )?;
+                Ok(p)
+            })
+            .unwrap();
+        let seq = replicate(&store, 0, &other);
+        assert!(!other.get_project(&home.id).unwrap().unwrap().chats);
+        assert!(store.ensure_chats("box").unwrap());
+        assert!(!store.ensure_chats("box").unwrap());
+        let now = store.get_project(&home.id).unwrap().unwrap();
+        assert!(now.chats);
+        assert_eq!(now.name, "Chats (box)");
+        replicate(&store, seq, &other);
+        assert_eq!(other.get_project(&home.id).unwrap().unwrap(), now);
+        // Resolution keeps using it.
+        let r = store
+            .resolve_project_with("m", "box", dir.path(), &launch(dir.path()))
+            .unwrap();
+        assert_eq!(r.project.id, home.id);
     }
 }

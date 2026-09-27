@@ -80,7 +80,7 @@ To cap spend: lower `memory.daily_distill_limit`, raise `memory.distill_idle_sec
 
 ## What memory contains
 
-Everything below is per project, visible on the project's **Memory** tab and in the session's **Memory** panel, and editable.
+Everything below is per project, visible on the project's **Memory** tab and in the session's **Memory** panel, and editable. Chats (sessions that belong to no project, see [projects-and-sessions.md](projects-and-sessions.md#chats)) have no project memory: distilling a chat writes only its session summary, and nothing is injected into one. So memory from unrelated chats never reaches a project, and a project's memory never reaches a chat.
 
 - **Brief.** A markdown description of the project: what it is, how to build and run it, current priorities. Written by the distiller and by you. Every change is a new version; **Versions** lists them and **Revert** restores one (as a new version).
 - **Records.** Short items of kind `decision`, `open_thread`, `gotcha`, `plan` or `note`, each with title, body, status (`active`, `resolved`, `archived`) and a pinned flag. The distiller creates decisions, open threads and gotchas and resolves threads; you can create any kind and edit, pin, resolve, reopen or delete them (archiving is available through the API). Agents can add records through the `mem_record` MCP tool.
@@ -109,6 +109,7 @@ Tools: search older history with the blirp MCP tools (mem_search, mem_session, m
 - Records are ordered pinned first, then most recently updated. Each item is one line of at most 400 characters. Dates are UTC.
 - Nothing in the text depends on the current time, so it only changes when memory changes, and agents' prompt caches keep hitting.
 - For continue in / fork, a [handoff pack](projects-and-sessions.md#continue-in--fork) is appended.
+- Chats get nothing (only a handoff pack you asked for with continue in / fork).
 
 The rendered text is written to `~/.blirp/launch/<session-id>/memory.md` and `BLIRP_MEMORY_FILE` points at it. The session's **Memory** panel shows exactly that file under **Injected at start** (`GET /api/inject?session=<id>`), followed by the session's distilled summary and the project's brief, open threads and pinned records, all editable in place.
 

@@ -23,7 +23,7 @@ Read [ARCHITECTURE.md](ARCHITECTURE.md) first: it is the design contract, and a 
 
 Read [ARCHITECTURE.md](ARCHITECTURE.md) before changing anything; it is the contract.
 
-- Projects are folders; git is optional. Never assume `.git` exists.
+- Projects are folders, or none (a blirp workspace per machine); git is optional. Never assume `.git` exists or that a project has a folder.
 - Never edit the user's agent config or project files except through the explicit, reversible `blirp hooks install` and `blirp skills install` flows.
 - Hooks always exit 0 within 2 s.
 - All writes to replicated tables go through `Store::apply`.

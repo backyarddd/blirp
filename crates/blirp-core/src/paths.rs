@@ -160,6 +160,25 @@ impl Paths {
         }
         Ok(self.home.join("launch").join(session_id))
     }
+    /// Per-project working folders of projects without folders (§5), per
+    /// machine and never synced. Inside the data dir, but mapped to their
+    /// projects and ingested like `worktrees/` (§8).
+    pub fn workspaces_dir(&self) -> PathBuf {
+        self.home.join("workspaces")
+    }
+    /// `workspaces/<project_id>/`, with the same id check as `launch_dir`.
+    pub fn workspace_dir(&self, project_id: &str) -> Result<PathBuf, PathsError> {
+        if !crate::is_safe_id(project_id) {
+            return Err(PathsError::InvalidId(project_id.to_string()));
+        }
+        Ok(self.workspaces_dir().join(project_id))
+    }
+    /// [`Self::workspace_dir`], created owner-only (0700 on unix) if needed.
+    pub fn ensure_workspace(&self, project_id: &str) -> Result<PathBuf, PathsError> {
+        let dir = self.workspace_dir(project_id)?;
+        create_private_dir(&dir)?;
+        Ok(dir)
+    }
     /// Files pasted or dropped into terminals (§3). Never in the database,
     /// so never replicated; pruned after a week.
     pub fn uploads_dir(&self) -> PathBuf {
@@ -183,6 +202,7 @@ impl Paths {
             self.home.clone(),
             self.logs_dir(),
             self.worktrees_dir(),
+            self.workspaces_dir(),
             self.home.join("launch"),
         ] {
             std::fs::create_dir_all(&dir).map_err(io("create", &dir))?;
@@ -335,6 +355,28 @@ mod tests {
             &"x".repeat(129),
         ] {
             assert!(paths.launch_dir(bad).is_err(), "{bad:?}");
+            assert!(paths.workspace_dir(bad).is_err(), "{bad:?}");
+        }
+    }
+
+    #[test]
+    fn workspaces_are_created_on_demand_and_private() {
+        let dir = tempfile::tempdir().unwrap();
+        let paths = Paths::at(dir.path().join("home"));
+        let id = crate::new_id();
+        let ws = paths.ensure_workspace(&id).unwrap();
+        assert_eq!(ws, paths.workspaces_dir().join(&id));
+        assert!(ws.is_dir());
+        // Idempotent, and never touches what is inside.
+        std::fs::write(ws.join(".mcp.json"), "{}").unwrap();
+        assert_eq!(paths.ensure_workspace(&id).unwrap(), ws);
+        assert!(ws.join(".mcp.json").exists());
+        assert!(paths.ensure_workspace("../x").is_err());
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = std::fs::metadata(&ws).unwrap().permissions().mode() & 0o777;
+            assert_eq!(mode, 0o700);
         }
     }
 

@@ -126,7 +126,7 @@ If `blirp doctor` says `CLAUDE_CODE_OAUTH_TOKEN from the environment`, the daemo
 
 1. Open the session's **Memory** panel: "Injected at start" is exactly what the session got (`~/.blirp/launch/<session-id>/memory.md`). If it only says `_No project brief yet._` with no sections, the project has no memory yet (no distilled sessions, no records).
 2. Check the agent's mechanism in [agents.md](agents.md): Cursor CLI gets memory only with global hooks; dsh, shell and custom agents only get `BLIRP_MEMORY_FILE`; Amp gets none if its settings file cannot be read (see the log).
-3. Wrong project: the session's folder resolved to another project (for example `Home (<machine>)` for sessions in your home directory). See [projects-and-sessions.md](projects-and-sessions.md#how-a-folder-becomes-a-project).
+3. Wrong project: the session's folder resolved to another project (for example Chats for sessions in your home directory or a folder that is no project). Move the session with the folder icon in its toolbar. See [projects-and-sessions.md](projects-and-sessions.md#how-a-session-finds-its-project).
 4. Sessions started outside blirp get memory only through global hooks (`blirp hooks install`).
 5. Search the log for `launching without it` warnings (memory render or integration failed).
 

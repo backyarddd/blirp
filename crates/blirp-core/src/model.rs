@@ -215,6 +215,11 @@ pub struct Project {
     pub created_at: i64,
     pub updated_at: i64,
     pub deleted: bool,
+    /// A machine's Chats bucket (§5): sessions that belong to no project.
+    /// Not listed among projects; its memory is never injected. Absent in
+    /// rows from blirp 0.1.0.
+    #[serde(default)]
+    pub chats: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
@@ -496,8 +501,12 @@ pub struct ProjectSummary {
     pub project: Project,
     pub paths: Vec<ProjectPathInfo>,
     pub is_git: bool,
-    /// This machine's per-machine "Home" project (sessions started in `~` or `/`).
+    /// This machine's Chats bucket (sessions that belong to no project).
     pub is_home: bool,
+    /// Project without folders: this machine's blirp workspace
+    /// (`BLIRP_HOME/workspaces/<id>`), where its sessions start. Set when the
+    /// project has no folder on any machine; the folder may not exist yet.
+    pub workspace: Option<String>,
     pub session_count: i64,
     pub live_session_count: i64,
     pub last_activity_at: Option<i64>,
@@ -506,10 +515,34 @@ pub struct ProjectSummary {
 #[derive(Debug, Clone, Serialize, Deserialize, TS)]
 #[serde(deny_unknown_fields)]
 pub struct CreateProject {
-    pub path: String,
+    /// Folder to register (absolute, on this machine). Without it the
+    /// project has no folder and `name` is required.
+    #[serde(default)]
+    #[ts(optional)]
+    pub path: Option<String>,
     #[serde(default)]
     #[ts(optional)]
     pub name: Option<String>,
+    /// Initial project brief (markdown).
+    #[serde(default)]
+    #[ts(optional)]
+    pub brief: Option<String>,
+}
+
+/// `POST /api/projects/:id/folders/remove`: unregister one of this
+/// machine's folders. The project stays, also without any folder.
+#[derive(Debug, Clone, Serialize, Deserialize, TS)]
+#[serde(deny_unknown_fields)]
+pub struct RemoveProjectFolder {
+    pub path: String,
+}
+
+/// `POST /api/sessions/:id/move`.
+#[derive(Debug, Clone, Serialize, Deserialize, TS)]
+#[serde(deny_unknown_fields)]
+pub struct MoveSession {
+    /// Target project; null moves the session to Chats.
+    pub project_id: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, TS)]
@@ -786,14 +819,22 @@ pub struct SessionsPage {
 #[derive(Debug, Clone, Default, Serialize, Deserialize, TS)]
 #[serde(deny_unknown_fields)]
 pub struct LaunchSession {
-    /// Launch in this project's folder on this machine. One of `project_id`/`cwd` is required.
+    /// Launch in this project's folder on this machine (a project without
+    /// folders: its blirp workspace). One of `project_id`/`cwd` is required.
     #[serde(default)]
     #[ts(optional)]
     pub project_id: Option<String>,
     /// Launch in this folder; the project is resolved (and created) from it.
+    /// With `project_id` it must be inside one of the project's folders here,
+    /// or `add_folder` is set.
     #[serde(default)]
     #[ts(optional)]
     pub cwd: Option<String>,
+    /// With `project_id` and a `cwd` outside its folders: register `cwd` (its
+    /// git top level inside a repository) as a folder of the project first.
+    #[serde(default)]
+    #[ts(optional)]
+    pub add_folder: Option<bool>,
     /// Agent id, e.g. `claude` or `custom:<name>`.
     pub agent: String,
     /// Typed into the agent once its output settles, followed by Enter.
@@ -1311,7 +1352,7 @@ mod tests {
             Machine, MachineInfo, Project, ProjectPath, Session, Event, Record, Brief, WikiPage, Suggestion,
             BriefProposal, RecordProposal, WikiProposal, Resource, Device,
             ErrorBody, ErrorDetail, Health, UpdateStatus, UpdateOutcome, ProjectPathInfo, ProjectSummary, CreateProject,
-            PatchProject, MergeProject, ProjectMemory, PutBrief, RevertBrief, CreateRecord,
+            PatchProject, MergeProject, RemoveProjectFolder, MoveSession, ProjectMemory, PutBrief, RevertBrief, CreateRecord,
             PatchRecord, CreateWikiPage, PutWikiPage, CreateResource, PatchResource,
             GitStatusEntry, GitStatus, GitDiff, FileEntry, DirListing, FileContent, SessionsPage, SessionDetail,
             LaunchSession, PatchSession, RemoveWorktree, OpenTarget, OpenSession, UploadedFile, EventsPage, SearchHit, SearchResults, AgentInfo,

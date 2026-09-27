@@ -83,7 +83,7 @@ fn open(paths: &Paths) -> anyhow::Result<Store> {
         .with_context(|| format!("open {}", paths.db_file().display()))
 }
 
-fn project_of(store: &Store, arg: Option<String>) -> anyhow::Result<String> {
+fn project_of(store: &Store, paths: &Paths, arg: Option<String>) -> anyhow::Result<String> {
     if let Some(p) = arg {
         return Ok(p);
     }
@@ -91,7 +91,7 @@ fn project_of(store: &Store, arg: Option<String>) -> anyhow::Result<String> {
     let machine = store
         .machine_id()?
         .context("no machine id yet; start the blirp daemon once")?;
-    match store.find_project_for_path(&machine, &cwd)? {
+    match store.find_project_for_path(&machine, &cwd, Some(&paths.workspaces_dir()))? {
         Some(p) => Ok(p.id),
         None => bail!(
             "{} is not inside a blirp project; pass --project <id>",
@@ -123,7 +123,7 @@ pub fn run_mem(paths: &Paths, cmd: MemCommand) -> anyhow::Result<ExitCode> {
             let project = if all {
                 None
             } else {
-                Some(project_of(&store, project)?)
+                Some(project_of(&store, paths, project)?)
             };
             let q = query.join(" ");
             let hits =
@@ -153,7 +153,7 @@ pub fn run_mem(paths: &Paths, cmd: MemCommand) -> anyhow::Result<ExitCode> {
             }
         }
         MemCommand::Brief { project, json } => {
-            let pid = project_of(&store, project)?;
+            let pid = project_of(&store, paths, project)?;
             let p = store.live_project(&pid)?;
             let brief = store.get_brief(&pid)?;
             let records = store.list_records(
@@ -223,7 +223,7 @@ pub fn run_mem(paths: &Paths, cmd: MemCommand) -> anyhow::Result<ExitCode> {
             limit,
             json,
         } => {
-            let pid = project_of(&store, project)?;
+            let pid = project_of(&store, paths, project)?;
             let sessions = store.recent_sessions(&pid, i64::from(limit.clamp(1, 200)))?;
             if json {
                 print_json(&sessions)?;

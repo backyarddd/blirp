@@ -6,6 +6,8 @@ import {
   canResume,
   groupSessions,
   hasTerminal,
+  isChats,
+  projectPlace,
   isLive,
   remoteLiveState,
   type LiveContext,
@@ -95,6 +97,8 @@ describe('groupSessions', () => {
     paths: [],
     is_git: false,
     is_home: false,
+    workspace: null,
+    chats: false,
     session_count: 1,
     live_session_count: 0,
     last_activity_at: null,
@@ -187,5 +191,27 @@ describe('groupSessions', () => {
     expect(order(ctx({ other: true }))).toEqual(['fresh', 'quiet', 'mine', 'ended']);
     expect(order(ctx({ other: false }))).toEqual(['mine', 'fresh', 'ended', 'quiet']);
     expect(order(ctx({}))).toEqual(['fresh', 'mine', 'ended', 'quiet']);
+  });
+  it("puts every machine's Chats into one group without a project", () => {
+    const chats = (id: string): ProjectSummary => ({ ...alpha, id, name: `Chats (${id})`, chats: true, is_home: id === 'c1' });
+    const projects = new Map([
+      ['a', alpha],
+      ['c1', chats('c1')],
+      ['c2', chats('c2')],
+    ]);
+    const groups = groupSessions([mk('1', 'c1'), mk('2', 'a'), mk('3', 'c2')], projects);
+    expect(groups.map((g) => [g.key, g.projectId, g.name, g.sessions.map((s) => s.id)])).toEqual([
+      ['chats', null, 'Chats', ['1', '3']],
+      ['a', 'a', 'Alpha', ['2']],
+    ]);
+    expect(isChats('c2', projects)).toBe(true);
+    expect(isChats('a', projects)).toBe(false);
+  });
+  it("describes where a project's sessions start", () => {
+    expect(projectPlace({ ...alpha, workspace: '/b/workspaces/a' })).toMatch(/blirp workspace/);
+    expect(projectPlace({ ...alpha, chats: true })).toMatch(/no project/);
+    expect(projectPlace(alpha)).toBe('No folder on this machine');
+    const local = { machine_id: 'm', path: '/w', git_remote: null, is_git: false, local: true };
+    expect(projectPlace({ ...alpha, paths: [local] })).toBe('');
   });
 });

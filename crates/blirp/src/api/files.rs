@@ -83,8 +83,12 @@ pub fn resolve_inside(root: &Path, rel: &str, data_dir: &Path) -> ApiResult<Path
         ));
     }
     let data_dir = dunce::canonicalize(data_dir).unwrap_or_else(|_| data_dir.to_path_buf());
-    // Session worktrees (checkouts of the user's repos) live there too.
-    if target.starts_with(&data_dir) && !target.starts_with(data_dir.join("worktrees")) {
+    // Session worktrees (checkouts of the user's repos) and the workspaces
+    // of projects without folders live there too.
+    if target.starts_with(&data_dir)
+        && !target.starts_with(data_dir.join("worktrees"))
+        && !target.starts_with(data_dir.join("workspaces"))
+    {
         return Err(ApiError::new(
             StatusCode::FORBIDDEN,
             "path_in_data_dir",
@@ -95,9 +99,17 @@ pub fn resolve_inside(root: &Path, rel: &str, data_dir: &Path) -> ApiResult<Path
 }
 
 /// The project root on this machine: `root` if given (must be registered), else the first one.
+/// A project without folders: its blirp workspace here (created on demand, empty).
 fn project_root(s: &SharedState, id: &str, root: Option<&str>) -> ApiResult<PathBuf> {
-    s.store.live_project(id)?;
-    let roots = s.store.local_roots(id, &s.machine.id)?;
+    let project = s.store.live_project(id)?;
+    let mut roots = s.store.local_roots(id, &s.machine.id)?;
+    if roots.is_empty() && !project.chats && s.store.project_paths(id)?.is_empty() {
+        roots.push(
+            s.paths
+                .ensure_workspace(id)
+                .map_err(|e| ApiError::internal("creating the project workspace", e))?,
+        );
+    }
     match root {
         Some(r) => roots
             .into_iter()
@@ -389,6 +401,10 @@ mod tests {
         std::fs::create_dir_all(data.join("worktrees/p/w")).unwrap();
         std::fs::write(data.join("worktrees/p/w/a.txt"), "x").unwrap();
         assert!(resolve_inside(root, ".blirp/worktrees/p/w/a.txt", &data).is_ok());
+        // So are the workspaces of projects without folders.
+        std::fs::create_dir_all(data.join("workspaces/p")).unwrap();
+        std::fs::write(data.join("workspaces/p/.mcp.json"), "{}").unwrap();
+        assert!(resolve_inside(&data.join("workspaces/p"), ".mcp.json", &data).is_ok());
     }
 
     #[test]

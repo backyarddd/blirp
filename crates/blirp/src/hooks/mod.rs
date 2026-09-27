@@ -184,7 +184,7 @@ pub fn handle(
                     &state.machine.id,
                     &state.machine.name,
                     Path::new(&cwd),
-                    &NonProjectDirs::from_process(),
+                    &NonProjectDirs::from_process().with_workspaces(&state.paths.workspaces_dir()),
                 )?;
             if resolved.created {
                 state.emit(ServerEvent::ProjectUpdated {
@@ -380,7 +380,10 @@ fn offline_context(env: &HookEnv<'_>, payload: &Value) -> Option<String> {
         Some(p) => p,
         None => {
             let machine = store.machine_id().ok()??;
-            store.find_project_for_path(&machine, &cwd).ok()??.id
+            store
+                .find_project_for_path(&machine, &cwd, Some(&paths.workspaces_dir()))
+                .ok()??
+                .id
         }
     };
     // Read-only: never create config.toml from a hook.

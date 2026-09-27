@@ -1208,6 +1208,7 @@ mod tests {
             created_at: 1,
             updated_at: 1,
             deleted: false,
+            chats: false,
         })
     }
 
@@ -1283,6 +1284,7 @@ mod tests {
             created_at: 1,
             updated_at,
             deleted: false,
+            chats: false,
         })
     }
 
@@ -1816,6 +1818,7 @@ mod tests {
                 created_at: 1,
                 updated_at: 2,
                 deleted: true,
+                chats: false,
             }),
         );
         let remove = wire(

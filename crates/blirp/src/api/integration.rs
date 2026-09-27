@@ -88,7 +88,11 @@ async fn inject(
             .ok_or_else(|| ApiError::bad_request("session or cwd is required"))?;
         let project = st
             .store
-            .find_project_for_path(&st.machine.id, std::path::Path::new(&cwd))?
+            .find_project_for_path(
+                &st.machine.id,
+                std::path::Path::new(&cwd),
+                Some(&st.paths.workspaces_dir()),
+            )?
             .ok_or_else(|| ApiError::not_found("project for this folder"))?;
         Ok(Injection {
             markdown: render_injection(&st.store, &project.id, None, max)?,

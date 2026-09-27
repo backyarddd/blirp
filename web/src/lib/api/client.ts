@@ -5,6 +5,7 @@ import type {
   BrowserInvite,
   CloneJob,
   CloneRepo,
+  CreateProject,
   CreateRecord,
   CreateResource,
   CreateWikiPage,
@@ -208,7 +209,10 @@ export const api = {
   projects: {
     list: () => request<ProjectSummary[]>('GET', '/api/projects'),
     get: (id: string) => request<ProjectSummary>('GET', p(id)),
-    create: (path: string, name?: string) => request<ProjectSummary>('POST', '/api/projects', { path, name }),
+    /** Without `path` the project has no folder (`name` required); its sessions start in a blirp workspace. */
+    create: (body: CreateProject) => request<ProjectSummary>('POST', '/api/projects', body),
+    /** Unregister one of this machine's folders; the project stays, also with no folder left. */
+    removeFolder: (id: string, path: string) => request<ProjectSummary>('POST', `${p(id)}/folders/remove`, { path }),
     rename: (id: string, name: string) => request<ProjectSummary>('PATCH', p(id), { name }),
     remove: (id: string) => request<void>('DELETE', p(id)),
     merge: (id: string, into: string) => request<ProjectSummary>('POST', `${p(id)}/merge`, { into }),
@@ -258,6 +262,8 @@ export const api = {
     resume: (id: string) => request<Session>('POST', `${s(id)}/resume`),
     distill: (id: string) => request<void>('POST', `${s(id)}/distill`),
     rename: (id: string, title: string | null) => request<Session>('PATCH', s(id), { title }),
+    /** Into another project, or into Chats with `null`; subagents and the records it produced move along. */
+    move: (id: string, project_id: string | null) => request<Session>('POST', `${s(id)}/move`, { project_id }),
     open: (id: string, target: OpenTarget) => request<void>('POST', `${s(id)}/open`, { target }),
     /** Ended sessions only (409 `session_live`); other clients hear `session_deleted`. */
     delete: (id: string) => request<void>('DELETE', s(id)),

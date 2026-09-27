@@ -8,6 +8,7 @@ use crate::pty::{ExitInfo, Reservation, SpawnRequest, Terminal};
 use crate::state::SharedState;
 use axum::http::StatusCode;
 use blirp_core::model::{LaunchSession, ServerEvent, Session, SessionOrigin, SessionStatus};
+use blirp_core::store::NonProjectDirs;
 use blirp_core::{git, now_ms};
 use regex::Regex;
 use std::collections::HashMap;
@@ -120,25 +121,43 @@ fn prepare(state: &SharedState, req: &LaunchSession) -> ApiResult<Prepared> {
     let store = &state.store;
     let (project_id, cwd) = match (&req.project_id, &req.cwd) {
         // Explicit project: the folder must be inside one of its folders here
-        // (no resolution, so a mismatch never registers a stray project).
+        // or its workspace (no resolution, so a mismatch never registers a
+        // stray project), unless the user adds it to the project.
         (Some(pid), Some(cwd)) => {
-            store.live_project(pid)?;
+            let project = store.live_project(pid)?;
             let cwd = dunce::canonicalize(cwd)
                 .map_err(|e| ApiError::bad_request(format!("cwd is not accessible: {e}")))?;
+            let workspace = state
+                .paths
+                .workspace_dir(pid)
+                .ok()
+                .and_then(|w| dunce::canonicalize(w).ok());
             let inside = store
                 .local_roots(pid, &state.machine.id)?
                 .iter()
+                .chain(workspace.iter().filter(|_| !project.chats))
                 .any(|root| cwd.starts_with(root));
             if !inside {
-                return Err(ApiError::bad_request(
-                    "cwd is not inside a folder of the given project on this machine",
-                ));
+                if req.add_folder != Some(true) {
+                    return Err(ApiError::bad_request(
+                        "cwd is not inside a folder of the given project on this machine",
+                    ));
+                }
+                store.add_project_folder(pid, &state.machine.id, &cwd)?;
+                state.emit(ServerEvent::ProjectUpdated {
+                    project_id: pid.clone(),
+                });
             }
             (pid.clone(), cwd)
         }
         (None, Some(cwd)) => {
-            let resolved =
-                store.resolve_project(&state.machine.id, &state.machine.name, Path::new(cwd))?;
+            let dirs = NonProjectDirs::launch().with_workspaces(&state.paths.workspaces_dir());
+            let resolved = store.resolve_project_with(
+                &state.machine.id,
+                &state.machine.name,
+                Path::new(cwd),
+                &dirs,
+            )?;
             if resolved.created {
                 state.emit(ServerEvent::ProjectUpdated {
                     project_id: resolved.project.id.clone(),
@@ -149,14 +168,25 @@ fn prepare(state: &SharedState, req: &LaunchSession) -> ApiResult<Prepared> {
             (resolved.project.id, cwd)
         }
         (Some(pid), None) => {
-            store.live_project(pid)?;
-            let root = store
+            let project = store.live_project(pid)?;
+            let root = match store
                 .local_roots(pid, &state.machine.id)?
                 .into_iter()
                 .next()
-                .ok_or_else(|| {
-                    ApiError::bad_request("project has no folder on this machine; pass cwd")
-                })?;
+            {
+                Some(root) => root,
+                // A project without folders starts in this machine's
+                // workspace (§5).
+                None if !project.chats && store.project_paths(pid)?.is_empty() => state
+                    .paths
+                    .ensure_workspace(pid)
+                    .map_err(|e| ApiError::internal("creating the project workspace", e))?,
+                None => {
+                    return Err(ApiError::bad_request(
+                        "project has no folder on this machine; pass cwd",
+                    ));
+                }
+            };
             (pid.clone(), root)
         }
         (None, None) => return Err(ApiError::bad_request("project_id or cwd is required")),

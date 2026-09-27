@@ -84,7 +84,8 @@ impl<'e> StoreSink<'e> {
                         .to_lowercase()
                         .starts_with(&root.to_string_lossy().to_lowercase()))
         };
-        inside(home) && !inside(&home.join("worktrees"))
+        // Session worktrees and project workspaces hold the user's work.
+        inside(home) && !inside(&home.join("worktrees")) && !inside(&home.join("workspaces"))
     }
 
     fn flush(&mut self, cursor: Option<&Cursor>) -> Result<()> {

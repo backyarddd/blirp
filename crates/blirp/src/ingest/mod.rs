@@ -47,7 +47,8 @@ pub struct IngestEnv {
     /// The user's home directory.
     pub home: PathBuf,
     /// `BLIRP_HOME`. Transcripts whose cwd is inside it (except
-    /// `worktrees/`) are blirp's own background runs and are not ingested.
+    /// `worktrees/` and `workspaces/`) are blirp's own background runs and
+    /// are not ingested.
     pub blirp_home: PathBuf,
     /// Environment overrides adapters honor (`CLAUDE_CONFIG_DIR`, ...).
     pub vars: HashMap<String, OsString>,
@@ -84,7 +85,8 @@ impl IngestEnv {
             home,
             blirp_home: blirp_home.to_path_buf(),
             vars,
-            non_projects: NonProjectDirs::from_process(),
+            non_projects: NonProjectDirs::from_process()
+                .with_workspaces(&blirp_home.join("workspaces")),
         })
     }
 
@@ -95,7 +97,8 @@ impl IngestEnv {
             home: home.to_path_buf(),
             blirp_home: blirp_home.to_path_buf(),
             vars: HashMap::new(),
-            non_projects: NonProjectDirs::auto(Some(home.to_path_buf()), Vec::new()),
+            non_projects: NonProjectDirs::auto(Some(home.to_path_buf()), Vec::new())
+                .with_workspaces(&blirp_home.join("workspaces")),
         }
     }
 

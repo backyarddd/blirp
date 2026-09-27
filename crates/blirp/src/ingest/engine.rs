@@ -306,16 +306,19 @@ impl Engine {
         }
     }
 
-    /// One-time cleanup after upgrading to the scratch-folder rules (§5):
-    /// projects earlier ingest created for temp, tool, system or Codex
-    /// chat folders are merged into the Home project when nothing shows
-    /// the user made or used them as a project (`Store::retire_non_projects`).
+    /// One-time cleanup after upgrading to the Chats rules (§5): projects
+    /// earlier ingest created for folders that are no actual project
+    /// (temp, tool, system or Codex chat folders, folders without git or a
+    /// project marker) are merged into Chats when nothing shows the user
+    /// made or used them as a project (`Store::retire_non_projects`).
     /// Runs at the start of an ingest pass, so never concurrently with
     /// one; a node waits for a pull to reach the hub's head first, so a
     /// change another machine made to such a project is seen (and makes it
     /// ineligible) before it is removed.
     pub fn retire_non_projects(&self) {
-        const KEY: &str = "projects.cleanup.non_projects";
+        // Renamed in 0.1.1 when chats left the projects: the pass runs again
+        // with the new rules where an earlier build ran it.
+        const KEY: &str = "projects.cleanup.chats";
         if self.retired.load(Ordering::Relaxed) {
             return;
         }
@@ -355,7 +358,7 @@ impl Engine {
             Ok(retired) => {
                 tracing::info!(
                     projects = retired.len(),
-                    "merged projects of scratch folders into the Home project"
+                    "moved the sessions of projects that are no actual project to Chats"
                 );
                 for p in &retired {
                     self.notifier.project(&p.id);
