@@ -339,6 +339,11 @@ impl SyncService {
         if let Role::Node { hub } = &self.inner.role {
             let hub = hub.id.to_string();
             let connected = lock(&self.inner.status).connected;
+            // A presence frame read just after the connection dropped must
+            // not outlive it: without the hub the others are unknown.
+            if !connected {
+                out.clear();
+            }
             let seen = *lock(&self.inner.hub_seen);
             out.insert(
                 hub.clone(),
@@ -587,7 +592,7 @@ async fn handle_incoming(inner: &Arc<Inner>, incoming: Incoming) -> Result<()> {
                 .conns
                 .push(conn.clone());
             touch_device(inner, &remote);
-            set_online(inner, &remote, true);
+            refresh_online(inner, &remote);
             (inner.on_status)();
             let kick = inner.clone();
             let result = repl::serve_hub(
@@ -606,12 +611,7 @@ async fn handle_incoming(inner: &Arc<Inner>, incoming: Incoming) -> Result<()> {
             )
             .await;
             forget_conn(inner, &remote, &conn);
-            let still = lock(&inner.peers)
-                .get(&remote)
-                .is_some_and(|p| !p.conns.is_empty());
-            if !still {
-                set_online(inner, &remote, false);
-            }
+            refresh_online(inner, &remote);
             if matches!(result, Ok(repl::HubSessionEnd::Left)) {
                 tracing::info!(node = %remote, "machine left the hub; revoked");
                 close_peer(inner, &remote);
@@ -935,17 +935,22 @@ async fn proxy_stream(
 
 // ---------------------------------------------------------------- presence
 
-/// Hub: record that `id` connected or lost its last sync connection.
-fn set_online(inner: &Inner, id: &str, online: bool) {
-    let now = blirp_core::now_ms();
-    lock(&inner.presence).insert(
-        id.to_string(),
-        Presence {
-            machine_id: id.to_string(),
-            online,
-            last_seen: now,
-        },
-    );
+/// Hub: `id` connected or lost a sync connection. Online means it still
+/// has one; read and written under the peers lock, so a connect and a
+/// disconnect racing each other cannot leave the wrong state behind.
+fn refresh_online(inner: &Inner, id: &str) {
+    {
+        let peers = lock(&inner.peers);
+        let online = peers.get(id).is_some_and(|p| !p.conns.is_empty());
+        lock(&inner.presence).insert(
+            id.to_string(),
+            Presence {
+                machine_id: id.to_string(),
+                online,
+                last_seen: blirp_core::now_ms(),
+            },
+        );
+    }
     publish_presence(inner);
 }
 
@@ -973,10 +978,45 @@ async fn hub_presence_loop(inner: Arc<Inner>) {
             _ = shutdown.changed() => return,
         }
         let now = blirp_core::now_ms();
-        for p in lock(&inner.presence).values_mut().filter(|p| p.online) {
-            p.last_seen = now;
-        }
+        // Recomputed from the live connections, so presence heals itself
+        // whatever happened between connect and disconnect bookkeeping.
+        let changed = {
+            let peers = lock(&inner.peers);
+            let mut presence = lock(&inner.presence);
+            let mut changed = false;
+            for id in peers
+                .iter()
+                .filter(|(_, p)| !p.conns.is_empty())
+                .map(|(id, _)| id)
+            {
+                if !presence.get(id).is_some_and(|x| x.online) {
+                    changed = true;
+                }
+                presence.insert(
+                    id.clone(),
+                    Presence {
+                        machine_id: id.clone(),
+                        online: true,
+                        last_seen: now,
+                    },
+                );
+            }
+            for p in presence.values_mut() {
+                let online = peers
+                    .get(&p.machine_id)
+                    .is_some_and(|x| !x.conns.is_empty());
+                if p.online && !online {
+                    p.online = false;
+                    p.last_seen = now;
+                    changed = true;
+                }
+            }
+            changed
+        };
         publish_presence(&inner);
+        if changed {
+            (inner.on_status)();
+        }
     }
 }
 
