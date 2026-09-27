@@ -356,9 +356,8 @@ impl Store {
             push(" AND id < ?))))", id.into(), &mut sql);
         }
         let limit = f.limit.clamp(1, 500);
-        // ponytail: sorts every matching row (no index covers the live
-        // expression); fine for thousands of sessions, add a stored `live`
-        // column with an index if lists get slow.
+        // Note: no index; scans matching sessions. Add an index on
+        // (live, last_activity_at) if lists get slow.
         sql.push_str(&format!(
             " ORDER BY live DESC, last_activity_at DESC, id DESC LIMIT {}",
             limit + 1
