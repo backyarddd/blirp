@@ -651,20 +651,21 @@ mod tests {
         assert!(s.excluded.is_empty(), "{:?}", s.excluded);
     }
 
-    /// The root may be spelled through a symlink while the data folder is
-    /// given resolved (or the other way round): it is still skipped.
+    /// The root may be reached through a symlinked parent (like `/var` on
+    /// macOS) while the data folder is given resolved: it is still skipped.
     #[cfg(unix)]
     #[test]
     fn data_dir_is_skipped_when_the_root_is_spelled_through_a_link() {
         let dir = tempfile::tempdir().unwrap();
-        let real = dir.path().join("real");
+        let base = dir.path().join("base");
+        let real = base.join("proj");
         std::fs::create_dir_all(real.join("data")).unwrap();
         std::fs::write(real.join("data/runtime.json"), "{}").unwrap();
         std::fs::write(real.join("a.txt"), "a").unwrap();
-        let link = dir.path().join("link");
-        std::os::unix::fs::symlink(&real, &link).unwrap();
+        let alias = dir.path().join("alias");
+        std::os::unix::fs::symlink(&base, &alias).unwrap();
         let s = scan(
-            &link,
+            &alias.join("proj"),
             false,
             &ScanConfig {
                 data_dir: Some(real.join("data")),
