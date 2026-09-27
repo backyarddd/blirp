@@ -1,0 +1,4 @@
+# Embedded into the binary and installed as-is: keep LF on every checkout.
+skills/** text eol=lf
+# Shell scripts must stay LF to run.
+*.sh text eol=lf
