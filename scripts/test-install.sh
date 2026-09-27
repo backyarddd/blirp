@@ -17,7 +17,8 @@
 #      `blirp doctor` server lines, `blirp backup`; without systemd (faked
 #      with failing systemctl/loginctl) it falls back to a direct daemon, and
 #      with BLIRP_TEST_SYSTEMD=1 it uses the real systemd --user manager (CI:
-#      needs linger; installs and removes a unit in the real home).
+#      needs linger; installs and removes a unit in the real home and a
+#      folder in ~/.cache).
 # Apart from 4 with BLIRP_TEST_SYSTEMD=1, nothing outside a temp dir is
 # touched: HOME (USERPROFILE, APPDATA, LOCALAPPDATA) points into it, no
 # service, PATH entry or desktop app is installed, and
@@ -63,9 +64,11 @@ v=$(sed -n '/^\[workspace.package\]/,/^\[/s/^version = "\([^"]*\)".*/\1/p' "$roo
 work=$(mktemp -d 2>/dev/null || mktemp -d -t blirp-install-test)
 server=
 hub_homes=
+sd_dir=${HOME:-/nonexistent}/.cache/blirp-install-test.$$
 cleanup() {
   # Daemons of the hub tests (defined below; nothing to stop before that).
   if [ -n "$hub_homes" ]; then stop_hubs; fi
+  rm -rf "$sd_dir"
   if [ -n "$server" ]; then
     kill "$server" 2>/dev/null || true
     # It serves from inside $work; let it exit before the rm.
@@ -239,18 +242,20 @@ sh_=${shells##* }
 # systemd --user manager of the current user, which needs linger already on;
 # it writes ~/.config/systemd/user/blirp.service in the real home and removes
 # it again. Every daemon is loopback-only and picks a free port.
+# The systemd mode installs the CLI under ~/.cache ($sd_dir), not the temp
+# dir: service install refuses a binary under /tmp, which is gone at reboot.
 # XDG_CONFIG_HOME is unset: runners set it to the real home's .config, where
 # the fallback mode must not look for a unit.
 hub_mode_env() {
   # Printed as NAME=VALUE words for `env`.
   if [ "$1" = systemd ]; then
-    printf 'HOME=%s XDG_DATA_HOME=%s BLIRP_INSTALL_DIR=%s\n' "$HOME" "$2/share" "$2/bin"
+    printf 'HOME=%s XDG_DATA_HOME=%s BLIRP_INSTALL_DIR=%s\n' "$HOME" "$sd_dir/share" "$sd_dir/bin"
   else
     printf 'HOME=%s PATH=%s\n' "$2" "$work/shim:$PATH"
   fi
 }
 hub_bin() {
-  if [ "$1" = systemd ]; then printf '%s\n' "$2/bin/blirp"; else installed_bin "$2"; fi
+  if [ "$1" = systemd ]; then printf '%s\n' "$sd_dir/bin/blirp"; else installed_bin "$2"; fi
 }
 # hub_cli MODE HOME ARGS...: the installed blirp in that setup's environment.
 hub_cli() {
