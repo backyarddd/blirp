@@ -33,7 +33,7 @@ blirp runs as your user account and starts coding agents that can already read a
 | Claude login token (only if you store one: `blirp agents set-token claude`) | `~/.blirp/secrets/claude_oauth_token` | `0600` in a `0700` folder (Windows: profile ACL); not in the database, so never synced; never logged or returned by the API; passed only to claude processes as `CLAUDE_CODE_OAUTH_TOKEN` ([agents.md](agents.md#headless-login-for-a-hub)) |
 | Other agent credentials | the agents' own config | never read or stored by blirp |
 
-Nothing is stored outside `~/.blirp` except what you ask for: autostart entries (`blirp service install`), agent config entries (`blirp hooks install`, with `.blirp-backup` copies), and git worktrees and `blirp/*` branches for worktree sessions.
+Nothing is stored outside `~/.blirp` except what you ask for: autostart entries (`blirp service install`), agent config entries (`blirp hooks install`, with `.blirp-backup` copies), skill folders (`blirp skills install`), and git worktrees and `blirp/*` branches for worktree sessions.
 
 ## Redaction
 
@@ -77,7 +77,7 @@ Never expose the daemon port or the portal to the internet. For remote access us
 
 ## Global hooks
 
-`blirp hooks install` is the only operation that edits files blirp does not own. It is explicit, idempotent, marker-based, backs up the original once, writes atomically, refuses to rewrite files with comments or invalid syntax, and `uninstall` removes exactly its own entries ([memory.md](memory.md#global-hooks)). Hook processes always exit 0 within 2 seconds and send only the agent's hook payload to the local daemon.
+`blirp hooks install` is the only operation that edits files blirp does not own (`blirp skills install` only adds its own skill folders, and never overwrites or removes a skill you edited unless you pass `--force`, [skills.md](skills.md)). It is explicit, idempotent, marker-based, backs up the original once, writes atomically, refuses to rewrite files with comments or invalid syntax, and `uninstall` removes exactly its own entries ([memory.md](memory.md#global-hooks)). Hook processes always exit 0 within 2 seconds and send only the agent's hook payload to the local daemon.
 
 ## Summarizer runs
 

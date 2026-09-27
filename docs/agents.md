@@ -135,6 +135,10 @@ The agent id is `custom:<name>` (usable as `[agents] default = "custom:claude-pl
 
 Config changes made in **Settings** apply immediately; hand edits to `config.toml` apply after restarting the daemon ([configuration.md](configuration.md)).
 
+## Skills
+
+`blirp skills install` gives agents that load Agent Skills (Claude Code, Codex, Gemini CLI, opencode, Cursor, Amp, pi) instructions for operating blirp itself: status, linking machines, updates, memory, sessions ([skills.md](skills.md)).
+
 ## Adding support for a new agent
 
 See [development.md](development.md#adding-an-agent-adapter).

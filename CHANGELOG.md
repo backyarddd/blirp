@@ -19,6 +19,13 @@ so every tag needs one.
   their paths typed into the terminal, so Claude Code and Codex attach
   pasted screenshots. `POST /api/sessions/:id/uploads` (terminal control,
   25 MB per file); uploads are removed with the session and after 7 days.
+- Agent Skills for operating blirp: `blirp skills install|uninstall|list`
+  puts `SKILL.md` skills (status and troubleshooting, linking machines,
+  updating, memory, sessions) into `~/.claude/skills` and
+  `~/.agents/skills` (Claude Code, Codex, Gemini CLI, opencode, Cursor,
+  Amp, pi), or a project with `--project`. Skills you edited are never
+  overwritten without `--force` nor removed; `blirp doctor` shows their
+  state and `blirp uninstall` removes them.
 
 ### Fixed
 

@@ -10,6 +10,7 @@ Read [ARCHITECTURE.md](ARCHITECTURE.md) first: it is the design contract, and a 
 | `crates/blirp-sync` | iroh endpoint, pairing (SPAKE2), replication protocol, remote proxy |
 | `crates/blirp` | the `blirp` binary: `cli/`, `daemon.rs`, `api/` (axum routes), `pty.rs`, `sessions.rs`, `agents.rs`, `ingest/` (one adapter per agent), `memory/` (distill, render, launch integration), `hooks/` (hook client, daemon side, global install), `mcp/`, `sync/`, `portal/` |
 | `crates/blirp/tests` | integration tests: `daemon.rs` (real daemon + PTY + WebSocket), `ingest.rs` (fixtures per agent), `memory.rs`, `sync.rs`; `fixtures/<agent>/` synthetic transcripts |
+| `skills/` | blirp's Agent Skills (`<name>/SKILL.md`), embedded into `blirp` by `cli/skills.rs` (add a new one to `SKILLS` there); a test parses every `blirp` command in them with the CLI ([skills.md](skills.md)) |
 | `web/` | Svelte 5 + Vite + TypeScript SPA (desktop UI and portal), built to `web/dist` and embedded into `blirp`; `web/e2e/` Playwright suite |
 | `app/` | Tauri 2 desktop shell (`src-tauri/`); `app/src` is only the loading/error page |
 | `scripts/` | `build-sidecar.{sh,ps1}` (stage `blirp` and ConPTY as the Tauri sidecar), `render-packaging.sh`, `third-party-notices.sh` (`THIRD_PARTY_NOTICES` from `about.toml` + `packaging/about.hbs`, npm licenses and `packaging/licenses/`) |
@@ -23,7 +24,7 @@ Read [ARCHITECTURE.md](ARCHITECTURE.md) first: it is the design contract, and a 
 Read [ARCHITECTURE.md](ARCHITECTURE.md) before changing anything; it is the contract.
 
 - Projects are folders; git is optional. Never assume `.git` exists.
-- Never edit the user's agent config or project files except through the explicit, reversible `blirp hooks install` flow.
+- Never edit the user's agent config or project files except through the explicit, reversible `blirp hooks install` and `blirp skills install` flows.
 - Hooks always exit 0 within 2 s.
 - All writes to replicated tables go through `Store::apply`.
 - Redact before storing, syncing or summarizing transcript text.

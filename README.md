@@ -90,6 +90,7 @@ Options (`--no-app`, `--service`, `--version X`), manual downloads, system requi
 3. **Work as usual.** When the session has been idle for 5 minutes, or ends, blirp summarizes it into the project's memory.
 4. **Start the next session** in the same folder, with the same or another agent. It begins with a `# blirp memory: <project>` block. Open **Memory** in the session toolbar to see exactly what it received.
 5. **Optional:** `blirp hooks install` gives sessions you start in your own terminal the same memory (Claude Code, Codex, Gemini CLI, Cursor; MCP only for opencode). It edits those agents' user config, reversibly.
+6. **Optional:** `blirp skills install` teaches your agents to operate blirp for you: check its health, link machines, update, search memory ([Agent skills](docs/skills.md)).
 
 Closing the window keeps the daemon and every session running; the tray icon brings it back.
 
@@ -167,7 +168,7 @@ Threat model and details: [docs/security.md](docs/security.md). Report vulnerabi
 | | |
 |---|---|
 | **Start** | [Getting started](docs/getting-started.md) · [Install](docs/install.md) · [FAQ](docs/faq.md) |
-| **Use** | [Projects and sessions](docs/projects-and-sessions.md) · [Memory](docs/memory.md) · [Agents](docs/agents.md) |
+| **Use** | [Projects and sessions](docs/projects-and-sessions.md) · [Memory](docs/memory.md) · [Agents](docs/agents.md) · [Agent skills](docs/skills.md) |
 | **Machines** | [Sync and hub](docs/sync-and-hub.md) · [Cloud sessions](docs/cloud-sessions.md) · [Web portal](docs/portal.md) |
 | **Reference** | [Configuration](docs/configuration.md) · [CLI](docs/cli.md) · [HTTP API](docs/api.md) · [Security](docs/security.md) · [Troubleshooting](docs/troubleshooting.md) |
 | **Develop** | [Development](docs/development.md) · [Architecture](docs/ARCHITECTURE.md) · [Contributing](CONTRIBUTING.md) |

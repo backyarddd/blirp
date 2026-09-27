@@ -228,6 +228,11 @@ pub async fn uninstall(paths: &Paths, purge: bool, yes: bool) -> anyhow::Result<
     println!("Removing global agent hooks:");
     ok &= super::mem::run_hooks(super::mem::HooksCommand::Uninstall { agent: None })?
         == ExitCode::SUCCESS;
+    println!("Removing blirp skills:");
+    ok &= super::skills::run(super::skills::SkillsCommand::Uninstall {
+        agent: None,
+        project: None,
+    })? == ExitCode::SUCCESS;
     match &inst {
         Some(inst) => ok &= remove_install(inst),
         None => println!(

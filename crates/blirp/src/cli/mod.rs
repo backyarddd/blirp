@@ -5,6 +5,7 @@ mod install;
 mod lifecycle;
 mod mem;
 pub mod service;
+mod skills;
 mod sync;
 mod worktrees;
 
@@ -84,6 +85,9 @@ enum Command {
     /// Install or remove global agent hooks and MCP registration.
     #[command(subcommand)]
     Hooks(mem::HooksCommand),
+    /// Install or remove blirp's Agent Skills (SKILL.md) for agents.
+    #[command(subcommand)]
+    Skills(skills::SkillsCommand),
     /// Headless agent login: a `claude setup-token` token for the claude
     /// sessions and summarizer the daemon starts.
     #[command(subcommand)]
@@ -171,6 +175,7 @@ pub fn main() -> ExitCode {
         Command::Logs { lines, follow } => report(lifecycle::logs(&paths, lines, follow)),
         Command::Worktrees(worktrees::WorktreesCommand::List) => report(worktrees::list(&paths)),
         Command::Hooks(cmd) => report(mem::run_hooks(cmd)),
+        Command::Skills(cmd) => report(skills::run(cmd)),
         Command::Agents(cmd) => report(agents::run(&paths, cmd)),
         command => run_async(command, paths),
     }
@@ -277,6 +282,7 @@ async fn run(cmd: Command, paths: Paths) -> anyhow::Result<ExitCode> {
         Command::Hook { .. }
         | Command::Mem(_)
         | Command::Hooks(_)
+        | Command::Skills(_)
         | Command::Agents(_)
         | Command::Logs { .. }
         | Command::Worktrees(worktrees::WorktreesCommand::List) => Ok(ExitCode::from(2)),
@@ -540,6 +546,15 @@ async fn doctor(paths: &Paths) -> anyhow::Result<ExitCode> {
     };
     if let Some((a, seen_by)) = claude.filter(|(a, _)| a.installed) {
         println!("[info] claude auth: {}", claude_auth_line(&a, seen_by));
+    }
+
+    match skills::home_targets() {
+        Ok(targets) => {
+            for t in targets {
+                println!("[info] skills {}: {}", t.label, skills::summary(&t));
+            }
+        }
+        Err(e) => println!("[info] skills: {e:#}"),
     }
 
     match crate::ingest::IngestEnv::from_process(paths.home()) {

@@ -21,6 +21,7 @@ Without a command, `blirp` does what [`blirp app`](#blirp-app) does.
 | [`doctor`](#blirp-doctor) | no | check the installation |
 | [`mem`](#blirp-mem) | no | search and show project memory |
 | [`hooks`](#blirp-hooks) | no | install/remove global agent hooks and MCP |
+| [`skills`](#blirp-skills) | no | install/remove blirp's Agent Skills for agents |
 | [`agents`](#blirp-agents) | no | store or remove the Claude login token for a headless hub |
 | [`pair`](#blirp-pair) | yes | pair this machine with a hub |
 | [`hub`](#blirp-hub) | yes | hub role, invites, sync status |
@@ -84,7 +85,7 @@ Shows the daemon log (`~/.blirp/logs/blirpd.<date>.log`). Run `blirp logs --help
 
 ## blirp doctor
 
-Checks, one line each, `[ ok ]` or `[FAIL]`: data directory writable, `config.toml` valid, database opens and passes `quick_check` (schema version shown), daemon reachable, `git` on PATH. Then `[info]` lines: LAN discovery (on or off, the running daemon's latest mDNS send failure when it logged one in the last 11 minutes, and on macOS a hint about the Local Network permission), detected agents with versions, how claude logs in (`claude auth`: a login token from the environment, a stored token or the keychain / credentials file, and whether `claude auth status` reports it logged in; asked from the running daemon, else from this shell), and per transcript adapter the store it found, the number of sources and the time of the last ingest. Exit code 1 if any check failed. Works without the daemon; run it in the same environment the daemon runs in (PATH matters for agent detection).
+Checks, one line each, `[ ok ]` or `[FAIL]`: data directory writable, `config.toml` valid, database opens and passes `quick_check` (schema version shown), daemon reachable, `git` on PATH. Then `[info]` lines: LAN discovery (on or off, the running daemon's latest mDNS send failure when it logged one in the last 11 minutes, and on macOS a hint about the Local Network permission), detected agents with versions, how claude logs in (`claude auth`: a login token from the environment, a stored token or the keychain / credentials file, and whether `claude auth status` reports it logged in; asked from the running daemon, else from this shell), per transcript adapter the store it found, the number of sources and the time of the last ingest, and the state of blirp's skills in both skill folders. Exit code 1 if any check failed. Works without the daemon; run it in the same environment the daemon runs in (PATH matters for agent detection).
 
 ## blirp mem
 
@@ -112,6 +113,16 @@ blirp hooks status    [--agent <AGENT>]
 ```
 
 Global integration for sessions started outside blirp. Supported agents: `claude`, `codex`, `gemini`, `cursor`, `opencode`. Without `--agent`, `install` handles every supported agent found on PATH, `uninstall` and `status` all supported agents. Prints one line per agent: `hooks <installed|not_installed|unsupported>  mcp <...>`, plus a note after install (Codex: run `/hooks` once to trust them). Exit code 1 if any agent failed (e.g. a config file with comments). Entries run the absolute path of this binary; from an AppImage mount they run the installed CLI instead (as for `blirp service install`). Does not need the daemon. Exactly what changes: [memory.md](memory.md#global-hooks).
+
+## blirp skills
+
+```
+blirp skills install   [--agent <AGENT>] [--project <DIR>] [--force]
+blirp skills uninstall [--agent <AGENT>] [--project <DIR>]
+blirp skills list      [--agent <AGENT>] [--project <DIR>]
+```
+
+blirp's [Agent Skills](skills.md) (`SKILL.md` files that teach agents to run blirp) in `~/.claude/skills` (`--agent claude` or `amp`; `$CLAUDE_CONFIG_DIR/skills`) and `~/.agents/skills` (`--agent codex`, `gemini`, `opencode`, `cursor` or `pi`). Without `--agent`, `install` handles the folders of the supported agents found on PATH, `uninstall` and `list` both folders. `--project <DIR>` uses `<DIR>/.claude/skills` and `<DIR>/.agents/skills` instead. One line per skill: folder, skill, result (`install`: `installed`, `updated`, `unchanged`, `skipped`, `replaced`; `uninstall`: `removed`, `kept_modified`; `list`: `installed`, `outdated`, `modified`, `not_ours`, `not_installed`) and path. `install` never overwrites a skill that was edited or not written by blirp unless `--force` (the old `SKILL.md` is copied once to `SKILL.md.blirp-backup`), and exits 1 when it skipped one. `uninstall` removes only unedited skills blirp wrote. Does not need the daemon.
 
 ## blirp agents
 
@@ -179,7 +190,7 @@ Updates an installation made by the install scripts to the latest published rele
 blirp uninstall [--purge] [--yes]
 ```
 
-Stops the daemon, removes the autostart entry (`blirp service uninstall`) and blirp's global hooks and MCP entries for every agent (`blirp hooks uninstall`; entries of other tools stay), then removes what the install script installed: the CLI files, the desktop app with its menu entry or Start Menu shortcut and `blirp://` registration, the PATH change the script made, and the install receipt. Only known file names in the recorded locations are deleted; a `blirp` the scripts did not install is left in place. On Windows the running `blirp.exe` is deleted right after the command exits.
+Stops the daemon, removes the autostart entry (`blirp service uninstall`), blirp's global hooks and MCP entries for every agent (`blirp hooks uninstall`; entries of other tools stay) and blirp's skills in your home folder (`blirp skills uninstall`; skills you edited stay), then removes what the install script installed: the CLI files, the desktop app with its menu entry or Start Menu shortcut and `blirp://` registration, the PATH change the script made, and the install receipt. Only known file names in the recorded locations are deleted; a `blirp` the scripts did not install is left in place. On Windows the running `blirp.exe` is deleted right after the command exits.
 
 - `--purge`: also delete the data directory (`BLIRP_HOME`, default `~/.blirp`: memory, sessions, settings). Asks for confirmation; refuses a directory that does not look like blirp's.
 - `--yes`: do not ask.
@@ -198,4 +209,4 @@ MCP server over stdio for agents ([memory.md](memory.md#mcp-tools)). Uses `BLIRP
 
 ## Exit codes
 
-`0` success; `1` error (message on stderr), `blirp status` with no daemon, `blirp doctor` with a failed check, `blirp hooks` with a failed agent, `blirp uninstall` when something could not be removed; `2` invalid arguments; `10` `blirp update --check` with an update available. `blirp hook` always exits 0.
+`0` success; `1` error (message on stderr), `blirp status` with no daemon, `blirp doctor` with a failed check, `blirp hooks` with a failed agent, `blirp skills` with a skipped or failed skill, `blirp uninstall` when something could not be removed; `2` invalid arguments; `10` `blirp update --check` with an update available. `blirp hook` always exits 0.
