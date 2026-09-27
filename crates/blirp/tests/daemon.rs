@@ -561,6 +561,61 @@ async fn terminal_uploads() {
         let err: ErrorBody = serde_json::from_slice(&bytes).unwrap();
         assert_eq!(err.error.code, "file_too_large");
     }
+    // Over TCP, a client that sends its whole body before reading still gets
+    // the 413 (the rest of the body is drained, not reset).
+    for chunked in [false, true] {
+        use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
+        let mut tcp = tokio::net::TcpStream::connect(("127.0.0.1", h.daemon.port))
+            .await
+            .unwrap();
+        let size = blirp::uploads::MAX_BYTES + (1 << 20);
+        let length = if chunked {
+            "Transfer-Encoding: chunked".to_string()
+        } else {
+            format!("Content-Length: {size}")
+        };
+        let head = format!(
+            "POST /api/sessions/{}/uploads?name=big.bin HTTP/1.1\r\nHost: 127.0.0.1:{}\r\n\
+             Authorization: Bearer {}\r\n{length}\r\n\r\n",
+            session.id, h.daemon.port, h.token
+        );
+        tcp.write_all(head.as_bytes()).await.unwrap();
+        let chunk = vec![0u8; 1 << 20];
+        for _ in 0..size / chunk.len() {
+            if chunked {
+                tcp.write_all(format!("{:x}\r\n", chunk.len()).as_bytes())
+                    .await
+                    .unwrap();
+            }
+            tcp.write_all(&chunk).await.unwrap();
+            if chunked {
+                tcp.write_all(b"\r\n").await.unwrap();
+            }
+        }
+        if chunked {
+            tcp.write_all(b"0\r\n\r\n").await.unwrap();
+        }
+        let mut answer = String::new();
+        let mut buf = vec![0u8; 4096];
+        while !answer.contains("file_too_large") {
+            let n = tokio::time::timeout(Duration::from_secs(20), tcp.read(&mut buf))
+                .await
+                .unwrap()
+                .unwrap();
+            if n == 0 {
+                break;
+            }
+            answer.push_str(&String::from_utf8_lossy(&buf[..n]));
+        }
+        assert!(
+            answer.starts_with("HTTP/1.1 413"),
+            "chunked {chunked}: {answer}"
+        );
+        assert!(
+            answer.contains("file_too_large"),
+            "chunked {chunked}: {answer}"
+        );
+    }
     assert_eq!(std::fs::read_dir(&dir).unwrap().count(), 1);
 
     // Only running sessions take uploads.

@@ -37,23 +37,49 @@ fn too_large() -> ApiError {
     )
 }
 
+/// How much more of a refused upload is read and thrown away before the
+/// 413 goes out. A client busy sending does not read the answer yet, and a
+/// server that closes the connection with the body unread makes the TCP
+/// stack reset it, so the client sees ECONNRESET instead of the 413. Past
+/// this bound (or [`DRAIN_TIME`]) the connection is closed regardless.
+const DRAIN_MAX: u64 = 4 * MAX_BYTES as u64;
+const DRAIN_TIME: std::time::Duration = std::time::Duration::from_secs(30);
+
+/// Read and discard the rest of a refused body, within the bounds above.
+async fn drain(stream: &mut axum::body::BodyDataStream, mut read: u64) {
+    let _ = tokio::time::timeout(DRAIN_TIME, async {
+        while let Some(Ok(chunk)) = stream.next().await {
+            read += chunk.len() as u64;
+            if read > MAX_BYTES as u64 + DRAIN_MAX {
+                break;
+            }
+        }
+    })
+    .await;
+}
+
 /// The raw body, refused past `MAX_BYTES` (by `Content-Length` before
-/// reading anything, else while reading).
+/// keeping anything, else while reading).
 async fn read_body(headers: &HeaderMap, body: Body) -> ApiResult<Bytes> {
     let declared = headers
         .get(header::CONTENT_LENGTH)
         .and_then(|v| v.to_str().ok())
         .and_then(|v| v.parse::<u64>().ok());
-    if declared.is_some_and(|n| n > MAX_BYTES as u64) {
+    let mut stream = body.into_data_stream();
+    if let Some(n) = declared.filter(|&n| n > MAX_BYTES as u64) {
+        // A body the drain would give up on anyway is not read at all.
+        if n <= MAX_BYTES as u64 + DRAIN_MAX {
+            drain(&mut stream, 0).await;
+        }
         return Err(too_large());
     }
-    let mut stream = body.into_data_stream();
     // A declared length is only a hint: never reserve more than 1 MiB up front.
     let mut buf = Vec::with_capacity(declared.map_or(0, |n| n.min(1 << 20) as usize));
     while let Some(chunk) = stream.next().await {
         let chunk =
             chunk.map_err(|e| ApiError::bad_request(format!("reading the upload failed: {e}")))?;
         if buf.len() + chunk.len() > MAX_BYTES {
+            drain(&mut stream, (buf.len() + chunk.len()) as u64).await;
             return Err(too_large());
         }
         buf.extend_from_slice(&chunk);
