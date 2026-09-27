@@ -495,6 +495,23 @@ async fn pair_replicate_proxy_revoke_and_portal() {
     assert_eq!(r.status(), 201, "{:?}", r.text().await);
     let session: Session = r.json().await.unwrap();
     assert_eq!(session.machine_id, a.id());
+    // Readable and changeable on B at once, before replication delivers it.
+    let r = b
+        .req(Method::GET, &format!("/api/sessions/{}", session.id), None)
+        .await;
+    assert_eq!(r.status(), 200, "{:?}", r.text().await);
+    let r = b
+        .req(
+            Method::PATCH,
+            &format!("/api/sessions/{}", session.id),
+            Some(json!({"title": "remote one"})),
+        )
+        .await;
+    assert_eq!(r.status(), 200, "{:?}", r.text().await);
+    eventually("B's rename reaches A", || async {
+        a.store().get_session(&session.id).unwrap().unwrap().title == Some("remote one".into())
+    })
+    .await;
     let url = format!(
         "{}/api/terminals/{}/ws",
         b.base.replace("http", "ws"),
@@ -583,6 +600,33 @@ async fn pair_replicate_proxy_revoke_and_portal() {
         .await;
     assert_eq!(r.status(), 202);
     drop(ws);
+    // Deleted from B: gone on B at once, and replication does not bring it back.
+    eventually("the remote session ended", || async {
+        !a.store()
+            .get_session(&session.id)
+            .unwrap()
+            .unwrap()
+            .status
+            .is_live()
+    })
+    .await;
+    let r = b
+        .req(
+            Method::DELETE,
+            &format!("/api/sessions/{}", session.id),
+            None,
+        )
+        .await;
+    assert_eq!(r.status(), 204, "{:?}", r.text().await);
+    let detail = format!("/api/sessions/{}", session.id);
+    assert_eq!(b.req(Method::GET, &detail, None).await.status(), 404);
+    eventually("B synced past the delete", || async {
+        let st = sync_status(&b).await;
+        st.pending_outbox == 0 && a.store().get_session(&session.id).unwrap().is_none()
+    })
+    .await;
+    tokio::time::sleep(Duration::from_secs(1)).await;
+    assert_eq!(b.req(Method::GET, &detail, None).await.status(), 404);
 
     // ---- the node has not opted in to hub control: the hub may read it
     // but not launch or change anything on it.

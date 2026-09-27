@@ -192,8 +192,28 @@ async fn remove(
     // A session belongs to its machine (§10): only that machine deletes it.
     if let Some(m) = remote_machine(&s, &id).await? {
         let path = format!("/api/sessions/{id}");
-        return crate::sync::forward(&s, &m, &principal, axum::http::Method::DELETE, &path, None)
-            .await;
+        let resp =
+            crate::sync::forward(&s, &m, &principal, axum::http::Method::DELETE, &path, None)
+                .await?;
+        if resp.status().is_success() {
+            // Gone here now, not once the owner's delete replicates; the
+            // tombstone keeps rows still in flight from bringing it back. A
+            // local failure is not the caller's: the owner deleted it and
+            // replication removes it here too.
+            let (store, sid) = (s.store.clone(), id.clone());
+            match blocking(move || {
+                store.apply_remote(&blirp_core::store::Change::DeleteSession { id: sid })?;
+                Ok(())
+            })
+            .await
+            {
+                Ok(()) => s.emit(ServerEvent::SessionDeleted { session_id: id }),
+                Err(e) => {
+                    tracing::warn!(session = %id, error = %e.message, "removing the remotely deleted session failed");
+                }
+            }
+        }
+        return Ok(resp);
     }
     if s.terminals.get(&id).is_some() {
         return Err(ApiError::conflict(

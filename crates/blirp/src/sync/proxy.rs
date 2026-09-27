@@ -8,7 +8,7 @@ use axum::body::Body;
 use axum::extract::ws::{Message, WebSocket};
 use axum::http::{Method, Request, StatusCode, header};
 use axum::response::Response;
-use blirp_core::model::{ErrorBody, LaunchSession, MachineRole, Session};
+use blirp_core::model::{ErrorBody, LaunchSession, MachineRole, ServerEvent, Session};
 use blirp_sync::SyncError;
 use blirp_sync::proxy::{ProxyPrincipal, ProxyStream};
 use futures_util::{SinkExt, StreamExt};
@@ -164,7 +164,23 @@ pub async fn launch_remote(
         .await
         .map_err(|e| ApiError::internal("reading proxied response", e))?;
     match serde_json::from_slice::<Session>(&bytes) {
-        Ok(session) => state.sync.remember_remote(&session.id, machine),
+        Ok(session) if session.machine_id != machine => {
+            // Stored rows follow §10 ownership: never one claiming another owner.
+            tracing::warn!(session = %session.id, owner = %session.machine_id, "remote launch returned a session of another machine");
+        }
+        Ok(session) => {
+            state.sync.remember_remote(&session.id, machine);
+            // The row replicates later (seconds on a slow link); until then
+            // the session must already be readable and changeable here.
+            let (store, s) = (state.store.clone(), session.clone());
+            match crate::api::blocking(move || Ok(store.cache_remote_session(&s)?)).await {
+                Ok(true) => state.emit(ServerEvent::SessionCreated { session }),
+                Ok(false) => {}
+                Err(e) => {
+                    tracing::warn!(session = %session.id, error = %e.message, "storing the remotely launched session failed");
+                }
+            }
+        }
         Err(e) => tracing::warn!(error = %e, "remote launch returned an unexpected body"),
     }
     Ok(Response::from_parts(parts, Body::from(bytes)))

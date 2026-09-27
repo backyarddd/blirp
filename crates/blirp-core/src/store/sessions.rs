@@ -179,6 +179,27 @@ impl Store {
         })
     }
 
+    /// Store another machine's session as that machine just reported it (a
+    /// launch through the proxy), so it can be read and changed here before
+    /// replication delivers it. Never queued: the owner replicates its rows.
+    /// A copy replication already delivered is at least as new, so it is
+    /// kept; a deleted session stays deleted. Rows pulled later overwrite
+    /// this one like any other. Returns whether it was stored.
+    pub fn cache_remote_session(&self, s: &Session) -> Result<bool> {
+        self.write(|tx| {
+            let known = one(
+                tx,
+                "SELECT 1 FROM sessions WHERE id = ?1",
+                params![s.id],
+                |_| Ok(()),
+            )?;
+            if known.is_some() {
+                return Ok(false);
+            }
+            Ok(write_row(tx, &Change::Session(s.clone()))? > 0)
+        })
+    }
+
     /// Read-modify-write a session in one transaction.
     ///
     /// Live status flips (working/idle/waiting and the activity time that
@@ -551,6 +572,44 @@ pub(super) mod tests {
             .insert_session_unless_known(&session("s3", "p", 3))
             .unwrap();
         assert_eq!((got.id.as_str(), inserted), ("s3", true));
+    }
+
+    #[test]
+    fn remote_launch_copy_is_cached_without_beating_replication() {
+        let (_d, store) = temp_store();
+        let head = store.outbox_head().unwrap();
+        let launched = Session {
+            machine_id: "hub".into(),
+            status: SessionStatus::Starting,
+            ..session("r1", "p", 1)
+        };
+        assert!(store.cache_remote_session(&launched).unwrap());
+        assert_eq!(store.get_session("r1").unwrap().unwrap(), launched);
+        assert_eq!(
+            store.outbox_head().unwrap(),
+            head,
+            "the owner replicates it"
+        );
+
+        // Replication delivered a newer row first: the launch copy loses.
+        let pulled = Session {
+            status: SessionStatus::Idle,
+            ..launched.clone()
+        };
+        store
+            .apply_remote(&Change::Session(pulled.clone()))
+            .unwrap();
+        assert!(!store.cache_remote_session(&launched).unwrap());
+        assert_eq!(store.get_session("r1").unwrap().unwrap(), pulled);
+
+        // A deleted session is not brought back, and later pulls of it lose.
+        store
+            .apply_remote(&Change::DeleteSession { id: "r1".into() })
+            .unwrap();
+        assert!(!store.cache_remote_session(&launched).unwrap());
+        store.apply_remote(&Change::Session(pulled)).unwrap();
+        assert!(store.get_session("r1").unwrap().is_none());
+        assert_eq!(store.outbox_head().unwrap(), head);
     }
 
     pub(crate) fn session(id: &str, project: &str, started_at: i64) -> Session {
