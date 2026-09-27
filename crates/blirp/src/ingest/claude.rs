@@ -264,6 +264,25 @@ impl Adapter for Claude {
     }
 }
 
+/// Subagent transcripts of the session transcript `<dir>/<sessionId>.jsonl`
+/// (`<dir>/<sessionId>/subagents/*.jsonl`); none for a subagent's own.
+pub(crate) fn subagent_transcripts(path: &Path) -> Vec<PathBuf> {
+    if path
+        .parent()
+        .and_then(Path::file_name)
+        .is_some_and(|n| n == "subagents")
+    {
+        return Vec::new();
+    }
+    let Ok(entries) = std::fs::read_dir(path.with_extension("").join("subagents")) else {
+        return Vec::new();
+    };
+    entries
+        .filter_map(|e| e.ok().map(|e| e.path()))
+        .filter(|p| p.extension().is_some_and(|e| e == "jsonl"))
+        .collect()
+}
+
 /// `<dir>/<sessionId>.jsonl` for a subagent transcript
 /// `<dir>/<sessionId>/subagents/agent-<id>.jsonl`.
 fn parent_transcript(path: &Path) -> Option<PathBuf> {

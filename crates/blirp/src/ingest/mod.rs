@@ -203,6 +203,15 @@ impl Cursor {
             .unwrap_or_default()
     }
 
+    /// The adapter state says the source is a scripted run ([`Launches`]).
+    pub(crate) fn headless(&self) -> bool {
+        self.state
+            .get("launch")
+            .cloned()
+            .and_then(|l| serde_json::from_value::<Launches>(l).ok())
+            .is_some_and(|l| l.is_headless())
+    }
+
     pub fn from_state<T: Serialize>(state: &T) -> Result<Cursor> {
         Ok(Cursor {
             fp: String::new(),
@@ -392,9 +401,7 @@ pub fn known_headless(store: &Store, agent: &str, path: &str) -> bool {
         .ok()
         .flatten()
         .and_then(|v| serde_json::from_value::<Cursor>(v).ok())
-        .and_then(|c| c.state.get("launch").cloned())
-        .and_then(|l| serde_json::from_value::<Launches>(l).ok())
-        .is_some_and(|l| l.is_headless())
+        .is_some_and(|c| c.headless())
 }
 
 impl SessionMeta {

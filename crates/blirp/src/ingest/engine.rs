@@ -263,6 +263,8 @@ impl Engine {
         {
             return Ok(false);
         }
+        // None: first read.
+        let was_headless = cursor.as_ref().map(Cursor::headless);
         let mut sink = StoreSink::new(self, id, &src.key, src.mtime_ms);
         let mut next = adapter.ingest(src, cursor, &mut sink)?;
         next.fp = if next.retry {
@@ -271,7 +273,26 @@ impl Engine {
             src.fingerprint.clone()
         };
         sink.finish(&next)?;
+        if id == "claude" && was_headless != Some(false) && !next.headless() {
+            self.reread_skipped_subagents(&src.path);
+        }
         Ok(true)
+    }
+
+    /// A claude session that looked scripted (or was not read yet) when its
+    /// subagents were read is a session now: subagent transcripts skipped
+    /// because of it are read again from the start on the next full pass
+    /// (one written only during the first prompt never changes again).
+    fn reread_skipped_subagents(&self, session_transcript: &Path) {
+        for sub in super::claude::subagent_transcripts(session_transcript) {
+            let key = sub.to_string_lossy();
+            if !super::known_headless(&self.store, "claude", &key) {
+                continue;
+            }
+            if let Err(e) = self.store.delete_cursor("claude", &key) {
+                tracing::warn!(error = %e, "resetting a subagent transcript's cursor failed");
+            }
+        }
     }
 
     /// One-time repair: before ingest waited for a transcript's cwd, a long

@@ -1900,38 +1900,58 @@ fn claude_subagents_follow_their_parent() {
             .replace(r#""entrypoint":"cli""#, r#""entrypoint":"sdk-cli""#)
             .replace(CLAUDE_SID, sid)
     };
-    // An Agent SDK app someone chats in (two prompts): kept, subagent too.
+    // An Agent SDK app someone chats in: its subagent is written once during
+    // the first prompt, while the run still looks scripted, and never again.
     let chat = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
+    let main = h.put(
+        &format!(".claude/projects/y/{chat}.jsonl"),
+        claude_print_run(&h).replace(CLAUDE_SID, chat).as_bytes(),
+    );
     h.put(
         &format!(".claude/projects/y/{chat}/subagents/agent-a1.jsonl"),
         sub(chat).as_bytes(),
     );
     h.pass();
+    let sub_asid = format!("{chat}:agent-a1");
+    assert!(
+        h.store
+            .session_by_agent_id("claude", &sub_asid)
+            .unwrap()
+            .is_none()
+    );
+    // A second prompt makes it a session; the skipped subagent follows.
+    append(
+        &main,
+        claude_line_from(&h, "p2", "and the docs", "sdk-cli").as_bytes(),
+    );
+    h.pass();
+    h.pass();
+    let parent = h.session("claude", chat);
+    let child = h.session("claude", &sub_asid);
+    assert_eq!(child.parent_session_id.as_deref(), Some(parent.id.as_str()));
+    let child_events = h.events(&child).len();
+    assert!(child_events > 0);
+
+    // A subagent read before its session's transcript existed.
+    let first = "dddddddd-dddd-4ddd-8ddd-dddddddddddd";
     h.put(
-        &format!(".claude/projects/y/{chat}.jsonl"),
+        &format!(".claude/projects/y/{first}/subagents/agent-a1.jsonl"),
+        sub(first).as_bytes(),
+    );
+    h.pass();
+    h.put(
+        &format!(".claude/projects/y/{first}.jsonl"),
         format!(
             "{}{}",
-            claude_print_run(&h).replace(CLAUDE_SID, chat),
+            claude_print_run(&h).replace(CLAUDE_SID, first),
             claude_line_from(&h, "p2", "and the docs", "sdk-cli")
         )
         .as_bytes(),
     );
     h.pass();
-    let parent = h.session("claude", chat);
-    // The subagent's file did not change; a new line makes it read again.
-    let path = h
-        .home
-        .join(".claude/projects/y")
-        .join(chat)
-        .join("subagents")
-        .join("agent-a1.jsonl");
-    append(
-        &path,
-        claude_line_from(&h, "x1", "more", "sdk-cli").as_bytes(),
-    );
     h.pass();
-    let child = h.session("claude", &format!("{chat}:agent-a1"));
-    assert_eq!(child.parent_session_id.as_deref(), Some(parent.id.as_str()));
+    let s = h.session("claude", &format!("{first}:agent-a1"));
+    assert_eq!(h.events(&s).len(), child_events);
 
     // Read after its stored parent: kept at once.
     let later = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb";
@@ -1950,7 +1970,9 @@ fn claude_subagents_follow_their_parent() {
         sub(later).as_bytes(),
     );
     h.pass();
-    h.session("claude", &format!("{later}:agent-a1"));
+    let s = h.session("claude", &format!("{later}:agent-a1"));
+    // The same full history as a subagent never skipped.
+    assert_eq!(h.events(&s).len(), child_events);
 
     // A scripted run's subagent is skipped with it.
     let bot = "cccccccc-cccc-4ccc-8ccc-cccccccccccc";
