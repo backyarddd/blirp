@@ -103,9 +103,9 @@ impl<'e> StoreSink<'e> {
             link: Option<String>,
             project: Option<(String, bool)>,
             parent: Option<String>,
-            /// (cwd, project id, project created) for a row filed before
-            /// its cwd was known.
-            refile: Option<(String, String, bool)>,
+            /// (cwd, project id, project created, project when planned) for
+            /// a row filed before its cwd was known.
+            refile: Option<(String, String, bool, String)>,
         }
         let mut plans = Vec::new();
         let mut drops = Vec::new();
@@ -157,9 +157,9 @@ impl<'e> StoreSink<'e> {
                         p.meta.git_remote.as_deref(),
                         &eng.env.non_projects,
                     )?;
-                    (cwd, r.project.id, r.created)
+                    (cwd, r.project.id, r.created, s.project_id.clone())
                 } else {
-                    (cwd, s.project_id.clone(), false)
+                    (cwd, s.project_id.clone(), false, s.project_id.clone())
                 });
             }
             if existing.is_none() {
@@ -186,12 +186,15 @@ impl<'e> StoreSink<'e> {
                     continue;
                 }
                 link = self.link_candidate(&p)?;
-                if link.is_none()
-                    && let Some(par) = &parent
-                {
-                    // A subagent works for its parent: same project, also
-                    // after the parent was moved.
-                    project = Some((par.project_id.clone(), false));
+                // A subagent works for its parent: same project, also after
+                // the parent was moved (or its project merged). A parent in
+                // a removed project leaves the folder to decide.
+                let parent_project = match (&link, &parent) {
+                    (None, Some(par)) => store.current_project(&par.project_id)?,
+                    _ => None,
+                };
+                if let Some(pp) = parent_project {
+                    project = Some((pp.id, false));
                 } else if link.is_none() {
                     let dir = cwd.map_or_else(|| eng.env.home.clone(), Into::into);
                     let r = store.resolve_project_lenient(
@@ -250,12 +253,18 @@ impl<'e> StoreSink<'e> {
                 let created = base.is_none();
                 let before = base.clone();
                 let mut s = self.merge(base, &plan.asid, &plan.p, project_id, plan.parent.clone());
-                if let Some((cwd, pid, _)) = &plan.refile {
+                // A re-file moves the row only while it is still where the
+                // plan saw it; a move made since planning wins.
+                let mut moving = false;
+                if let Some((cwd, pid, _, planned)) = &plan.refile {
                     s.cwd.clone_from(cwd);
-                    s.project_id.clone_from(pid);
+                    if before.as_ref().is_some_and(|b| &b.project_id == planned) {
+                        s.project_id.clone_from(pid);
+                        moving = true;
+                    }
                 }
                 let changed = before.as_ref() != Some(&s);
-                if changed && plan.refile.is_some() {
+                if changed && moving {
                     tx.apply_move(&Change::Session(s.clone()))?;
                 } else if changed {
                     tx.apply(&Change::Session(s.clone()))?;

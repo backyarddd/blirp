@@ -88,7 +88,7 @@ CSRF protection: a mutating request or WebSocket upgrade that carries an `Origin
 | `POST /api/projects` | `{path?, name?, brief?}`: register a folder on this machine (`name` defaults to the folder name), or without `path` create a project without folders (`name` required, 400 otherwise); `brief` becomes its first brief version. 201 `ProjectSummary` |
 | `GET /api/projects/chat-candidates` | `ProjectSummary[]`: projects an earlier version made for plain folders (no git, no project file) that look like chats: never renamed or edited, only sessions from outside blirp on this machine. Empty once dismissed. |
 | `POST /api/projects/chat-candidates/dismiss` | control. Stop offering them; 204. |
-| `POST /api/projects/:id/to-chats` | control. Move the project's sessions, summarized records and suggestions to this machine's Chats and remove the project (its folders and brief stay with it); 204. 400 for Chats itself. |
+| `POST /api/projects/:id/to-chats` | control. Move the project's sessions, summarized records and suggestions to this machine's Chats and remove the project (its folders and brief stay with it); 204. 400 for Chats itself, 409 when the project is not (or no longer) one that is offered. |
 | `POST /api/projects/:id/folders/remove` | control. `{path}`: unregister one of this machine's folders of the project (as listed in `paths`); the project, its sessions and memory stay, also with no folder left. Returns the `ProjectSummary`; 404 when it is not a folder of the project on this machine. |
 | `PATCH /api/projects/:id` | `{name}`: rename |
 | `DELETE /api/projects/:id` | unregister its folders and hide it; 204 (400 for Chats, which also cannot be merged) |

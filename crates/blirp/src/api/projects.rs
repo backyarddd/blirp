@@ -225,9 +225,11 @@ async fn to_chats(
     let st = s.clone();
     let pid = id.clone();
     blocking(move || {
+        let dirs = blirp_core::store::NonProjectDirs::from_process()
+            .with_workspaces(&st.paths.workspaces_dir());
         Ok(st
             .store
-            .move_project_to_chats(&pid, &st.machine.id, &st.machine.name)?)
+            .move_project_to_chats(&pid, &st.machine.id, &st.machine.name, &dirs)?)
     })
     .await?;
     s.emit(ServerEvent::ProjectUpdated { project_id: id });

@@ -1756,3 +1756,50 @@ fn refiling_keeps_a_session_the_user_moved() {
     assert_eq!(Path::new(&s.cwd), h.cwd);
     assert_eq!(s.project_id, mine.id);
 }
+
+// A subagent whose parent sits in a removed project is filed by its own
+// folder (a write into the removed project would be refused and stall the
+// transcript), and one whose parent's project was merged follows the merge.
+#[test]
+fn subagents_of_a_parent_in_a_removed_project_still_ingest() {
+    for merged in [false, true] {
+        let h = H::new();
+        let dir = format!(".claude/projects/C--work-proj/{CLAUDE_SID}");
+        h.put(
+            &format!("{dir}.jsonl"),
+            h.fill(&fixture("claude/session.jsonl")).as_bytes(),
+        );
+        h.pass();
+        let parent = h.session("claude", CLAUDE_SID);
+        let target = h.store.create_project("Target", None).unwrap();
+        if merged {
+            h.store
+                .merge_projects(&parent.project_id, &target.id)
+                .unwrap();
+        } else {
+            h.store.delete_project(&parent.project_id).unwrap();
+        }
+        h.put(
+            &format!("{dir}/subagents/agent-a1.jsonl"),
+            h.fill(&fixture("claude/agent-a1.jsonl")).as_bytes(),
+        );
+        h.put(
+            &format!("{dir}/subagents/agent-a1.meta.json"),
+            fixture("claude/agent-a1.meta.json").as_bytes(),
+        );
+        h.pass();
+        let child = h.session("claude", &format!("{CLAUDE_SID}:agent-a1"));
+        if merged {
+            assert_eq!(child.project_id, target.id);
+        } else {
+            assert_ne!(child.project_id, parent.project_id);
+            assert!(
+                !h.store
+                    .get_project(&child.project_id)
+                    .unwrap()
+                    .unwrap()
+                    .deleted
+            );
+        }
+    }
+}

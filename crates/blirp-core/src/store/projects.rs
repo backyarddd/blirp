@@ -943,24 +943,36 @@ impl Store {
     /// project: an untouched Home is merged into it (sessions and records;
     /// the Home project is removed), one with memory someone wrote (renamed,
     /// a user brief version, a user or pinned record, a wiki page or a
-    /// resource) stays a normal project. Through `apply`, so every machine
+    /// resource) or with another machine's sessions in it stays a normal
+    /// project. Through `apply`, so every machine
     /// learns it. Returns whether anything changed.
     pub fn ensure_chats(&self, machine_id: &str, machine_name: &str) -> Result<bool> {
         let Some(id) = self.home_project_id()? else {
             return Ok(false);
         };
+        if id == chats_id(machine_id) {
+            return Ok(false);
+        }
         self.write(|tx| {
-            let Some(old) = get_project_in(tx, &id)?.filter(|p| !p.deleted && !p.chats) else {
+            let Some(old) = get_project_in(tx, &id)?.filter(|p| !p.deleted) else {
                 return Ok(false);
             };
+            // A bucket under another id (an earlier 0.1.1 build, or this
+            // machine's id before `rebind_machine`) joins the canonical one.
+            if old.chats {
+                let bucket = chats_bucket(tx, machine_id, machine_name)?;
+                merge_in(tx, &old.id, &bucket.id, true)?;
+                return Ok(true);
+            }
             let authored: Option<i64> = one(
                 tx,
                 "SELECT 1 WHERE EXISTS (SELECT 1 FROM records WHERE project_id = ?1
                                         AND (updated_by != ?2 OR pinned != 0))
                    OR EXISTS (SELECT 1 FROM brief_history WHERE project_id = ?1 AND updated_by != ?2)
                    OR EXISTS (SELECT 1 FROM wiki_pages WHERE project_id = ?1)
-                   OR EXISTS (SELECT 1 FROM resources WHERE project_id = ?1)",
-                params![old.id, super::BY_DISTILLER],
+                   OR EXISTS (SELECT 1 FROM resources WHERE project_id = ?1)
+                   OR EXISTS (SELECT 1 FROM sessions WHERE project_id = ?1 AND machine_id != ?3)",
+                params![old.id, super::BY_DISTILLER, machine_id],
                 |r| r.get(0),
             )?;
             let untouched = authored.is_none() && old.name == format!("Home ({machine_name})");
@@ -1091,12 +1103,7 @@ impl Store {
         let found = self.read(|c| untouched_projects(c, machine_id))?;
         Ok(found
             .into_iter()
-            .filter(|(_, paths)| {
-                paths.iter().all(|pp| {
-                    let p = normalize(Path::new(&pp.path));
-                    !dirs.contains(&p) && p.is_dir() && !dirs.is_project_folder(&p)
-                })
-            })
+            .filter(|(_, paths)| looks_like_chats(dirs, paths))
             .map(|(p, _)| p)
             .collect())
     }
@@ -1109,15 +1116,32 @@ impl Store {
         id: &str,
         machine_id: &str,
         machine_name: &str,
+        dirs: &NonProjectDirs,
     ) -> Result<()> {
         self.write(|tx| {
             if live_project_in(tx, id)?.chats {
                 return Err(StoreError::Invalid("already Chats".into()));
             }
+            // Only what `chat_candidates` offers, checked again under the
+            // write lock: a project someone used or edited meanwhile stays.
+            let offered = untouched_projects(tx, machine_id)?
+                .into_iter()
+                .any(|(p, paths)| p.id == id && looks_like_chats(dirs, &paths));
+            if !offered {
+                return Err(StoreError::Conflict(
+                    "this project is not one that looks like chats (it was used, edited, or has another machine's folders or sessions)".into(),
+                ));
+            }
             let home = home_project(tx, machine_id, machine_name)?;
             merge_in(tx, id, &home.id, true)?;
             Ok(())
         })
+    }
+
+    /// `id`'s live project (Chats included), following merges; None when it
+    /// was removed.
+    pub fn current_project(&self, id: &str) -> Result<Option<Project>> {
+        self.read(|c| current_project_in(c, id))
     }
 
     pub fn sessions_of_project(&self, project_id: &str) -> Result<Vec<Session>> {
@@ -1189,14 +1213,30 @@ fn untouched_projects(
     Ok(out)
 }
 
+/// Folders of a plain-folder project that looks like chats: every one
+/// exists, is no scratch place (those are retired on their own) and no
+/// actual project folder.
+fn looks_like_chats(dirs: &NonProjectDirs, paths: &[ProjectPath]) -> bool {
+    paths.iter().all(|pp| {
+        let p = normalize(Path::new(&pp.path));
+        !dirs.contains(&p) && p.is_dir() && !dirs.is_project_folder(&p)
+    })
+}
+
 /// `id`'s live project, following merges; None for a removed project or
 /// Chats.
 pub(super) fn follow_merged(c: &Connection, id: &str) -> Result<Option<Project>> {
+    Ok(current_project_in(c, id)?.filter(|p| !p.chats))
+}
+
+/// `id`'s live project (Chats included), following merges; None for a
+/// removed project.
+fn current_project_in(c: &Connection, id: &str) -> Result<Option<Project>> {
     let mut id = id.to_string();
     // Merge chains are short; the bound only guards against a cycle.
     for _ in 0..16 {
         match get_project_in(c, &id)? {
-            Some(p) if !p.deleted => return Ok(Some(p).filter(|p| !p.chats)),
+            Some(p) if !p.deleted => return Ok(Some(p)),
             Some(Project {
                 merged_into: Some(next),
                 ..
@@ -1314,18 +1354,8 @@ fn chats_id(machine_id: &str) -> String {
 /// This machine's Chats project, created on first use (called Home before
 /// 0.1.1, see [`Store::ensure_chats`]).
 fn home_project(tx: &Transaction<'_>, machine_id: &str, machine_name: &str) -> Result<Project> {
-    let id: Option<String> = one(
-        tx,
-        "SELECT value_json FROM settings WHERE key = ?1",
-        params![HOME_PROJECT_KEY],
-        |r| r.get::<_, String>(0),
-    )?
-    .and_then(|v| serde_json::from_str::<String>(&v).ok());
-    if let Some(id) = id
-        && let Some(p) = get_project_in(tx, &id)?.filter(|p| !p.deleted && p.chats)
-    {
-        return Ok(p);
-    }
+    // Only the canonical bucket: one under another id is merged into it by
+    // `ensure_chats` at start.
     chats_bucket(tx, machine_id, machine_name)
 }
 
@@ -1785,13 +1815,27 @@ mod tests {
                 .is_empty()
         );
 
-        store.move_project_to_chats(&notes.id, "m", "box").unwrap();
+        // Only an offered project moves: one someone used or renamed, or
+        // with another machine's sessions, is refused.
+        for touched in [&renamed, &foreign_session, &sub] {
+            assert!(
+                matches!(
+                    store.move_project_to_chats(&touched.id, "m", "box", &launch_dirs),
+                    Err(StoreError::Conflict(_))
+                ),
+                "{}",
+                touched.name
+            );
+        }
+        store
+            .move_project_to_chats(&notes.id, "m", "box", &launch_dirs)
+            .unwrap();
         let n = store.get_project(&notes.id).unwrap().unwrap();
         assert!(n.deleted);
         assert_eq!(n.merged_into.as_deref(), Some(home.as_str()));
         assert!(store.chat_candidates("m", &launch_dirs).unwrap().is_empty());
         assert!(matches!(
-            store.move_project_to_chats(&home, "m", "box"),
+            store.move_project_to_chats(&home, "m", "box", &launch_dirs),
             Err(StoreError::Invalid(_))
         ));
         assert!(matches!(
@@ -2321,7 +2365,7 @@ mod tests {
 
     #[test]
     fn an_old_home_project_with_user_memory_stays_a_project() {
-        for touch in ["renamed", "brief", "record", "pinned", "wiki"] {
+        for touch in ["renamed", "brief", "record", "pinned", "wiki", "foreign"] {
             let (_d, store) = temp_store();
             let name = if touch == "renamed" {
                 "My home"
@@ -2348,6 +2392,11 @@ mod tests {
                         .create_wiki_page(&home.id, "notes", "Notes", "x", "user")
                         .unwrap();
                 }
+                "foreign" => {
+                    store
+                        .insert_session(&external("f", &home.id, "other"))
+                        .unwrap();
+                }
                 _ => {}
             }
             assert!(store.ensure_chats("m", "box").unwrap(), "{touch}");
@@ -2356,6 +2405,25 @@ mod tests {
             assert!(store.get_project("chats-m").unwrap().unwrap().chats);
             assert_eq!(store.home_project_id().unwrap().as_deref(), Some("chats-m"));
         }
+    }
+
+    // A bucket under another id (an earlier build, or this machine's id
+    // before it was rebound) joins the canonical one at start.
+    #[test]
+    fn a_chats_bucket_under_another_id_joins_the_canonical_one() {
+        let (_d, store) = temp_store();
+        let old = store.write(|tx| home_project(tx, "old-id", "box")).unwrap();
+        assert_eq!(old.id, "chats-old-id");
+        store.insert_session(&external("c", &old.id, "m")).unwrap();
+        assert!(store.ensure_chats("m", "box").unwrap());
+        assert_eq!(store.home_project_id().unwrap().as_deref(), Some("chats-m"));
+        assert_eq!(
+            store.get_session("c").unwrap().unwrap().project_id,
+            "chats-m"
+        );
+        let gone = store.get_project(&old.id).unwrap().unwrap();
+        assert!(gone.deleted && gone.chats);
+        assert!(!store.ensure_chats("m", "box").unwrap());
     }
 
     #[test]
