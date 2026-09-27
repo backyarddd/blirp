@@ -200,6 +200,32 @@ impl Store {
         })
     }
 
+    /// Apply to the copy of another machine's session here a change that
+    /// machine made (a rename or move forwarded to it). Never queued: the
+    /// owner replicates its row. Returns the row before and after, or None
+    /// when there is no copy here.
+    pub fn update_remote_copy(
+        &self,
+        id: &str,
+        f: impl FnOnce(&mut Session),
+    ) -> Result<Option<(Session, Session)>> {
+        self.write(|tx| {
+            let Some(before) = one(
+                tx,
+                "SELECT * FROM sessions WHERE id = ?1",
+                params![id],
+                session_row,
+            )?
+            else {
+                return Ok(None);
+            };
+            let mut after = before.clone();
+            f(&mut after);
+            write_row(tx, &Change::Session(after.clone()))?;
+            Ok(Some((before, after)))
+        })
+    }
+
     /// Read-modify-write a session in one transaction.
     ///
     /// Live status flips (working/idle/waiting and the activity time that
@@ -610,6 +636,26 @@ pub(super) mod tests {
         store.apply_remote(&Change::Session(pulled)).unwrap();
         assert!(store.get_session("r1").unwrap().is_none());
         assert_eq!(store.outbox_head().unwrap(), head);
+    }
+
+    #[test]
+    fn owner_changes_update_the_copy_without_queuing() {
+        let (_d, store) = temp_store();
+        let head = store.outbox_head().unwrap();
+        let copy = Session {
+            machine_id: "owner".into(),
+            ..session("r1", "p", 1)
+        };
+        store.cache_remote_session(&copy).unwrap();
+        let (before, after) = store
+            .update_remote_copy("r1", |s| s.title = Some("renamed".into()))
+            .unwrap()
+            .unwrap();
+        assert_eq!(before, copy);
+        assert_eq!(after.title.as_deref(), Some("renamed"));
+        assert_eq!(store.get_session("r1").unwrap().unwrap(), after);
+        assert_eq!(store.outbox_head().unwrap(), head);
+        assert!(store.update_remote_copy("gone", |_| {}).unwrap().is_none());
     }
 
     pub(crate) fn session(id: &str, project: &str, started_at: i64) -> Session {

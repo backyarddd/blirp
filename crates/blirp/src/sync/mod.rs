@@ -83,7 +83,8 @@ impl SyncState {
         lock(&self.remote_sessions).insert(session.to_string(), machine.to_string());
     }
 
-    fn remote_of(&self, session: &str) -> Option<String> {
+    /// The machine a session was launched on from here (this daemon run).
+    pub(crate) fn remote_of(&self, session: &str) -> Option<String> {
         lock(&self.remote_sessions).get(session).cloned()
     }
 

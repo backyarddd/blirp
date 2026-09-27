@@ -1172,3 +1172,115 @@ async fn presence_follows_connections() {
     assert_eq!(online_on(&b, &c_id).await, None);
     b.daemon.shutdown().await.unwrap();
 }
+
+// B launches a session on C through hub A and renames and files it before
+// C's row reached the hub. The changes go to C (the hub would reject them
+// from B: it has no row to change yet) and show on B at once; once C's row
+// replicates, B follows C's rows again instead of keeping its launch copy.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn changes_to_a_remote_launch_before_its_row_replicates() {
+    use blirp_core::model::SessionStatus;
+    let tmp = tempfile::tempdir().unwrap();
+    let a = Node::start(&tmp.path().join("a"), "hub-a", None).await;
+    let b = Node::start(&tmp.path().join("b"), "node-b", None).await;
+    let c = Node::start(&tmp.path().join("c"), "node-c", None).await;
+    pair(&a, &b).await;
+    let inv: SyncInvite = a.ok(Method::POST, "/api/sync/invite", None).await;
+    let _: SyncStatus = c
+        .ok(
+            Method::POST,
+            "/api/sync/join",
+            Some(json!({"invite": inv.invite, "code": inv.code, "allow_hub_control": true})),
+        )
+        .await;
+    eventually("C connected", || async { sync_status(&c).await.connected }).await;
+    let c_id = c.id();
+    eventually("B knows C", || async {
+        online_on(&b, &c_id).await == Some(true)
+    })
+    .await;
+
+    // C's writes stay unpushed until replication is turned back on.
+    c.daemon.state.store.set_replication(false).unwrap();
+    let dir = tmp.path().join("work-c");
+    std::fs::create_dir_all(&dir).unwrap();
+    let launched: Session = b
+        .ok(
+            Method::POST,
+            "/api/sessions",
+            Some(json!({"cwd": dir, "agent": "shell", "machine": c_id})),
+        )
+        .await;
+    let id = launched.id.clone();
+    let renamed: Session = b
+        .ok(
+            Method::PATCH,
+            &format!("/api/sessions/{id}"),
+            Some(json!({"title": "renamed on b"})),
+        )
+        .await;
+    assert_eq!(renamed.title.as_deref(), Some("renamed on b"));
+    let moved: Session = b
+        .ok(
+            Method::POST,
+            &format!("/api/sessions/{id}/move"),
+            Some(json!({"project_id": null})),
+        )
+        .await;
+    let on_c = c.store().get_session(&id).unwrap().unwrap();
+    assert_eq!(on_c.title.as_deref(), Some("renamed on b"));
+    assert_eq!(moved.project_id, on_c.project_id);
+    let on_b = b.store().get_session(&id).unwrap().unwrap();
+    assert_eq!(
+        (on_b.title.as_deref(), &on_b.project_id),
+        (Some("renamed on b"), &on_c.project_id)
+    );
+    assert!(a.store().get_session(&id).unwrap().is_none());
+    // Anything B queued reaches the hub before C's row can.
+    eventually("B pushed", || async {
+        sync_status(&b).await.pending_outbox == 0
+    })
+    .await;
+    tokio::time::sleep(Duration::from_secs(1)).await;
+
+    c.daemon.state.store.set_replication(true).unwrap();
+    eventually("B follows C's row", || async {
+        let (on_b, on_c) = (
+            b.store().get_session(&id).unwrap().unwrap(),
+            c.store().get_session(&id).unwrap().unwrap(),
+        );
+        on_c.status != SessionStatus::Starting && on_b == on_c
+    })
+    .await;
+    assert_eq!(
+        b.store()
+            .get_session(&id)
+            .unwrap()
+            .unwrap()
+            .title
+            .as_deref(),
+        Some("renamed on b"),
+        "the rename is kept"
+    );
+    // Later changes on C keep arriving.
+    let r = c
+        .req(
+            Method::POST,
+            &format!("/api/sessions/{id}/stop"),
+            Some(json!({})),
+        )
+        .await;
+    assert_eq!(r.status(), 202);
+    eventually("B sees the session end", || async {
+        !b.store()
+            .get_session(&id)
+            .unwrap()
+            .unwrap()
+            .status
+            .is_live()
+    })
+    .await;
+    for n in [c, b, a] {
+        n.daemon.shutdown().await.unwrap();
+    }
+}

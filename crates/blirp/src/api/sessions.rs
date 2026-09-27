@@ -246,12 +246,53 @@ async fn remove(
     ))
 }
 
+/// A rename or move of a session launched from here on another machine goes
+/// to that machine, and its answer updates the copy here. Its row may not
+/// have reached the hub yet: the hub would reject the change made here (§10
+/// ownership, no row to change yet), and this machine's own pending write
+/// would then hold back its pulls of the owner's rows for that session.
+/// Sessions that came through replication are changed here as before, also
+/// while their machine is offline. None: not launched from here.
+async fn forward_to_launch_machine(
+    s: &SharedState,
+    id: &str,
+    principal: &super::Principal,
+    method: axum::http::Method,
+    path: &str,
+    body: Vec<u8>,
+    apply: impl FnOnce(&mut Session, Session) + Send + 'static,
+) -> ApiResult<Option<(Response, Option<(Session, Session)>)>> {
+    let Some(m) = s.sync.remote_of(id) else {
+        return Ok(None);
+    };
+    let resp = crate::sync::forward(s, &m, principal, method, path, Some(body)).await?;
+    if !resp.status().is_success() {
+        return Ok(Some((resp, None)));
+    }
+    let (parts, body) = resp.into_parts();
+    let bytes = axum::body::to_bytes(body, 16 << 20)
+        .await
+        .map_err(|e| ApiError::internal("reading proxied response", e))?;
+    let owner: Session = serde_json::from_slice(&bytes)
+        .map_err(|e| ApiError::internal("remote machine answered an unexpected body", e))?;
+    let (store, sid) = (s.store.clone(), id.to_string());
+    let updated =
+        blocking(move || Ok(store.update_remote_copy(&sid, |c| apply(c, owner))?)).await?;
+    if let Some((_, after)) = &updated {
+        s.emit(ServerEvent::SessionUpdated {
+            session: after.clone(),
+        });
+    }
+    let resp = Response::from_parts(parts, axum::body::Body::from(bytes));
+    Ok(Some((resp, updated)))
+}
+
 async fn patch(
     State(s): State<SharedState>,
-    _: Control,
+    Control(principal): Control,
     ApiPath(id): ApiPath<String>,
     ApiJson(body): ApiJson<PatchSession>,
-) -> ApiResult<Json<Session>> {
+) -> ApiResult<Response> {
     let title = body
         .title
         .map(|t| t.trim().to_string())
@@ -261,12 +302,30 @@ async fn patch(
             "title must be at most 300 characters",
         ));
     }
+    let json = serde_json::to_vec(&PatchSession {
+        title: title.clone(),
+    })
+    .map_err(|e| ApiError::internal("encoding the rename", e))?;
+    let path = format!("/api/sessions/{id}");
+    let forwarded = forward_to_launch_machine(
+        &s,
+        &id,
+        &principal,
+        axum::http::Method::PATCH,
+        &path,
+        json,
+        |c, owner| c.title = owner.title,
+    )
+    .await?;
+    if let Some((resp, _)) = forwarded {
+        return Ok(resp);
+    }
     let store = s.store.clone();
     let session = blocking(move || Ok(store.modify_session(&id, |s| s.title = title)?)).await?;
     s.emit(ServerEvent::SessionUpdated {
         session: session.clone(),
     });
-    Ok(Json(session))
+    Ok(axum::response::IntoResponse::into_response(Json(session)))
 }
 
 /// POST /api/sessions/:id/move: file a session (any machine's: another
@@ -274,10 +333,30 @@ async fn patch(
 /// in Chats with `project_id: null`.
 async fn move_session(
     State(s): State<SharedState>,
-    _: Control,
+    Control(principal): Control,
     ApiPath(id): ApiPath<String>,
     ApiJson(body): ApiJson<MoveSession>,
-) -> ApiResult<Json<Session>> {
+) -> ApiResult<Response> {
+    let json = serde_json::to_vec(&body).map_err(|e| ApiError::internal("encoding the move", e))?;
+    let path = format!("/api/sessions/{id}/move");
+    let forwarded = forward_to_launch_machine(
+        &s,
+        &id,
+        &principal,
+        axum::http::Method::POST,
+        &path,
+        json,
+        |c, owner| c.project_id = owner.project_id,
+    )
+    .await?;
+    if let Some((resp, updated)) = forwarded {
+        if let Some((before, after)) = updated {
+            for project_id in [before.project_id, after.project_id] {
+                s.emit(ServerEvent::ProjectUpdated { project_id });
+            }
+        }
+        return Ok(resp);
+    }
     let st = s.clone();
     let (session, from) = blocking(move || {
         let from = st
@@ -300,5 +379,5 @@ async fn move_session(
     for project_id in [from, session.project_id.clone()] {
         s.emit(ServerEvent::ProjectUpdated { project_id });
     }
-    Ok(Json(session))
+    Ok(axum::response::IntoResponse::into_response(Json(session)))
 }
