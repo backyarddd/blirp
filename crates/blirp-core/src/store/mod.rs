@@ -146,7 +146,13 @@ pub struct Store {
     readers: Mutex<Vec<Connection>>,
     /// A node pull reached the hub's head since this store was opened.
     pulled_to_head: std::sync::atomic::AtomicBool,
+    /// Told which projects a replicated change touched (their row or a
+    /// folder), after it is committed.
+    remote_projects: std::sync::RwLock<Option<ProjectsHook>>,
 }
+
+/// See [`Store::on_remote_projects`].
+pub type ProjectsHook = std::sync::Arc<dyn Fn(&[String]) + Send + Sync>;
 
 impl std::fmt::Debug for Store {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -177,6 +183,7 @@ impl Store {
             writer: Mutex::new(conn),
             readers: Mutex::new(Vec::new()),
             pulled_to_head: std::sync::atomic::AtomicBool::new(false),
+            remote_projects: std::sync::RwLock::default(),
         })
     }
 
@@ -236,6 +243,33 @@ impl Store {
         let out = f(&tx)?;
         tx.commit()?;
         Ok(out)
+    }
+
+    /// Call `hook` with the ids of the projects each committed batch of
+    /// replicated changes from other machines touched (a project row, or
+    /// one of its folders added or removed), so the daemon can react as it
+    /// does to local changes.
+    pub fn on_remote_projects(&self, hook: ProjectsHook) {
+        *self
+            .remote_projects
+            .write()
+            .unwrap_or_else(PoisonError::into_inner) = Some(hook);
+    }
+
+    fn remote_projects_changed(&self, mut ids: Vec<String>) {
+        if ids.is_empty() {
+            return;
+        }
+        ids.sort();
+        ids.dedup();
+        let hook = self
+            .remote_projects
+            .read()
+            .unwrap_or_else(PoisonError::into_inner)
+            .clone();
+        if let Some(h) = hook {
+            h(&ids);
+        }
     }
 
     /// Apply one replicated change (row + outbox) atomically. Returns false

@@ -697,6 +697,42 @@ async fn empty_files_upload_and_missing_folders_wait_for_their_return() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_project_deleted_on_another_machine_stops_syncing_here_at_once() {
+    if !in_temp_home("a_project_deleted_on_another_machine_stops_syncing_here_at_once") {
+        return;
+    }
+    let tmp = tempfile::tempdir().unwrap();
+    let hub = Node::start(&tmp.path().join("a"), "hub-a").await;
+    let b = Node::start(&tmp.path().join("b"), "node-b").await;
+    pair(&hub, &b).await;
+    for n in [&hub, &b] {
+        n.start_now().await;
+    }
+    let origin = tmp.path().join("work").join("proj");
+    write(&origin.join("a.txt"), "one");
+    let project = b.project(&origin).await;
+    let key = dunce::canonicalize(&origin).unwrap().display().to_string();
+    eventually("the folder uploaded", || async {
+        hub_files(&hub, &project).await.is_some_and(|(_, n)| n == 1)
+    })
+    .await;
+    assert!(b.daemon.state.store.file_copy(&key).unwrap().is_some());
+    // Deleted on the hub: the node learns it by replication and its file
+    // engine lets go of the folder now, not at the next 10 minute rescan.
+    let r = hub
+        .req(Method::DELETE, &format!("/api/projects/{project}"), None)
+        .await;
+    assert!(r.status().is_success(), "{}", r.status());
+    eventually("the node dropped the folder's sync state", || async {
+        b.daemon.state.store.file_copy(&key).unwrap().is_none()
+    })
+    .await;
+    for n in [b, hub] {
+        n.daemon.shutdown().await.unwrap();
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_deleted_workspace_made_again_empty_takes_its_files_back() {
     if !in_temp_home("a_deleted_workspace_made_again_empty_takes_its_files_back") {
         return;

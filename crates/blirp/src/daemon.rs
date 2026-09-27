@@ -254,6 +254,18 @@ impl Daemon {
             shutdown_rx.clone(),
         ));
         state.sync.set_identity(identity);
+        // Projects and folders changed by another machine are announced like
+        // local changes (the file engine reconciles, the UI refetches).
+        let weak = Arc::downgrade(&state);
+        state.store.on_remote_projects(Arc::new(move |ids| {
+            if let Some(st) = weak.upgrade() {
+                for id in ids {
+                    st.emit(blirp_core::model::ServerEvent::ProjectUpdated {
+                        project_id: id.clone(),
+                    });
+                }
+            }
+        }));
         crate::sessions::mark_detached(&state)?;
         crate::memory::distill::Distiller::start(state.clone());
         crate::uploads::start_pruning(state.clone());

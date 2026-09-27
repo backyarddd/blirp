@@ -501,7 +501,7 @@ struct Arrived {
 /// was parked for a removed row, by a machine no longer paired, or a folder
 /// merge whose folder its owner filed elsewhere meanwhile (in no project
 /// merged into the target).
-fn unpark_in(tx: &Transaction<'_>, arrived: &[Arrived]) -> Result<()> {
+fn unpark_in(tx: &Transaction<'_>, arrived: &[Arrived], touched: &mut Vec<String>) -> Result<()> {
     let mut seen = std::collections::BTreeSet::new();
     for a in arrived {
         if !seen.insert((&a.entity, &a.key, a.deleted)) {
@@ -525,13 +525,17 @@ fn unpark_in(tx: &Transaction<'_>, arrived: &[Arrived]) -> Result<()> {
                 match unparked_change(tx, &a.key, &kept) {
                     Ok(Some(change)) => match check_owner(tx, &origin, None, change) {
                         Ok(change) => {
+                            let project = project_of(tx, &change)?;
                             let applied = savepoint(tx, || {
                                 check_ids(&change)?;
                                 write_row(tx, &change)?;
                                 super::queue_in(tx, &change)
                             })?;
-                            if let Err(err) = applied {
-                                tracing::warn!(origin, origin_seq, error = %err, "hub could not apply a parked entry");
+                            match applied {
+                                Ok(_) => touched.extend(project),
+                                Err(err) => {
+                                    tracing::warn!(origin, origin_seq, error = %err, "hub could not apply a parked entry");
+                                }
                             }
                         }
                         Err(Refused::Missing { .. }) => continue,
@@ -629,6 +633,23 @@ fn set_cursors_in(tx: &Transaction<'_>, peer: &str, c: SyncCursors) -> Result<()
         params![peer, c.last_pushed_origin_seq, c.last_pulled_hub_seq],
     )?;
     Ok(())
+}
+
+/// The project a replicated change touches as a project or a folder of it
+/// (read before a folder's removal, which leaves no row to read after).
+fn project_of(tx: &Transaction<'_>, change: &Change) -> Result<Option<String>> {
+    Ok(match change {
+        Change::Project(p) => Some(p.id.clone()),
+        Change::ProjectPath(p) => Some(p.project_id.clone()),
+        Change::DeleteProjectPath { machine_id, path } => tx
+            .query_row(
+                "SELECT project_id FROM project_paths WHERE machine_id = ?1 AND path = ?2",
+                params![machine_id, path],
+                |r| r.get(0),
+            )
+            .optional()?,
+        _ => None,
+    })
 }
 
 /// Run `f` inside a savepoint: its writes are rolled back if it fails, the
@@ -1006,7 +1027,13 @@ impl Store {
     /// Write a replicated change received from another machine: the row
     /// only, never the outbox. Returns false for a duplicate event.
     pub fn apply_remote(&self, change: &Change) -> Result<bool> {
-        self.write(|tx| Ok(write_row(tx, change)? > 0 || !matches!(change, Change::Event(_))))
+        let (out, touched) = self.write(|tx| {
+            let project = project_of(tx, change)?;
+            let out = write_row(tx, change)? > 0 || !matches!(change, Change::Event(_));
+            Ok((out, project.into_iter().collect()))
+        })?;
+        self.remote_projects_changed(touched);
+        Ok(out)
     }
 
     /// Highest `origin_seq` in the outbox (0 when empty).
@@ -1113,7 +1140,8 @@ impl Store {
         if origin == own {
             return Err(StoreError::Invalid("hub cannot ingest its own id".into()));
         }
-        self.write(|tx| {
+        let mut touched = Vec::new();
+        let out = self.write(|tx| {
             flush_own_in(tx, own)?;
             let mut cur = cursors_in(tx, origin)?;
             let mut inserted = 0;
@@ -1180,8 +1208,10 @@ impl Store {
                     continue;
                 }
                 inserted += 1;
+                let project = project_of(tx, &change)?;
                 match savepoint(tx, || write_row(tx, &change))? {
                     Ok(_) => {
+                        touched.extend(project);
                         // A delete drops what was parked for the row.
                         let deleted = match change {
                             Change::Session(_) | Change::ProjectPath(_) => Some(false),
@@ -1206,7 +1236,7 @@ impl Store {
             }
             // After the whole batch: the parked writes follow every write of
             // the row in it.
-            unpark_in(tx, &arrived)?;
+            unpark_in(tx, &arrived, &mut touched)?;
             if acked > cur.last_pushed_origin_seq {
                 cur.last_pushed_origin_seq = acked;
                 set_cursors_in(tx, origin, cur)?;
@@ -1217,7 +1247,9 @@ impl Store {
                 rejected,
                 parked,
             })
-        })
+        })?;
+        self.remote_projects_changed(touched);
+        Ok(out)
     }
 
     /// Hub: `hub_log` after `after` for `requester` (its own entries become
@@ -1455,7 +1487,8 @@ impl Store {
     /// Node: apply a pull page from `hub` and advance the pull cursor in the
     /// same transaction. Returns how many remote entries were applied.
     pub fn node_apply_pull(&self, hub: &str, page: &HubPage) -> Result<usize> {
-        let applied = self.node_apply_pull_in(hub, page)?;
+        let (applied, touched) = self.node_apply_pull_in(hub, page)?;
+        self.remote_projects_changed(touched);
         if !page.more {
             self.pulled_to_head
                 .store(true, std::sync::atomic::Ordering::Relaxed);
@@ -1470,15 +1503,17 @@ impl Store {
             .load(std::sync::atomic::Ordering::Relaxed)
     }
 
-    fn node_apply_pull_in(&self, hub: &str, page: &HubPage) -> Result<usize> {
+    /// Entries applied, and the projects they touched.
+    fn node_apply_pull_in(&self, hub: &str, page: &HubPage) -> Result<(usize, Vec<String>)> {
         self.write(|tx| {
             let mut cur = cursors_in(tx, hub)?;
             if page.up_to <= cur.last_pulled_hub_seq {
-                return Ok(0);
+                return Ok((0, Vec::new()));
             }
             let me = super::local_machine_in(tx)?;
             let mut own_seen = page.own_seen;
             let mut applied = 0;
+            let mut touched = Vec::new();
             let mut later_own = tx.prepare_cached(
                 "SELECT 1 FROM outbox WHERE entity = ?1 AND key = ?2 AND origin_seq > ?3
                  UNION ALL SELECT 1 FROM outbox_deferred WHERE entity = ?1 AND key = ?2
@@ -1534,8 +1569,12 @@ impl Store {
                         {
                             continue;
                         }
+                        let project = project_of(tx, &change)?;
                         match savepoint(tx, || write_row(tx, &change))? {
-                            Ok(_) => applied += 1,
+                            Ok(_) => {
+                                applied += 1;
+                                touched.extend(project);
+                            }
                             Err(err) => {
                                 tracing::warn!(origin = %origin_machine, hub_seq, entity = %entry.entity, error = %err, "could not apply replicated entry");
                             }
@@ -1552,7 +1591,7 @@ impl Store {
             // Never past what the hub acknowledged: `own_seen` is the hub's
             // word, and an unpushed entry dropped here would be lost.
             prune_in(tx, own_seen.min(cur.last_pushed_origin_seq))?;
-            Ok(applied)
+            Ok((applied, touched))
         })
     }
 
@@ -1746,6 +1785,54 @@ mod tests {
         // A skips its own entry and gets the hub's.
         assert_eq!(pull(&a, "A", &hub, "H"), 1);
         assert_eq!(pull(&a, "A", &hub, "H"), 0);
+    }
+
+    #[test]
+    fn replicated_project_and_folder_changes_are_announced() {
+        let (_h, hub) = temp_store();
+        let (_a, a) = temp_store();
+        let (_b, b) = temp_store();
+        let seen = |s: &Store| {
+            let log: std::sync::Arc<std::sync::Mutex<Vec<Vec<String>>>> = Default::default();
+            let l = log.clone();
+            s.on_remote_projects(std::sync::Arc::new(move |ids: &[String]| {
+                l.lock().unwrap().push(ids.to_vec());
+            }));
+            log
+        };
+        let (on_hub, on_b) = (seen(&hub), seen(&b));
+        let take =
+            |log: &std::sync::Mutex<Vec<Vec<String>>>| std::mem::take(&mut *log.lock().unwrap());
+        let folder = crate::model::ProjectPath {
+            project_id: "p1".into(),
+            machine_id: "A".into(),
+            path: "/work/p1".into(),
+            git_remote: None,
+        };
+        a.apply(project("p1", "one")).unwrap();
+        a.apply(Change::ProjectPath(folder.clone())).unwrap();
+        push(&a, "A", &hub, "H");
+        pull(&b, "B", &hub, "H");
+        // One call per batch, each project once.
+        assert_eq!(take(&on_hub), [vec!["p1".to_string()]]);
+        assert_eq!(take(&on_b), [vec!["p1".to_string()]]);
+
+        // A folder removed elsewhere names its project (read before the
+        // row goes).
+        a.apply(Change::DeleteProjectPath {
+            machine_id: "A".into(),
+            path: folder.path.clone(),
+        })
+        .unwrap();
+        push(&a, "A", &hub, "H");
+        pull(&b, "B", &hub, "H");
+        assert_eq!(take(&on_hub), [vec!["p1".to_string()]]);
+        assert_eq!(take(&on_b), [vec!["p1".to_string()]]);
+        assert!(hub.project_paths("p1").unwrap().is_empty());
+
+        // Nothing replicated, nothing announced.
+        pull(&b, "B", &hub, "H");
+        assert!(take(&on_b).is_empty());
     }
 
     fn project_at(id: &str, name: &str, updated_at: i64) -> Change {
