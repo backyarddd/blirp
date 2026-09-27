@@ -246,7 +246,12 @@ impl Walk<'_> {
                 continue;
             };
             let is_dir = ft.is_dir();
-            if is_dir && self.data_key.as_ref().is_some_and(|d| path_key(&abs) == *d) {
+            if is_dir
+                && self
+                    .data_key
+                    .as_ref()
+                    .is_some_and(|d| path_key(Path::new(&wire)) == *d)
+            {
                 continue;
             }
             let meta = if ft.is_file() {
@@ -333,10 +338,7 @@ pub fn scan(root: &Path, git: bool, cfg: &ScanConfig) -> std::io::Result<Scan> {
         root,
         rules: Rules::new(root, git),
         cfg,
-        data_key: cfg
-            .data_dir
-            .as_deref()
-            .map(|d| path_key(&dunce::canonicalize(d).unwrap_or_else(|_| d.to_path_buf()))),
+        data_key: data_dir_inside(root, cfg.data_dir.as_deref()),
         out: Scan {
             found: Vec::new(),
             excluded: Vec::new(),
@@ -356,6 +358,23 @@ pub fn scan(root: &Path, git: bool, cfg: &ScanConfig) -> std::io::Result<Scan> {
     walk.dir(root, "", &mut frames);
     walk.out.found.sort_by(|a, b| a.path.cmp(&b.path));
     Ok(walk.out)
+}
+
+/// Where the data folder sits inside `root`, as a key of its `/`-separated
+/// relative path. Both sides are resolved first: the walk only knows paths
+/// relative to the root, and the root may be spelled through a symlink
+/// (`/var` on macOS) or an 8.3 short name on Windows.
+fn data_dir_inside(root: &Path, data: Option<&Path>) -> Option<PathBuf> {
+    let resolve = |p: &Path| dunce::canonicalize(p).unwrap_or_else(|_| p.to_path_buf());
+    let rel = resolve(data?)
+        .strip_prefix(resolve(root))
+        .ok()?
+        .to_path_buf();
+    let wire: Vec<String> = rel
+        .components()
+        .map(|c| c.as_os_str().to_string_lossy().into_owned())
+        .collect();
+    (!wire.is_empty()).then(|| path_key(Path::new(&wire.join("/"))))
 }
 
 /// A hash cache row: what a file looked like when it was hashed.
@@ -630,6 +649,30 @@ mod tests {
         .unwrap();
         assert_eq!(paths(&s), ["a.txt"]);
         assert!(s.excluded.is_empty(), "{:?}", s.excluded);
+    }
+
+    /// The root may be spelled through a symlink while the data folder is
+    /// given resolved (or the other way round): it is still skipped.
+    #[cfg(unix)]
+    #[test]
+    fn data_dir_is_skipped_when_the_root_is_spelled_through_a_link() {
+        let dir = tempfile::tempdir().unwrap();
+        let real = dir.path().join("real");
+        std::fs::create_dir_all(real.join("data")).unwrap();
+        std::fs::write(real.join("data/runtime.json"), "{}").unwrap();
+        std::fs::write(real.join("a.txt"), "a").unwrap();
+        let link = dir.path().join("link");
+        std::os::unix::fs::symlink(&real, &link).unwrap();
+        let s = scan(
+            &link,
+            false,
+            &ScanConfig {
+                data_dir: Some(real.join("data")),
+                ..cfg()
+            },
+        )
+        .unwrap();
+        assert_eq!(paths(&s), ["a.txt"]);
     }
 
     #[test]
