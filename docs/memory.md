@@ -33,7 +33,7 @@ Redaction is pattern based. A secret in an unusual format can survive; see [secu
 
 Distilling turns the new part of a session's transcript into memory.
 
-**When.** A session is distilled when it has been idle for `memory.distill_idle_secs` (default 300 s) with new events, or shortly after it ends (process exit or the agent's session-end hook; the run waits 10 s so the last transcript lines are in, and both triggers make one run). A scheduler checks every 30 s. Only sessions active in the last 7 days are distilled automatically, so importing old history does not use up the budget.
+**When.** A session is distilled when it has been quiet for `memory.distill_idle_secs` (default 300 s) with a new prompt or reply since its last distill (tool output alone does not count), or shortly after it ends (process exit or the agent's session-end hook; the run waits 10 s so the last transcript lines are in, and both triggers make one run). A scheduler checks every 30 s. Only sessions active in the last 7 days are distilled automatically, so importing old history does not use up the budget.
 
 **Which sessions.** Only sessions that ran on this machine: a session replicated from another machine is distilled there and its results arrive by sync. Subagent sessions are skipped (their task and final report are already in the parent's transcript); **Distill now** still works on them.
 

@@ -21,6 +21,12 @@ pub const MACHINE_ID_KEY: &str = "machine_id";
 /// `updated_by` of rows written by the distiller.
 pub const BY_DISTILLER: &str = "distiller";
 
+/// SQL condition on event `e` of session `s`: something worth distilling
+/// past the last summary. Only prompts and replies count: tool traffic
+/// without a reply, injected context and compaction markers alone never
+/// make a session due again.
+const NEW_CONTENT: &str = "e.seq > s.distilled_through_seq AND e.kind IN ('user','assistant')";
+
 /// How a distill result changes the project brief.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BriefApply {
@@ -293,13 +299,20 @@ impl Store {
         })
     }
 
-    /// Sessions on `machine_id` due for distillation (§9 trigger): idle since
-    /// `idle_before` or ended, active after `active_after`, with events past
-    /// `distilled_through_seq`, and not already failed at the same point.
-    /// Ingested subagent children (external with a parent) are left out: the
-    /// parent's transcript already carries their task and result. Sessions of
-    /// other machines are distilled on their origin machine and replicated.
-    /// Most recently active first.
+    /// Sessions on `machine_id` due for distillation (§9 trigger): quiet
+    /// since `idle_before` (idle or ended), active after `active_after`,
+    /// with new prompts or replies past `distilled_through_seq`
+    /// ([`NEW_CONTENT`]), and not already failed at the same point.
+    ///
+    /// Ended sessions wait for `idle_before` too: an external session is
+    /// marked `completed` after two quiet minutes and back to `working` by
+    /// its next transcript write, so without the wait a long session was
+    /// distilled at every pause. A session that really ended is queued
+    /// directly (SessionEnd hook, process exit). Ingested subagent children
+    /// (external with a parent) are left out: the parent's transcript
+    /// already carries their task and result. Sessions of other machines
+    /// are distilled on their origin machine and replicated. Most recently
+    /// active first.
     pub fn distill_candidates(
         &self,
         machine_id: &str,
@@ -307,22 +320,33 @@ impl Store {
         active_after: i64,
         limit: i64,
     ) -> Result<Vec<Session>> {
+        let sql = format!(
+            "SELECT s.* FROM sessions s
+             WHERE s.machine_id = ?1 AND s.last_activity_at >= ?3 AND s.last_activity_at <= ?2
+               AND NOT (s.origin = 'external' AND s.parent_session_id IS NOT NULL)
+               AND s.status IN ('idle','completed','failed','detached')
+               AND EXISTS (SELECT 1 FROM events e WHERE e.session_id = s.id AND {NEW_CONTENT}
+                           AND e.seq > COALESCE(json_extract(s.summary_json, '$.error.through_seq'), 0))
+             ORDER BY s.last_activity_at DESC LIMIT ?4"
+        );
         self.read(|c| {
             all(
                 c,
-                "SELECT s.* FROM sessions s
-                 WHERE s.machine_id = ?1 AND s.last_activity_at >= ?3
-                   AND NOT (s.origin = 'external' AND s.parent_session_id IS NOT NULL)
-                   AND ((s.status = 'idle' AND s.last_activity_at <= ?2)
-                        OR s.status IN ('completed','failed','detached'))
-                   AND EXISTS (SELECT 1 FROM events e WHERE e.session_id = s.id
-                               AND e.seq > s.distilled_through_seq
-                               AND e.seq > COALESCE(json_extract(s.summary_json, '$.error.through_seq'), 0))
-                 ORDER BY s.last_activity_at DESC LIMIT ?4",
+                &sql,
                 params![machine_id, idle_before, active_after, limit],
                 session_row,
             )
         })
+    }
+
+    /// True when session `id` has new prompts or replies past its last
+    /// summary ([`NEW_CONTENT`]).
+    pub fn has_new_content(&self, id: &str) -> Result<bool> {
+        let sql = format!(
+            "SELECT 1 FROM sessions s WHERE s.id = ?1
+               AND EXISTS (SELECT 1 FROM events e WHERE e.session_id = s.id AND {NEW_CONTENT})"
+        );
+        self.read(|c| Ok(one(c, &sql, params![id], |_| Ok(()))?.is_some()))
     }
 
     /// Apply a distill result atomically (§9 Apply). Records last edited by the

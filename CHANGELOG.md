@@ -51,6 +51,11 @@ so every tag needs one.
 - The hub's storage quota no longer loses track of uploads that stop
   midway or run twice at once, and partial downloads left by stopped
   transfers are removed after a day.
+- A long session started outside blirp is no longer distilled at every
+  short pause (up to the whole daily budget): a session marked completed
+  after two quiet minutes now waits `memory.distill_idle_secs` like an idle
+  one, and a session is distilled again only when a new prompt or reply
+  arrived since its last distill.
 
 ## [0.2.0] - 2026-09-27
 

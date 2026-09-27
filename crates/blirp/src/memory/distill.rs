@@ -1419,17 +1419,18 @@ async fn process(state: &SharedState, job: &Job) {
     let sid = job.session_id.clone();
     let lookup = move || -> Result<_, StoreError> {
         let s = store.get_session(&sid)?;
-        let max = store.max_event_seq(&sid)?;
-        Ok(s.map(|s| (s, max)))
+        let fresh = store.has_new_content(&sid)?;
+        Ok(s.map(|s| (s, fresh)))
     };
     match tokio::task::spawn_blocking(lookup).await {
-        Ok(Ok(Some((s, max_seq)))) => {
+        Ok(Ok(Some((s, fresh)))) => {
             if let Some(why) = skip_reason(&s, &state.machine.id, job.manual) {
                 tracing::debug!(session = %job.session_id, why, "not distilling");
                 return;
             }
-            // Nothing past the last summary (e.g. queued twice): no budget spent.
-            if !job.manual && max_seq <= s.distilled_through_seq {
+            // No new prompt or reply since the last summary (e.g. queued
+            // twice, or only tool output arrived): no budget spent.
+            if !job.manual && !fresh {
                 tracing::debug!(session = %job.session_id, "nothing new to distill");
                 return;
             }
@@ -1562,7 +1563,7 @@ mod tests {
     #![allow(clippy::unwrap_used)]
     use super::*;
     use crate::memory::testutil::*;
-    use blirp_core::model::{SuggestionStatus, SuggestionTarget};
+    use blirp_core::model::{SessionStatus, SuggestionStatus, SuggestionTarget};
     use std::collections::VecDeque;
 
     struct Fake(
@@ -2179,6 +2180,63 @@ mod tests {
         assert_eq!(skip_reason(by_id("sub"), "m", true), None);
         assert!(skip_reason(by_id("remote"), "m", false).is_some());
         assert!(skip_reason(by_id("remote"), "m", true).is_some());
+    }
+
+    /// The smoke-test loop: an external session is marked `completed` two
+    /// minutes after its last transcript write and back to `working` by the
+    /// next one. Completion by quiet time must wait for the idle delay like
+    /// `idle`, and only new prompts or replies make it due again.
+    #[tokio::test]
+    async fn quiet_completed_sessions_wait_for_idle_and_new_content() {
+        let (_d, store, pid) = project_store("L");
+        let store = Arc::new(store);
+        let mut s = session("ext", &pid, 1_000);
+        s.origin = SessionOrigin::External;
+        s.agent = "claude".into();
+        s.last_activity_at = 10_000;
+        store.insert_session(&s).unwrap();
+        event(&store, "ext", 1, EventKind::User, "harden the release");
+        event(&store, "ext", 2, EventKind::Assistant, "on it");
+        let due = |idle_before: i64| {
+            store
+                .distill_candidates("m", idle_before, 0, 10)
+                .unwrap()
+                .into_iter()
+                .map(|s| s.id)
+                .collect::<Vec<_>>()
+        };
+        // Quiet for two minutes: completed, but not yet idle long enough.
+        assert!(due(9_999).is_empty());
+        assert_eq!(due(10_000), ["ext"]);
+        for status in [SessionStatus::Idle, SessionStatus::Failed] {
+            store.modify_session("ext", |s| s.status = status).unwrap();
+            assert!(due(9_999).is_empty(), "{status:?}");
+            assert_eq!(due(10_000), ["ext"], "{status:?}");
+        }
+        store
+            .modify_session("ext", |s| s.status = SessionStatus::Working)
+            .unwrap();
+        assert!(due(i64::MAX).is_empty(), "a working session is never due");
+        store
+            .modify_session("ext", |s| s.status = SessionStatus::Completed)
+            .unwrap();
+
+        let fake = Fake::new(vec![Ok(reply(&[]))]);
+        run_distill(store.clone(), "ext", &fake, &cfg(BriefMode::Auto))
+            .await
+            .unwrap();
+        assert!(due(i64::MAX).is_empty());
+        assert!(!store.has_new_content("ext").unwrap());
+        // Only tool traffic, injected context and a compaction since: not due.
+        event(&store, "ext", 3, EventKind::ToolCall, "Bash: ls");
+        event(&store, "ext", 4, EventKind::ToolResult, "a b");
+        event(&store, "ext", 5, EventKind::System, "<system-reminder>");
+        event(&store, "ext", 6, EventKind::Summary, "compacted");
+        assert!(due(i64::MAX).is_empty());
+        assert!(!store.has_new_content("ext").unwrap());
+        event(&store, "ext", 7, EventKind::Assistant, "done");
+        assert_eq!(due(i64::MAX), ["ext"]);
+        assert!(store.has_new_content("ext").unwrap());
     }
 
     #[tokio::test]
