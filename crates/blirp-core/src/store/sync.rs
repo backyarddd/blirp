@@ -12,7 +12,7 @@
 use super::misc::device_row;
 use super::projects::path_row;
 use super::sessions::session_row;
-use super::{Change, Result, Store, StoreError, all, check_ids, one, write_row};
+use super::{Change, Result, Store, StoreError, all, check_ids, one, tombstoned, write_row};
 use crate::model::Session;
 use rusqlite::{Connection, OptionalExtension, Transaction, params};
 use serde::{Deserialize, Serialize};
@@ -162,6 +162,32 @@ fn foreign_session_write(old: Session, new: &Session) -> Session {
     }
 }
 
+/// Why a replicated entry is not accepted (§10).
+#[derive(Debug)]
+enum Refused {
+    /// It changes another machine's session or folder that is not here
+    /// yet (its owner has not synced it): the hub parks it until the row
+    /// arrives ([`Store::hub_ingest`]), a node skips it. `owner`: the
+    /// machine the row belongs to.
+    Missing { owner: String, message: String },
+    /// Never allowed.
+    Invalid(String),
+}
+
+impl std::fmt::Display for Refused {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Refused::Missing { message: m, .. } | Refused::Invalid(m) => f.write_str(m),
+        }
+    }
+}
+
+impl From<String> for Refused {
+    fn from(m: String) -> Self {
+        Refused::Invalid(m)
+    }
+}
+
 /// §10 ownership: a machine's folders, sessions and their events are
 /// written only by that machine. Another machine may only re-point an
 /// existing folder or session to another project (merge) and retitle a
@@ -176,7 +202,7 @@ fn check_owner(
     origin: &str,
     hub: Option<&str>,
     change: Change,
-) -> std::result::Result<Change, String> {
+) -> std::result::Result<Change, Refused> {
     let session = |id: &str| -> std::result::Result<Option<Session>, String> {
         one(
             c,
@@ -198,19 +224,24 @@ fn check_owner(
         .map_err(|e| e.to_string())
     };
     let foreign = |owner: &str| owner != origin;
+    let invalid = |m: String| Err(Refused::Invalid(m));
     match change {
         Change::Machine(m) if foreign(&m.id) && hub != Some(origin) => {
-            Err(format!("machine row of {}", m.id))
+            invalid(format!("machine row of {}", m.id))
         }
-        Change::DeleteMachine { id } => Err(format!("machine delete of {id}")),
+        Change::DeleteMachine { id } => invalid(format!("machine delete of {id}")),
         Change::ProjectPath(p) if foreign(&p.machine_id) => {
             match path_project(&p.machine_id, &p.path)? {
                 Some(old) if old.git_remote == p.git_remote => Ok(Change::ProjectPath(p)),
-                _ => Err(format!("folder of machine {}", p.machine_id)),
+                Some(_) => invalid(format!("folder of machine {}", p.machine_id)),
+                None => Err(Refused::Missing {
+                    message: format!("folder of machine {} it has not synced yet", p.machine_id),
+                    owner: p.machine_id,
+                }),
             }
         }
         Change::DeleteProjectPath { machine_id, .. } if foreign(&machine_id) => {
-            Err(format!("folder removal on machine {machine_id}"))
+            invalid(format!("folder removal on machine {machine_id}"))
         }
         Change::Session(s) => match session(&s.id)? {
             Some(old) if !foreign(&old.machine_id) && !foreign(&s.machine_id) => {
@@ -219,20 +250,26 @@ fn check_owner(
             Some(old) if old.machine_id == s.machine_id => {
                 Ok(Change::Session(foreign_session_write(old, &s)))
             }
-            Some(old) => Err(format!("session of machine {}", old.machine_id)),
+            Some(old) => invalid(format!("session of machine {}", old.machine_id)),
             None if !foreign(&s.machine_id) => Ok(Change::Session(s)),
-            None => Err(format!("new session for machine {}", s.machine_id)),
+            None if tombstoned(c, "deleted_sessions", &s.id).map_err(|e| e.to_string())? => {
+                invalid(format!("deleted session of machine {}", s.machine_id))
+            }
+            None => Err(Refused::Missing {
+                message: format!("session of machine {} it has not synced yet", s.machine_id),
+                owner: s.machine_id,
+            }),
         },
         Change::DeleteSession { id } => match session(&id)? {
             Some(old) if foreign(&old.machine_id) => {
-                Err(format!("delete of a session of machine {}", old.machine_id))
+                invalid(format!("delete of a session of machine {}", old.machine_id))
             }
             _ => Ok(Change::DeleteSession { id }),
         },
         Change::Event(e) => match session(&e.session_id)? {
             Some(s) if !foreign(&s.machine_id) => Ok(Change::Event(e)),
-            Some(s) => Err(format!("event of a session of machine {}", s.machine_id)),
-            None => Err("event of an unknown session".into()),
+            Some(s) => invalid(format!("event of a session of machine {}", s.machine_id)),
+            None => invalid("event of an unknown session".into()),
         },
         other => Ok(other),
     }
@@ -246,9 +283,9 @@ fn check_entry(
     origin: &str,
     hub: Option<&str>,
     e: &WireEntry,
-) -> std::result::Result<(Change, Option<String>), String> {
+) -> std::result::Result<(Change, Option<String>), Refused> {
     if e.payload_json.len() > MAX_ENTRY_BYTES {
-        return Err(format!("payload of {} bytes", e.payload_json.len()));
+        return Err(format!("payload of {} bytes", e.payload_json.len()).into());
     }
     let parsed = e.change().map_err(|err| err.to_string())?;
     check_ids(&parsed).map_err(|err| err.to_string())?;
@@ -332,8 +369,91 @@ pub struct IngestOutcome {
     pub acked: i64,
     /// Newly logged entries (0 for a fully duplicate batch).
     pub inserted: usize,
-    /// Entries rejected as malformed (logged at warn, never retried).
+    /// Entries rejected as malformed or not allowed (logged at warn, never
+    /// retried).
     pub rejected: usize,
+    /// Entries parked until the row they change arrives ([`park_in`]).
+    pub parked: usize,
+}
+
+/// `hub_log.op` of a position marker for an entry the hub did not log as
+/// a change (rejected or parked): only its origin gets it, as an own entry.
+const MARKER_OP: &str = "marker";
+/// Parked entries are dropped after this long (the row never arrived: its
+/// owner deleted it before syncing, or never syncs again).
+const PARK_TTL_MS: i64 = 7 * 24 * 3600 * 1000;
+/// At most this many entries are parked; more are rejected.
+const MAX_PARKED: i64 = 10_000;
+
+/// Hub: keep `e` from `origin`, which changes another machine's session or
+/// folder the hub does not have yet, until the owner's row arrives
+/// ([`unpark_in`]). False when the hub holds too many already.
+fn park_in(tx: &Transaction<'_>, origin: &str, e: &WireEntry) -> Result<bool> {
+    let held: i64 = tx.query_row("SELECT count(*) FROM hub_parked", [], |r| r.get(0))?;
+    if held >= MAX_PARKED {
+        return Ok(false);
+    }
+    tx.execute(
+        "INSERT OR IGNORE INTO hub_parked(origin_machine, origin_seq, entity, key, payload_json, ts, parked_at)
+         VALUES (?1,?2,?3,?4,?5,?6,?7)",
+        params![origin, e.origin_seq, e.entity, e.key, e.payload_json, e.ts, crate::now_ms()],
+    )?;
+    Ok(true)
+}
+
+/// Hub: the rows `arrived` (entity, key) were just written by their owner:
+/// apply what was parked for them, in the order it was pushed, checked as
+/// if it arrived now (so another machine's session write is still reduced
+/// to what it may change). Applied as the hub's own write, so it is logged
+/// after the owner's row and every machine applies it after that row.
+fn unpark_in(tx: &Transaction<'_>, arrived: &[(String, String)]) -> Result<()> {
+    let mut seen = std::collections::BTreeSet::new();
+    for (entity, key) in arrived {
+        if !seen.insert((entity, key)) {
+            continue;
+        }
+        let parked = all(
+            tx,
+            "SELECT origin_machine, origin_seq, entity, key, payload_json, ts FROM hub_parked
+             WHERE entity = ?1 AND key = ?2 ORDER BY parked_at, origin_seq",
+            params![entity, key],
+            |r| {
+                Ok((
+                    r.get::<_, String>(0)?,
+                    WireEntry {
+                        origin_seq: r.get(1)?,
+                        entity: r.get(2)?,
+                        op: "upsert".into(),
+                        key: r.get(3)?,
+                        payload_json: r.get(4)?,
+                        ts: r.get(5)?,
+                    },
+                ))
+            },
+        )?;
+        for (origin, e) in parked {
+            match check_entry(tx, &origin, None, &e) {
+                Ok((change, _)) => {
+                    let applied = savepoint(tx, || {
+                        write_row(tx, &change)?;
+                        super::queue_in(tx, &change)
+                    })?;
+                    if let Err(err) = applied {
+                        tracing::warn!(origin, origin_seq = e.origin_seq, entity = %e.entity, error = %err, "hub could not apply a parked entry");
+                    }
+                }
+                Err(Refused::Missing { .. }) => continue,
+                Err(err) => {
+                    tracing::warn!(origin, origin_seq = e.origin_seq, entity = %e.entity, error = %err, "dropping a parked entry");
+                }
+            }
+            tx.execute(
+                "DELETE FROM hub_parked WHERE origin_machine = ?1 AND origin_seq = ?2",
+                params![origin, e.origin_seq],
+            )?;
+        }
+    }
+    Ok(())
 }
 
 fn cursors_in(c: &rusqlite::Connection, peer: &str) -> Result<SyncCursors> {
@@ -779,6 +899,8 @@ impl Store {
             let mut cur = cursors_in(tx, origin)?;
             let mut inserted = 0;
             let mut rejected = 0;
+            let mut parked = 0;
+            let mut arrived = Vec::new();
             let mut acked = cur.last_pushed_origin_seq;
             for e in entries {
                 if e.origin_seq <= 0 {
@@ -796,9 +918,26 @@ impl Store {
                 acked = acked.max(e.origin_seq);
                 let (change, payload) = match check_entry(tx, origin, None, e) {
                     Ok(c) => c,
-                    Err(err) => {
-                        tracing::warn!(origin, origin_seq = e.origin_seq, entity = %e.entity, error = %err, "rejecting replicated entry");
-                        rejected += 1;
+                    Err(refused) => {
+                        // The hub has every row of its own: one it lacks
+                        // never arrives.
+                        let awaited =
+                            matches!(&refused, Refused::Missing { owner, .. } if owner != own);
+                        if awaited && park_in(tx, origin, e)? {
+                            tracing::info!(origin, origin_seq = e.origin_seq, entity = %e.entity, reason = %refused, "parking replicated entry until its row arrives");
+                            parked += 1;
+                        } else {
+                            tracing::warn!(origin, origin_seq = e.origin_seq, entity = %e.entity, error = %refused, "rejecting replicated entry");
+                            rejected += 1;
+                        }
+                        // A marker: the origin's `own_seen` passes it, so
+                        // the origin stops holding back others' writes of
+                        // that row for it (§10).
+                        tx.execute(
+                            "INSERT OR IGNORE INTO hub_log(origin_machine, origin_seq, entity, op, key, payload_json, ts)
+                             VALUES (?1, ?2, '', ?3, '', '', ?4)",
+                            params![origin, e.origin_seq, MARKER_OP, e.ts],
+                        )?;
                         continue;
                     }
                 };
@@ -818,11 +957,27 @@ impl Store {
                     continue;
                 }
                 inserted += 1;
-                if let Err(err) = savepoint(tx, || write_row(tx, &change))? {
+                match savepoint(tx, || write_row(tx, &change))? {
+                    Ok(_) => {
+                        // A delete drops what was parked for the row.
+                        if matches!(
+                            change,
+                            Change::Session(_)
+                                | Change::DeleteSession { .. }
+                                | Change::ProjectPath(_)
+                        ) {
+                            arrived.push((e.entity.clone(), e.key.clone()));
+                        }
+                    }
                     // Logged regardless: other machines may still apply it.
-                    tracing::warn!(origin, origin_seq = e.origin_seq, entity = %e.entity, error = %err, "hub could not apply replicated entry");
+                    Err(err) => {
+                        tracing::warn!(origin, origin_seq = e.origin_seq, entity = %e.entity, error = %err, "hub could not apply replicated entry");
+                    }
                 }
             }
+            // After the whole batch: the parked writes follow every write of
+            // the row in it.
+            unpark_in(tx, &arrived)?;
             if acked > cur.last_pushed_origin_seq {
                 cur.last_pushed_origin_seq = acked;
                 set_cursors_in(tx, origin, cur)?;
@@ -831,6 +986,7 @@ impl Store {
                 acked,
                 inserted,
                 rejected,
+                parked,
             })
         })
     }
@@ -1007,6 +1163,19 @@ impl Store {
                 |r| r.get::<_, i64>(0),
             )?)
         })?;
+        // Parked entries whose row never arrived.
+        let expired = self.write(|tx| {
+            Ok(tx.execute(
+                "DELETE FROM hub_parked WHERE parked_at < ?1",
+                params![crate::now_ms() - PARK_TTL_MS],
+            )?)
+        })?;
+        if expired > 0 {
+            tracing::warn!(
+                expired,
+                "dropped parked replicated entries whose row never arrived"
+            );
+        }
         let mut done = Compacted::default();
         for (entity, owner) in COMPACTED {
             let mut pos = (String::new(), 0);
@@ -1687,7 +1856,17 @@ mod tests {
         ];
         let out = hub.hub_ingest("H", "A", &entries).unwrap();
         assert_eq!((out.acked, out.inserted, out.rejected), (2, 0, 2));
-        assert_eq!(hub.hub_head().unwrap(), 0);
+        // Logged as markers only: A gets them back as its own entries,
+        // nobody else gets anything.
+        let page = hub.hub_page("B", 0, 100, 4 << 20).unwrap();
+        assert!(page.entries.is_empty(), "{page:?}");
+        let page = hub.hub_page("A", 0, 100, 4 << 20).unwrap();
+        assert!(
+            page.entries
+                .iter()
+                .all(|e| matches!(e, PulledEntry::Own { .. })),
+            "{page:?}"
+        );
         assert!(hub.get_project("p").unwrap().is_none());
     }
 
@@ -2466,11 +2645,14 @@ mod tests {
         assert_eq!(pull(&node, "N", &hub, "H"), 0, "never sent again");
         assert!(!node.get_project("chats-H").unwrap().unwrap().chats);
 
-        // Upgrade both: migration 12 runs on open, then replication is
-        // switched on as on every daemon start.
+        // Upgrade both from the schema of 0.2.0: migrations 12 and on run on
+        // open, then replication is switched on as on every daemon start.
         let reopen = |s: Store| {
-            s.write(|tx| Ok(tx.pragma_update(None, "user_version", 11)?))
-                .unwrap();
+            s.write(|tx| {
+                tx.execute_batch("DROP TABLE hub_parked")?;
+                Ok(tx.pragma_update(None, "user_version", 11)?)
+            })
+            .unwrap();
             let path = s.path().to_owned();
             drop(s);
             Store::open(&path).unwrap()
@@ -2488,5 +2670,118 @@ mod tests {
             assert_eq!(s.get_project("chats-H").unwrap().unwrap(), bucket);
             assert_eq!(s.get_project("old").unwrap().unwrap(), merged);
         }
+    }
+
+    fn named(s: &Store, id: &str) {
+        s.set_setting(super::super::MACHINE_ID_KEY, &serde_json::json!(id))
+            .unwrap();
+    }
+
+    // N launched a session on X and renames it, then merges its project,
+    // before X's push of the session reached the hub. The hub parks N's
+    // writes until X's row arrives instead of dropping them, and N is not
+    // held back meanwhile.
+    #[test]
+    fn edits_of_a_session_the_hub_does_not_have_yet_wait_for_its_row() {
+        let (_h, hub) = temp_store();
+        let (_n, n) = temp_store();
+        let (_x, x) = temp_store();
+        named(&n, "N");
+        named(&x, "X");
+        machine_device(&hub, "N", false);
+        machine_device(&hub, "X", false);
+        hub.apply(project("p1", "one")).unwrap();
+        hub.apply(project("p2", "two")).unwrap();
+        pull(&n, "N", &hub, "H");
+        pull(&x, "X", &hub, "H");
+
+        let launched = crate::model::Session {
+            project_id: "p1".into(),
+            title: Some("first".into()),
+            ..session_of("s", "X")
+        };
+        x.apply(Change::Session(launched.clone())).unwrap();
+        // N holds X's row before the hub does.
+        n.apply_remote(&Change::Session(launched)).unwrap();
+        n.modify_session("s", |s| s.title = Some("renamed".into()))
+            .unwrap();
+        n.merge_projects("p1", "p2").unwrap();
+        let after = n.sync_cursors("H").unwrap().last_pushed_origin_seq;
+        let out = hub
+            .hub_ingest("H", "N", &n.outbox_batch(after, 500, 4 << 20).unwrap())
+            .unwrap();
+        n.set_pushed_cursor("H", out.acked).unwrap();
+        assert_eq!((out.parked, out.rejected), (2, 0), "{out:?}");
+        assert!(hub.get_session("s").unwrap().is_none());
+        // Its entries came back as markers: nothing of N's is left to hold
+        // back X's writes of the row.
+        pull(&n, "N", &hub, "H");
+        assert_eq!(outbox_len(&n), 0);
+
+        // X's row arrives: the parked writes follow it.
+        push(&x, "X", &hub, "H");
+        for _ in 0..2 {
+            pull(&n, "N", &hub, "H");
+            pull(&x, "X", &hub, "H");
+        }
+        let row = hub.get_session("s").unwrap().unwrap();
+        assert_eq!(
+            (row.title.as_deref(), row.project_id.as_str()),
+            (Some("renamed"), "p2")
+        );
+        assert_eq!(n.get_session("s").unwrap().unwrap(), row);
+        assert_eq!(x.get_session("s").unwrap().unwrap(), row);
+        assert_eq!(
+            hub.read(
+                |c| Ok(c.query_row("SELECT count(*) FROM hub_parked", [], |r| r
+                    .get::<_, i64>(0))?)
+            )
+            .unwrap(),
+            0
+        );
+    }
+
+    // A write the hub rejects comes back to its origin as a marker, so the
+    // origin applies the owner's later writes of that row again.
+    #[test]
+    fn a_rejected_write_does_not_hold_back_its_origin() {
+        let (_h, hub) = temp_store();
+        let (_n, n) = temp_store();
+        let (_x, x) = temp_store();
+        named(&n, "N");
+        named(&x, "X");
+        hub.apply(project("p", "p")).unwrap();
+        let folder = |remote: Option<&str>| {
+            Change::ProjectPath(crate::model::ProjectPath {
+                project_id: "p".into(),
+                machine_id: "X".into(),
+                path: "/w".into(),
+                git_remote: remote.map(Into::into),
+            })
+        };
+        x.apply(project("p", "p")).unwrap();
+        x.apply(folder(None)).unwrap();
+        push(&x, "X", &hub, "H");
+        pull(&n, "N", &hub, "H");
+        // No machine removes another machine's folder.
+        n.apply(Change::DeleteProjectPath {
+            machine_id: "X".into(),
+            path: "/w".into(),
+        })
+        .unwrap();
+        let after = n.sync_cursors("H").unwrap().last_pushed_origin_seq;
+        let out = hub
+            .hub_ingest("H", "N", &n.outbox_batch(after, 500, 4 << 20).unwrap())
+            .unwrap();
+        n.set_pushed_cursor("H", out.acked).unwrap();
+        assert_eq!(out.rejected, 1);
+        pull(&n, "N", &hub, "H");
+        x.apply(folder(Some("host/o/r"))).unwrap();
+        push(&x, "X", &hub, "H");
+        pull(&n, "N", &hub, "H");
+        assert_eq!(
+            n.project_paths("p").unwrap()[0].git_remote.as_deref(),
+            Some("host/o/r")
+        );
     }
 }

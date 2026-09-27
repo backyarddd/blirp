@@ -4,7 +4,7 @@
 use rusqlite::Connection;
 
 /// Index `i` holds the migration that moves the schema from version `i` to `i + 1`.
-pub(crate) const MIGRATIONS: &[&str] = &[V1, V2, V3, V4, V5, V6, V7, V8, V9, V10, V11, V12];
+pub(crate) const MIGRATIONS: &[&str] = &[V1, V2, V3, V4, V5, V6, V7, V8, V9, V10, V11, V12, V13];
 
 /// Schema of §5. Note on the FTS tables: they are external-content tables keyed
 /// by the implicit rowid of `events`/`records`. blirp never runs `VACUUM`
@@ -450,6 +450,23 @@ const V12: &str = r#"
 INSERT INTO settings(key, value_json)
     SELECT 'sync.requeue_projects', 'true' WHERE EXISTS (SELECT 1 FROM projects)
     ON CONFLICT(key) DO NOTHING;
+"#;
+
+/// Hub: entries that change another machine's session or folder the hub
+/// does not have yet (its owner has not synced it), kept until the owner's
+/// row arrives (§10). Never replicated.
+const V13: &str = r#"
+CREATE TABLE hub_parked(
+    origin_machine TEXT NOT NULL,
+    origin_seq     INTEGER NOT NULL,
+    entity         TEXT NOT NULL,
+    key            TEXT NOT NULL,
+    payload_json   TEXT NOT NULL,
+    ts             INTEGER NOT NULL,
+    parked_at      INTEGER NOT NULL,
+    PRIMARY KEY(origin_machine, origin_seq)
+);
+CREATE INDEX hub_parked_row ON hub_parked(entity, key);
 "#;
 
 #[derive(Debug, thiserror::Error)]
