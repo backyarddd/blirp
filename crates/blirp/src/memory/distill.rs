@@ -874,11 +874,9 @@ pub fn parse_claude_json(stdout: &str) -> Result<String, String> {
     let v: serde_json::Value = serde_json::from_str(stdout.trim())
         .map_err(|e| format!("claude output is not JSON: {e}"))?;
     let result = v.get("result").and_then(|r| r.as_str()).unwrap_or_default();
-    // A limit message can come back as a plain result: it must fail the run
-    // (and pause distilling), not count as the model's reply.
-    if v.get("is_error").and_then(|b| b.as_bool()) == Some(true)
-        || (extract_json(result).is_none() && is_rate_limit(result))
-    {
+    // Claude Code's own limit message can come back as a plain result: it
+    // must fail the run (and pause distilling), not count as the reply.
+    if v.get("is_error").and_then(|b| b.as_bool()) == Some(true) || is_claude_limit_reply(result) {
         return Err(format!("claude reported an error: {}", tail(result)));
     }
     if result.trim().is_empty() {
@@ -1136,6 +1134,22 @@ fn is_rate_limit(text: &str) -> bool {
     ]
     .iter()
     .any(|w| msg.contains(w))
+}
+
+/// A successful `claude -p` result that is Claude Code's own short limit
+/// notice, not model output. Only these exact openings count: a model reply
+/// that merely mentions a quota must stay a (possibly invalid) reply of one
+/// session instead of pausing every distill.
+fn is_claude_limit_reply(result: &str) -> bool {
+    let t = result.trim();
+    t.chars().count() < 300
+        && [
+            "You've hit your",
+            "You\u{2019}ve hit your",
+            "Claude AI usage limit reached",
+        ]
+        .iter()
+        .any(|p| t.starts_with(p))
 }
 
 /// A failure of the summarizer itself (credentials, installation, limits),
@@ -1861,9 +1875,19 @@ mod tests {
                 );
             }
         }
-        // A reply that is the contract JSON is never taken for a limit.
-        let ok = serde_json::json!({"is_error": false, "result": "{\"summary\":\"hit the session limit\"}"});
-        assert!(parse_claude_json(&ok.to_string()).is_ok());
+        // A reply that is the contract JSON, or model prose that mentions a
+        // limit, is never taken for Claude Code's limit notice.
+        for reply in [
+            "{\"summary\":\"hit the session limit\"}",
+            "The API returned 429 Too Many Requests; the quota was raised.",
+            "Overloaded servers are a rate limit problem, see the usage limit docs.",
+        ] {
+            let env = serde_json::json!({"is_error": false, "result": reply});
+            assert_eq!(parse_claude_json(&env.to_string()).unwrap(), reply);
+        }
+        let long = format!("You've hit your {}", "x".repeat(400));
+        let env = serde_json::json!({"is_error": false, "result": long});
+        assert!(parse_claude_json(&env.to_string()).is_ok());
         let jsonl = "{\"type\":\"thread.started\"}\n{\"type\":\"item.completed\",\"item\":{\"type\":\"agent_message\",\"text\":\"first\"}}\nnoise\n{\"type\":\"item.completed\",\"item\":{\"type\":\"agent_message\",\"text\":\"{}\"}}\n";
         assert_eq!(parse_codex_jsonl(jsonl).unwrap(), "{}");
         let failed = "{\"type\":\"turn.failed\",\"error\":{\"message\":\"quota\"}}";
