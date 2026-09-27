@@ -180,6 +180,13 @@ jobs:
           cargo build --locked -p blirp
           bin=target/debug/blirp
           if [ "$RUNNER_OS" = Windows ]; then bin=$bin.exe; fi
+          # Linux: also `install.sh --hub` through a real systemd --user
+          # manager, as on a VPS (the runner is throwaway; sudo is allowed).
+          if [ "$RUNNER_OS" = Linux ]; then
+            sudo loginctl enable-linger "$(id -un)"
+            for _ in $(seq 50); do [ -S "/run/user/$(id -u)/bus" ] && break; sleep 0.2; done
+            export BLIRP_TEST_SYSTEMD=1
+          fi
           sh scripts/test-install.sh "$bin" "$dir/$exe"
           if [ "$RUNNER_OS" = Linux ]; then df -h /; fi
 

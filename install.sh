@@ -3,6 +3,7 @@
 #
 #   curl -fsSL https://raw.githubusercontent.com/backyarddd/blirp/main/install.sh | sh
 #   curl -fsSL https://raw.githubusercontent.com/backyarddd/blirp/main/install.sh | sh -s -- --service
+#   curl -fsSL https://raw.githubusercontent.com/backyarddd/blirp/main/install.sh | sh -s -- --hub
 #
 # Installs the `blirp` CLI into ${BLIRP_INSTALL_DIR:-~/.local/bin} and the
 # desktop app (macOS ~/Applications/blirp.app, Linux an AppImage in
@@ -35,6 +36,9 @@ Options (or the environment variable in brackets):
   --version X     install release X instead of the latest   [BLIRP_VERSION]
   --no-app        CLI only, no desktop app                   [BLIRP_NO_APP=1]
   --service       start the daemon at login                  [BLIRP_SERVICE=1]
+  --hub           server install (e.g. a VPS): CLI only, then `blirp hub setup`
+                  (autostart that survives logout, hub role, an invite)
+                                                             [BLIRP_HUB=1]
   --modify-path   add the install folder to PATH in your shell startup file
                                                              [BLIRP_MODIFY_PATH=1]
 Environment:
@@ -49,6 +53,7 @@ EOF
 version=${BLIRP_VERSION:-}
 no_app=${BLIRP_NO_APP:-}
 service=${BLIRP_SERVICE:-}
+hub=${BLIRP_HUB:-}
 modify_path=${BLIRP_MODIFY_PATH:-}
 require_signature=${BLIRP_REQUIRE_SIGNATURE:-}
 while [ $# -gt 0 ]; do
@@ -64,6 +69,7 @@ while [ $# -gt 0 ]; do
       ;;
     --no-app) no_app=1; shift ;;
     --service) service=1; shift ;;
+    --hub) hub=1; shift ;;
     --modify-path) modify_path=1; shift ;;
     -h | --help)
       usage
@@ -76,8 +82,22 @@ version=${version#v}
 # Accept 0/false for the boolean variables.
 case $no_app in 0 | false) no_app= ;; esac
 case $service in 0 | false) service= ;; esac
+case $hub in 0 | false) hub= ;; esac
 case $modify_path in 0 | false) modify_path= ;; esac
 case $require_signature in 0 | false) require_signature= ;; esac
+
+# A server needs no desktop app. The hub runs sessions as its user, so
+# never as root: stop before downloading anything (`blirp hub setup` checks
+# again and prints the same advice).
+if [ -n "$hub" ]; then
+  no_app=1
+  if [ "$(id -u)" = 0 ]; then
+    say "refusing to set up a hub as root: sessions on the hub run as its user."
+    say "create a user for blirp and install as that user, logged in over SSH as it:"
+    printf '\n    adduser blirp\n    loginctl enable-linger blirp\n    ssh blirp@<this server>\n\n'
+    die "see docs/vps.md"
+  fi
+fi
 
 # ------------------------------------------------------------------ platform
 
@@ -441,6 +461,15 @@ mv -f "$receipt.tmp" "$receipt"
 
 # -------------------------------------------------------------------- daemon
 
+if [ -n "$hub" ]; then
+  # Idempotent: autostart (with linger), the daemon, hub role, an invite.
+  # The install folder goes on the PATH the service records, so agent CLIs
+  # installed there (e.g. claude's installer uses ~/.local/bin) are found.
+  say "setting up this machine as a hub"
+  PATH="$install_dir:${PATH:-/usr/bin:/bin}" "$bin" hub setup || die "blirp hub setup failed (see above); fix it and run \`blirp hub setup\` again"
+  say "done: blirp $ver"
+  exit 0
+fi
 if [ -n "$service" ]; then
   "$bin" service install
 fi

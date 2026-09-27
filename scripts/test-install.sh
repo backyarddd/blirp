@@ -12,10 +12,16 @@
 #   1. a CLI-only install into a temp home verifies the signature and gives a
 #      working `blirp --version`;
 #   2. an asset that does not match SHA256SUMS.txt is refused;
-#   3. a SHA256SUMS.txt that does not match its signature is refused.
-# Nothing outside a temp dir is touched: HOME (USERPROFILE, APPDATA,
-# LOCALAPPDATA) points into it, no service, PATH entry or desktop app is
-# installed, and BLIRP_REQUIRE_SIGNATURE=1 makes a skipped check a failure.
+#   3. a SHA256SUMS.txt that does not match its signature is refused;
+#   4. (Linux) `install.sh --hub` twice: hub role, invite, LAN discovery off,
+#      `blirp doctor` server lines, `blirp backup`; without systemd (faked
+#      with failing systemctl/loginctl) it falls back to a direct daemon, and
+#      with BLIRP_TEST_SYSTEMD=1 it uses the real systemd --user manager (CI:
+#      needs linger; installs and removes a unit in the real home).
+# Apart from 4 with BLIRP_TEST_SYSTEMD=1, nothing outside a temp dir is
+# touched: HOME (USERPROFILE, APPDATA, LOCALAPPDATA) points into it, no
+# service, PATH entry or desktop app is installed, and
+# BLIRP_REQUIRE_SIGNATURE=1 makes a skipped check a failure.
 set -eu
 
 if [ $# -ne 2 ]; then
@@ -56,7 +62,10 @@ v=$(sed -n '/^\[workspace.package\]/,/^\[/s/^version = "\([^"]*\)".*/\1/p' "$roo
 
 work=$(mktemp -d 2>/dev/null || mktemp -d -t blirp-install-test)
 server=
+hub_homes=
 cleanup() {
+  # Daemons of the hub tests (defined below; nothing to stop before that).
+  if [ -n "$hub_homes" ]; then stop_hubs; fi
   if [ -n "$server" ]; then
     kill "$server" 2>/dev/null || true
     # It serves from inside $work; let it exit before the rm.
@@ -221,6 +230,137 @@ for sh_ in $shells; do
   echo "ok: $sh_ installs blirp $v with a verified signature ($out)"
 done
 sh_=${shells##* }
+
+# ------------------------------------------------------------ hub (Linux)
+
+# `install.sh --hub`, twice, as on a fresh server. Mode `fallback`: systemctl
+# and loginctl fail as in a container, so hub setup must say so and start the
+# daemon directly. Mode `systemd` (BLIRP_TEST_SYSTEMD=1, CI only): the real
+# systemd --user manager of the current user, which needs linger already on;
+# it writes ~/.config/systemd/user/blirp.service in the real home and removes
+# it again. Every daemon is loopback-only and picks a free port.
+# XDG_CONFIG_HOME is unset: runners set it to the real home's .config, where
+# the fallback mode must not look for a unit.
+hub_mode_env() {
+  # Printed as NAME=VALUE words for `env`.
+  if [ "$1" = systemd ]; then
+    printf 'HOME=%s XDG_DATA_HOME=%s BLIRP_INSTALL_DIR=%s\n' "$HOME" "$2/share" "$2/bin"
+  else
+    printf 'HOME=%s PATH=%s\n' "$2" "$work/shim:$PATH"
+  fi
+}
+hub_bin() {
+  if [ "$1" = systemd ]; then printf '%s\n' "$2/bin/blirp"; else installed_bin "$2"; fi
+}
+# hub_cli MODE HOME ARGS...: the installed blirp in that setup's environment.
+hub_cli() {
+  _m=$1
+  _h=$2
+  shift 2
+  # shellcheck disable=SC2046 # NAME=VALUE words without spaces
+  env -u XDG_CONFIG_HOME $(hub_mode_env "$_m" "$_h") BLIRP_HOME="$_h/.blirp" BLIRP_LOOPBACK_ONLY=1 \
+    "$(hub_bin "$_m" "$_h")" "$@"
+}
+run_hub() {
+  # shellcheck disable=SC2046 # NAME=VALUE words without spaces
+  env -u GITHUB_TOKEN -u BLIRP_INSTALL_DIR -u XDG_DATA_HOME -u XDG_CONFIG_HOME -u BLIRP_VERSION \
+    $(hub_mode_env "$1" "$2") SHELL=/bin/sh BLIRP_HOME="$2/.blirp" BLIRP_LOOPBACK_ONLY=1 \
+    BLIRP_RELEASE_BASE_URL="$base" BLIRP_REQUIRE_SIGNATURE=1 \
+    sh "$script" --hub >"$work/out.log" 2>&1
+}
+stop_hubs() {
+  for _mh in $hub_homes; do
+    _m=${_mh%%:*}
+    _h=${_mh#*:}
+    [ -x "$(hub_bin "$_m" "$_h")" ] || continue
+    hub_cli "$_m" "$_h" stop >/dev/null 2>&1 || true
+    if [ "$_m" = systemd ]; then
+      hub_cli "$_m" "$_h" service uninstall >/dev/null 2>&1 || true
+      XDG_RUNTIME_DIR=/run/user/$(id -u) systemctl --user unset-environment BLIRP_LOOPBACK_ONLY         >/dev/null 2>&1 || true
+    fi
+  done
+}
+
+hub_test() {
+  mode=$1
+  h=$work/hub-$mode
+  mkdir -p "$h/.blirp"
+  # A free port: a runner may already use the default one.
+  printf '[daemon]\nport = 0\n' >"$h/.blirp/config.toml"
+  hub_homes="$hub_homes $mode:$h"
+  if [ "$mode" = systemd ]; then
+    [ -S "/run/user/$(id -u)/bus" ] || fail "systemd: no user manager (run: sudo loginctl enable-linger $(id -un))"
+    # The service's daemon inherits the manager's environment.
+    systemctl --user set-environment BLIRP_LOOPBACK_ONLY=1 ||
+      XDG_RUNTIME_DIR=/run/user/$(id -u) systemctl --user set-environment BLIRP_LOOPBACK_ONLY=1 ||
+      fail "systemd: cannot set the user manager's environment"
+  else
+    mkdir -p "$work/shim"
+    for t in systemctl loginctl; do
+      printf '#!/bin/sh\necho "System has not been booted with systemd as init system (PID 1)." >&2\nexit 1\n' >"$work/shim/$t"
+      chmod +x "$work/shim/$t"
+    done
+  fi
+
+  run_hub "$mode" "$h" || fail "hub/$mode: install.sh --hub failed"
+  grep -E 'blirp pair blirp1-[a-z0-9]+ [A-Z0-9]{4}-[A-Z0-9]{4}' "$work/out.log" >/dev/null ||
+    fail "hub/$mode: no invite printed"
+  grep -F 'LAN discovery (mDNS) turned off' "$work/out.log" >/dev/null ||
+    fail "hub/$mode: LAN discovery was not turned off"
+  grep -E '^lan_discovery = false' "$h/.blirp/config.toml" >/dev/null ||
+    fail "hub/$mode: config.toml does not keep LAN discovery off"
+  grep -F 'blirp agents set-token claude' "$work/out.log" >/dev/null || fail "hub/$mode: no next steps"
+  if [ "$mode" = systemd ]; then
+    grep -F 'Linger is on' "$work/out.log" >/dev/null || fail "hub/$mode: linger not reported on"
+    grep -F 'Autostart installed' "$work/out.log" >/dev/null || fail "hub/$mode: autostart not installed"
+    XDG_RUNTIME_DIR=/run/user/$(id -u) systemctl --user is-active --quiet blirp.service ||
+      fail "hub/$mode: blirp.service is not active"
+  else
+    grep -F 'no autostart service was installed' "$work/out.log" >/dev/null ||
+      grep -F 'systemd is not running here' "$work/out.log" >/dev/null ||
+      fail "hub/$mode: no fallback message without systemd"
+  fi
+  st=$(hub_cli "$mode" "$h" hub status 2>&1) || fail "hub/$mode: blirp hub status failed: $st"
+  case $st in *"role       hub"*) ;; *) fail "hub/$mode: not a hub: $st" ;; esac
+  id1=$(printf '%s\n' "$st" | sed -n 's/^machine *//p')
+
+  hub_cli "$mode" "$h" doctor >"$work/out.log" 2>&1 || fail "hub/$mode: blirp doctor failed"
+  for line in '[info] role: hub' 'autostart:' 'linger:' '[info] relay: off (BLIRP_LOOPBACK_ONLY=1)'; do
+    grep -F "$line" "$work/out.log" >/dev/null || fail "hub/$mode: doctor has no '$line' line"
+  done
+  if [ "$mode" = systemd ]; then
+    grep -F '[info] linger: on' "$work/out.log" >/dev/null || fail "hub/$mode: doctor: linger not on"
+  fi
+
+  # Again: an upgrade in place that keeps the hub and prints a new invite.
+  run_hub "$mode" "$h" || fail "hub/$mode: second install.sh --hub failed"
+  grep -E 'blirp pair blirp1-' "$work/out.log" >/dev/null || fail "hub/$mode: no invite on the second run"
+  if grep -F 'LAN discovery (mDNS) turned' "$work/out.log" >/dev/null; then
+    fail "hub/$mode: the second run changed LAN discovery"
+  fi
+  if [ "$mode" = systemd ]; then
+    # The upgrade stopped the daemon; the unchanged unit starts it again.
+    XDG_RUNTIME_DIR=/run/user/$(id -u) systemctl --user is-active --quiet blirp.service ||
+      fail "hub/$mode: blirp.service is not active after the second run"
+  fi
+  st=$(hub_cli "$mode" "$h" hub status 2>&1) || fail "hub/$mode: blirp hub status failed: $st"
+  [ "$(printf '%s\n' "$st" | sed -n 's/^machine *//p')" = "$id1" ] || fail "hub/$mode: the machine id changed"
+
+  # A backup of the live database, never over an existing file.
+  hub_cli "$mode" "$h" backup "$h/backup.db" >"$work/out.log" 2>&1 || fail "hub/$mode: blirp backup failed"
+  [ -s "$h/backup.db" ] || fail "hub/$mode: the backup is empty"
+  if hub_cli "$mode" "$h" backup "$h/backup.db" >"$work/out.log" 2>&1; then
+    fail "hub/$mode: blirp backup overwrote a file"
+  fi
+  echo "ok: install.sh --hub ($mode) sets up a hub, prints an invite, and runs again cleanly"
+}
+
+if [ "$kind" = unix ] && [ "$(uname -s)" = Linux ]; then
+  hub_test fallback
+  if [ "${BLIRP_TEST_SYSTEMD:-}" = 1 ]; then hub_test systemd; fi
+  stop_hubs
+  hub_homes=
+fi
 
 # An asset that does not match SHA256SUMS.txt.
 printf 'tampered' >>"$dl/$asset"
