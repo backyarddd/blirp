@@ -59,6 +59,8 @@ so every tag needs one.
 - Claude Code's "You've hit your session limit" (and weekly limit) is
   recognized as a usage limit: automatic distilling pauses and the budget
   unit is given back instead of the session failing.
+- A distill reply with keys outside the output contract is accepted (the
+  extra keys are ignored) instead of failing and costing a retry.
 
 ## [0.2.0] - 2026-09-27
 

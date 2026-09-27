@@ -309,7 +309,7 @@ Summarizer failures are classified. A failure of the summarizer itself (auth: "n
 
 Input: redacted, compacted transcript of the events past `distilled_through_seq` (all events when nothing is new, e.g. a manual re-run) (user prompts verbatim; assistant text; tool calls as one-line `TOOL: ...` (<= 300 chars); tool results `RESULT: ...` (<= 400 chars); file edits and system lines one-line), capped at `memory.distill_max_chars` (default 60 000, keep head 20% + tail 80% around a `[... N characters omitted ...]` marker), plus the current brief and active records (with ids) of the project, and, when continuing, the session's previous summary and items as context (the model returns title and summary for the whole session and only new or changed items). Events are selected in SQL (`Store::distill_events`): the first events filling 20% and the last filling 80% of the budget by an estimate that mirrors the line caps; the ones in between are never loaded and appear as `[... N events omitted ...]`.
 
-Output (strict JSON, `deny_unknown_fields`, validated; one retry with the validation error on invalid output, then the attempt fails):
+Output (JSON, validated: required keys, types and no duplicate keys; keys outside the contract are ignored; one retry with the validation error on invalid output, then the attempt fails):
 ```json
 { "title": "short session title",
   "summary": "3-6 sentences",

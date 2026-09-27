@@ -117,16 +117,16 @@ fn cut(full: String, max_chars: usize) -> String {
 // ---------------------------------------------------------------- contract
 
 #[derive(Debug, Clone, PartialEq, Deserialize)]
-#[serde(deny_unknown_fields)]
 pub struct Item {
     pub title: String,
     #[serde(default)]
     pub body: String,
 }
 
-/// §9 distill output contract.
+/// §9 distill output contract. Keys outside it are ignored (they carry
+/// nothing blirp stores, and rejecting them only cost a retry); required
+/// keys, types and duplicate keys are still enforced.
 #[derive(Debug, Clone, PartialEq, Deserialize)]
-#[serde(deny_unknown_fields)]
 pub struct DistillOutput {
     pub title: String,
     pub summary: String,
@@ -1794,11 +1794,21 @@ mod tests {
         assert_eq!(o.title, "Fix the parser");
         assert_eq!(o.resolved_record_ids, ["r1"]);
         assert_eq!(o.files, ["src/a.rs"]);
+        // Extra keys (e.g. a transcript's own JSON schema echoed back) are
+        // ignored instead of failing the reply.
+        let extra = r#"{"title":"t","summary":"s","direction":"long","verdict":"hold",
+            "decisions":[{"title":"d","body":"b","confidence":0.9}]}"#;
+        let o = parse_output(extra, &known).unwrap();
+        assert_eq!(
+            (o.title.as_str(), o.decisions[0].title.as_str()),
+            ("t", "d")
+        );
         for bad in [
             "no json at all",
             r#"{"title":"","summary":"x"}"#,
             r#"{"title":"t","summary":""}"#,
-            r#"{"title":"t","summary":"s","extra":1}"#,
+            r#"{"title":"t","extra":1}"#,
+            r#"{"title":"t","summary":"s","summary":"again"}"#,
             r#"{"title":"t","summary":"s","decisions":[{"title":""}]}"#,
             r#"{"title":"t","summary":"s","decisions":"nope"}"#,
             "{not json}",

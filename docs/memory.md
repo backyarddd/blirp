@@ -41,7 +41,7 @@ Distilling turns the new part of a session's transcript into memory.
 
 **Input.** The redacted transcript since the last distill (with the session's previous summary as context, so a long session is summarized piece by piece and nothing is sent twice), compacted (prompts verbatim, assistant text, tool calls and results as short one-liners), capped at `memory.distill_max_chars` (default 60 000 characters: the first 20 % and last 80 % are kept around an omission marker), plus the current brief and the active records with their ids.
 
-**Output.** Strict JSON, validated (one retry with the validation error on bad output):
+**Output.** JSON, validated (required keys and types; other keys are ignored; one retry with the validation error on bad output):
 
 - `title` and a 3-6 sentence `summary` of the session,
 - `decisions`, `open_threads`, `gotchas` (up to 20 each) that become records,
