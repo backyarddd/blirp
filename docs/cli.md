@@ -28,6 +28,7 @@ Without a command, `blirp` does what [`blirp app`](#blirp-app) does.
 | [`devices`](#blirp-devices) | yes | paired machines and browser devices |
 | [`backup`](#blirp-backup) | no | consistent copy of the database |
 | [`service`](#blirp-service) | no | autostart at login |
+| [`worktrees`](#blirp-worktrees) | `prune` only | git worktrees blirp created for sessions |
 | [`update`](#blirp-update) | no | update blirp and the desktop app |
 | [`uninstall`](#blirp-uninstall) | no | remove blirp (and with `--purge` its data) |
 | [`hook`](#blirp-hook), [`mcp`](#blirp-mcp) | - | entry points spawned by agents |
@@ -184,7 +185,20 @@ blirp service status      # installed? daemon running?
 blirp service uninstall   # remove the autostart entry; a running daemon keeps running
 ```
 
+`status` exits 1 when autostart is not installed (like `blirp status` without a daemon), so scripts can test for it.
+
 Per-user autostart, never a system service: macOS LaunchAgent `dev.blirp.daemon`, Linux `systemd --user` unit `blirp.service`, Windows `HKCU\...\Run` value `blirp`. Records the absolute path of the binary you ran it with and, on macOS/Linux, your current `PATH` and `BLIRP_HOME`; re-run after moving the binary or changing where agents are installed. Run from a temporary location (an AppImage mount or `/tmp`), it records the installed CLI instead (the one the install receipt names, else `blirp` on `PATH`) and refuses when there is none. Idempotent.
+
+## blirp worktrees
+
+```
+blirp worktrees list    # session worktrees and their state
+blirp worktrees prune   # remove the worktrees of ended sessions without changes
+```
+
+The git worktrees blirp created for sessions, under `~/.blirp/worktrees/<project>/<name>`. `list` reads the database read-only (no daemon needed) and prints, for each worktree of a session on this machine, the session id, its status, its uncommitted changes (`clean`, `<n> changed`, `missing` when the folder is gone, `unknown (<error>)` when `git status` fails) and the path; folders there that no session refers to are listed as `(no session)`. Prints "no blirp worktrees" when there are none.
+
+`prune` needs the daemon. Through it (`POST /api/sessions/:id/worktree/remove`) it removes the worktree of every ended session that has no uncommitted changes (untracked files count as changes) or whose folder is already gone; branches are kept. It keeps, with the reason, the worktrees of running sessions, with changes, or whose state is unknown, and ends with `<n> removed, <n> kept`. Folders without a session are never removed. Exit code 0 also when some were kept.
 
 ## blirp update
 
@@ -224,4 +238,4 @@ MCP server over stdio for agents ([memory.md](memory.md#mcp-tools)). Uses `BLIRP
 
 ## Exit codes
 
-`0` success; `1` error (message on stderr), `blirp status` with no daemon, `blirp doctor` with a failed check, `blirp hooks` with a failed agent, `blirp skills` with a skipped or failed skill, `blirp uninstall` when something could not be removed; `2` invalid arguments; `10` `blirp update --check` with an update available. `blirp hook` always exits 0.
+`0` success; `1` error (message on stderr), `blirp status` with no daemon, `blirp service status` without autostart installed, `blirp doctor` with a failed check, `blirp hooks` with a failed agent, `blirp skills` with a skipped or failed skill, `blirp uninstall` when something could not be removed; `2` invalid arguments; `10` `blirp update --check` with an update available. `blirp hook` always exits 0.
