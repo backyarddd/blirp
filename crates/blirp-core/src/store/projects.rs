@@ -152,8 +152,10 @@ fn canonical_or_same(p: &Path) -> PathBuf {
 
 /// A recorded folder in one spelling: no `\\?\` prefix, no trailing or
 /// doubled separators, `.` and `..` resolved lexically, `/` as `\` on
-/// Windows. For folders that no longer exist (existing ones are
-/// canonicalized).
+/// Windows, and its deepest existing ancestor canonicalized. For folders
+/// that no longer exist (existing ones are canonicalized): a gone
+/// `/tmp/run` on macOS is `/private/tmp/run`, like the (canonical) roots
+/// and registered folders it is matched against.
 fn normalize(p: &Path) -> PathBuf {
     use std::path::Component;
     let mut out = PathBuf::new();
@@ -165,6 +167,14 @@ fn normalize(p: &Path) -> PathBuf {
                 out.pop();
             }
             c => out.push(c),
+        }
+    }
+    for base in out.ancestors() {
+        if let Ok(canon) = dunce::canonicalize(base) {
+            return match out.strip_prefix(base) {
+                Ok(rest) if !rest.as_os_str().is_empty() => canon.join(rest),
+                _ => canon,
+            };
         }
     }
     out
@@ -851,8 +861,14 @@ mod tests {
             home.join(".codex/worktrees/abc/app"),
             home.join(".some-tool/profiles/default"),
             home.join("Documents/Codex/2026-01-02/new-chat"),
-            home.join("documents/codex/2026-01-02"),
         ];
+        // Paths are case insensitive only on Windows (`paths::path_key`):
+        // elsewhere `documents` can be another folder (macOS volumes can be
+        // case sensitive; canonicalizing gives existing folders their case).
+        let scratch: Vec<PathBuf> = scratch
+            .into_iter()
+            .chain(cfg!(windows).then(|| home.join("documents/codex/2026-01-02")))
+            .collect();
         for s in &scratch {
             std::fs::create_dir_all(s).unwrap();
             let r = store.resolve_project_with("m", "box", s, &dirs).unwrap();
@@ -913,9 +929,13 @@ mod tests {
         assert_eq!(n, root.join("a/c/d"));
         #[cfg(unix)]
         {
+            // Gone folders match in canonical form, like the roots: through
+            // a symlink here, `/tmp` -> `/private/tmp` on macOS.
+            std::os::unix::fs::symlink(root.join("home"), root.join("link")).unwrap();
+            assert_eq!(normalize(&root.join("link/gone")), root.join("home/gone"));
             let p = NonProjectDirs::from_process();
-            assert!(p.contains(Path::new("/tmp/agent/run")));
-            assert!(p.contains(Path::new("/var/tmp/agent")));
+            assert!(p.contains(&normalize(Path::new("/tmp/agent/run"))));
+            assert!(p.contains(&normalize(Path::new("/var/tmp/agent"))));
         }
     }
 
