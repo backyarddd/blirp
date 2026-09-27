@@ -959,9 +959,21 @@ impl Store {
             };
             // A bucket under another id (an earlier 0.1.1 build, or this
             // machine's id before `rebind_machine`) joins the canonical one.
+            // Not when it is another machine's (a database copied from
+            // another machine): that one keeps it.
             if old.chats {
+                let foreign: Option<i64> = one(
+                    tx,
+                    "SELECT 1 WHERE EXISTS (SELECT 1 FROM sessions WHERE project_id = ?1
+                                            AND machine_id != ?2)
+                       OR EXISTS (SELECT 1 FROM machines WHERE 'chats-' || id = ?1 AND id != ?2)",
+                    params![old.id, machine_id],
+                    |r| r.get(0),
+                )?;
                 let bucket = chats_bucket(tx, machine_id, machine_name)?;
-                merge_in(tx, &old.id, &bucket.id, true)?;
+                if foreign.is_none() {
+                    merge_in(tx, &old.id, &bucket.id, true)?;
+                }
                 return Ok(true);
             }
             let authored: Option<i64> = one(
@@ -1118,19 +1130,29 @@ impl Store {
         machine_name: &str,
         dirs: &NonProjectDirs,
     ) -> Result<()> {
-        self.write(|tx| {
-            if live_project_in(tx, id)?.chats {
-                return Err(StoreError::Invalid("already Chats".into()));
-            }
-            // Only what `chat_candidates` offers, checked again under the
-            // write lock: a project someone used or edited meanwhile stays.
-            let offered = untouched_projects(tx, machine_id)?
+        let refused = || {
+            StoreError::Conflict(
+                "this project is not one that looks like chats (it was used, edited, or has another machine's folders or sessions)".into(),
+            )
+        };
+        let offered = |c: &Connection| -> Result<Option<Vec<ProjectPath>>> {
+            Ok(untouched_projects(c, machine_id)?
                 .into_iter()
-                .any(|(p, paths)| p.id == id && looks_like_chats(dirs, &paths));
-            if !offered {
-                return Err(StoreError::Conflict(
-                    "this project is not one that looks like chats (it was used, edited, or has another machine's folders or sessions)".into(),
-                ));
+                .find(|(p, _)| p.id == id)
+                .map(|(_, paths)| paths))
+        };
+        if self.read(|c| live_project_in(c, id))?.chats {
+            return Err(StoreError::Invalid("already Chats".into()));
+        }
+        // Filesystem checks outside the write lock; under it only that the
+        // project is still untouched with the same folders.
+        let paths = self.read(|c| offered(c))?.ok_or_else(refused)?;
+        if !looks_like_chats(dirs, &paths) {
+            return Err(refused());
+        }
+        self.write(|tx| {
+            if offered(tx)?.as_ref() != Some(&paths) {
+                return Err(refused());
             }
             let home = home_project(tx, machine_id, machine_name)?;
             merge_in(tx, id, &home.id, true)?;
@@ -1199,7 +1221,7 @@ fn untouched_projects(
     for p in candidates {
         let paths = all(
             c,
-            "SELECT * FROM project_paths WHERE project_id = ?1",
+            "SELECT * FROM project_paths WHERE project_id = ?1 ORDER BY machine_id, path",
             params![p.id],
             path_row,
         )?;
@@ -2424,6 +2446,37 @@ mod tests {
         let gone = store.get_project(&old.id).unwrap().unwrap();
         assert!(gone.deleted && gone.chats);
         assert!(!store.ensure_chats("m", "box").unwrap());
+
+        // A copied database: the stored bucket is another known machine's,
+        // or holds its sessions. It stays that machine's.
+        for case in ["known machine", "foreign session"] {
+            let (_d, store) = temp_store();
+            let theirs = store
+                .write(|tx| home_project(tx, "laptop", "laptop"))
+                .unwrap();
+            if case == "known machine" {
+                store
+                    .upsert_machine(&crate::model::Machine {
+                        id: "laptop".into(),
+                        name: "laptop".into(),
+                        os: "linux".into(),
+                        role: crate::model::MachineRole::Node,
+                        last_seen: 1,
+                        revoked: false,
+                    })
+                    .unwrap();
+            } else {
+                store
+                    .insert_session(&external("x", &theirs.id, "someone"))
+                    .unwrap();
+            }
+            assert!(store.ensure_chats("m", "box").unwrap(), "{case}");
+            assert!(
+                !store.get_project(&theirs.id).unwrap().unwrap().deleted,
+                "{case}"
+            );
+            assert_eq!(store.home_project_id().unwrap().as_deref(), Some("chats-m"));
+        }
     }
 
     #[test]

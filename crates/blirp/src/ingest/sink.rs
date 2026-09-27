@@ -279,8 +279,13 @@ impl<'e> StoreSink<'e> {
                         meta: meta.clone(),
                     }))?;
                 }
-                let project_created = (created && plan.project.as_ref().is_some_and(|p| p.1))
-                    || plan.refile.as_ref().is_some_and(|r| r.2);
+                // A project resolution created for this row (a re-file that
+                // did not happen leaves its new project unused).
+                let project_created = match (&plan.project, &plan.refile) {
+                    (Some((pid, true)), _) if created => Some(pid.clone()),
+                    (_, Some((_, pid, true, _))) if moving => Some(pid.clone()),
+                    _ => None,
+                };
                 out.push((s, created, changed, project_created));
             }
             if let Some(c) = cursor {
@@ -292,8 +297,8 @@ impl<'e> StoreSink<'e> {
             eng.notifier.deleted(id);
         }
         for (s, created, changed, project_created) in results {
-            if project_created {
-                eng.notifier.project(&s.project_id);
+            if let Some(pid) = project_created {
+                eng.notifier.project(&pid);
             }
             if created {
                 eng.notifier.created(s);
