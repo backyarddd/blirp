@@ -311,6 +311,8 @@ pub async fn launch(state: &SharedState, req: LaunchSession) -> ApiResult<Sessio
     let st = state.clone();
     let req2 = req.clone();
     let prepared = crate::api::blocking(move || prepare(&st, &req2)).await?;
+    // A copy downloaded from the hub takes the hub's changes first.
+    crate::files::fast_forward(state, &prepared.cwd).await;
 
     let now = now_ms();
     let session = Session {

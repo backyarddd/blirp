@@ -3,6 +3,7 @@
 
 pub mod api;
 pub mod copy;
+pub mod download;
 pub mod engine;
 pub mod local;
 
@@ -35,6 +36,8 @@ pub struct FilesState {
     pub hash_gate: Arc<tokio::sync::Semaphore>,
     engine: Mutex<Option<Arc<Engine>>>,
     hub: Mutex<Option<Arc<HubFiles>>>,
+    /// Copies being made on this machine.
+    pub downloads: download::Downloads,
 }
 
 impl Default for FilesState {
@@ -43,6 +46,7 @@ impl Default for FilesState {
             hash_gate: Arc::new(tokio::sync::Semaphore::new(1)),
             engine: Mutex::default(),
             hub: Mutex::default(),
+            downloads: download::Downloads::default(),
         }
     }
 }
@@ -170,5 +174,41 @@ pub fn config_changed(state: &SharedState) {
             r.rate().set(cfg.files.upload_kbps);
         }
         e.rescan();
+    }
+}
+
+/// How long a session start waits for its copy to take the hub's changes.
+const FAST_FORWARD: std::time::Duration = std::time::Duration::from_secs(30);
+
+/// A session starts in `cwd`: a downloaded copy containing it takes the
+/// hub's changes first (design §5, `on_demand`). Failures are logged; the
+/// session starts either way.
+pub async fn fast_forward(state: &SharedState, cwd: &std::path::Path) {
+    let Some(e) = engine(state) else { return };
+    let key = blirp_core::paths::path_key(cwd);
+    let Some(t) = e.tracked().into_iter().find(|t| {
+        !t.copy.origin
+            && key.starts_with(blirp_core::paths::path_key(std::path::Path::new(
+                &t.copy.key,
+            )))
+    }) else {
+        return;
+    };
+    let run = async {
+        let _work = e.work.lock().await;
+        copy::apply(&e.env, &t.copy, false).await
+    };
+    match tokio::time::timeout(FAST_FORWARD, run).await {
+        Ok(Ok(r)) if r.written + r.deleted + r.conflicts.len() > 0 => tracing::info!(
+            written = r.written,
+            deleted = r.deleted,
+            conflicts = r.conflicts.len(),
+            "session folder took the hub's changes"
+        ),
+        Ok(Ok(_)) => {}
+        Ok(Err(err)) => {
+            tracing::warn!(error = %err, "session folder could not take the hub's changes")
+        }
+        Err(_) => tracing::warn!("taking the hub's changes before a session start timed out"),
     }
 }

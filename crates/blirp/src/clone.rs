@@ -226,7 +226,7 @@ impl CloneJobs {
 }
 
 /// Run the clone, reporting progress lines; `Err` carries git's last output.
-fn run_clone(url: &str, dest: &Path, progress: &dyn Fn(&str)) -> Result<(), String> {
+pub(crate) fn run_clone(url: &str, dest: &Path, progress: &dyn Fn(&str)) -> Result<(), String> {
     let mut cmd = process::command("git");
     cmd.args([
         // Transport helpers can run arbitrary commands.

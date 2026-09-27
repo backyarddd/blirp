@@ -955,6 +955,13 @@ const MUTATING_ROUTES: &[(&str, &str, Need)] = &[
     ("PATCH", "/api/projects/p1/resources/r1", Need::Control),
     ("DELETE", "/api/projects/p1/resources/r1", Need::Control),
     ("POST", "/api/suggestions/x1/accept", Need::Control),
+    ("POST", "/api/projects/p1/files-sync/apply", Need::Control),
+    (
+        "DELETE",
+        "/api/projects/p1/files-sync/roots/r1",
+        Need::Control,
+    ),
+    ("POST", "/api/machines/m1/files/download", Need::Control),
 ];
 
 #[derive(Debug, Clone, Copy, PartialEq)]
