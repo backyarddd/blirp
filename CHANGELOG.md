@@ -10,6 +10,19 @@ so every tag needs one.
 
 ## [Unreleased]
 
+### Added
+
+- Project files on the hub ([docs/project-files.md](docs/project-files.md)):
+  paired machines upload their project folders to the hub, uncommitted
+  changes included, leaving out secrets, build output and ignored files
+  (`.gitignore`, `.blirpignore`). Cloud sessions can start from a hub copy
+  and other machines can download a copy (clone plus the uploaded files);
+  edits sync back, concurrent edits are kept as conflict copies, and your own
+  folders change only when you click Bring changes here. Per-project
+  Default/On/Off, Preview, Pause, first-run grace period and banner,
+  `[sync] project_files` and a `[files]` config section. Portal browser
+  devices need the new Files permission for project files.
+
 ## [0.1.1] - 2026-09-26
 
 ### Added

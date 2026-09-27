@@ -42,14 +42,14 @@ The device appears under **Settings > Machines & Sync > Devices** named after it
 | | Browser device | With **Terminal control** on |
 |---|---|---|
 | Read projects, sessions, transcripts, summaries, memory, search | yes | yes |
-| Browse project files (read-only) and git status/diffs | yes | yes |
+| Browse project files (read-only), git diffs, [project file sync](project-files.md) | only with **Files** (403 `files_not_allowed`) | only with **Files** |
 | Edit memory (brief, records, wiki, resources, suggestions), rename and register projects | yes | yes |
 | Change settings (`PATCH /api/settings`) and create new device login links | yes | yes |
 | Start, stop, resume sessions; distill a session; type into terminals, paste or drop files into them, and resize them | no (403 `control_not_allowed`; terminals are view-only) | yes, also for sessions on other paired machines (relayed by the hub) |
 | Pair machines, enable/disable the hub, invite, revoke or change devices | no (403 `admin_only`) | no |
 | Install global hooks, open folders/editors on the hub, stop the daemon, use `/mcp` | no | no |
 
-New devices start without terminal control. Toggle **Terminal control** or **Revoke** a device under **Settings > Machines & Sync > Devices** on the hub (or `blirp devices list|revoke`). Revoking or changing a device closes its open WebSockets at once, so it continues only with its new rights.
+New devices start without terminal control and without **Files**. A device with terminal control can run a shell on the hub, so it can read files there anyway. Toggle **Terminal control** or **Revoke** a device under **Settings > Machines & Sync > Devices** on the hub (or `blirp devices list|revoke`). Revoking or changing a device closes its open WebSockets at once, so it continues only with its new rights.
 
 Treat a signed-in device like a logged-in session on the hub: it can read all your synced history and change settings. Revoke devices you no longer use.
 

@@ -1,6 +1,6 @@
 # Project file sync through the hub: design
 
-Status: approved for v1 (phases 0 and 1). Scope: upload each project folder's working tree to the hub, run cloud sessions on the hub's copy, and open copies on other machines on demand.
+Status: approved for v1 (phases 0 and 1); implemented, see ARCHITECTURE.md §10a and project-files.md. Scope: upload each project folder's working tree to the hub, run cloud sessions on the hub's copy, and open copies on other machines on demand.
 
 ## 0. Baseline
 

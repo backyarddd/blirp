@@ -53,6 +53,8 @@ Data dir `BLIRP_HOME`, default `~/.blirp` on every OS (Windows: `%USERPROFILE%\.
                                    removed with the session and after 7 days
   distill/run-*/                   summarizer scratch dirs (§9), removed after each run
   secrets/claude_oauth_token       optional Claude Code login token (§7); dir 0700, file 0600; never in the DB
+  files/blobs/ab/cd/<hash>.zst     project file contents on the hub (§10a); files/tmp/ partial uploads,
+                                   files/dl/ partial downloads (every machine)
 ```
 
 `runtime.json` + the token authenticate every local client (Tauri shell, hooks, MCP stdio shim, CLI). The daemon binds `127.0.0.1:<port>` (default 47770). It and the LAN portal bind exclusively (`SO_EXCLUSIVEADDRUSE` on Windows, where another program could otherwise bind a more specific address on the same port, e.g. `127.0.0.1` under the portal's `0.0.0.0`, and receive its connections). A taken port fails the start with an error naming the program that holds it when the OS tells (never a silent move to another port, which would leave the known address to whoever holds it); `daemon.port = 0` explicitly picks a free port. The actual port is in runtime.json.
@@ -136,7 +138,8 @@ ingest_cursors(adapter TEXT, source TEXT, cursor_json TEXT, PRIMARY KEY(adapter,
 settings(key TEXT PK, value_json TEXT)
 devices(id TEXT PK, name TEXT, kind TEXT CHECK(kind IN ('machine','browser')),
         token_hash TEXT NULL, node_id TEXT NULL, created_at INT, last_seen INT,
-        revoked INT DEFAULT 0, can_control_terminals INT DEFAULT 0)
+        revoked INT DEFAULT 0, can_control_terminals INT DEFAULT 0,
+        can_access_files INT DEFAULT 0)                 -- portal "Files" permission (migration 10)
 
 -- replication (§10)
 outbox(origin_seq INTEGER PRIMARY KEY AUTOINCREMENT, entity TEXT, op TEXT, key TEXT, payload_json TEXT, ts INT)
@@ -146,6 +149,17 @@ hub_log(hub_seq INTEGER PRIMARY KEY AUTOINCREMENT, origin_machine TEXT, origin_s
         UNIQUE(origin_machine, origin_seq))            -- only populated on the hub; payload '' for
                                                        -- events and compacted markers (migration 9)
 hub_pulls(machine_id TEXT PK, after INT)               -- hub: each node's last pull position (migration 9)
+
+-- project files (§10a, migration 10; never replicated through hub_log)
+file_roots(root_id TEXT PK, machine_id, path, project_id, head INT, manifest_json, created_at, updated_at)  -- hub
+file_entries(root_id, path, version, hash NULL, link NULL, size, mode_x, mtime, by_machine, at,
+             PRIMARY KEY(root_id, path))              -- hub; hash and link both NULL = tombstone
+file_history(root_id, path, version, ..., replaced_at, PRIMARY KEY(root_id, path, version))           -- hub
+file_blobs(hash TEXT PK, size, stored, created_at)    -- hub; stored = compressed bytes on disk
+file_projects(project_id TEXT PK, mode CHECK(mode IN ('default','on','off')))                         -- hub
+file_copies(path TEXT PK, root_id, origin INT, mode CHECK(mode IN ('on_demand','keep_synced')), seen, created_at)
+file_base(copy, path, version, hash NULL, link NULL, skipped INT, rejected NULL, PRIMARY KEY(copy, path))
+file_hashes(copy, path, size, mtime_ns, file_id, hash, secret INT, checked_at, PRIMARY KEY(copy, path))
 ```
 
 All writes to replicated entities (`projects`, `project_paths`, `sessions`, `events`, `records`, `briefs`, `wiki_pages`, `resources`, `machines`) go through `Store::apply(Change)` which writes the row and appends to `outbox` in one transaction. One exception keeps the outbox from growing with every status flip: a session change that only moves between live statuses (starting/working/idle/waiting, plus `last_activity_at`) within 5 s of that session's last outbox entry writes the row and records `outbox_deferred(entity, key, due)` (migration 5) instead; the daemon's 500 ms status tick queues the then-current row once `due` passes (`Store::flush_deferred`), and any other change to the session (a final status, a title, tokens) is queued at once and clears the deferral. So at most one status-only entry per session per 5 s is replicated and the final state always is.
@@ -371,7 +385,7 @@ Current project = `BLIRP_PROJECT_ID` env, else the registered project containing
 
 ## 10. Sync (`blirp-sync`)
 
-Roles: `standalone` (default), `hub`, `node`. Transport: iroh 1.x (QUIC, NAT traversal, relay fallback). `sync.relay`: `default` = n0 relays plus n0 DNS address publishing/lookup (peers are found by id alone), `disabled` = direct addresses only, `<url>` = that relay only. Local-network discovery (mDNS, service `blirp`) is on unless `sync.lan_discovery = false` (then a join without an invite answers 400 `invite_required`; changing it through `PATCH /api/settings` restarts a running endpoint, and a failed restart answers 502 `sync_failed` with the config saved); hubs advertise the user data `blirp-hub`. ALPNs: `blirp/pair/1`, `blirp/sync/1`, `blirp/proxy/1`. One accept loop routes by ALPN: a hub accepts pairing from anyone and sync/proxy only from paired, non-revoked machines (`devices` kind `machine`, matched on the TLS-authenticated endpoint id); a node accepts proxy only from its hub. Standalone machines open no endpoint at all.
+Roles: `standalone` (default), `hub`, `node`. Transport: iroh 1.x (QUIC, NAT traversal, relay fallback). `sync.relay`: `default` = n0 relays plus n0 DNS address publishing/lookup (peers are found by id alone), `disabled` = direct addresses only, `<url>` = that relay only. Local-network discovery (mDNS, service `blirp`) is on unless `sync.lan_discovery = false` (then a join without an invite answers 400 `invite_required`; changing it through `PATCH /api/settings` restarts a running endpoint, and a failed restart answers 502 `sync_failed` with the config saved); hubs advertise the user data `blirp-hub`. ALPNs: `blirp/pair/1`, `blirp/sync/1`, `blirp/proxy/1`, `blirp/files/1` (§10a). One accept loop routes by ALPN: a hub accepts pairing from anyone and sync/proxy only from paired, non-revoked machines (`devices` kind `machine`, matched on the TLS-authenticated endpoint id); a node accepts proxy only from its hub. Standalone machines open no endpoint at all.
 
 Wire format (all three protocols): frames of a 4-byte big-endian length + JSON. JSON because replicated payloads are already JSON and stay debuggable. Frames are size-checked before reading (8 MiB hard cap, 64 KiB for handshake/control frames). Each protocol opens with a hello carrying the sender's `versions`; the receiver picks the highest common version or answers `unsupported_version` (current: 1).
 
@@ -397,6 +411,24 @@ Remote proxy (`blirp/proxy/1`): every node keeps one proxy connection to its hub
 - `/api/machines/:id/{health,agents,dirs,clone,clone/:job}` for another machine are forwarded to it (the target answers the same route for its own id), so the new-session dialog shows the target's agents (with claude's login state), browses its folders and clones onto it. `clone` with `project_id` is resolved on the requesting machine (the remote URL of its folder of that project) and forwarded as a URL without credentials.
 
 Revocation (`DELETE /api/machines/:id` or `DELETE /api/devices/:id` on the hub): the device and the replicated machine row are marked revoked and the machine's live connections are closed at once; reconnects are refused. `PATCH /api/devices/:id` also closes the machine's connections (or the browser device's WebSockets) so they reopen with the new rights. Leaving (`POST /api/sync/leave` on a node): the node stops its sync session, opens a fresh one, pushes what is still queued (new batches start for at most 5 s) and sends `leave`; the hub revokes the sender (device revoked with terminal control off, machine row revoked; the machine is the connection's TLS-authenticated endpoint id, never an id from the message, so a node can only revoke itself), answers `left` and closes the node's connections. The whole exchange is bounded (10 s); the node then becomes standalone in any case (`sync.allow_hub_control` reset). When the hub could not be told, or changes had not reached it, the answer carries a `warning` asking the user to revoke the machine on the hub. `DELETE /api/machines/:id` on a node is refused (409 `not_hub`).
+
+## 10a. Project files (`blirp::files`, `blirp_sync::files`, `blirp_core::files`)
+
+Design and rationale: [design/project-file-sync.md](design/project-file-sync.md); user guide: [project-files.md](project-files.md). v1 = phases 0 and 1.
+
+- **Root**: one `ProjectPath` on its origin machine; `root_id = hex(blake3("<machine_id>\n<path>"))[..32]`. The hub keeps one tree per root; every working copy (the origin folder, the hub copy for cloud sessions, copies on other machines) writes to it. A root is registered by its origin's first commit (the hub checks the id against the claimed path and that the hub has the `project_paths` row; else `root_pending`, retried).
+- **Eligible folders**: this machine's folders of live projects except the Home bucket, scratch projects (resolution-made, never touched, in a scratch folder per §5), anything inside `BLIRP_HOME` but `workspaces/`, and removable or network drives. Upload runs when the project's mode (hub `file_projects`: default/on/off) is on, or default and this machine's `sync.project_files`.
+- **Scanner** (`blirp_core::files::scan`): own walk without following symlinks; layers (later wins): 1 VCS folders, `.blirp-tmp-*`, `BLIRP_HOME` (not overridable); 2 build denylist (+ `*.exe` outside `bin/` of non-git roots, `*.zip` over 10 MB); 3 `.gitignore` + `.git/info/exclude`; 4 secrets denylist + private-key header in the first 4 KiB of files under 1 MiB; 5 `.blirpignore` (`!` re-includes; a re-included secret is flagged). Caps `files.max_file_mb` (skip), `files.max_root_gb` and 100 000 files (root paused). Pauses while `.git/index.lock` or `.git/rebase-*` exists. Symlinks are synced as links when relative and inside the root.
+- **Hash cache** `file_hashes`: `(size, mtime_ns, file_id)` (inode; Windows creation time) -> BLAKE3; a row is trusted only if it was hashed more than 2 s after the file's mtime (racy rule). Hashing runs behind a semaphore of one on the blocking pool.
+- **Engine** (daemon, hub and node roles): watcher (notify, 2 s debounce) + rescan at start, every 10 min and after watcher errors. An upload pass diffs the scan against `file_base`: new/changed -> `Put{hash}`/`Link`, gone -> `Delete`, excluded now -> `Forget` (no tombstone); uploads missing blobs (at most 4 streams, `files.upload_kbps` token bucket), then commits batches of at most 1000 changes with the origin's git manifest. The first start (after upgrade or pairing) waits `files.grace_until` (10 min) while it scans; `POST /api/files/start-now` ends it. Settings key `files.paused` pauses uploads.
+- **Commit** (hub, one transaction per batch): a change is accepted only if the path's current version equals its `base_version` (0 = never seen). A write over a tombstone is always accepted (modify beats delete); the same content twice is `Ok` with the current version; a delete with a stale base is a conflict; a losing write is stored at `name.conflict-<machine>-<YYYYMMDD-HHMMSS>[-n].ext` (machine name reduced to `[A-Za-z0-9-]`, at most 10 live per path, older ones tombstoned into history). Every path is checked (`files::path::check`: relative, no `.`/`..`/empty parts, no control characters or backslashes, no VCS component including `.git.`, `.git `, `GIT~1` and NTFS streams, no `.blirp-tmp-`); links must stay inside; `Put` needs the blob (`missing_blob`); a project in mode off refuses the batch (`files_off`). Replaced versions go to `file_history`.
+- **Conflicts on the writer**: a copy writes its losing content to the conflict path locally (the hub's copy of it) and takes the winner; an origin folder (upload-only in v1) records the refused content in `file_base.rejected` (`-` for a delete) and does not send it again.
+- **Applying the hub** (Update from hub on a copy, at session start in a copy (bounded 30 s), Bring changes here on the origin, the overlay of a new copy): full index vs bases vs the disk: unchanged since base (or refused content already kept on the hub) -> overwrite; missing locally -> write (modify wins); changed locally -> the hub's version is written as a conflict copy and the local one uploads over it; tombstones remove only unchanged files; paths the OS cannot hold, Windows symlinks and case-only collisions (written as a conflict copy) are recorded as `skipped` and never read as deletes. Writes (`files::write::Target`): parent folders walked from the root without following symlinks, never inside `BLIRP_HOME` unless the copy is a workspace there, temp file `.blirp-tmp-<rand>` fsynced, content verified against its hash, target re-checked against the expectation, then hard link (new files) or rename.
+- **Copies** (`POST /api/machines/:id/files/download`, forwarded like clone): destination `~/blirp/<origin folder name>` or an empty/missing folder inside home (folderless: `BLIRP_HOME/workspaces/<project>`); git remote cloned when the manifest has one and git is installed, HEAD checked out when on the remote (else the branch, with a note), then the overlay; registered with `Store::attach_folder` (explicit `project_id`) and `file_copies` (`on_demand`: uploads live, takes the hub's changes on demand). The hub copy for cloud sessions is the same job on the hub. A copy whose root was deleted on the hub detaches (files kept).
+- **Protocol `blirp/files/1`** (hub only, `authorized()` like sync; connections tracked per machine, so revocation closes them): every bi stream opens with `Open::{Hello, PutBlob{hash, len}, GetBlob{hash, offset}}`. Control stream: `Roots` -> `RootList{roots, project_modes}`, `Index{root_id, after}` -> `IndexPage{entries <= 5000, head, more}`, `Have{hashes}` -> `Missing{hash, have}`, `Commit{root_id, root_path?, manifest?, changes}` -> `CommitResult{results, head}`, `DeleteRoot`, `SetMode`. Blob bytes: chunks of `[u32 zlen][zstd frame of <= 1 MiB raw]`, `0` ends; decompression bounded per chunk. Uploads append raw bytes to `files/tmp/<hash>.part` (resume at its length), the hub verifies BLAKE3, compresses (zstd 3), fsyncs and renames into `files/blobs/`; downloads resume from `files/dl/<hash>.part` and are verified. `Notify{root_id, head}` on a uni stream. The writer of a commit is the connection's TLS-authenticated machine. A hub without the ALPN -> `hub_outdated`. The hub's own engine calls the same service in-process (`FileHub::Local`).
+- **Quota and GC** (hub): quota `files.hub_quota_gb`, else half the free disk when first run (settings key `files.hub_quota`); an upload that does not fit first drops the oldest history rows and unreferenced blobs, then fails `hub_quota`. Daily: history older than `files.keep_versions_days`, tombstones older than 90 days, unreferenced blobs older than 1 h, parts older than 24 h, orphaned blob files.
+- **Delete hub copy**: only while the project's mode is off or its origin is revoked (`files_on` otherwise); entries and history go, blobs with the next GC.
+- Logs name paths and counts, never contents. Server event `files_updated` on state changes.
 
 ## 11. HTTP API (daemon, axum)
 
@@ -447,6 +479,13 @@ CRUD /api/projects/:id/resources[/:id]
 GET  /api/projects/:id/suggestions       POST /api/suggestions/:id/{accept|reject|dismiss}
 GET  /api/projects/:id/git               {is_git, branch, status[], ahead/behind}; 404 `not_git` when the folder is not a repo ; GET .../git/diff?path=
 GET  /api/projects/:id/files?path=       directory listing (read-only) ; GET .../files/content?path= (text, <= 1 MiB)
+                                         (portal devices: Files permission, 403 `files_not_allowed`; also git diff
+                                         and everything under files-sync and /api/files)
+GET  /api/projects/:id/files-sync        ProjectFiles; PUT {mode} (control); GET .../preview?root= (local dry run),
+                                         .../incoming?root=; POST .../apply {root} (control); DELETE .../roots/:root (§10a)
+GET  /api/files/status                   FilesOverview; POST /api/files/start-now, /api/files/pause {paused} (control)
+POST /api/machines/:id/files/download    {root_id, parent?, name?} (control): a copy there (§10a); 202 DownloadJob;
+                                         GET .../files/download/:job
                                          files and git take optional `root=` (one of the project's folders here);
                                          paths are relative, `..`/absolute paths and symlinks escaping the root are rejected,
                                          and so is anything inside BLIRP_HOME but `worktrees/` and `workspaces/`
@@ -529,9 +568,9 @@ GET  /mcp                                MCP Streamable HTTP
 GET  /*                                  embedded SPA
 ```
 
-Request/response DTOs are defined in `blirp-core::model` and exported to `web/src/lib/api/types.gen.ts` (`cargo test -p blirp-core export_bindings`). `/api/events/ws` pushes JSON `ServerEvent` frames: `session_created`, `session_updated`, `session_deleted {session_id}`, `project_updated`, `memory_updated {project_id, part}`, `sync_updated {status}` (role, connection or portal changed), and `resync` when the client fell behind and must refetch.
+Request/response DTOs are defined in `blirp-core::model` and exported to `web/src/lib/api/types.gen.ts` (`cargo test -p blirp-core export_bindings`). `/api/events/ws` pushes JSON `ServerEvent` frames: `session_created`, `session_updated`, `session_deleted {session_id}`, `project_updated`, `memory_updated {project_id, part}`, `sync_updated {status}` (role, connection or portal changed), `files_updated` (§10a), and `resync` when the client fell behind and must refetch.
 
-Every authenticated request carries a principal: local clients (runtime token or WebSocket ticket) have `control` and `admin`; portal browser devices have `control = can_control_terminals` and no `admin`; requests relayed by the sync proxy have the proxied `control` and no `admin`. Rights are checked before the request body is read (extractors `Control` / `Admin`), so a caller without them always gets 403:
+Every authenticated request carries a principal: local clients (runtime token or WebSocket ticket) have `control` and `admin`; portal browser devices have `control = can_control_terminals`, `files = can_access_files` and no `admin`; requests relayed by the sync proxy have the proxied `control` and no `admin`. Rights are checked before the request body is read (extractors `Control` / `Admin`), so a caller without them always gets 403:
 - `admin` (403 `admin_only`): `PATCH /api/settings` (config.toml, settings values), hub enable/disable, invite, join, browser invites, device and machine revoke/patch, hook ingress, global integration install/uninstall, claude's login token, `POST /api/sessions/:id/open`, `POST /api/daemon/shutdown`, `POST /api/update/check`, `POST /api/update/apply`.
 - `control` (403 `control_not_allowed`): every other mutation: launch, resume, stop, distill, rename or delete sessions, worktree removal, machine folder listing and clone, project register/rename/delete/merge, brief, records, wiki, resources and suggestions; plus terminal input and resize, and terminal uploads.
 - Reads (every `GET`, the event stream, viewing a terminal) need authentication only.
@@ -566,9 +605,12 @@ The loopback listener answers only requests whose `Host` is `127.0.0.1:<port>`, 
                                        # (unchecked by default) or Settings; reset when leaving the hub;
                                        # changing it closes relayed WebSockets so they reopen with the new rights
            lan_discovery = true        # mDNS on the LAN (§10); macOS needs the Local Network permission
+           project_files = true        # upload project folders to the hub (§10a)
 [portal]   lan = false          # hub: serve portal on LAN with HTTPS
            lan_port = 47771
 [update]   check = true         # GET /api/update may ask GitHub for the latest release
+[files]    max_file_mb = 50  max_root_gb = 2  hub_quota_gb = 0 (half the free disk)
+           upload_kbps = 0 (unlimited)  keep_versions_days = 30          # §10a
 ```
 
 ## 13. Portal and remote browser access

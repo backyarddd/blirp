@@ -31,6 +31,7 @@ blirp runs as your user account and starts coding agents that can already read a
 | Logs | `~/.blirp/logs/` | never contain transcript text or secrets |
 | Files pasted or dropped into a terminal | `~/.blirp/uploads/<session>/` on the machine running the session | `0600` in `0700` folders (Windows: profile ACL); not redacted; not in the database, so never synced, and never ingested; deleted with the session and after 7 days; at most 25 MB each; saved only inside that folder under a sanitized name (the client's path is never used) |
 | Claude login token (only if you store one: `blirp agents set-token claude`) | `~/.blirp/secrets/claude_oauth_token` | `0600` in a `0700` folder (Windows: profile ACL); not in the database, so never synced; never logged or returned by the API; passed only to claude processes as `CLAUDE_CODE_OAUTH_TOKEN` ([agents.md](agents.md#headless-login-for-a-hub)) |
+| Project folders uploaded to the hub ([project-files.md](project-files.md)) | hub: `~/.blirp/files/blobs/` (zstd, content-addressed) with the index in `blirp.db`; partial transfers in `files/tmp/`, `files/dl/` | not encrypted at rest (cloud sessions need plain files; use full-disk encryption on the hub); secrets left out by default by name and by a private-key content check, never redacted; only paired, non-revoked machines read or write them; replaced versions kept 30 days, deletions 90 days; logs name paths and counts, never contents |
 | Other agent credentials | the agents' own config | never read or stored by blirp |
 
 Nothing is stored outside `~/.blirp` except what you ask for: autostart entries (`blirp service install`), agent config entries (`blirp hooks install`, with `.blirp-backup` copies), skill folders (`blirp skills install`), and git worktrees and `blirp/*` branches for worktree sessions.
@@ -75,6 +76,10 @@ Requests run with `control` and `admin` rights ([api.md](api.md#listeners-and-au
 
 Never expose the daemon port or the portal to the internet. For remote access use Tailscale ([portal.md](portal.md#tailscale)).
 
+## Project files from other machines
+
+Project file sync ([project-files.md](project-files.md)) writes files that came from another machine into folders on this one, so every path from the network is checked before anything is stored or written: relative, no `..`, no empty parts, no control characters or backslashes, nothing inside a VCS folder (`.git`, `.hg`, `.svn`, `.jj`, including the Windows spellings `.GIT.`, `GIT~1` and NTFS streams), no blirp temp file. Writers also refuse names the OS cannot hold, symlinked or junctioned parent folders, links leaving the folder and anything inside blirp's data folder. Content is verified against its BLAKE3 hash on both ends; writes go to a temp file that is fsynced, checked again against what blirp last synced there, and then moved into place (a new file with a hard link that fails if the name appeared meanwhile). A file that changed locally is never overwritten: the incoming version is written next to it as a conflict copy. Your own project folders are upload-only unless you click **Bring changes here**. Portal browser devices need the **Files** permission for project files.
+
 ## Global hooks
 
 `blirp hooks install` is the only operation that edits files blirp does not own (`blirp skills install` only adds its own skill folders, and never overwrites or removes a skill you edited unless you pass `--force`, [skills.md](skills.md)). It is explicit, idempotent, marker-based, backs up the original once, writes atomically, refuses to rewrite files with comments or invalid syntax, and `uninstall` removes exactly its own entries ([memory.md](memory.md#global-hooks)). Hook processes always exit 0 within 2 seconds and send only the agent's hook payload to the local daemon.
@@ -97,3 +102,4 @@ The window loads only its bundled loading page and the local daemon UI. The daem
 - Keep the portal off unless you use it; give **Terminal control** only to devices that need it; revoke unused devices and machines.
 - Use `summarizer = "ollama"` or `"none"` if transcripts must not reach a model provider, and `sync.relay = "disabled"` (or your own relay) if you do not want public relay/discovery servers involved.
 - Keep blirp updated; only the latest release gets security fixes.
+- Review **Preview** on a project's **Files on hub** tab before its first upload; add a `.blirpignore` for anything sensitive the secret rules do not know.

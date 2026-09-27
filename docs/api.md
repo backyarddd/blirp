@@ -99,7 +99,27 @@ CSRF protection: a mutating request or WebSocket upgrade that carries an `Origin
 | `GET /api/projects/:id/git?root=` | `{is_git, root, branch, head, upstream, ahead, behind, entries[{path, orig_path, index, worktree, conflicted}]}`; 404 `not_git` for plain folders |
 | `GET /api/projects/:id/git/diff?path=&root=` | `{path, diff, truncated}` (working tree diff, capped at 1 MiB) |
 
-Files and git are read-only and take paths relative to the project folder on this machine (`root` picks one when the project has several). Absolute paths, `..` and symlinks leading outside the folder are rejected, and so is anything inside blirp's own data folder (`BLIRP_HOME`, e.g. when the project folder is your home folder; session worktrees under `worktrees/` and project workspaces under `workspaces/` excepted): 403 `path_in_data_dir`. For a project without folders they read its blirp workspace on this machine (created, empty, when missing).
+Portal browser devices need the **Files** permission for files, file content, git diffs and everything under `files-sync` and `/api/files` (403 `files_not_allowed`). Files and git are read-only and take paths relative to the project folder on this machine (`root` picks one when the project has several). Absolute paths, `..` and symlinks leading outside the folder are rejected, and so is anything inside blirp's own data folder (`BLIRP_HOME`, e.g. when the project folder is your home folder; session worktrees under `worktrees/` and project workspaces under `workspaces/` excepted): 403 `path_in_data_dir`. For a project without folders they read its blirp workspace on this machine (created, empty, when missing).
+
+### Project files on the hub
+
+See [project-files.md](project-files.md). Mutations need `control`.
+
+| Method and path | Description |
+|---|---|
+| `GET /api/files/status` | `FilesOverview {available, enabled, paused, grace_until, hub_name, folders, bytes, hub_error}` (first-run banner) |
+| `POST /api/files/start-now` | end the first-run grace period; `FilesOverview` |
+| `POST /api/files/pause` | `{paused}`: Pause file sync on this machine; `FilesOverview` |
+| `GET /api/projects/:id/files-sync` | `ProjectFiles {available, mode, global, effective, paused, hub_error, roots[{root_id, machine_id, machine_name, path, origin_revoked, hub: RootInfo?, local: LocalFiles?}]}` |
+| `PUT /api/projects/:id/files-sync` | `{mode: default\|on\|off}`, stored on the hub; `ProjectFiles` |
+| `GET /api/projects/:id/files-sync/preview?root=` | `FilesPreview {root, state, never_synced, files, bytes, excluded[{reason, count, paths}], reincluded_secrets}`: a local dry run |
+| `GET /api/projects/:id/files-sync/incoming?root=` | `FilesIncoming {root, files[{path, action (update\|new\|delete\|conflict\|skip), by_machine_name, at}]}` |
+| `POST /api/projects/:id/files-sync/apply` | `{root}`: Update from hub (a copy) or Bring changes here (the origin); `AppliedFiles {written, deleted, conflicts, skipped, failed}` |
+| `DELETE /api/projects/:id/files-sync/roots/:root_id` | Delete hub copy; 409 `files_on` unless the project is Off or its origin is revoked |
+| `POST /api/machines/:id/files/download` | `{root_id, parent?, name?}`: make a copy on that machine (forwarded like clone); 202 `DownloadJob`; 409 `already_exists`, `already_copied`, `origin_here` |
+| `GET /api/machines/:id/files/download/:job` | poll a `DownloadJob {state, dest, progress, error, note}` |
+
+Errors: 409 `files_unavailable` (no hub), 502 `hub_unreachable`, 409 `hub_outdated`.
 
 ### Memory
 
@@ -160,8 +180,8 @@ Text fields are limited to 256 KiB.
 | `POST /api/sync/join/preview` | admin. `{invite}` (invite, join link or `""`) -> `JoinPreview {hub_id}`: the hub's machine id read from the invite, nothing contacted; `null` for a LAN join. The hub's name is only exchanged after the code is verified. |
 | `POST /api/sync/join` | admin. `{invite, code, allow_hub_control?}`; `invite` may be a `blirp://join/...` link (its code is used when `code` is empty) or `""` to find the hub on the LAN. `allow_hub_control` sets `sync.allow_hub_control` with the new role (left out: unchanged). `SyncStatus`. 409 `already_synced`. |
 | `POST /api/sync/leave` | admin, node. Pushes the changes still queued (for at most 5 s), asks the hub to revoke this machine, then returns to `standalone` and resets `sync.allow_hub_control`. `LeftHub {status: SyncStatus, warning}`: `warning` is set when the hub could not be reached (it still lists this machine as paired: revoke it there) or changes made here had not reached it. Leaving never fails because the hub is down. 409 `not_node`. |
-| `GET /api/devices` | `Device[]`: `{id, name, kind (machine\|browser), node_id, created_at, last_seen, revoked, can_control_terminals}` |
-| `PATCH /api/devices/:id` | admin. `{can_control_terminals}`; closes the device's connections so they reopen with the new rights |
+| `GET /api/devices` | `Device[]`: `{id, name, kind (machine\|browser), node_id, created_at, last_seen, revoked, can_control_terminals, can_access_files}` |
+| `PATCH /api/devices/:id` | admin. `{can_control_terminals?, can_access_files?}`; closes the device's connections so they reopen with the new rights |
 | `DELETE /api/devices/:id` | admin. Revoke; 204 |
 | `POST /api/devices/browser-invite` | admin. `{url, expires_at}`: one-time portal login link (5 minutes). 409 `portal_disabled` when the portal is not running. |
 | `GET /device-login?invite=` | portal listener only: redeem a login link, set the device cookie, redirect to `/` |
@@ -198,6 +218,7 @@ Server push only; each text frame is one JSON event:
 | `project_updated` | `project_id` | a project was created, renamed, merged or removed |
 | `memory_updated` | `project_id`, `part` (`brief`, `records`, `wiki`, `resources`, `suggestions`) | memory changed |
 | `sync_updated` | `status: SyncStatus` | role, connection or portal changed |
+| `files_updated` | - | project file sync state changed (a folder here, a root on the hub) |
 | `resync` | - | events were dropped because the client fell behind; refetch state |
 
 ## MCP: `/mcp`

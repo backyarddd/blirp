@@ -109,6 +109,8 @@ Replicated between all paired machines (every node ends up with a full copy):
 - sessions (metadata, status, summaries, tokens, cost) and all transcript events,
 - records, briefs (with version history), wiki pages, resources.
 
+Project folders themselves (their working trees, uncommitted changes included) go to the hub separately, not to every node: see [project-files.md](project-files.md). They use their own protocol (`blirp/files/1`); a node whose hub is older says "update the hub to sync project files" and keeps syncing everything else.
+
 Local to each machine, never synced: `config.toml`, the runtime token, `identity.key`, the TLS certificate, the Claude login token (`~/.blirp/secrets/`), suggestions, local settings and ingest cursors, launch files, worktrees, terminal screen contents, and the device list (kept on the hub).
 
 Everything replicated has been redacted before it was stored. Each machine distills and ingests only its own sessions; summaries of a session run on the laptop are produced on the laptop and arrive on the other machines by sync.
@@ -161,6 +163,7 @@ Everything is in `~/.blirp` on the hub:
 - `blirp.db`: all data. Back it up while the daemon runs with `blirp backup /backups/blirp.db` (a consistent copy; it never overwrites a file), or stop the daemon and copy the file (with `blirp.db-wal` if present).
 - `identity.key`: the hub's identity (secret, mode 0600). Paired machines trust this key; losing it means pairing every machine again.
 - `config.toml`.
+- `files/`: project folders uploaded by your machines ([project-files.md](project-files.md)); their index is in `blirp.db`.
 
 To move the hub, stop the daemon, copy `~/.blirp` to the new machine, install blirp there and start it. Every node also holds a full copy of the replicated data, so a lost hub loses nothing that had already synced.
 
@@ -173,6 +176,7 @@ Script installs: `blirp update` (it replaces the CLI and the desktop app and sta
 - Run the hub as a normal user; use full-disk encryption on it (it holds the redacted history of every paired machine).
 - Keep the portal off unless you use it, and never expose the daemon port or the portal to the internet (`tailscale serve`, never `tailscale funnel`).
 - Revoke lost or retired machines and browser devices.
+- The hub stores project folders in plain form (`~/.blirp/files/`); secrets are left out by default ([project-files.md](project-files.md#security-and-privacy)).
 - Consider turning off **Terminal control** for machines that should only read.
 
 More: [security.md](security.md).

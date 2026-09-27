@@ -13,6 +13,7 @@
 | [Cloud sessions](cloud-sessions.md) | run sessions on your hub (an always-on machine) from your PC, keep them through sleep and restarts, keep-awake, clone and pick folders on the hub |
 | [Hub on a VPS](vps.md) | no always-on machine at home: run the hub on a rented Linux server with one command, pairing, headless agent logins, firewall, backups, updates |
 | [Sync and hub](sync-and-hub.md) | self-hosting a hub (macOS, Linux, Windows), pairing, what syncs, conflicts, relays and privacy, remote sessions, revocation, backups |
+| [Project files on the hub](project-files.md) | upload project folders to the hub (with uncommitted changes), exclusions and secrets, copies on other machines and for cloud sessions, conflicts |
 | [Web portal](portal.md) | LAN HTTPS portal, phone login via QR, certificate fingerprint, browser device permissions, Tailscale |
 
 ## Reference

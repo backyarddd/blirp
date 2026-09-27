@@ -40,6 +40,7 @@ role = "standalone"
 relay = "default"
 allow_hub_control = false
 lan_discovery = true
+project_files = true
 
 [portal]
 lan = false
@@ -47,6 +48,13 @@ lan_port = 47771
 
 [update]
 check = true
+
+[files]
+max_file_mb = 50
+max_root_gb = 2
+hub_quota_gb = 0
+upload_kbps = 0
+keep_versions_days = 30
 ```
 
 ### `[daemon]`
@@ -106,6 +114,7 @@ Normally managed by `blirp hub enable|disable`, `blirp pair` and **Settings > Ma
 | `relay` | `"default"` \| `"disabled"` \| `http(s)://` URL | `"default"` | How machines find and reach each other: n0 public relays and DNS discovery, direct/LAN only, or only your own iroh relay. See [sync-and-hub.md](sync-and-hub.md#network-relay-and-privacy). |
 | `allow_hub_control` | bool | `false` | Node only: let the hub and other paired machines launch, stop, resume and delete sessions, type into terminals and change memory on this machine. Off: they can only read it. Takes effect immediately. |
 | `lan_discovery` | bool | `true` | Find and announce machines on the local network with mDNS (hub and node). Off: `blirp pair <code>` without an invite does not work, and peers connect through the relay or the addresses they already know. On macOS it needs the Local Network permission ([troubleshooting.md](troubleshooting.md#error-sending-mdns-no-route-to-host-in-the-log-macos)). Also in **Settings > Machines & Sync**; takes effect immediately (a running sync endpoint restarts; if it cannot, the setting is still saved and the save answers `sync_failed`). |
+| `project_files` | bool | `true` | Upload this machine's project folders to the hub (hub and node roles). Each project can override it with On or Off on its **Files on hub** tab. Also in **Settings > Machines & Sync**. See [project-files.md](project-files.md). |
 
 ### `[portal]`
 
@@ -119,6 +128,18 @@ Normally managed by `blirp hub enable|disable`, `blirp pair` and **Settings > Ma
 | Key | Type | Default | Description |
 |---|---|---|---|
 | `check` | bool | `true` | Let the daemon ask GitHub once a day (hourly after a failure; the UI asks the daemon on load and every few hours) whether a newer release exists, and **Check now** in Settings > About ask right away (at most once a minute). The UI then shows a notice with **Update now** (script installs) or a link to the release page. `false`: no requests, no notice and no Update now; `blirp update` still works ([install.md](install.md#updating)). |
+
+### `[files]`
+
+Project file sync through the hub ([project-files.md](project-files.md)). Changes apply at once.
+
+| Key | Type | Default | Description |
+|---|---|---|---|
+| `max_file_mb` | integer 1-1024 | `50` | Larger files are skipped and listed. |
+| `max_root_gb` | integer 1-1024 | `2` | A folder with more synced data (or more than 100 000 files) is paused as too large. |
+| `hub_quota_gb` | integer | `0` | Hub: disk space for file contents; `0` = half of the free space when file sync first ran on the hub. Old versions are dropped first, then new uploads are refused (`hub_quota`). |
+| `upload_kbps` | integer | `0` | Upload limit of this machine in kilobits per second; `0` = unlimited. |
+| `keep_versions_days` | integer > 0 | `30` | Hub: how long replaced versions are kept. |
 
 ## Environment variables
 
@@ -157,6 +178,7 @@ Same layout on every OS under `BLIRP_HOME` (default `~/.blirp`; Windows `%USERPR
 | `launch/<session-id>/` | per-launch files: `memory.md`, `handoff.md`, Claude `settings.json` and `mcp.json`, Gemini/Amp settings copies |
 | `worktrees/<project-id>/<name>/` | per-session git worktrees |
 | `distill/run-*/` | summarizer scratch folders, removed after each run |
+| `files/blobs/`, `files/tmp/`, `files/dl/` | project file sync: contents stored on the hub (zstd), partial uploads, partial downloads |
 
 Installing, upgrading or removing blirp never touches this directory.
 

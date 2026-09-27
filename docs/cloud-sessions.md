@@ -48,7 +48,9 @@ Press **+** (Ctrl+T). With a hub paired, the dialog starts with **Run on**: **Th
 - **Project**: a project that already has a folder on the hub starts there. A git project that exists only on your PC offers **Clone on <hub>**: the hub runs `git clone` with the remote URL of your local repository into `~/blirp/<repo name>` (or a folder you pick), with progress and git's error output in the dialog. The hub uses its own git credentials (SSH keys, credential helper); nothing is copied from the PC, and credentials inside the URL (`https://user:token@...`) are removed before it is sent. Once cloned, the session joins the same project (matched by the git remote). A project without a folder starts in the hub's own blirp workspace for it (workspaces are per machine and not synced; the project's memory is).
 - **Folder on <hub>**: type a path or **Browse…** folders on the hub. The browser shows folder names only (never files or their contents), only inside the hub user's home, hidden folders on request, and git repositories marked. **Recent on <hub>** offers folders earlier sessions ran in there.
 
-Non-git folders cannot be cloned; pick an existing folder on the hub. Anything the agent talks to has to be on the hub too: for example an MCP server that drives a desktop app needs that app running on the hub machine, not on your PC.
+- **Use hub copy (includes uncommitted changes)**: when a machine uploaded the project's folder to the hub ([project-files.md](project-files.md)), this is offered next to Clone. The hub makes its own copy (cloning the git remote when it can, then writing the uploaded files on top), and the session's edits sync back to the hub; your PC shows **Hub has N newer files** and **Bring changes here**.
+
+Non-git folders without a hub copy cannot be cloned; pick an existing folder on the hub. Anything the agent talks to has to be on the hub too: for example an MCP server that drives a desktop app needs that app running on the hub machine, not on your PC.
 
 Start the session: its terminal opens on the PC, streamed from the hub. Session cards, the session toolbar and grid tiles show a machine badge (a cloud for the hub); sessions on this machine have none.
 
@@ -76,7 +78,7 @@ It is on by default for the hub and off for other machines ([configuration](conf
 - The hub must be on and online. If it is unreachable the session cannot be attached (`machine_unreachable`), but it keeps running there.
 - Restarting the hub's daemon (or the hub) ends its running sessions; they become **Detached**. **Resume** continues the agent's conversation (`claude --resume` and the equivalents), in a new process.
 - Terminal history lives in the hub daemon's RAM, not on disk: 10 000 lines per session, gone when the session ends. The agent's transcript is ingested as usual, so search and project memory keep it.
-- Sessions run as the hub's user with the hub's files, credentials and tools. The dialog never transfers secrets or files from the PC; clone only passes a URL.
+- Sessions run as the hub's user with the hub's files, credentials and tools. The dialog never transfers secrets from the PC; clone only passes a URL, and a hub copy holds only what project file sync uploaded (secrets are left out).
 - The folder browser is limited to the home folder of the hub user.
 
 ## Troubleshooting
