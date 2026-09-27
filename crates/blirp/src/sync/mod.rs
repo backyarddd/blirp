@@ -180,6 +180,15 @@ pub async fn start(state: &SharedState) {
         Ok(Err(e)) => tracing::error!(error = %e, "switching replication failed"),
         Err(e) => tracing::error!(error = %e, "switching replication failed"),
     }
+    if state.config().sync.role == MachineRole::Hub {
+        let store = state.store.clone();
+        match tokio::task::spawn_blocking(move || store.hub_stamp_legacy_sessions()).await {
+            Ok(Ok(0)) => {}
+            Ok(Ok(n)) => tracing::info!(sessions = n, "re-sent sessions with edit times"),
+            Ok(Err(e)) => tracing::error!(error = %e, "stamping session edit times failed"),
+            Err(e) => tracing::error!(error = %e, "stamping session edit times failed"),
+        }
+    }
     if let Err(e) = start_service(state).await {
         tracing::error!(error = %e.message, "sync did not start");
     }

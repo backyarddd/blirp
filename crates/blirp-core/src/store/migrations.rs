@@ -473,10 +473,17 @@ CREATE INDEX hub_parked_row ON hub_parked(entity, key);
 /// A session's title and project are edited by other machines too (§10):
 /// each converges on its newest edit by its own time, so the owner's
 /// full-row writes (status ticks) never revert a newer rename or move.
-/// Existing rows read as never edited (0).
+/// Existing rows read as never edited (0). Changes logged before carry no
+/// times either, so between them the larger value would win, not the later
+/// one: a hub re-sends its sessions once with time 1
+/// (`sync.stamp_sessions`, `Store::hub_stamp_legacy_sessions`), so every
+/// machine converges on the hub's values, which followed hub order.
 const V14: &str = r#"
 ALTER TABLE sessions ADD COLUMN title_updated_at INTEGER NOT NULL DEFAULT 0;
 ALTER TABLE sessions ADD COLUMN project_updated_at INTEGER NOT NULL DEFAULT 0;
+INSERT INTO settings(key, value_json)
+    SELECT 'sync.stamp_sessions', 'true' WHERE EXISTS (SELECT 1 FROM sessions)
+    ON CONFLICT(key) DO NOTHING;
 "#;
 
 #[derive(Debug, thiserror::Error)]

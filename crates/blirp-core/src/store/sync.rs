@@ -21,6 +21,9 @@ use serde::{Deserialize, Serialize};
 const OUTBOX_OFF_KEY: &str = "sync.outbox_off";
 /// Events rowid up to which a backfill queued them (present while one runs).
 const BACKFILL_KEY: &str = "sync.backfill_events";
+/// Present on a hub until it stamped its sessions' legacy edit times
+/// (migration 14, [`Store::hub_stamp_legacy_sessions`]).
+const STAMP_SESSIONS_KEY: &str = "sync.stamp_sessions";
 /// Present until this machine re-sent its projects once (migration 12).
 const REQUEUE_PROJECTS_KEY: &str = "sync.requeue_projects";
 
@@ -381,78 +384,226 @@ const MARKER_OP: &str = "marker";
 /// Parked entries are dropped after this long (the row never arrived: its
 /// owner deleted it before syncing, or never syncs again).
 const PARK_TTL_MS: i64 = 7 * 24 * 3600 * 1000;
-/// At most this many entries are parked; more are rejected.
-const MAX_PARKED: i64 = 10_000;
+/// At most this many entries of one origin are parked; more are rejected.
+const MAX_PARKED_PER_ORIGIN: i64 = 1_000;
+/// Largest parked entry (it keeps only what it may change).
+const MAX_PARKED_BYTES: usize = 16 << 10;
 
-/// Hub: keep `e` from `origin`, which changes another machine's session or
-/// folder the hub does not have yet, until the owner's row arrives
-/// ([`unpark_in`]). False when the hub holds too many already.
-fn park_in(tx: &Transaction<'_>, origin: &str, e: &WireEntry) -> Result<bool> {
-    let held: i64 = tx.query_row("SELECT count(*) FROM hub_parked", [], |r| r.get(0))?;
-    if held >= MAX_PARKED {
+/// What a parked entry keeps: only what another machine may change of the
+/// row ([`foreign_session_write`], a folder re-pointed by a merge).
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+enum Parked {
+    Session {
+        machine_id: String,
+        title: Option<String>,
+        title_updated_at: i64,
+        project_id: String,
+        project_updated_at: i64,
+    },
+    Folder(crate::model::ProjectPath),
+}
+
+/// A paired machine the hub accepts sync from.
+fn paired_in(c: &Connection, machine: &str) -> Result<bool> {
+    Ok(one(
+        c,
+        "SELECT 1 FROM devices WHERE kind = 'machine' AND node_id = ?1 AND revoked = 0",
+        params![machine],
+        |_| Ok(()),
+    )?
+    .is_some())
+}
+
+/// Hub: keep `change` of entry `e` from `origin`, which changes `owner`'s
+/// session or folder the hub does not have yet, until the owner's row
+/// arrives ([`unpark_in`]). False (rejected instead) when the owner is no
+/// paired machine, so its row never comes, when the origin has too many
+/// parked already, or when what would be kept is too large.
+fn park_in(
+    tx: &Transaction<'_>,
+    origin: &str,
+    owner: &str,
+    change: Change,
+    e: &WireEntry,
+) -> Result<bool> {
+    if !paired_in(tx, owner)? {
+        return Ok(false);
+    }
+    let held: i64 = tx.query_row(
+        "SELECT count(*) FROM hub_parked WHERE origin_machine = ?1",
+        params![origin],
+        |r| r.get(0),
+    )?;
+    if held >= MAX_PARKED_PER_ORIGIN {
+        return Ok(false);
+    }
+    let kept = match change {
+        Change::Session(s) => Parked::Session {
+            machine_id: s.machine_id,
+            title: s.title,
+            title_updated_at: s.title_updated_at,
+            project_id: s.project_id,
+            project_updated_at: s.project_updated_at,
+        },
+        Change::ProjectPath(p) => Parked::Folder(p),
+        _ => return Ok(false),
+    };
+    let kept = serde_json::to_string(&kept)?;
+    if kept.len() > MAX_PARKED_BYTES {
         return Ok(false);
     }
     tx.execute(
         "INSERT OR IGNORE INTO hub_parked(origin_machine, origin_seq, entity, key, payload_json, ts, parked_at)
          VALUES (?1,?2,?3,?4,?5,?6,?7)",
-        params![origin, e.origin_seq, e.entity, e.key, e.payload_json, e.ts, crate::now_ms()],
+        params![origin, e.origin_seq, e.entity, e.key, kept, e.ts, crate::now_ms()],
     )?;
     Ok(true)
 }
 
-/// Hub: the rows `arrived` (entity, key) were just written by their owner:
-/// apply what was parked for them, in the order it was pushed, checked as
-/// if it arrived now (so another machine's session write is still reduced
-/// to what it may change). Applied as the hub's own write, so it is logged
-/// after the owner's row and every machine applies it after that row.
-fn unpark_in(tx: &Transaction<'_>, arrived: &[(String, String)]) -> Result<()> {
+/// Whether project `from` is `target` or was merged into it, directly or
+/// through other merges (`projects.merged_into`).
+fn merged_into_in(c: &Connection, from: &str, target: &str) -> Result<bool> {
+    let mut at = from.to_string();
+    // Merge chains are short; the bound only guards against a cycle.
+    for _ in 0..64 {
+        if at == target {
+            return Ok(true);
+        }
+        match one(
+            c,
+            "SELECT merged_into FROM projects WHERE id = ?1",
+            params![at],
+            |r| r.get::<_, Option<String>>(0),
+        )?
+        .flatten()
+        {
+            Some(next) => at = next,
+            None => return Ok(false),
+        }
+    }
+    Ok(false)
+}
+
+/// A row written by its owner (or removed) in an ingested batch: parked
+/// writes for it are applied or dropped ([`unpark_in`]).
+struct Arrived {
+    entity: String,
+    key: String,
+    deleted: bool,
+}
+
+/// Hub: the rows `arrived` were just written (or removed): apply what was
+/// parked for them, in the order it was parked, checked as if it arrived
+/// now (so another machine's session write is still reduced to what it may
+/// change). Applied as the hub's own write, so it is logged after the
+/// owner's row and every machine applies it after that row. Dropped: what
+/// was parked for a removed row, by a machine no longer paired, or a folder
+/// merge whose folder its owner filed elsewhere meanwhile (in no project
+/// merged into the target).
+fn unpark_in(tx: &Transaction<'_>, arrived: &[Arrived]) -> Result<()> {
     let mut seen = std::collections::BTreeSet::new();
-    for (entity, key) in arrived {
-        if !seen.insert((entity, key)) {
+    for a in arrived {
+        if !seen.insert((&a.entity, &a.key, a.deleted)) {
             continue;
         }
         let parked = all(
             tx,
-            "SELECT origin_machine, origin_seq, entity, key, payload_json, ts FROM hub_parked
-             WHERE entity = ?1 AND key = ?2 ORDER BY parked_at, origin_seq",
-            params![entity, key],
+            "SELECT origin_machine, origin_seq, payload_json FROM hub_parked
+             WHERE entity = ?1 AND key = ?2 ORDER BY rowid",
+            params![a.entity, a.key],
             |r| {
                 Ok((
                     r.get::<_, String>(0)?,
-                    WireEntry {
-                        origin_seq: r.get(1)?,
-                        entity: r.get(2)?,
-                        op: "upsert".into(),
-                        key: r.get(3)?,
-                        payload_json: r.get(4)?,
-                        ts: r.get(5)?,
-                    },
+                    r.get::<_, i64>(1)?,
+                    r.get::<_, String>(2)?,
                 ))
             },
         )?;
-        for (origin, e) in parked {
-            match check_entry(tx, &origin, None, &e) {
-                Ok((change, _)) => {
-                    let applied = savepoint(tx, || {
-                        write_row(tx, &change)?;
-                        super::queue_in(tx, &change)
-                    })?;
-                    if let Err(err) = applied {
-                        tracing::warn!(origin, origin_seq = e.origin_seq, entity = %e.entity, error = %err, "hub could not apply a parked entry");
+        for (origin, origin_seq, kept) in parked {
+            if !a.deleted && paired_in(tx, &origin)? {
+                match unparked_change(tx, &a.key, &kept) {
+                    Ok(Some(change)) => match check_owner(tx, &origin, None, change) {
+                        Ok(change) => {
+                            let applied = savepoint(tx, || {
+                                check_ids(&change)?;
+                                write_row(tx, &change)?;
+                                super::queue_in(tx, &change)
+                            })?;
+                            if let Err(err) = applied {
+                                tracing::warn!(origin, origin_seq, error = %err, "hub could not apply a parked entry");
+                            }
+                        }
+                        Err(Refused::Missing { .. }) => continue,
+                        Err(err) => {
+                            tracing::warn!(origin, origin_seq, error = %err, "dropping a parked entry");
+                        }
+                    },
+                    // Its row is not here (yet).
+                    Ok(None) => continue,
+                    Err(err) => {
+                        tracing::warn!(origin, origin_seq, error = %err, "dropping a parked entry");
                     }
-                }
-                Err(Refused::Missing { .. }) => continue,
-                Err(err) => {
-                    tracing::warn!(origin, origin_seq = e.origin_seq, entity = %e.entity, error = %err, "dropping a parked entry");
                 }
             }
             tx.execute(
                 "DELETE FROM hub_parked WHERE origin_machine = ?1 AND origin_seq = ?2",
-                params![origin, e.origin_seq],
+                params![origin, origin_seq],
             )?;
         }
     }
     Ok(())
+}
+
+/// The change a parked entry `kept` for row `key` stands for, built on the
+/// stored row. None while that row is not here; an error drops the entry.
+fn unparked_change(tx: &Transaction<'_>, key: &str, kept: &str) -> Result<Option<Change>> {
+    Ok(match serde_json::from_str::<Parked>(kept)? {
+        Parked::Session {
+            machine_id,
+            title,
+            title_updated_at,
+            project_id,
+            project_updated_at,
+        } => one(
+            tx,
+            "SELECT * FROM sessions WHERE id = ?1",
+            params![key],
+            session_row,
+        )?
+        .map(|old| {
+            Change::Session(Session {
+                machine_id,
+                title,
+                title_updated_at,
+                project_id,
+                project_updated_at,
+                ..old
+            })
+        }),
+        Parked::Folder(p) => {
+            let Some(now) = one(
+                tx,
+                "SELECT * FROM project_paths WHERE machine_id = ?1 AND path = ?2",
+                params![p.machine_id, p.path],
+                path_row,
+            )?
+            else {
+                return Ok(None);
+            };
+            if !merged_into_in(tx, &now.project_id, &p.project_id)? {
+                return Err(StoreError::Conflict(format!(
+                    "folder {} was filed in another project meanwhile",
+                    p.path
+                )));
+            }
+            // A re-point: everything else is the owner's.
+            Some(Change::ProjectPath(crate::model::ProjectPath {
+                project_id: p.project_id,
+                ..now
+            }))
+        }
+    })
 }
 
 fn cursors_in(c: &rusqlite::Connection, peer: &str) -> Result<SyncCursors> {
@@ -548,6 +699,17 @@ const COMPACTED: [(&str, &str); 3] = [
 /// Highest floor up to which `hub_log` was compacted (hub).
 const COMPACTED_KEY: &str = "sync.hub_log_compacted";
 
+/// Record that `hub_log` was compacted up to `floor` (kept when higher).
+fn record_compacted_in(tx: &Transaction<'_>, floor: i64) -> Result<()> {
+    tx.execute(
+        "INSERT INTO settings(key, value_json) VALUES (?1, ?2)
+         ON CONFLICT(key) DO UPDATE SET value_json = excluded.value_json
+         WHERE CAST(value_json AS INTEGER) < CAST(excluded.value_json AS INTEGER)",
+        params![COMPACTED_KEY, floor.to_string()],
+    )?;
+    Ok(())
+}
+
 fn compacted_in(c: &Connection) -> Result<i64> {
     Ok(one(
         c,
@@ -569,16 +731,20 @@ fn compact_batch_in(
     pos: &(String, i64),
     batch: usize,
 ) -> Result<(Compacted, Option<(String, i64)>)> {
-    // Another machine's session write (a rename or move) is kept: its title
-    // or project can be newer than those of every later owner write, which
-    // keep their own edit times (`write_row`).
+    // Per row: whether its owner wrote it, and (a session) its title and
+    // project edit times.
     let rows = all(
         tx,
         &format!(
-            "SELECT l.hub_seq, l.key, l.origin_machine, l.origin_seq, l.payload_json = '' FROM hub_log l
+            "SELECT l.hub_seq, l.key, l.origin_machine, l.origin_seq, l.payload_json = '',
+               coalesce(({owner}) = l.origin_machine, 1),
+               CASE WHEN l.payload_json <> '' THEN
+                 coalesce(json_extract(l.payload_json, '$.row.title_updated_at'), 0) END,
+               CASE WHEN l.payload_json <> '' THEN
+                 coalesce(json_extract(l.payload_json, '$.row.project_updated_at'), 0) END
+             FROM hub_log l
              WHERE l.op = 'upsert' AND l.entity = ?1 AND (l.key, l.hub_seq) > (?2, ?3)
                AND l.hub_seq <= ?4
-               AND (l.entity <> 'sessions' OR coalesce(({owner}) = l.origin_machine, 1))
              ORDER BY l.key, l.hub_seq LIMIT ?5"
         ),
         params![entity, pos.0, pos.1, floor, batch as i64],
@@ -589,6 +755,9 @@ fn compact_batch_in(
                 r.get::<_, String>(2)?,
                 r.get::<_, i64>(3)?,
                 r.get::<_, bool>(4)?,
+                r.get::<_, bool>(5)?,
+                r.get::<_, Option<i64>>(6)?.unwrap_or(0),
+                r.get::<_, Option<i64>>(7)?.unwrap_or(0),
             ))
         },
     )?;
@@ -596,6 +765,18 @@ fn compact_batch_in(
         "SELECT 1 FROM hub_log l
          WHERE l.op = 'upsert' AND l.entity = ?1 AND l.key = ?2 AND l.hub_seq > ?3
            AND l.hub_seq <= ?4 AND l.payload_json <> '' AND ({owner}) = l.origin_machine
+         LIMIT 1"
+    ))?;
+    // Another machine's session write (a rename or move) only hides behind
+    // a later owner upsert whose title and project edits are at least as
+    // new: those keep their newest edit whatever write carries them
+    // (`write_row`).
+    let mut superseded_foreign = tx.prepare_cached(&format!(
+        "SELECT 1 FROM hub_log l
+         WHERE l.op = 'upsert' AND l.entity = ?1 AND l.key = ?2 AND l.hub_seq > ?3
+           AND l.hub_seq <= ?4 AND l.payload_json <> '' AND ({owner}) = l.origin_machine
+           AND coalesce(json_extract(l.payload_json, '$.row.title_updated_at'), 0) >= ?5
+           AND coalesce(json_extract(l.payload_json, '$.row.project_updated_at'), 0) >= ?6
          LIMIT 1"
     ))?;
     // A later row of the same origin with a higher origin_seq keeps that
@@ -613,19 +794,13 @@ fn compact_batch_in(
          LIMIT 1",
     )?;
     let mut done = Compacted::default();
-    let changed = || -> Result<()> {
-        tx.execute(
-            "INSERT INTO settings(key, value_json) VALUES (?1, ?2)
-             ON CONFLICT(key) DO UPDATE SET value_json = excluded.value_json
-             WHERE CAST(value_json AS INTEGER) < CAST(excluded.value_json AS INTEGER)",
-            params![COMPACTED_KEY, floor.to_string()],
-        )?;
-        Ok(())
-    };
-    for (hub_seq, key, origin, origin_seq, stripped) in &rows {
-        if !superseded.exists(params![entity, key, hub_seq, floor])?
-            || !first.exists(params![entity, key, hub_seq])?
-        {
+    for (hub_seq, key, origin, origin_seq, stripped, by_owner, title_at, project_at) in &rows {
+        let hidden = if *by_owner || entity != "sessions" {
+            superseded.exists(params![entity, key, hub_seq, floor])?
+        } else {
+            superseded_foreign.exists(params![entity, key, hub_seq, floor, title_at, project_at])?
+        };
+        if !hidden || !first.exists(params![entity, key, hub_seq])? {
             continue;
         }
         if outranked.exists(params![origin, hub_seq, floor, origin_seq])? {
@@ -640,7 +815,7 @@ fn compact_batch_in(
         }
     }
     if done != Compacted::default() {
-        changed()?;
+        record_compacted_in(tx, floor)?;
     }
     let next = if rows.len() < batch {
         None
@@ -724,6 +899,44 @@ impl Store {
             {}
         }
         Ok(queued)
+    }
+
+    /// Hub, once after migration 14: changes logged before it carry no title
+    /// or project edit times, and between two such the larger value wins, not
+    /// the later one, so a machine replaying them could end elsewhere than
+    /// the hub, whose rows followed hub order. The hub gives every session's
+    /// title and project without a time the time 1 and re-sends the rows:
+    /// every machine then converges on the hub's values, while any edit made
+    /// since (stamped with the current time) still wins. Returns how many
+    /// sessions were re-sent.
+    pub fn hub_stamp_legacy_sessions(&self) -> Result<usize> {
+        self.write(|tx| {
+            if tx.execute(
+                "DELETE FROM settings WHERE key = ?1",
+                params![STAMP_SESSIONS_KEY],
+            )? == 0
+            {
+                return Ok(0);
+            }
+            let legacy = all(
+                tx,
+                "SELECT * FROM sessions WHERE title_updated_at = 0 OR project_updated_at = 0",
+                [],
+                session_row,
+            )?;
+            let n = legacy.len();
+            for s in legacy {
+                let s = Session {
+                    title_updated_at: s.title_updated_at.max(1),
+                    project_updated_at: s.project_updated_at.max(1),
+                    ..s
+                };
+                let change = Change::Session(s);
+                write_row(tx, &change)?;
+                super::queue_in(tx, &change)?;
+            }
+            Ok(n)
+        })
     }
 
     /// Queue up to `limit` more of this machine's events after turning
@@ -927,9 +1140,13 @@ impl Store {
                     Err(refused) => {
                         // The hub has every row of its own: one it lacks
                         // never arrives.
-                        let awaited =
-                            matches!(&refused, Refused::Missing { owner, .. } if owner != own);
-                        if awaited && park_in(tx, origin, e)? {
+                        let awaited = match &refused {
+                            Refused::Missing { owner, .. } if owner != own => {
+                                park_in(tx, origin, owner, e.change()?, e)?
+                            }
+                            _ => false,
+                        };
+                        if awaited {
                             tracing::info!(origin, origin_seq = e.origin_seq, entity = %e.entity, reason = %refused, "parking replicated entry until its row arrives");
                             parked += 1;
                         } else {
@@ -966,13 +1183,19 @@ impl Store {
                 match savepoint(tx, || write_row(tx, &change))? {
                     Ok(_) => {
                         // A delete drops what was parked for the row.
-                        if matches!(
-                            change,
-                            Change::Session(_)
-                                | Change::DeleteSession { .. }
-                                | Change::ProjectPath(_)
-                        ) {
-                            arrived.push((e.entity.clone(), e.key.clone()));
+                        let deleted = match change {
+                            Change::Session(_) | Change::ProjectPath(_) => Some(false),
+                            Change::DeleteSession { .. } | Change::DeleteProjectPath { .. } => {
+                                Some(true)
+                            }
+                            _ => None,
+                        };
+                        if let Some(deleted) = deleted {
+                            arrived.push(Arrived {
+                                entity: e.entity.clone(),
+                                key: e.key.clone(),
+                                deleted,
+                            });
                         }
                     }
                     // Logged regardless: other machines may still apply it.
@@ -1125,11 +1348,16 @@ impl Store {
     }
 
     /// Hub: forget `machine`'s pull position (it was revoked): pairing
-    /// again starts from whatever cursor it has.
+    /// again starts from whatever cursor it has. Its parked writes are
+    /// dropped: a revoked machine changes nothing anymore.
     pub fn hub_forget_pull(&self, machine: &str) -> Result<()> {
         self.write(|tx| {
             tx.execute(
                 "DELETE FROM hub_pulls WHERE machine_id = ?1",
+                params![machine],
+            )?;
+            tx.execute(
+                "DELETE FROM hub_parked WHERE origin_machine = ?1",
                 params![machine],
             )?;
             Ok(())
@@ -1194,6 +1422,31 @@ impl Store {
                     Some(p) => pos = p,
                     None => break,
                 }
+            }
+        }
+        // Markers of rejected or parked entries only keep their origin's
+        // `own_seen` exact: one at or below the floor goes once a row of the
+        // same origin with a higher origin_seq is at or below it too.
+        loop {
+            let removed = self.write(|tx| {
+                let n = tx.execute(
+                    "DELETE FROM hub_log WHERE hub_seq IN (
+                       SELECT m.hub_seq FROM hub_log m
+                       WHERE m.op = ?1 AND m.hub_seq <= ?2
+                         AND EXISTS (SELECT 1 FROM hub_log o
+                                     WHERE o.origin_machine = m.origin_machine
+                                       AND o.hub_seq <= ?2 AND o.origin_seq > m.origin_seq)
+                       LIMIT ?3)",
+                    params![MARKER_OP, floor, batch as i64],
+                )?;
+                if n > 0 {
+                    record_compacted_in(tx, floor)?;
+                }
+                Ok(n)
+            })?;
+            done.removed += removed;
+            if removed < batch {
+                break;
             }
         }
         Ok(done)
@@ -1354,6 +1607,11 @@ impl Store {
                     id: old.to_string(),
                 },
             )?;
+            // Nothing written under the old id may be applied later.
+            tx.execute(
+                "DELETE FROM hub_parked WHERE origin_machine = ?1",
+                params![old],
+            )?;
             Ok(())
         })
     }
@@ -1429,11 +1687,12 @@ mod tests {
     }
 
     /// Push everything pending from `node` to `hub`.
-    fn push(node: &Store, node_id: &str, hub: &Store, hub_id: &str) {
+    fn push(node: &Store, node_id: &str, hub: &Store, hub_id: &str) -> IngestOutcome {
         let after = node.sync_cursors(hub_id).unwrap().last_pushed_origin_seq;
         let batch = node.outbox_batch(after, 500, 4 << 20).unwrap();
         let out = hub.hub_ingest(hub_id, node_id, &batch).unwrap();
         node.set_pushed_cursor(hub_id, out.acked).unwrap();
+        out
     }
 
     /// Make every outbox entry older than the coalescing window, so pruning
@@ -2329,10 +2588,9 @@ mod tests {
         .unwrap();
         push(&b, "B", &hub, "H");
         pull(&a, "A", &hub, "H");
-        // A retitles once more after B; the hub's retitle after it stays.
-        // B's retitle is kept in the log (another machine's session write:
-        // a later owner write need not carry a newer title), though A's
-        // newer title replaced it.
+        // A retitles once more after it got B's retitle: A's write carries
+        // a newer title, so it hides B's (B's only logged row: it stays as
+        // B's marker); the hub's retitle after it stays.
         a.apply(Change::Session(crate::model::Session {
             title: Some("owner final".into()),
             ..a.get_session("s1").unwrap().unwrap()
@@ -2355,11 +2613,10 @@ mod tests {
         let rows = log_rows(&hub).len();
 
         let done = hub.compact_hub_log(2).unwrap();
-        // A's upserts of s1 between its first and last one. First upserts
-        // stay (s1's events need it; so does the first machine row), s2's
-        // is followed by its delete, not by a newer upsert, and B's retitle
-        // is another machine's.
-        assert_eq!((done.removed, done.stripped), (4, 0), "{done:?}");
+        // s1's upserts between its first and A's last one. First upserts
+        // stay (s1's events need it; so does the first machine row), and
+        // s2's is followed by its delete, not by a newer upsert.
+        assert_eq!((done.removed, done.stripped), (4, 1), "{done:?}");
         assert_eq!(log_rows(&hub).len(), rows - done.removed);
         assert_eq!((own_seen("A"), own_seen("B")), before);
         assert_eq!(hub.compact_hub_log(2).unwrap(), Compacted::default());
@@ -2374,10 +2631,17 @@ mod tests {
             .count();
         assert_eq!(events, 3, "s1's events once, none of deleted s2");
         assert!(
-            page.entries.iter().any(
+            !page.entries.iter().any(
                 |e| matches!(e, PulledEntry::Remote { origin_machine, .. } if origin_machine == "B")
             ),
-            "B's retitle stays"
+            "B's compacted row is only B's marker"
+        );
+        let marker = hub.hub_page("B", 0, 1000, 4 << 20).unwrap();
+        assert!(
+            marker
+                .entries
+                .iter()
+                .any(|e| matches!(e, PulledEntry::Own { .. }))
         );
         pull(&c, "C", &hub, "H");
         let s1_hub = hub.get_session("s1").unwrap().unwrap();
@@ -2898,5 +3162,305 @@ mod tests {
             assert_eq!(n.get_session("s").unwrap().unwrap(), row, "order {order:?}");
             assert_eq!(x.get_session("s").unwrap().unwrap(), row, "order {order:?}");
         }
+    }
+
+    fn count(s: &Store, sql: &str) -> i64 {
+        s.read(|c| Ok(c.query_row(sql, [], |r| r.get::<_, i64>(0))?))
+            .unwrap()
+    }
+
+    /// Hub H with N and X paired and projects p, p2, p3 everywhere.
+    struct Three {
+        _dirs: [tempfile::TempDir; 3],
+        hub: Store,
+        n: Store,
+        x: Store,
+    }
+
+    fn three() -> Three {
+        let (dh, hub) = temp_store();
+        let (dn, n) = temp_store();
+        let (dx, x) = temp_store();
+        named(&n, "N");
+        named(&x, "X");
+        machine_device(&hub, "N", false);
+        machine_device(&hub, "X", false);
+        for (id, name) in [("p", "one"), ("p2", "two"), ("p3", "three")] {
+            hub.apply(project(id, name)).unwrap();
+        }
+        pull(&n, "N", &hub, "H");
+        pull(&x, "X", &hub, "H");
+        Three {
+            _dirs: [dh, dn, dx],
+            hub,
+            n,
+            x,
+        }
+    }
+
+    /// X runs session s, not synced yet; N holds it and renames it: the
+    /// hub parks the rename.
+    fn park_rename(t: &Three) {
+        let s = crate::model::Session {
+            title: Some("first".into()),
+            ..session_of("s", "X")
+        };
+        t.x.apply(Change::Session(s.clone())).unwrap();
+        t.n.apply_remote(&Change::Session(s)).unwrap();
+        t.n.modify_session("s", |s| s.title = Some("renamed".into()))
+            .unwrap();
+        assert_eq!(push(&t.n, "N", &t.hub, "H").parked, 1);
+    }
+
+    const PARKED: &str = "SELECT count(*) FROM hub_parked";
+
+    #[test]
+    fn a_revoked_machines_parked_writes_are_never_applied() {
+        // Revoked while its rename waits: X's row arrives alone.
+        let t = three();
+        park_rename(&t);
+        machine_device(&t.hub, "N", true);
+        push(&t.x, "X", &t.hub, "H");
+        assert_eq!(
+            t.hub.get_session("s").unwrap().unwrap().title.as_deref(),
+            Some("first")
+        );
+        assert_eq!(count(&t.hub, PARKED), 0);
+        // Revoking (which forgets its pull position) drops them at once.
+        let t = three();
+        park_rename(&t);
+        t.hub.hub_forget_pull("N").unwrap();
+        assert_eq!(count(&t.hub, PARKED), 0);
+    }
+
+    #[test]
+    fn only_what_may_change_is_parked_for_a_paired_owner_within_a_cap() {
+        let t = three();
+        // No paired machine Z will ever send its row: rejected.
+        let z = crate::model::Session {
+            agent_session_id: Some("z".into()),
+            ..session_of("z", "Z")
+        };
+        t.n.apply_remote(&Change::Session(z)).unwrap();
+        t.n.modify_session("z", |s| s.title = Some("y".into()))
+            .unwrap();
+        let out = push(&t.n, "N", &t.hub, "H");
+        assert_eq!((out.parked, out.rejected), (0, 1));
+        // Kept: what another machine may change, not the rest of its copy.
+        let big = crate::model::Session {
+            summary: Some(serde_json::json!({ "text": "x".repeat(100_000) })),
+            ..session_of("s", "X")
+        };
+        t.n.apply_remote(&Change::Session(big)).unwrap();
+        t.n.modify_session("s", |s| s.title = Some("u".into()))
+            .unwrap();
+        assert_eq!(push(&t.n, "N", &t.hub, "H").parked, 1);
+        assert!(count(&t.hub, "SELECT max(length(payload_json)) FROM hub_parked") < 1000);
+        // At most 1000 per origin; other origins are not affected.
+        let entries: Vec<WireEntry> = (0..1001)
+            .map(|i| {
+                let s = crate::model::Session {
+                    agent_session_id: Some(format!("c{i}")),
+                    ..session_of(&format!("c{i}"), "X")
+                };
+                wire(10_000 + i, &Change::Session(s))
+            })
+            .collect();
+        let out = t.hub.hub_ingest("H", "N", &entries).unwrap();
+        assert_eq!((out.parked, out.rejected), (999, 2));
+        machine_device(&t.hub, "M", false);
+        let out = t.hub.hub_ingest("H", "M", &entries[..1]).unwrap();
+        assert_eq!(out.parked, 1);
+    }
+
+    #[test]
+    fn markers_below_the_floor_are_compacted() {
+        let t = three();
+        let folder = crate::model::ProjectPath {
+            project_id: "p".into(),
+            machine_id: "X".into(),
+            path: "/w".into(),
+            git_remote: None,
+        };
+        t.x.apply(Change::ProjectPath(folder)).unwrap();
+        push(&t.x, "X", &t.hub, "H");
+        pull(&t.n, "N", &t.hub, "H");
+        // No machine removes another machine's folder: three markers.
+        for _ in 0..3 {
+            t.n.apply(Change::DeleteProjectPath {
+                machine_id: "X".into(),
+                path: "/w".into(),
+            })
+            .unwrap();
+        }
+        assert_eq!(push(&t.n, "N", &t.hub, "H").rejected, 3);
+        let markers = |h: &Store| count(h, "SELECT count(*) FROM hub_log WHERE op = 'marker'");
+        assert_eq!(markers(&t.hub), 3);
+        let settle = |t: &Three| {
+            for _ in 0..2 {
+                pull(&t.n, "N", &t.hub, "H");
+                pull(&t.x, "X", &t.hub, "H");
+            }
+        };
+        let own_seen = |h: &Store| {
+            h.hub_page("N", h.hub_head().unwrap(), 10, 4 << 20)
+                .unwrap()
+                .own_seen
+        };
+        settle(&t);
+        let seen = own_seen(&t.hub);
+        t.hub.compact_hub_log(1000).unwrap();
+        assert_eq!(markers(&t.hub), 1, "N's highest stays");
+        assert_eq!(own_seen(&t.hub), seen);
+        // A later row of N outranks that one too.
+        t.n.apply(project("q", "q")).unwrap();
+        push(&t.n, "N", &t.hub, "H");
+        settle(&t);
+        let seen = own_seen(&t.hub);
+        t.hub.compact_hub_log(1000).unwrap();
+        assert_eq!(markers(&t.hub), 0);
+        assert_eq!(own_seen(&t.hub), seen);
+    }
+
+    // N merges p into p2 while it holds X's folder in p that the hub does
+    // not have yet. The parked re-point follows X's folder only while X has
+    // it in p (or anything merged into p2), and goes with a delete.
+    #[test]
+    fn a_parked_folder_merge_follows_only_a_folder_still_in_the_merged_project() {
+        for (filed, deleted, expect) in [
+            ("p", false, Some("p2")),
+            ("p3", false, Some("p3")),
+            ("p", true, None),
+        ] {
+            let t = three();
+            let f = crate::model::ProjectPath {
+                project_id: "p".into(),
+                machine_id: "X".into(),
+                path: "/w".into(),
+                git_remote: None,
+            };
+            t.n.apply_remote(&Change::ProjectPath(f.clone())).unwrap();
+            t.n.merge_projects("p", "p2").unwrap();
+            assert_eq!(push(&t.n, "N", &t.hub, "H").parked, 1);
+            t.x.apply(Change::ProjectPath(crate::model::ProjectPath {
+                project_id: filed.into(),
+                ..f
+            }))
+            .unwrap();
+            if deleted {
+                t.x.apply(Change::DeleteProjectPath {
+                    machine_id: "X".into(),
+                    path: "/w".into(),
+                })
+                .unwrap();
+            }
+            push(&t.x, "X", &t.hub, "H");
+            let now: Option<String> = t
+                .hub
+                .read(|c| {
+                    one(
+                        c,
+                        "SELECT project_id FROM project_paths WHERE machine_id = 'X'",
+                        [],
+                        |r| r.get(0),
+                    )
+                })
+                .unwrap();
+            assert_eq!(
+                now.as_deref(),
+                expect,
+                "filed in {filed}, deleted {deleted}"
+            );
+            assert_eq!(count(&t.hub, PARKED), 0);
+        }
+    }
+
+    // Changes logged before migration 14 carry no edit times: between two
+    // of them the larger title wins, so a machine replaying the log would
+    // end elsewhere than the hub, which applied them in hub order. The
+    // hub's one-time re-send with time 1 makes every machine converge.
+    #[test]
+    fn legacy_session_writes_replay_to_the_hubs_values() {
+        let (_h, hub) = temp_store();
+        machine_device(&hub, "X", false);
+        hub.apply(project("p", "p")).unwrap();
+        let s = |t: &str| {
+            Change::Session(crate::model::Session {
+                title: Some(t.into()),
+                ..session_of("s", "X")
+            })
+        };
+        hub.hub_ingest("H", "X", &[wire(1, &s("zzz")), wire(2, &s("aaa"))])
+            .unwrap();
+        // What blirp 0.2.0 made of them (hub order), and its schema.
+        hub.write(|tx| {
+            tx.execute_batch(
+                "UPDATE sessions SET title = 'aaa';
+                 ALTER TABLE sessions DROP COLUMN title_updated_at;
+                 ALTER TABLE sessions DROP COLUMN project_updated_at;",
+            )?;
+            Ok(tx.pragma_update(None, "user_version", 13)?)
+        })
+        .unwrap();
+        let path = hub.path().to_owned();
+        drop(hub);
+        let hub = Store::open(&path).unwrap();
+        let title = |s: &Store| s.get_session("s").unwrap().unwrap().title;
+        let (_c, c) = temp_store();
+        pull(&c, "C", &hub, "H");
+        assert_eq!(title(&c).as_deref(), Some("zzz"), "diverged");
+
+        assert_eq!(hub.hub_stamp_legacy_sessions().unwrap(), 1);
+        assert_eq!(hub.hub_stamp_legacy_sessions().unwrap(), 0, "once");
+        pull(&c, "C", &hub, "H");
+        let (_d, d) = temp_store();
+        pull(&d, "D", &hub, "H");
+        for st in [&c, &d] {
+            assert_eq!(
+                st.get_session("s").unwrap().unwrap(),
+                hub.get_session("s").unwrap().unwrap()
+            );
+        }
+        assert_eq!(title(&hub).as_deref(), Some("aaa"));
+    }
+
+    // Renames from another machine that the owner's later writes carry on
+    // are compacted like the owner's own superseded writes.
+    #[test]
+    fn renames_from_another_machine_compact_behind_the_owners_writes() {
+        let t = three();
+        t.x.apply(Change::Session(session_of("s", "X"))).unwrap();
+        push(&t.x, "X", &t.hub, "H");
+        pull(&t.n, "N", &t.hub, "H");
+        for i in 0..20 {
+            t.n.modify_session("s", |s| s.title = Some(format!("r{i}")))
+                .unwrap();
+            push(&t.n, "N", &t.hub, "H");
+            pull(&t.x, "X", &t.hub, "H");
+            age(&t.x);
+            t.x.modify_session("s", |s| s.last_activity_at += 1)
+                .unwrap();
+            push(&t.x, "X", &t.hub, "H");
+            pull(&t.n, "N", &t.hub, "H");
+        }
+        for _ in 0..2 {
+            pull(&t.n, "N", &t.hub, "H");
+            pull(&t.x, "X", &t.hub, "H");
+        }
+        let sessions = |h: &Store| {
+            count(
+                h,
+                "SELECT count(*) FROM hub_log WHERE entity = 'sessions' AND payload_json <> ''",
+            )
+        };
+        assert!(sessions(&t.hub) > 40);
+        t.hub.compact_hub_log(1000).unwrap();
+        // X's first and last upsert.
+        assert_eq!(sessions(&t.hub), 2);
+        let (_d, d) = temp_store();
+        pull(&d, "D", &t.hub, "H");
+        let row = t.hub.get_session("s").unwrap().unwrap();
+        assert_eq!(row.title.as_deref(), Some("r19"));
+        assert_eq!(d.get_session("s").unwrap().unwrap(), row);
     }
 }
