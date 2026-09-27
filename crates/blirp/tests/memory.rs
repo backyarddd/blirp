@@ -184,11 +184,34 @@ async fn hooks_of_headless_runs_create_no_session() {
     let h = Harness::start().await;
     let (dir, _pid) = h.project("bots").await;
     let body = |asid: &str, headless: bool| json!({"payload": {"session_id": asid, "cwd": dir}, "global": true, "headless": headless});
+    let projects: Value = h.get("/api/projects").await;
     for event in ["SessionStart", "UserPromptSubmit", "Stop", "SessionEnd"] {
         let r = h.hook("claude", event, body("bot-1", true)).await;
         assert!(r["session_id"].is_null(), "{event}: {r}");
-        assert!(r["additional_context"].is_null(), "{event}: {r}");
+        if event == "SessionStart" {
+            // An app someone chats in over the Agent SDK still gets memory.
+            let ctx = r["additional_context"].as_str().unwrap_or_default();
+            assert!(ctx.contains("bots is a test project."), "{r}");
+        } else {
+            assert!(r["additional_context"].is_null(), "{event}: {r}");
+        }
     }
+    // A folder of no project: no memory, and no project is created.
+    let elsewhere = h.home.path().join("elsewhere");
+    std::fs::create_dir_all(&elsewhere).unwrap();
+    let r = h
+        .hook(
+            "claude",
+            "SessionStart",
+            json!({"payload": {"session_id": "bot-2", "cwd": elsewhere}, "global": true, "headless": true}),
+        )
+        .await;
+    assert!(
+        r["session_id"].is_null() && r["additional_context"].is_null(),
+        "{r}"
+    );
+    let after: Value = h.get("/api/projects").await;
+    assert_eq!(projects, after, "no project created");
     let sessions: Value = h.get("/api/sessions").await;
     assert!(
         !sessions.to_string().contains("bot-1"),

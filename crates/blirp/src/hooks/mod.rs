@@ -194,7 +194,34 @@ pub fn handle(
                 || str_field(p, &["transcript_path"])
                     .is_some_and(|t| crate::ingest::known_headless(store, agent, t))
             {
-                return Ok(HookReply::default());
+                // An app someone chats in over the Agent SDK looks the same
+                // here; it still gets the memory of the project its folder
+                // belongs to (found read-only: nothing is created).
+                let memory = state.config().memory;
+                let additional_context = match payload_cwd(p).or(req.cwd.clone()) {
+                    Some(cwd)
+                        if event == HookEvent::SessionStart && memory.inject_enabled(agent) =>
+                    {
+                        match store.find_project_for_path(
+                            &state.machine.id,
+                            Path::new(&cwd),
+                            Some(&state.paths.workspaces_dir()),
+                        )? {
+                            Some(project) => Some(render_injection(
+                                store,
+                                &project.id,
+                                None,
+                                memory.inject_max_chars as usize,
+                            )?),
+                            None => None,
+                        }
+                    }
+                    _ => None,
+                };
+                return Ok(HookReply {
+                    session_id: None,
+                    additional_context,
+                });
             }
             let Some(cwd) = payload_cwd(p).or(req.cwd.clone()) else {
                 return Ok(HookReply::default());
