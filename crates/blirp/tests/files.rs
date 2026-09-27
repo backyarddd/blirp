@@ -611,3 +611,87 @@ async fn folderless_workspaces_sync_and_land_in_the_other_workspace() {
     );
     r.shutdown().await;
 }
+
+/// This machine's state of the project's only folder.
+async fn local_state(n: &Node, project: &str) -> Option<String> {
+    let f = n.files(project).await;
+    f.roots
+        .into_iter()
+        .find_map(|r| r.local)
+        .map(|l| l.state.as_str().to_string())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn empty_files_upload_and_missing_folders_wait_for_their_return() {
+    if !in_temp_home("empty_files_upload_and_missing_folders_wait_for_their_return") {
+        return;
+    }
+    let tmp = tempfile::tempdir().unwrap();
+    let hub = Node::start(&tmp.path().join("a"), "hub-a").await;
+    let b = Node::start(&tmp.path().join("b"), "node-b").await;
+    pair(&hub, &b).await;
+    let origin = tmp.path().join("work").join("proj");
+    write(&origin.join("a.txt"), "one");
+    write(&origin.join("empty.txt"), "");
+    let project = b.project(&origin).await;
+    let origin = dunce::canonicalize(&origin).unwrap();
+    // A folder gone before its first sync (a start with a drive unplugged).
+    let gone = tmp.path().join("work").join("gone");
+    write(&gone.join("x.txt"), "x");
+    let gone_project = b.project(&gone).await;
+    let gone_key = dunce::canonicalize(&gone).unwrap().display().to_string();
+    std::fs::remove_dir_all(&gone).unwrap();
+    for n in [&hub, &b] {
+        n.start_now().await;
+    }
+
+    // The empty file does not hold up its folder.
+    eventually("the folder with an empty file uploaded", || async {
+        hub_files(&hub, &project).await.is_some_and(|(_, n)| n == 2)
+    })
+    .await;
+    // The folder that is gone reports it, and no copy row was made.
+    eventually("the gone folder shows missing", || async {
+        local_state(&b, &gone_project).await.as_deref() == Some("missing")
+    })
+    .await;
+    assert!(b.daemon.state.store.file_copy(&gone_key).unwrap().is_none());
+
+    // Deleted while synced: missing, and taking the hub's changes is
+    // refused rather than making the folder again.
+    let head = || {
+        let roots = hub.daemon.state.store.hub_file_roots().unwrap();
+        roots.iter().find(|r| r.project_id == project).unwrap().head
+    };
+    let head_before = head();
+    std::fs::remove_dir_all(&origin).unwrap();
+    eventually("the deleted folder shows missing", || async {
+        local_state(&b, &project).await.as_deref() == Some("missing")
+    })
+    .await;
+    let apply_path = format!("/api/projects/{project}/files-sync/apply");
+    let apply = |root: PathBuf| b.req(Method::POST, &apply_path, Some(json!({ "root": root })));
+    let r = apply(origin.clone()).await;
+    assert_eq!(r.status(), reqwest::StatusCode::CONFLICT);
+    assert!(r.text().await.unwrap().contains("root_missing"));
+
+    // Back as it was (a drive mounted again): the request sees it at once,
+    // and the folder syncs again without uploading anything anew.
+    write(&origin.join("a.txt"), "one");
+    write(&origin.join("empty.txt"), "");
+    let r = apply(origin.clone()).await;
+    let status = r.status();
+    assert!(status.is_success(), "{status} {}", r.text().await.unwrap());
+    eventually("the folder is back in sync", || async {
+        local_state(&b, &project).await.as_deref() == Some("idle")
+    })
+    .await;
+    assert_eq!(
+        head(),
+        head_before,
+        "the returned folder's files were committed again"
+    );
+    for n in [b, hub] {
+        n.daemon.shutdown().await.unwrap();
+    }
+}

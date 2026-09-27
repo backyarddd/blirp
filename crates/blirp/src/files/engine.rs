@@ -50,6 +50,8 @@ enum Kick {
     Paths(Vec<PathBuf>),
     /// Reconcile the folder list and scan everything.
     Rescan,
+    /// Reconcile the folder list; scan only folders new to it.
+    Refresh,
     /// Scan this folder now.
     Copy(String),
 }
@@ -132,6 +134,11 @@ impl Engine {
     /// Reconcile and scan everything soon.
     pub fn rescan(&self) {
         let _ = self.kick.send(Kick::Rescan);
+    }
+
+    /// Reconcile the folder list soon; only new folders are scanned.
+    pub fn refresh(&self) {
+        let _ = self.kick.send(Kick::Refresh);
     }
 
     /// Scan one folder soon.
@@ -442,9 +449,10 @@ impl Engine {
                 (CopyState::Error, Some(e.to_string()))
             }
             // The folder went away since the last reconcile (a watched
-            // folder deleted): the rescan marks it missing and logs it once.
-            "local_error" if !root_exists(key).await => {
-                let _ = self.kick.send(Kick::Rescan);
+            // folder deleted): the next reconcile marks it missing and
+            // logs it once.
+            "local_error" if root_missing(key).await => {
+                self.refresh();
                 (CopyState::Missing, Some(MISSING.into()))
             }
             _ => {
@@ -467,11 +475,36 @@ impl Engine {
     }
 }
 
-async fn root_exists(key: &str) -> bool {
+/// Whether the folder at `p` is gone: not found, or not a folder. Any
+/// other failure (no permission, an I/O error) is not "missing": the pass
+/// runs and reports it as an error.
+pub(crate) fn folder_missing(p: &Path) -> bool {
+    match std::fs::metadata(p) {
+        Ok(m) => !m.is_dir(),
+        Err(e) => matches!(
+            e.kind(),
+            std::io::ErrorKind::NotFound | std::io::ErrorKind::NotADirectory
+        ),
+    }
+}
+
+/// `p` canonicalized; when it does not exist, its canonical parent joined
+/// with its name (the spelling it had while it existed).
+fn canonical_folder(p: &Path) -> PathBuf {
+    dunce::canonicalize(p)
+        .ok()
+        .or_else(|| {
+            let parent = dunce::canonicalize(p.parent()?).ok()?;
+            Some(parent.join(p.file_name()?))
+        })
+        .unwrap_or_else(|| p.to_path_buf())
+}
+
+async fn root_missing(key: &str) -> bool {
     let p = PathBuf::from(key);
-    tokio::task::spawn_blocking(move || p.is_dir())
+    tokio::task::spawn_blocking(move || folder_missing(&p))
         .await
-        .unwrap_or(true)
+        .unwrap_or(false)
 }
 
 /// Log folders that went missing or came back since the last reconcile
@@ -573,8 +606,10 @@ fn tracked_folders(
         let workspace = (s.paths.is_empty())
             .then(|| paths.workspace_dir(&s.project.id).ok())
             .flatten()
-            .filter(|w| w.is_dir())
-            .map(|w| dunce::canonicalize(&w).unwrap_or(w).display().to_string());
+            .map(|w| canonical_folder(&w).display().to_string())
+            // One that synced before and is gone now is tracked as missing,
+            // so its row and bases stay for its return.
+            .filter(|w| !folder_missing(Path::new(w)) || rows.contains_key(w));
         let folders: Vec<String> = s
             .paths
             .iter()
@@ -588,7 +623,7 @@ fn tracked_folders(
             let row = rows.get(p);
             // Skipped, not forgotten: its row and bases stay, so a folder
             // that comes back unchanged uploads nothing again.
-            let missing = !Path::new(p).is_dir();
+            let missing = folder_missing(Path::new(p));
             let origin = row.is_none_or(|r| r.origin);
             let root_id = row.map_or_else(
                 || blirp_core::files::root_id(machine_id, p),
@@ -783,6 +818,7 @@ async fn run(
                 k = rx.recv() => match k {
                     None => break,
                     Some(Kick::Rescan) => full = true,
+                    Some(Kick::Refresh) => refresh = true,
                     Some(Kick::Copy(key)) => { pending.insert(key); }
                     Some(Kick::Paths(paths)) => {
                         for p in &paths {
@@ -795,7 +831,8 @@ async fn run(
             }
         }
         if full || refresh {
-            // A folder that was missing is scanned as soon as it is back.
+            // Missing folders count as new: each reconcile reports them
+            // (a pass only sets their state) and scans them once back.
             let before: HashSet<String> = engine
                 .tracked()
                 .into_iter()
@@ -835,7 +872,6 @@ async fn run(
             pending.extend(
                 tracked
                     .into_iter()
-                    .filter(|t| !t.missing)
                     .map(|t| t.copy.key)
                     .filter(|k| scan_all || !before.contains(k)),
             );
@@ -856,6 +892,7 @@ async fn run(
             while let Ok(k) = rx.try_recv() {
                 match k {
                     Kick::Rescan => full = true,
+                    Kick::Refresh => refresh = true,
                     Kick::Copy(key) => {
                         pending.insert(key);
                     }
@@ -868,7 +905,7 @@ async fn run(
                     }
                 }
             }
-            if full {
+            if full || refresh {
                 break;
             }
         }
@@ -895,6 +932,80 @@ mod tests {
         assert_eq!(event_copy(roots(), &root.join("out/x.o")), None);
         assert_eq!(event_copy(roots(), &root.join(".git/index")), None);
         assert_eq!(event_copy(roots(), &base.join("elsewhere/a.rs")), None);
+    }
+
+    #[tokio::test]
+    async fn a_pass_failing_on_a_vanished_folder_reports_it_missing() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Arc::new(blirp_core::store::Store::open(&dir.path().join("db")).unwrap());
+        let hub = Arc::new(blirp_sync::files::HubFiles::new(
+            store.clone(),
+            &dir.path().join("hub"),
+            1 << 30,
+            0,
+        ));
+        let env = Env {
+            store,
+            hub: blirp_sync::files::FileHub::Local(Arc::new(blirp_sync::files::LocalHub {
+                hub,
+                machine_id: "m".into(),
+                machine_name: "m".into(),
+                parts: blirp_sync::files::blobs::BlobStore::new(dir.path().join("dl")),
+            })),
+            data_dir: dir.path().join("data"),
+            scan: super::super::local::scan_config(&Default::default(), &dir.path().join("data")),
+            gate: Arc::new(tokio::sync::Semaphore::new(1)),
+            work: Arc::default(),
+            after_scan: None,
+            retry: Arc::new(blirp_core::files::write::RetryBudget::new(
+                blirp_core::files::write::RETRY_BUDGET,
+            )),
+        };
+        let (kick, mut rx) = mpsc::unbounded_channel();
+        let engine = Engine {
+            weak: Weak::new(),
+            env,
+            status: Mutex::default(),
+            tracked: Mutex::default(),
+            hub_error: Mutex::default(),
+            modes: Mutex::default(),
+            roots: Mutex::default(),
+            kick,
+            stop: watch::channel(false).0,
+            task: Mutex::default(),
+            held: Mutex::default(),
+        };
+        let tracked = |p: &Path| Tracked {
+            copy: Copy {
+                key: p.display().to_string(),
+                root_id: "r".into(),
+                origin: true,
+                incarnation: String::new(),
+            },
+            project_id: "p".into(),
+            never: None,
+            effective: true,
+            missing: false,
+        };
+        let state = |p: &Path| engine.status_of(&p.display().to_string()).unwrap();
+
+        // Gone since the last reconcile: missing, and a reconcile (not a
+        // full rescan) is asked for.
+        let gone = dir.path().join("gone");
+        engine
+            .failed(&tracked(&gone), CopyError::Local("not found".into()))
+            .await;
+        assert_eq!(state(&gone).state, CopyState::Missing);
+        assert!(matches!(rx.try_recv(), Ok(Kick::Refresh)));
+
+        // Still there: a local failure is an error.
+        let here = dir.path().join("here");
+        std::fs::create_dir(&here).unwrap();
+        engine
+            .failed(&tracked(&here), CopyError::Local("disk".into()))
+            .await;
+        assert_eq!(state(&here).state, CopyState::Error);
+        assert!(rx.try_recv().is_err());
     }
 
     #[test]
@@ -929,5 +1040,27 @@ mod tests {
         std::fs::remove_dir(&folder).unwrap();
         assert!(track()[0].missing);
         assert!(store.file_copy(&key).unwrap().is_some());
+        // A file in its place is no folder either.
+        std::fs::write(&folder, "").unwrap();
+        assert!(track()[0].missing);
+        std::fs::remove_file(&folder).unwrap();
+
+        // A project without folders: its workspace once it exists; gone
+        // after it synced, it stays tracked (missing) with its row.
+        let ws_project = store.create_project("ws", None).unwrap();
+        let ws = paths.workspace_dir(&ws_project.id).unwrap();
+        let ws_of = |t: &[Tracked]| {
+            t.iter()
+                .find(|t| t.project_id == ws_project.id)
+                .map(|t| (t.copy.key.clone(), t.missing))
+        };
+        assert_eq!(ws_of(&track()), None);
+        std::fs::create_dir_all(&ws).unwrap();
+        let (ws_key, missing) = ws_of(&track()).unwrap();
+        assert!(!missing);
+        assert!(store.file_copy(&ws_key).unwrap().is_some());
+        std::fs::remove_dir(&ws).unwrap();
+        assert_eq!(ws_of(&track()), Some((ws_key.clone(), true)));
+        assert!(store.file_copy(&ws_key).unwrap().is_some());
     }
 }

@@ -425,16 +425,22 @@ async fn apply(
     let e = need_engine(&s)?;
     let st = s.clone();
     let (e2, id2, root) = (e.clone(), id.clone(), body.root.clone());
-    let (tracked, pending) = blocking(move || {
+    let (tracked, pending, gone) = blocking(move || {
         let t = tracked_copy(&e2, &st, &id2, Some(&root))?;
         let pending = st
             .store
             .file_copy(&t.copy.key)?
             .is_some_and(|c| c.mode == CopyMode::Pending);
-        Ok((t, pending))
+        let gone = engine::folder_missing(Path::new(&t.copy.key));
+        Ok((t, pending, gone))
     })
     .await?;
-    if tracked.missing {
+    // The engine's view is from its last reconcile: the disk decides now,
+    // and a view that disagrees is brought up to date.
+    if gone != tracked.missing {
+        e.refresh();
+    }
+    if gone {
         // Never makes a vanished folder again behind the user's back.
         return Err(ApiError::conflict(
             "root_missing",
