@@ -85,6 +85,16 @@ so every tag needs one.
   working now is not buried under newer finished ones. `GET /api/sessions`
   (and `blirp sessions`) use the same order; cursors from 0.1.0 are
   rejected with 400.
+- The Sessions sidebar no longer stops silently at the newest 200 sessions:
+  **Load older sessions** pages through all of them, and the filter box
+  searches every session through the daemon, not only the loaded ones.
+- One busy project no longer pushes every other project out of the Sessions
+  sidebar: each project group shows its 5 most recent sessions (plus any
+  running or open one) with **Show N more**.
+- On paired machines every session in the sidebar is labeled with the
+  machine it runs on, this machine's included, and a machine picker filters
+  the list, so a mixed list no longer reads as if only the other machine's
+  sessions were shown.
   Projects created for them earlier are merged into Home once, unless you
   renamed, used or edited them.
 - Transcripts of a folder that no longer exists no longer create a second

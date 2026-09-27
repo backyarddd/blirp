@@ -41,6 +41,19 @@ Paste a screenshot or a copied file into a terminal pane (Ctrl+V or Ctrl+Shift+V
 - On Linux (and macOS) plain Ctrl+V still goes to the program in the terminal, as in native terminals: Claude Code then reads the clipboard of the machine it runs on, which only works for sessions on this machine. On Windows plain Ctrl+V pastes, as in Windows Terminal (Claude Code's own image paste there is Alt+V, which still reaches it).
 - Needs **Terminal control** on portal devices, like typing.
 
+### The Sessions list
+
+The Sessions sidebar lists every session this machine knows: its own, and on paired machines the other machines' sessions, which replicate. Order:
+
+- Running sessions (Starting, Working, Idle, Waiting) come first: a process is attached, so they are the ones you can act on, even after hours of idling.
+- Then by most recent activity (the last transcript event or terminal output), not by start time, so a session started yesterday that is working now is not buried.
+
+Sessions are grouped by project, groups ordered by their most recent session. A group shows its 5 most recent sessions, plus any running one and the one that is open; **Show N more** lists the rest. The sidebar loads the 200 most recent sessions and **Load older sessions** fetches the next 200.
+
+The filter box matches title, folder, branch and agent over all sessions (it asks the daemon, so it also finds sessions not loaded yet). On paired machines each card shows the machine it runs on, this machine's included, and a machine picker narrows the list to one machine. The project page's Sessions tab lists one project's sessions in the same order, with a status filter.
+
+External sessions (started in your own terminal) show up while they run, marked `external`; see [External sessions](#external-sessions).
+
 ### Statuses
 
 | Status | Meaning |

@@ -111,3 +111,28 @@ export function groupSessions(sessions: readonly Session[], projects: ReadonlyMa
   }
   return [...groups.values()];
 }
+
+/**
+ * The daemon's list order (`GET /api/sessions`): live sessions first, since a process is
+ * attached and the user can act on them even after hours of idling, then most recent activity
+ * (a long-running session started yesterday but working now is not buried), then id.
+ */
+export function compareSessions(a: Session, b: Session): number {
+  const live = Number(isLive(b.status)) - Number(isLive(a.status));
+  if (live !== 0) return live;
+  if (a.last_activity_at !== b.last_activity_at) return b.last_activity_at - a.last_activity_at;
+  return a.id < b.id ? 1 : a.id > b.id ? -1 : 0;
+}
+
+/**
+ * The first `limit` sessions of a group, plus any later live or `keepId` (selected) session, so
+ * one busy project does not push every other project off screen. `hidden` is how many are left.
+ */
+export function previewSessions(
+  sessions: readonly Session[],
+  limit: number,
+  keepId: string | null,
+): { shown: Session[]; hidden: number } {
+  const shown = sessions.filter((s, i) => i < limit || isLive(s.status) || s.id === keepId);
+  return { shown, hidden: sessions.length - shown.length };
+}

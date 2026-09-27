@@ -4,10 +4,14 @@
   import Coffee from '@lucide/svelte/icons/coffee';
   import { app } from '../app.svelte';
 
-  /** Shows where a session runs when that is another machine; nothing for this machine. */
+  /**
+   * Shows where a session runs. This machine's sessions are labeled too once other machines are
+   * paired, so a mixed list never reads as if only the other machine's sessions were there.
+   */
   let { machineId }: { machineId: string } = $props();
 
   const info = $derived(app.remote(machineId));
+  const self = $derived(info === null && machineId === app.selfId && app.machines.length > 1);
   const awake = $derived(info !== null && app.awake[info.id] === true);
   const title = $derived(
     info === null
@@ -16,7 +20,12 @@
   );
 </script>
 
-{#if info}
+{#if self}
+  <span class="mbadge" title="Runs on this machine" data-testid="machine-badge">
+    <Monitor size={12} aria-hidden="true" />
+    <span class="ellipsis">{app.machineName(machineId)}</span>
+  </span>
+{:else if info}
   <span class="mbadge" class:cloud={info.cloud} {title} data-testid="machine-badge">
     {#if info.cloud}<Cloud size={12} aria-hidden="true" />{:else}<Monitor size={12} aria-hidden="true" />{/if}
     <span class="ellipsis">{info.name}</span>

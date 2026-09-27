@@ -4,11 +4,13 @@ import {
   agentLabel,
   basename,
   canResume,
+  compareSessions,
   groupSessions,
   hasTerminal,
   isLive,
   isSubagent,
   notifiableTransition,
+  previewSessions,
   sessionStatusInfo,
   sessionTitle,
   statusInfo,
@@ -111,5 +113,38 @@ describe('groupSessions', () => {
       ['Unknown project', ['1', '3']],
       ['Alpha', ['2']],
     ]);
+  });
+  it('orders live sessions first, then by last activity, then id (as the daemon does)', () => {
+    const at = (id: string, status: SessionStatus, last: number, started = 0): Session => ({
+      ...mk(id, 'a'),
+      status,
+      last_activity_at: last,
+      started_at: started,
+    });
+    const list = [
+      at('old', 'completed', 5),
+      at('tie-a', 'failed', 50),
+      at('idle-live', 'idle', 1),
+      at('long-running', 'completed', 100, -1000),
+      at('tie-b', 'completed', 50),
+      at('working', 'working', 2),
+    ];
+    expect([...list].sort(compareSessions).map((s) => s.id)).toEqual([
+      'working',
+      'idle-live',
+      'long-running',
+      'tie-b',
+      'tie-a',
+      'old',
+    ]);
+  });
+  it('previews a group without hiding live or selected sessions', () => {
+    const list = ['1', '2', '3', '4', '5'].map((id) => ({ ...mk(id, 'a'), status: 'completed' as const }));
+    const live = { ...mk('6', 'a'), status: 'waiting' as const };
+    const all = [...list, live];
+    const p = previewSessions(all, 2, '4');
+    expect(p.shown.map((s) => s.id)).toEqual(['1', '2', '4', '6']);
+    expect(p.hidden).toBe(2);
+    expect(previewSessions(all, 10, null)).toEqual({ shown: all, hidden: 0 });
   });
 });

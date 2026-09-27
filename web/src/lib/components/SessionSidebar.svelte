@@ -2,9 +2,13 @@
   import Plus from '@lucide/svelte/icons/plus';
   import GitBranch from '@lucide/svelte/icons/git-branch';
   import Folder from '@lucide/svelte/icons/folder';
+  import { untrack } from 'svelte';
+  import { SvelteSet } from 'svelte/reactivity';
+  import { api, errorMessage } from '../api/client';
+  import type { Session } from '../api/types.gen';
   import { app } from '../app.svelte';
   import { href } from '../router';
-  import { agentLabel, basename, groupSessions, sessionTitle } from '../status';
+  import { agentLabel, basename, compareSessions, groupSessions, previewSessions, sessionTitle } from '../status';
   import { formatRelative } from '../time';
   import StatusChip from './StatusChip.svelte';
   import Loadable from './Loadable.svelte';
@@ -14,35 +18,105 @@
   /** `selectedChildren`: subagent count of the selected session (lists leave subagents out). */
   let { selectedId, selectedChildren }: { selectedId: string | null; selectedChildren: number } = $props();
 
-  let filter = $state('');
+  /** Sessions a project group shows before "Show N more" (live and selected ones always show). */
+  const GROUP_PREVIEW = 5;
+  const PAGE = 100;
 
-  const groups = $derived.by(() => {
-    const q = filter.trim().toLowerCase();
-    const list = q
-      ? app.topSessions.filter((s) =>
-          `${sessionTitle(s)} ${s.branch ?? ''} ${s.cwd} ${s.agent}`.toLowerCase().includes(q),
-        )
-      : app.topSessions;
-    return groupSessions(list, app.projectById);
+  let filter = $state('');
+  let machine = $state('');
+  const expanded = new SvelteSet<string>();
+
+  const q = $derived(filter.trim());
+  const filtering = $derived(q !== '' || machine !== '');
+  const matches = (s: Session): boolean =>
+    (machine === '' || s.machine_id === machine) &&
+    (q === '' || `${sessionTitle(s)} ${s.branch ?? ''} ${s.cwd} ${s.agent}`.toLowerCase().includes(q.toLowerCase()));
+
+  // A filter asks the daemon, so sessions beyond the pages loaded here are found too.
+  let found: Session[] = $state.raw([]);
+  let foundCursor: string | null = $state(null);
+  let foundLoading = $state(false);
+  let foundError: string | null = $state(null);
+  let token = 0;
+
+  async function search(reset: boolean): Promise<void> {
+    const t = ++token;
+    foundLoading = true;
+    foundError = null;
+    try {
+      const page = await api.sessions.list({
+        ...(q ? { q } : {}),
+        ...(machine ? { machine } : {}),
+        ...(!reset && foundCursor ? { cursor: foundCursor } : {}),
+        limit: PAGE,
+      });
+      if (t !== token) return;
+      found = reset ? page.items : [...found, ...page.items];
+      foundCursor = page.next_cursor;
+    } catch (e) {
+      if (t === token) foundError = errorMessage(e);
+    } finally {
+      if (t === token) foundLoading = false;
+    }
+  }
+
+  $effect(() => {
+    const active = filtering;
+    void q;
+    void machine;
+    untrack(() => {
+      token++;
+      found = [];
+      foundCursor = null;
+      foundError = null;
+      foundLoading = active;
+    });
+    if (!active) return;
+    const timer = setTimeout(() => void search(true), 250);
+    return () => clearTimeout(timer);
   });
+
+  const list = $derived.by(() => {
+    if (!filtering) return app.topSessions;
+    // Results take the live copy when this client has one; new sessions matching the filter
+    // appear without asking the daemon again.
+    const byId = new Map<string, Session>();
+    for (const s of found) byId.set(s.id, app.sessionById.get(s.id) ?? s);
+    for (const s of app.topSessions) if (matches(s)) byId.set(s.id, s);
+    return [...byId.values()].filter((s) => !app.deletedSessions.has(s.id) && matches(s)).sort(compareSessions);
+  });
+  const groups = $derived(groupSessions(list, app.projectById));
+  const more = $derived(filtering ? foundCursor !== null : app.sessionsCursor !== null);
+  const loadingMore = $derived(filtering ? foundLoading && found.length > 0 : app.sessionsLoadingMore);
+  const machines = $derived(app.machines.length > 1 ? app.machines : []);
 </script>
 
 <div class="sidebar-inner">
   <div class="search">
     <input class="input" type="search" placeholder="Filter sessions" aria-label="Filter sessions" bind:value={filter} />
+    {#if machines.length > 0}
+      <select class="select" aria-label="Machine" bind:value={machine}>
+        <option value="">All machines</option>
+        {#each machines as m (m.id)}
+          <option value={m.id}>{app.machineName(m.id)}{m.id === app.selfId ? ' (this machine)' : ''}</option>
+        {/each}
+      </select>
+    {/if}
   </div>
   <div class="scroll">
     <Loadable
-      loading={!app.sessionsLoaded}
-      error={app.sessionsError}
+      loading={!app.sessionsLoaded || (filtering && foundLoading && list.length === 0)}
+      error={filtering ? (list.length === 0 ? foundError : null) : app.sessionsError}
       empty={groups.length === 0}
-      emptyText={filter ? 'No sessions match.' : 'No sessions yet. Start one and it shows up here, along with sessions you run outside blirp.'}
-      onretry={() => app.refreshSessions()}
+      emptyText={filtering ? 'No sessions match.' : 'No sessions yet. Start one and it shows up here, along with sessions you run outside blirp.'}
+      onretry={() => (filtering ? search(true) : app.refreshSessions())}
     >
       {#snippet emptyAction()}
-        {#if !filter && app.control}<button class="btn primary sm" type="button" onclick={() => app.openNewSession()}>New session</button>{/if}
+        {#if !filtering && app.control}<button class="btn primary sm" type="button" onclick={() => app.openNewSession()}>New session</button>{/if}
       {/snippet}
       {#each groups as g (g.projectId)}
+        {@const open = expanded.has(g.projectId)}
+        {@const preview = previewSessions(g.sessions, open ? Infinity : GROUP_PREVIEW, selectedId)}
         <section class="group" aria-label={g.name}>
           <header>
             <a class="gname ellipsis" href={href.project(g.projectId)}>{g.name}</a>
@@ -57,7 +131,7 @@
             {/if}
           </header>
           <ul class="list-plain">
-            {#each g.sessions as s (s.id)}
+            {#each preview.shown as s (s.id)}
               <li>
                 <a
                   class="scard"
@@ -88,8 +162,22 @@
               </li>
             {/each}
           </ul>
+          {#if preview.hidden > 0}
+            <button type="button" class="link-btn" onclick={() => expanded.add(g.projectId)}>Show {preview.hidden} more</button>
+          {:else if open && g.sessions.length > GROUP_PREVIEW}
+            <button type="button" class="link-btn" onclick={() => expanded.delete(g.projectId)}>Show fewer</button>
+          {/if}
         </section>
       {/each}
+      {#if filtering && foundError && list.length > 0}<p class="err" role="alert">{foundError}</p>{/if}
+      {#if more}
+        <button
+          type="button"
+          class="btn sm more"
+          disabled={loadingMore}
+          onclick={() => (filtering ? search(false) : app.loadMoreSessions())}>{loadingMore ? 'Loading…' : 'Load older sessions'}</button
+        >
+      {/if}
     </Loadable>
   </div>
 </div>
@@ -102,7 +190,30 @@
     min-height: 0;
   }
   .search {
+    display: grid;
+    gap: 6px;
     padding: 12px 12px 4px;
+  }
+  .link-btn {
+    margin: 4px 0 0 6px;
+    padding: 2px 0;
+    border: 0;
+    background: none;
+    color: var(--text-2);
+    font-size: 12px;
+    cursor: pointer;
+  }
+  .link-btn:hover {
+    color: var(--text);
+    text-decoration: underline;
+  }
+  .more {
+    width: 100%;
+    margin-top: 12px;
+  }
+  .err {
+    color: var(--danger);
+    font-size: 12px;
   }
   .scroll {
     flex: 1;

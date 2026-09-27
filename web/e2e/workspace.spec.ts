@@ -969,6 +969,107 @@ test('notifications: inside the desktop app they go through its notify command',
   await ctx.close();
 });
 
+test('sessions list: recent activity first, every machine labeled and filterable', async () => {
+  // Two external Claude Code transcripts: one started hours ago but active a minute ago, one
+  // started later that went quiet. Most recent activity comes first, not the latest start.
+  const folder = join(env.root, 'order-e2e');
+  mkdirSync(folder, { recursive: true });
+  // Registered, so the temp folder is a project of its own rather than Home.
+  await apiCall('POST', '/api/projects', { path: folder, name: 'order-e2e' });
+  const now = Date.now();
+  const transcript = (sid: string, prompt: string, first: number, last: number): string => {
+    const common = { cwd: folder, sessionId: sid, version: '2.0.0', userType: 'external', entrypoint: 'cli' };
+    const usage = { input_tokens: 5, cache_creation_input_tokens: 0, cache_read_input_tokens: 0, output_tokens: 3 };
+    return [
+      { parentUuid: null, type: 'user', message: { role: 'user', content: prompt }, uuid: `${sid}-u`, timestamp: new Date(first).toISOString() },
+      {
+        parentUuid: `${sid}-u`,
+        type: 'assistant',
+        message: { model: 'claude-haiku-4-5', id: `msg_${sid}`, type: 'message', role: 'assistant', content: [{ type: 'text', text: 'ok' }], usage },
+        uuid: `${sid}-a`,
+        timestamp: new Date(last).toISOString(),
+      },
+    ]
+      .map((t) => JSON.stringify({ ...t, isSidechain: false, ...common }))
+      .join('\n');
+  };
+  const [longRunning, recentStart] = [randomUUID(), randomUUID()];
+  const dir = join(env.userHome, '.claude', 'projects', 'e2e-order');
+  mkdirSync(dir, { recursive: true });
+  writeFileSync(join(dir, `${longRunning}.jsonl`), `${transcript(longRunning, 'Long running order check', now - 3 * 3_600_000, now - 60_000)}\n`);
+  writeFileSync(join(dir, `${recentStart}.jsonl`), `${transcript(recentStart, 'Recently started order check', now - 30 * 60_000, now - 20 * 60_000)}\n`);
+  const ingested = async (): Promise<number> =>
+    (await apiCall<{ items: SessionRow[] }>('GET', '/api/sessions?agent=claude&limit=500')).items.filter(
+      (x) => x.agent_session_id === longRunning || x.agent_session_id === recentStart,
+    ).length;
+  await expect.poll(ingested, { timeout: 30_000 }).toBe(2);
+
+  // Pretend this machine is paired with a hub that has one session of its own.
+  const me = await apiCall<{ machine: { id: string; name: string } }>('GET', '/api/health');
+  const hub = { id: 'e2e-hub', name: 'Studio Mac', os: 'macos', role: 'hub', last_seen: now, revoked: false };
+  const self = { ...me.machine, os: 'windows', role: 'node', last_seen: now, revoked: false };
+  await page.route(`${env.url}/api/sync/status`, (r) =>
+    r.fulfill({
+      json: {
+        role: 'node',
+        machine_id: me.machine.id,
+        hub: hub.id,
+        connected: true,
+        last_sync_at: now,
+        pending_outbox: 0,
+        portal_url: null,
+        portal_cert_fingerprint: null,
+      },
+    }),
+  );
+  await page.route(`${env.url}/api/machines`, (r) => r.fulfill({ json: [self, hub] }));
+  await page.route(`${env.url}/api/machines/${hub.id}/health`, (r) => r.fulfill({ json: { keep_awake: false } }));
+  const [template] = (await apiCall<{ items: Array<Record<string, unknown>> }>('GET', '/api/sessions?limit=1')).items;
+  const remoteSession = {
+    ...template,
+    id: 'e2e-remote',
+    machine_id: hub.id,
+    project_id: 'e2e-remote-project',
+    title: 'Remote order check',
+    status: 'completed',
+    origin: 'external',
+    parent_session_id: null,
+    worktree: null,
+    last_activity_at: now - 5 * 60_000,
+  };
+  await page.route(
+    (u) => u.pathname === '/api/sessions',
+    async (r) => {
+      const res = await r.fetch();
+      const body = (await res.json()) as { items: Array<Record<string, unknown>>; next_cursor: string | null };
+      const u = new URL(r.request().url());
+      const machine = u.searchParams.get('machine');
+      const fresh = !u.searchParams.has('cursor') && !u.searchParams.has('parent') && !u.searchParams.has('q');
+      if (fresh && (machine === null || machine === hub.id)) body.items.push(remoteSession);
+      await r.fulfill({ response: res, json: body });
+    },
+  );
+  await page.goto(`${env.url}/sessions`);
+  const sidebar = page.getByRole('complementary', { name: 'Sessions' });
+  const group = sidebar.getByRole('region', { name: 'order-e2e' });
+  await expect(group.locator('.scard .title')).toHaveText(['Long running order check', 'Recently started order check']);
+  // This machine's sessions carry its name once another machine is paired, the hub's carry the hub's.
+  await expect(group.getByTestId('machine-badge').first()).toHaveText(me.machine.name);
+  const remote = sidebar.locator('a[href="/sessions/e2e-remote"]');
+  await expect(remote.getByTestId('machine-badge')).toHaveText(hub.name);
+
+  const pick = sidebar.getByRole('combobox', { name: 'Machine' });
+  await pick.selectOption(hub.id);
+  await expect(remote).toBeVisible();
+  await expect(group).toHaveCount(0);
+  await pick.selectOption(me.machine.id);
+  await expect(group.locator('.scard .title')).toHaveText(['Long running order check', 'Recently started order check']);
+  await expect(remote).toHaveCount(0);
+
+  await page.unrouteAll({ behavior: 'wait' });
+  await page.goto(`${env.url}/sessions`);
+});
+
 test('no CSP violations or unexpected console errors', async () => {
   const csp = await page.evaluate(() => (window as unknown as { __csp: string[] }).__csp);
   expect(csp).toEqual([]);

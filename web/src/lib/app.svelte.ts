@@ -13,7 +13,7 @@ import type {
   SyncStatus,
 } from './api/types.gen';
 import { backoffDelay } from './terminal/protocol';
-import { hasTerminal, isSubagent, sessionTitle } from './status';
+import { compareSessions, hasTerminal, isSubagent, sessionTitle } from './status';
 import { readPref, writePref } from './prefs';
 import {
   EVENT_TEXT,
@@ -50,8 +50,6 @@ const SIDEBAR_LIMIT = 200;
 const AWAKE_POLL_MS = 30_000;
 const MEMORY_PANEL_PREF = readPref('blirp.memoryPanel', ['open', 'closed', 'unset'], 'unset');
 
-const byStartedDesc = (a: Session, b: Session): number => b.started_at - a.started_at;
-
 const EVENT_TYPES: ReadonlySet<string> = new Set([
   'session_created',
   'session_updated',
@@ -82,6 +80,9 @@ class AppState {
   sessions: Session[] = $state.raw([]);
   sessionsLoaded = $state(false);
   sessionsError: string | null = $state(null);
+  /** More sessions than loaded exist when set; `loadMoreSessions` fetches the next page. */
+  sessionsCursor: string | null = $state(null);
+  sessionsLoadingMore = $state(false);
   projects: ProjectSummary[] = $state.raw([]);
   projectsLoaded = $state(false);
   projectsError: string | null = $state(null);
@@ -261,12 +262,32 @@ class AppState {
   async refreshSessions(): Promise<void> {
     try {
       const page = await api.sessions.list({ limit: SIDEBAR_LIMIT });
-      this.sessions = [...page.items].sort(byStartedDesc);
+      this.sessions = [...page.items].sort(compareSessions);
+      this.sessionsCursor = page.next_cursor;
       this.sessionsError = null;
     } catch (e) {
       this.sessionsError = errorMessage(e);
     } finally {
       this.sessionsLoaded = true;
+    }
+  }
+
+  /** The next page of the unfiltered list (older activity); a failure is a toast, the list stays. */
+  async loadMoreSessions(): Promise<void> {
+    const cursor = this.sessionsCursor;
+    if (!cursor || this.sessionsLoadingMore) return;
+    this.sessionsLoadingMore = true;
+    try {
+      const page = await api.sessions.list({ limit: SIDEBAR_LIMIT, cursor });
+      // A refresh meanwhile started the list over; this page belongs to the old one.
+      if (this.sessionsCursor !== cursor) return;
+      const known = this.sessionById;
+      this.sessions = [...this.sessions, ...page.items.filter((s) => !known.has(s.id))].sort(compareSessions);
+      this.sessionsCursor = page.next_cursor;
+    } catch (e) {
+      this.toast(`Could not load more sessions: ${errorMessage(e)}`);
+    } finally {
+      this.sessionsLoadingMore = false;
     }
   }
 
@@ -296,9 +317,8 @@ class AppState {
     const prev = this.sessionById.get(s.id);
     // A session started or ended somewhere: keep-awake follows within a status tick.
     if (!prev || hasTerminal(prev) !== hasTerminal(s)) this.#awakeSoon();
-    this.sessions = prev
-      ? this.sessions.map((x) => (x.id === s.id ? s : x))
-      : [s, ...this.sessions].sort(byStartedDesc);
+    // Activity and status move a session within the list, not only its arrival.
+    this.sessions = (prev ? this.sessions.map((x) => (x.id === s.id ? s : x)) : [s, ...this.sessions]).sort(compareSessions);
     if (prev) this.#maybeNotify(prev, s);
     // Answered somewhere else: it no longer waits for anyone.
     if (s.status === 'working' || s.status === 'starting') this.#seen(s.id);
