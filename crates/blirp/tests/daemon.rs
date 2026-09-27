@@ -1458,7 +1458,7 @@ fn fake_install(h: &Harness, base: &str) -> (std::path::PathBuf, Spawned) {
                     .lock()
                     .unwrap()
                     .push((exe.to_path_buf(), args.to_vec(), dir.to_path_buf()));
-                Ok(4242)
+                Ok(())
             })),
         });
     (cli, spawned)
@@ -1514,16 +1514,8 @@ async fn update_status_check_and_apply() {
         let spawned = spawned.lock().unwrap();
         assert_eq!(spawned.len(), 1);
         let (exe, args, dir) = &spawned[0];
-        assert!(
-            args.ends_with(&["update".into(), "--version".into(), "99.0.0".into()]),
-            "{args:?}"
-        );
-        // Linux CI may run the tests inside a systemd service.
-        let cli_s = cli.display().to_string();
-        assert!(
-            *exe == cli || (exe == std::path::Path::new("systemd-run") && args.contains(&cli_s)),
-            "{exe:?} {args:?}"
-        );
+        assert_eq!(*exe, cli);
+        assert_eq!(args, &["update", "--version", "99.0.0"]);
         assert_eq!(dir, h.daemon.state.paths.home());
     }
     // One updater at a time, until it records an outcome.
@@ -1534,7 +1526,8 @@ async fn update_status_check_and_apply() {
     );
     let failed = UpdateOutcome {
         from: blirp::update::CURRENT.into(),
-        to: "99.0.0".into(),
+        to: Some("99.0.0".into()),
+        installed: false,
         ok: false,
         error: Some("updating to 99.0.0 failed: disk full".into()),
         finished_at: blirp_core::now_ms() + 1,

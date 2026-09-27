@@ -183,11 +183,28 @@ error: string | null,
 last_update: UpdateOutcome | null, };
 
 /**
- * One install attempt of `blirp update`, a line of `logs/update.log`.
+ * One run of `blirp update` (not `--check`), a line of `logs/update.log`.
  */
-export type UpdateOutcome = { from: string, to: string, ok: boolean, 
+export type UpdateOutcome = { 
 /**
- * Why it failed; the previous version is still installed.
+ * The version that ran the update.
+ */
+from: string, 
+/**
+ * The release it aimed for; null when it failed before finding one.
+ */
+to: string | null, 
+/**
+ * The files were replaced: `to` is installed now.
+ */
+installed: boolean, 
+/**
+ * Everything worked, including "nothing to install".
+ */
+ok: boolean, 
+/**
+ * Why it failed: before `installed`, `from` is still installed;
+ * after it, the daemon did not start again.
  */
 error: string | null, 
 /**

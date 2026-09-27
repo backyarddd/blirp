@@ -163,22 +163,21 @@ async fn apply(State(s): State<SharedState>, _: Admin) -> ApiResult<StatusCode> 
         }
         *started = Some(now);
     }
-    let under_systemd = cfg!(target_os = "linux") && std::env::var_os("INVOCATION_ID").is_some();
-    let (exe, args) = update::updater_command(&cli, &target, under_systemd, |n| {
-        std::env::var_os(n).is_some()
-    });
-    let spawn = s
+    let args = update::updater_args(&target);
+    let spawn: update::Spawner = s
         .updates
         .overrides()
         .spawn
-        .unwrap_or_else(|| std::sync::Arc::new(crate::daemon::spawn_detached));
-    match spawn(&exe, &args, s.paths.home()) {
-        Ok(pid) => {
+        .unwrap_or_else(|| std::sync::Arc::new(update::start_updater));
+    let home = s.paths.home().to_path_buf();
+    let started = tokio::task::spawn_blocking(move || spawn(&cli, &args, &home))
+        .await
+        .unwrap_or_else(|e| Err(std::io::Error::other(e)));
+    match started {
+        Ok(()) => {
             tracing::info!(
                 from = update::CURRENT,
                 to = %target,
-                pid,
-                updater = %exe.display(),
                 "update started from the UI"
             );
             Ok(StatusCode::ACCEPTED)

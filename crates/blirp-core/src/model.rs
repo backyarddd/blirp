@@ -432,13 +432,19 @@ pub struct UpdateStatus {
     pub last_update: Option<UpdateOutcome>,
 }
 
-/// One install attempt of `blirp update`, a line of `logs/update.log`.
+/// One run of `blirp update` (not `--check`), a line of `logs/update.log`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
 pub struct UpdateOutcome {
+    /// The version that ran the update.
     pub from: String,
-    pub to: String,
+    /// The release it aimed for; null when it failed before finding one.
+    pub to: Option<String>,
+    /// The files were replaced: `to` is installed now.
+    pub installed: bool,
+    /// Everything worked, including "nothing to install".
     pub ok: bool,
-    /// Why it failed; the previous version is still installed.
+    /// Why it failed: before `installed`, `from` is still installed;
+    /// after it, the daemon did not start again.
     pub error: Option<String>,
     /// Unix ms.
     pub finished_at: i64,

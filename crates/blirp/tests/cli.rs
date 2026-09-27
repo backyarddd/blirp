@@ -382,3 +382,94 @@ async fn daemon_started_inside_claude_drops_the_inherited_token() {
     let o = blirp(&home, &user, &["stop"]);
     assert!(o.status.success(), "{}", text(&o));
 }
+
+/// `blirp update` against the releases API at `base`, never a real
+/// release: the test binary has no install receipt, so it refuses to
+/// replace itself. Returns the output and the last recorded outcome.
+async fn update_run(
+    home: &Path,
+    user: &Path,
+    base: &str,
+    args: &[&str],
+) -> (Output, blirp_core::model::UpdateOutcome) {
+    let (home, user, base) = (home.to_path_buf(), user.to_path_buf(), base.to_string());
+    let args: Vec<String> = args.iter().map(|a| a.to_string()).collect();
+    let o = tokio::task::spawn_blocking(move || {
+        let mut cmd = blirp_core::process::command(env!("CARGO_BIN_EXE_blirp"));
+        cmd.arg("update")
+            .args(&args)
+            .env("BLIRP_HOME", &home)
+            .env("HOME", &user)
+            .env("USERPROFILE", &user)
+            .env("APPDATA", user.join("AppData"))
+            .env("BLIRP_RELEASE_BASE_URL", &base)
+            .env_remove("GITHUB_TOKEN");
+        for v in INGEST_VARS {
+            cmd.env_remove(v);
+        }
+        let o = cmd.output().unwrap();
+        (o, home)
+    })
+    .await
+    .unwrap();
+    let outcome = blirp::update::last_outcome(&blirp_core::paths::Paths::at(&o.1))
+        .unwrap_or_else(|| panic!("no outcome recorded: {}", text(&o.0)));
+    (o.0, outcome)
+}
+
+// Every run that may install records how it ended, also when it stops
+// early (the UI's Update now waits for that record).
+#[tokio::test]
+async fn update_records_every_run() {
+    let current = env!("CARGO_PKG_VERSION");
+    let tmp = tempfile::tempdir().unwrap();
+    let home = tmp.path().join("blirp");
+    let user = tmp.path().join("user");
+    std::fs::create_dir_all(&user).unwrap();
+
+    // Offline: fails before a release is known.
+    let closed = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let offline = format!("http://{}/releases", closed.local_addr().unwrap());
+    drop(closed);
+    let (o, out) = update_run(&home, &user, &offline, &[]).await;
+    assert!(!o.status.success(), "{}", text(&o));
+    assert!(!out.ok && !out.installed && out.to.is_none(), "{out:?}");
+    assert!(out.error.is_some_and(|e| e.contains("/releases/latest")));
+    assert_eq!(out.from, current);
+
+    let app = axum::Router::new()
+        .route(
+            "/releases/latest",
+            axum::routing::get(|| async {
+                let tag = concat!("v", env!("CARGO_PKG_VERSION"));
+                axum::Json(serde_json::json!({ "tag_name": tag, "html_url": "", "assets": [] }))
+            }),
+        )
+        .route(
+            "/releases/tags/{tag}",
+            axum::routing::get(
+                |axum::extract::Path(tag): axum::extract::Path<String>| async move {
+                    axum::Json(serde_json::json!({ "tag_name": tag, "html_url": "", "assets": [] }))
+                },
+            ),
+        );
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let base = format!("http://{}/releases", listener.local_addr().unwrap());
+    tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+
+    // Nothing to install: ok, nothing replaced.
+    let (o, out) = update_run(&home, &user, &base, &[]).await;
+    assert!(o.status.success(), "{}", text(&o));
+    assert!(out.ok && !out.installed, "{out:?}");
+    assert_eq!(out.to.as_deref(), Some(current));
+
+    // Not a script install: refused before anything is downloaded.
+    let (o, out) = update_run(&home, &user, &base, &["--version", "0.0.1"]).await;
+    assert!(!o.status.success(), "{}", text(&o));
+    assert!(!out.ok && !out.installed, "{out:?}");
+    assert_eq!(out.to.as_deref(), Some("0.0.1"));
+    assert!(
+        out.error
+            .is_some_and(|e| e.contains("not installed by the blirp install script"))
+    );
+}

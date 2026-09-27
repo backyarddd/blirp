@@ -15,36 +15,78 @@ pub async fn update(
     check: bool,
     version: Option<String>,
 ) -> anyhow::Result<ExitCode> {
+    if check {
+        return check_update(version).await;
+    }
+    // Every run is recorded, whatever ends it: Settings > About shows the
+    // last one, and the UI's Update now waits for it (it runs without a
+    // terminal).
+    let mut progress = Progress::default();
+    let result = run_update(paths, version, &mut progress).await;
+    let outcome = blirp_core::model::UpdateOutcome {
+        from: update::CURRENT.to_string(),
+        to: progress.target.map(|t| t.to_string()),
+        installed: progress.installed,
+        ok: result.is_ok(),
+        error: result.as_ref().err().map(|e| format!("{e:#}")),
+        finished_at: blirp_core::now_ms(),
+    };
+    if let Err(e) = update::record_outcome(paths, &outcome) {
+        eprintln!("blirp: could not record the update in the log: {e:#}");
+    }
+    result.map(|()| ExitCode::SUCCESS)
+}
+
+/// How far an update got, for its [`blirp_core::model::UpdateOutcome`].
+#[derive(Default)]
+struct Progress {
+    /// The release it aims for, once known.
+    target: Option<semver::Version>,
+    /// The files were replaced.
+    installed: bool,
+}
+
+async fn check_update(version: Option<String>) -> anyhow::Result<ExitCode> {
+    let current = update::parse_version(update::CURRENT)?;
+    let wanted = version.as_deref().map(update::parse_version).transpose()?;
+    let release = update::fetch_release(&update::http()?, wanted.as_ref()).await?;
+    let target = release.version()?;
+    if target > current {
+        // An invalid receipt is reported by the update itself.
+        let how = if install::installed().is_ok_and(|i| i.is_some()) {
+            "run `blirp update`"
+        } else {
+            "this copy was not installed by the install script: update it the way you \
+             installed it (installer, package manager, source build)"
+        };
+        println!("blirp {target} is available (you have {current}); {how}");
+        return Ok(ExitCode::from(UPDATE_AVAILABLE));
+    }
+    println!("blirp {current} is up to date");
+    Ok(ExitCode::SUCCESS)
+}
+
+async fn run_update(
+    paths: &Paths,
+    version: Option<String>,
+    progress: &mut Progress,
+) -> anyhow::Result<()> {
     let current = update::parse_version(update::CURRENT)?;
     let wanted = version.as_deref().map(update::parse_version).transpose()?;
     let client = update::http()?;
     let release = update::fetch_release(&client, wanted.as_ref()).await?;
     let target = release.version()?;
-    if check {
-        if target > current {
-            // An invalid receipt is reported by the update itself.
-            let how = if install::installed().is_ok_and(|i| i.is_some()) {
-                "run `blirp update`"
-            } else {
-                "this copy was not installed by the install script: update it the way you \
-                 installed it (installer, package manager, source build)"
-            };
-            println!("blirp {target} is available (you have {current}); {how}");
-            return Ok(ExitCode::from(UPDATE_AVAILABLE));
-        }
-        println!("blirp {current} is up to date");
-        return Ok(ExitCode::SUCCESS);
-    }
+    progress.target = Some(target.clone());
     if target == current {
         println!("blirp {current} is already installed");
-        return Ok(ExitCode::SUCCESS);
+        return Ok(());
     }
     if target < current && wanted.is_none() {
         println!(
             "blirp {current} is newer than the latest release ({target}); \
              use `blirp update --version {target}` to downgrade"
         );
-        return Ok(ExitCode::SUCCESS);
+        return Ok(());
     }
     let Some(inst) = install::installed()? else {
         bail!(
@@ -55,20 +97,16 @@ pub async fn update(
         );
     };
     println!("Updating blirp {current} -> {target}");
-    let result = install_release(paths, &client, &release, inst, &current, &target).await;
-    // Settings > About shows the last attempt (`GET /api/update`), also
-    // after an update started there, which runs without a terminal.
-    let outcome = blirp_core::model::UpdateOutcome {
-        from: current.to_string(),
-        to: target.to_string(),
-        ok: result.is_ok(),
-        error: result.as_ref().err().map(|e| format!("{e:#}")),
-        finished_at: blirp_core::now_ms(),
-    };
-    if let Err(e) = update::record_outcome(paths, &outcome) {
-        eprintln!("blirp: could not record the update in the log: {e:#}");
-    }
-    result.map(|()| ExitCode::SUCCESS)
+    install_release(
+        paths,
+        &client,
+        &release,
+        inst,
+        &current,
+        &target,
+        &mut progress.installed,
+    )
+    .await
 }
 
 /// Download, verify and install `release` (`target`) over this
@@ -80,6 +118,7 @@ async fn install_release(
     mut inst: install::Installed,
     current: &semver::Version,
     target: &semver::Version,
+    installed_flag: &mut bool,
 ) -> anyhow::Result<()> {
     let names = update::this_platform(target)?;
     let app = inst
@@ -182,10 +221,16 @@ async fn install_release(
             "updating to {target} failed; blirp {current} is still installed"
         )));
     }
+    *installed_flag = true;
     println!("Updated blirp {current} -> {target}");
     // Never fails the update: the outcome stays what the install did.
     super::skills::refresh_after_update(&inst.dir.join(install::CLI_FILES[0]));
-    restarted
+    restarted.map_err(|e| {
+        e.context(format!(
+            "blirp {target} is installed, but the daemon did not start again \
+             (start it with `blirp start`)"
+        ))
+    })
 }
 
 /// Unpack a downloaded desktop app asset in `dir`; returns the new app

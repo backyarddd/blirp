@@ -325,8 +325,8 @@ pub struct Checked {
     pub latest: Result<Arc<Latest>, String>,
 }
 
-/// Starts `exe args` detached with `dir` as data dir; returns its pid.
-pub type Spawner = Arc<dyn Fn(&Path, &[String], &Path) -> std::io::Result<u32> + Send + Sync>;
+/// Starts the updater `cli args` with `dir` as data dir ([`start_updater`]).
+pub type Spawner = Arc<dyn Fn(&Path, &[String], &Path) -> std::io::Result<()> + Send + Sync>;
 
 /// Replacements for what the daemon's update routes reach outside the
 /// process. Only tests set them.
@@ -449,30 +449,31 @@ pub fn last_outcome(paths: &Paths) -> Option<UpdateOutcome> {
         .find_map(|l| serde_json::from_str(l.trim()).ok())
 }
 
-/// The updater command line: `<cli> update --version <version>`. On Linux
-/// under a systemd service (`under_systemd`), `systemd-run --user` starts
-/// it in a unit of its own, because stopping the daemon's service kills
-/// everything in the service's cgroup, the updater included.
-/// `--setenv=NAME` copies a variable from the environment `systemd-run`
-/// gets; `present` says which are set.
-pub fn updater_command(
-    cli: &Path,
-    version: &Version,
-    under_systemd: bool,
-    present: impl Fn(&str) -> bool,
-) -> (PathBuf, Vec<String>) {
-    let args = vec![
+/// The updater's arguments: `update --version <version>`.
+pub fn updater_args(version: &Version) -> Vec<String> {
+    vec![
         "update".to_string(),
         "--version".to_string(),
         version.to_string(),
-    ];
-    if !under_systemd {
-        return (cli.to_path_buf(), args);
-    }
-    let mut wrapped: Vec<String> = [
+    ]
+}
+
+/// `systemd-run --user` arguments that run `cli args` in a transient unit
+/// of its own. Stopping the daemon's service kills everything in the
+/// service's cgroup, the updater included; `KillMode=process` keeps a
+/// `daemon --detach` the updater starts (when the service cannot) alive
+/// once the updater's own unit ends. `--setenv=NAME` copies a variable from
+/// the environment `systemd-run` gets; `present` says which are set.
+pub fn systemd_run_args(
+    cli: &Path,
+    args: &[String],
+    present: impl Fn(&str) -> bool,
+) -> Vec<String> {
+    let mut out: Vec<String> = [
         "--user",
         "--collect",
         "--quiet",
+        "--property=KillMode=process",
         "--description=blirp update",
     ]
     .map(String::from)
@@ -485,13 +486,50 @@ pub fn updater_command(
         BASE_URL_ENV,
     ] {
         if present(name) {
-            wrapped.push(format!("--setenv={name}"));
+            out.push(format!("--setenv={name}"));
         }
     }
-    wrapped.push("--".to_string());
-    wrapped.push(cli.display().to_string());
-    wrapped.extend(args);
-    (PathBuf::from("systemd-run"), wrapped)
+    out.push("--".to_string());
+    out.push(cli.display().to_string());
+    out.extend(args.iter().cloned());
+    out
+}
+
+/// Start the updater `cli args` so that it outlives this daemon, which it
+/// stops; `dir` is the data dir. On Linux under a systemd service
+/// (`INVOCATION_ID`) through `systemd-run`, which returns once the unit
+/// started (its failure is this error); without `systemd-run`, and
+/// elsewhere, as a detached process like `daemon --detach`. Blocking.
+pub fn start_updater(cli: &Path, args: &[String], dir: &Path) -> std::io::Result<()> {
+    if cfg!(target_os = "linux") && std::env::var_os("INVOCATION_ID").is_some() {
+        let wrapped = systemd_run_args(cli, args, |n| std::env::var_os(n).is_some());
+        match blirp_core::process::command("systemd-run")
+            .args(&wrapped)
+            .env(blirp_core::paths::HOME_ENV, dir)
+            .current_dir(dir)
+            .stdin(std::process::Stdio::null())
+            .output()
+        {
+            Ok(out) if out.status.success() => {
+                tracing::info!(updater = %cli.display(), "updater started with systemd-run");
+                return Ok(());
+            }
+            Ok(out) => {
+                return Err(std::io::Error::other(format!(
+                    "systemd-run failed ({}): {}",
+                    out.status,
+                    String::from_utf8_lossy(&out.stderr).trim()
+                )));
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                tracing::warn!("systemd-run not found; starting the updater directly");
+            }
+            Err(e) => return Err(e),
+        }
+    }
+    let pid = crate::daemon::spawn_detached(cli, args, dir)?;
+    tracing::info!(pid, updater = %cli.display(), "updater started");
+    Ok(())
 }
 
 #[cfg(test)]
@@ -592,20 +630,17 @@ U9d1YnP09dRsKTqDZBVlbrzr0GNVnDVjBx4vqKQqfwyTXTiIr3dIkL33LD0QhQ6UtqF3neyOI/DD6jVI
     }
 
     #[test]
-    fn updater_command_leaves_the_service_cgroup_under_systemd() {
+    fn updater_leaves_the_service_cgroup_under_systemd() {
         let cli = Path::new("/home/me/.local/bin/blirp");
-        let v = parse_version("0.2.0").unwrap();
-        let (exe, args) = updater_command(cli, &v, false, |_| true);
-        assert_eq!(exe, cli);
+        let args = updater_args(&parse_version("0.2.0").unwrap());
         assert_eq!(args, ["update", "--version", "0.2.0"]);
-        let (exe, args) = updater_command(cli, &v, true, |n| n != TOKEN_ENV);
-        assert_eq!(exe, Path::new("systemd-run"));
         assert_eq!(
-            args,
+            systemd_run_args(cli, &args, |n| n != TOKEN_ENV),
             [
                 "--user",
                 "--collect",
                 "--quiet",
+                "--property=KillMode=process",
                 "--description=blirp update",
                 "--setenv=BLIRP_HOME",
                 "--setenv=PATH",
@@ -627,7 +662,8 @@ U9d1YnP09dRsKTqDZBVlbrzr0GNVnDVjBx4vqKQqfwyTXTiIr3dIkL33LD0QhQ6UtqF3neyOI/DD6jVI
         assert_eq!(last_outcome(&paths), None);
         let outcome = |ok, at| UpdateOutcome {
             from: "0.1.0".into(),
-            to: "0.2.0".into(),
+            to: Some("0.2.0".into()),
+            installed: ok,
             ok,
             error: (!ok).then(|| "disk full".to_string()),
             finished_at: at,
