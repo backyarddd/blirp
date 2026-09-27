@@ -93,7 +93,13 @@ stopped_by_user: boolean,
  * may retitle or move a session, so each converges on its newest edit
  * by this time, independent of the rest of the row (§10). 0: never.
  */
-title_updated_at: number, project_updated_at: number, };
+title_updated_at: number, project_updated_at: number, 
+/**
+ * When the agent last compacted its context: the time of the newest
+ * compaction summary in its transcript (§8); null when it never did.
+ * Written by the owner's ingest, like tokens.
+ */
+compacted_at: number | null, };
 
 export type Event = { session_id: string, seq: number, ts: number, kind: EventKind, 
 /**
@@ -443,7 +449,13 @@ stopped_by_user: boolean,
  * may retitle or move a session, so each converges on its newest edit
  * by this time, independent of the rest of the row (§10). 0: never.
  */
-title_updated_at: number, project_updated_at: number, };
+title_updated_at: number, project_updated_at: number, 
+/**
+ * When the agent last compacted its context: the time of the newest
+ * compaction summary in its transcript (§8); null when it never did.
+ * Written by the owner's ingest, like tokens.
+ */
+compacted_at: number | null, };
 
 export type LaunchSession = { 
 /**

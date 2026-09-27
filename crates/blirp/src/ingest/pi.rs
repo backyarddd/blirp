@@ -156,8 +156,12 @@ impl Adapter for Pi {
                     &mut st,
                     &mut meta,
                 ),
-                "compaction" | "branch_summary" => {
-                    e.text(ts, EventKind::Summary, s("summary").unwrap_or(""), None)?;
+                kind @ ("compaction" | "branch_summary") => {
+                    // A branch summary is written when leaving a branch of the
+                    // tree, not because the context was full (§8 compaction).
+                    let branch =
+                        (kind == "branch_summary").then(|| json!({ "branch_summary": true }));
+                    e.text(ts, EventKind::Summary, s("summary").unwrap_or(""), branch)?;
                     if let Some(u) = v.get("usage") {
                         let model = st.model.clone();
                         add_usage(u, &mut st, model.as_deref());

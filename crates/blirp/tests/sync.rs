@@ -1117,6 +1117,7 @@ async fn presence_follows_connections() {
         stopped_by_user: false,
         title_updated_at: 0,
         project_updated_at: 0,
+        compacted_at: None,
     };
     store
         .insert_session(&mk("on-c", &c_id, SessionStatus::Working, now - 7_200_000))

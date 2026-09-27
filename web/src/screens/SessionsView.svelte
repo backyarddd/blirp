@@ -7,6 +7,7 @@
   import { hasTerminal, sessionTitle } from '../lib/status';
   import SessionSidebar from '../lib/components/SessionSidebar.svelte';
   import SessionToolbar from '../lib/components/SessionToolbar.svelte';
+  import CompactionHint from '../lib/components/CompactionHint.svelte';
   import MemoryPanel from '../lib/components/MemoryPanel.svelte';
   import Terminal from '../lib/terminal/Terminal.svelte';
   import SessionDetail from './SessionDetail.svelte';
@@ -106,6 +107,9 @@
       <span class="spacer"></span>
       {#if session}<SessionToolbar {session} />{/if}
     </div>
+    {#if session}
+      {#key session.id}<CompactionHint {session} />{/key}
+    {/if}
 
     <div class="frame card">
       {#if session}

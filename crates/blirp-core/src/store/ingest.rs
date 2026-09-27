@@ -312,6 +312,7 @@ mod tests {
             stopped_by_user: false,
             title_updated_at: 0,
             project_updated_at: 0,
+            compacted_at: None,
         }
     }
 

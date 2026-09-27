@@ -325,6 +325,8 @@ fn claude_sessions_subagents_resume_partial_truncation() {
             (11264, EventKind::Summary),
         ]
     );
+    // The compaction summary's time: the agent's context filled up then.
+    assert_eq!(s.compacted_at, Some(1_767_261_608_000));
     assert!(
         ev[0]
             .text
@@ -345,6 +347,7 @@ fn claude_sessions_subagents_resume_partial_truncation() {
         Some("subagent (Explore): Find files")
     );
     assert_eq!(h.kinds(&child), [EventKind::User, EventKind::Assistant]);
+    assert_eq!(child.compacted_at, None);
     let created = h
         .emitted
         .lock()
@@ -448,6 +451,7 @@ fn claude_session_launched_by_blirp_keeps_its_fields() {
         stopped_by_user: false,
         title_updated_at: 0,
         project_updated_at: 0,
+        compacted_at: None,
     };
     h.store.insert_session(&launched).unwrap();
     put_claude(&h);
@@ -689,6 +693,7 @@ fn codex_rollout_links_to_blirp_launch() {
         stopped_by_user: false,
         title_updated_at: 0,
         project_updated_at: 0,
+        compacted_at: None,
     };
     // Machine id of the engine's machine.
     let machine = h.store.get_setting("machine_id").unwrap().unwrap();
@@ -1024,6 +1029,7 @@ fn pi_sessions() {
             (9216, EventKind::Summary),
         ]
     );
+    assert_eq!(s.compacted_at, Some(1_767_528_007_000));
     append(&path, fixture("pi/append.jsonl").as_bytes());
     h.pass();
     let ev = h.events(&s);
@@ -1653,6 +1659,7 @@ fn transcripts_of_other_machines_sessions_are_left_alone() {
         stopped_by_user: false,
         title_updated_at: 0,
         project_updated_at: 0,
+        compacted_at: None,
     };
     h.store
         .apply_remote(&blirp_core::store::Change::Session(remote.clone()))
@@ -2130,6 +2137,7 @@ fn headless_runs_blirp_launched_or_hook_created() {
         stopped_by_user: false,
         title_updated_at: 0,
         project_updated_at: 0,
+        compacted_at: None,
     };
     // A blirp launch whose transcript says headless keeps its session.
     h.store
@@ -2354,6 +2362,7 @@ fn ingested_headless_runs_are_removed_once() {
             stopped_by_user: false,
             title_updated_at: 0,
             project_updated_at: 0,
+            compacted_at: None,
         };
         h.store.insert_session(&s).unwrap();
         s

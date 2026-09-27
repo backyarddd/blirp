@@ -641,8 +641,8 @@ fn write_row(tx: &Transaction<'_>, change: &Change) -> Result<usize> {
             "INSERT INTO sessions(id, project_id, machine_id, agent, agent_session_id, origin, cwd, title,
                status, branch, worktree, transcript_path, started_at, ended_at, last_activity_at, exit_code,
                summary_json, distilled_through_seq, tokens_in, tokens_out, cost_usd, parent_session_id,
-               stopped_by_user, title_updated_at, project_updated_at)
-             VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,?19,?20,?21,?22,?23,?24,?25)
+               stopped_by_user, title_updated_at, project_updated_at, compacted_at)
+             VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,?19,?20,?21,?22,?23,?24,?25,?26)
              ON CONFLICT(id) DO UPDATE SET
                -- Title and project: each keeps its newest edit by its own
                -- time (ties by value), whatever the rest of the row is (§10).
@@ -662,13 +662,14 @@ fn write_row(tx: &Transaction<'_>, change: &Change) -> Result<usize> {
                last_activity_at=excluded.last_activity_at, exit_code=excluded.exit_code,
                summary_json=excluded.summary_json, distilled_through_seq=excluded.distilled_through_seq,
                tokens_in=excluded.tokens_in, tokens_out=excluded.tokens_out, cost_usd=excluded.cost_usd,
-               parent_session_id=excluded.parent_session_id, stopped_by_user=excluded.stopped_by_user",
+               parent_session_id=excluded.parent_session_id, stopped_by_user=excluded.stopped_by_user,
+               compacted_at=excluded.compacted_at",
             params![
                 s.id, s.project_id, s.machine_id, s.agent, s.agent_session_id, s.origin, s.cwd, s.title,
                 s.status, s.branch, s.worktree, s.transcript_path, s.started_at, s.ended_at,
                 s.last_activity_at, s.exit_code, json_text(&s.summary), s.distilled_through_seq,
                 s.tokens_in, s.tokens_out, s.cost_usd, s.parent_session_id, s.stopped_by_user,
-                s.title_updated_at, s.project_updated_at
+                s.title_updated_at, s.project_updated_at, s.compacted_at
             ],
         )?,
         Change::DeleteSession { id } => {

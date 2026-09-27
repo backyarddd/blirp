@@ -5,7 +5,7 @@ use rusqlite::Connection;
 
 /// Index `i` holds the migration that moves the schema from version `i` to `i + 1`.
 pub(crate) const MIGRATIONS: &[&str] = &[
-    V1, V2, V3, V4, V5, V6, V7, V8, V9, V10, V11, V12, V13, V14, V15,
+    V1, V2, V3, V4, V5, V6, V7, V8, V9, V10, V11, V12, V13, V14, V15, V16,
 ];
 
 /// Schema of §5. Note on the FTS tables: they are external-content tables keyed
@@ -492,6 +492,14 @@ INSERT INTO settings(key, value_json)
 /// daemon was stopped is still told apart.
 const V15: &str = r#"
 ALTER TABLE file_copies ADD COLUMN identity TEXT NULL;
+"#;
+
+/// `sessions.compacted_at`: newest compaction summary of the transcript (§8),
+/// for the "start a fresh session" suggestion. Set by ingest from now on;
+/// sessions ingested before stay null until their next compaction (a backfill
+/// would scan every event once, for sessions that are mostly over).
+const V16: &str = r#"
+ALTER TABLE sessions ADD COLUMN compacted_at INTEGER NULL;
 "#;
 
 #[derive(Debug, thiserror::Error)]

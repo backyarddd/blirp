@@ -151,7 +151,8 @@ pub const MAX_ENTRY_BYTES: usize = 4 << 20;
 /// the stored edit (`write_row`); everything else is the owner's (its
 /// status, which only the machine running the session knows; what it runs
 /// and reads: resume argv, folder, worktree, transcript; and what it
-/// derives from its transcript: summary, distill position, tokens, cost),
+/// derives from its transcript: summary, distill position, tokens, cost,
+/// compaction time),
 /// so it is kept from `old`. A foreign copy carries whatever version of
 /// those fields it last saw.
 fn foreign_session_write(old: Session, new: &Session) -> Session {
@@ -2276,6 +2277,7 @@ mod tests {
             stopped_by_user: false,
             title_updated_at: 0,
             project_updated_at: 0,
+            compacted_at: None,
         }
     }
 
@@ -2547,6 +2549,7 @@ mod tests {
             stopped_by_user: false,
             title_updated_at: 0,
             project_updated_at: 0,
+            compacted_at: None,
         };
         store.insert_session(&s).unwrap();
         store.rebind_machine("old", "new").unwrap();
@@ -3031,7 +3034,8 @@ mod tests {
                     "DROP TABLE hub_parked;
                      ALTER TABLE sessions DROP COLUMN title_updated_at;
                      ALTER TABLE sessions DROP COLUMN project_updated_at;
-                     ALTER TABLE file_copies DROP COLUMN identity;",
+                     ALTER TABLE file_copies DROP COLUMN identity;
+                     ALTER TABLE sessions DROP COLUMN compacted_at;",
                 )?;
                 Ok(tx.pragma_update(None, "user_version", 11)?)
             })
@@ -3486,7 +3490,8 @@ mod tests {
                 "UPDATE sessions SET title = 'aaa';
                  ALTER TABLE sessions DROP COLUMN title_updated_at;
                  ALTER TABLE sessions DROP COLUMN project_updated_at;
-                 ALTER TABLE file_copies DROP COLUMN identity;",
+                 ALTER TABLE file_copies DROP COLUMN identity;
+                 ALTER TABLE sessions DROP COLUMN compacted_at;",
             )?;
             Ok(tx.pragma_update(None, "user_version", 13)?)
         })

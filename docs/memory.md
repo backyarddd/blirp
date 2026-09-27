@@ -15,6 +15,8 @@ blirp gives every new session in a project a short, stable summary of the work d
 
 blirp reads the transcripts that agents already write to disk (Claude Code JSONL, Codex rollouts, opencode's SQLite database, ...; the list per agent is in [agents.md](agents.md)). It tails them incrementally: file watchers, a full rescan every 5 minutes and at daemon start, and immediate reads when a hook reports a transcript path. Each transcript becomes a session with events: user prompts, assistant replies, tool calls (one line plus redacted arguments), tool results (cut to 4 KiB), file edits (one event per path), compaction summaries and injected system context. Reasoning/thinking blocks are not stored.
 
+A compaction summary also marks the session: when the agent of a running session compacts its context (its window filled up and older turns became a summary), the session page suggests **Start new session from this session**, which continues the work in a fresh session with a [handoff](projects-and-sessions.md#continue-in--fork). Dismiss it and it stays hidden in this browser until the agent compacts again.
+
 Terminal output is never used as memory. It only drives the live view and the Working/Idle heuristic.
 
 Shell sessions and custom agents have no transcript, so they are tracked (status, folder, duration) but add nothing to memory.

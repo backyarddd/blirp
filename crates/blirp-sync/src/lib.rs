@@ -38,8 +38,9 @@ pub const PROTOCOL_VERSIONS: &[u32] = &[1];
 /// `projects.chats` and `merged_into` that way). So a release that adds or
 /// changes a replicated field bumps the version and speaks only the new one,
 /// and older peers are refused until they update (§10). 3 = the schema of
-/// migrations 10 (`projects.chats`, `projects.merged_into`) and 14
-/// (`sessions.title_updated_at`, `sessions.project_updated_at`).
+/// migrations 10 (`projects.chats`, `projects.merged_into`), 14
+/// (`sessions.title_updated_at`, `sessions.project_updated_at`) and 16
+/// (`sessions.compacted_at`).
 pub const SYNC_VERSIONS: &[u32] = &[3];
 
 /// mDNS service name blirp endpoints advertise on the local network.
@@ -223,6 +224,7 @@ mod tests {
                 stopped_by_user: false,
                 title_updated_at: 0,
                 project_updated_at: 0,
+                compacted_at: Some(0),
             }),
             Change::DeleteSession { id: s() },
             Change::Event(Event {
@@ -303,7 +305,7 @@ delete_project_path (project_paths delete): machine_id path
 session (sessions upsert): id project_id machine_id agent agent_session_id origin cwd title \
 status branch worktree transcript_path started_at ended_at last_activity_at exit_code summary \
 distilled_through_seq tokens_in tokens_out cost_usd parent_session_id stopped_by_user \
-title_updated_at project_updated_at
+title_updated_at project_updated_at compacted_at
 delete_session (sessions delete): id
 event (events insert): session_id seq ts kind text meta
 record (records upsert): id project_id kind title body status pinned source_session_id \
@@ -325,7 +327,7 @@ transcript_path: string | null, started_at: bigint, ended_at: bigint | null, \
 last_activity_at: bigint, exit_code: number | null, summary: JsonValue | null, \
 distilled_through_seq: bigint, tokens_in: bigint, tokens_out: bigint, cost_usd: number, \
 parent_session_id: string | null, stopped_by_user: boolean, title_updated_at: bigint, \
-project_updated_at: bigint, };
+project_updated_at: bigint, compacted_at: bigint | null, };
 type Event = { session_id: string, seq: bigint, ts: bigint, kind: EventKind, text: string, \
 meta: JsonValue | null, };
 type Record = { id: string, project_id: string, kind: RecordKind, title: string, body: string, \
@@ -360,7 +362,7 @@ table resources: id project_id kind url title meta_json created_at deleted updat
 table sessions: id project_id machine_id agent agent_session_id origin cwd title status branch \
 worktree transcript_path started_at ended_at last_activity_at exit_code summary_json \
 distilled_through_seq tokens_in tokens_out cost_usd parent_session_id stopped_by_user \
-title_updated_at project_updated_at
+title_updated_at project_updated_at compacted_at
 table wiki_pages: id project_id slug title body_md updated_at updated_by deleted
 ";
         let samples = samples();

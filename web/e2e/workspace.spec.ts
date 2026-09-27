@@ -1156,6 +1156,95 @@ test('sessions list: recent activity first, every machine labeled and filterable
   await page.goto(`${env.url}/sessions`);
 });
 
+test('a running session whose agent compacted its context suggests a fresh session, once per compaction', async () => {
+  // A live Claude Code session started outside blirp: its transcript changed a moment ago and
+  // holds a compaction (the boundary marker and the summary Claude writes in place of older turns).
+  const folder = join(env.root, 'compact-e2e');
+  mkdirSync(folder, { recursive: true });
+  await apiCall('POST', '/api/projects', { path: folder, name: 'compact-e2e' });
+  const sid = randomUUID();
+  const common = { cwd: folder, sessionId: sid, version: '2.0.0', userType: 'external', entrypoint: 'cli', isSidechain: false };
+  const usage = { input_tokens: 5, cache_creation_input_tokens: 0, cache_read_input_tokens: 0, output_tokens: 3 };
+  const lines = (tag: string, at: number): string[] => [
+    { type: 'user', message: { role: 'user', content: `Keep refactoring ${tag}` }, uuid: `${tag}-u`, timestamp: new Date(at).toISOString() },
+    {
+      type: 'system',
+      subtype: 'compact_boundary',
+      content: 'Conversation compacted',
+      compactMetadata: { trigger: 'auto', preTokens: 190_000 },
+      uuid: `${tag}-b`,
+      timestamp: new Date(at + 1_000).toISOString(),
+    },
+    {
+      type: 'user',
+      isCompactSummary: true,
+      message: { role: 'user', content: `Summary of the work on ${tag}` },
+      uuid: `${tag}-s`,
+      timestamp: new Date(at + 2_000).toISOString(),
+    },
+    {
+      type: 'assistant',
+      message: { model: 'claude-haiku-4-5', id: `msg_${tag}`, type: 'message', role: 'assistant', content: [{ type: 'text', text: 'ok' }], usage },
+      uuid: `${tag}-a`,
+      timestamp: new Date(at + 3_000).toISOString(),
+    },
+  ].map((l) => JSON.stringify({ ...l, parentUuid: null, ...common }));
+  const dir = join(env.userHome, '.claude', 'projects', 'e2e-compact');
+  mkdirSync(dir, { recursive: true });
+  const file = join(dir, `${sid}.jsonl`);
+  writeFileSync(file, `${lines('first', Date.now() - 30_000).join('\n')}\n`);
+  interface Compacted extends SessionRow {
+    compacted_at: number | null;
+  }
+  const find = async (): Promise<Compacted | undefined> =>
+    (await apiCall<{ items: Compacted[] }>('GET', '/api/sessions?agent=claude&limit=500')).items.find((x) => x.agent_session_id === sid);
+  await expect.poll(async () => (await find())?.compacted_at ?? null, { timeout: 30_000 }).not.toBeNull();
+  const session = await find();
+  if (!session) throw new Error('the ingested session disappeared');
+  expect(LIVE).toContain(session.status);
+
+  await page.goto(`${env.url}/sessions/${session.id}`);
+  const hint = page.getByTestId('compaction-hint');
+  await expect(hint).toContainText('The agent compacted its context');
+  const start = hint.getByRole('button', { name: 'Start new session from this session' });
+
+  // The launch waits while the daemon summarizes the session: both buttons say so and hold off.
+  let release: () => void = () => undefined;
+  const held = new Promise<void>((r) => (release = r));
+  let launches = 0;
+  await page.route(
+    (u) => u.pathname === '/api/sessions',
+    async (r) => {
+      if (r.request().method() !== 'POST') return r.fallback();
+      launches++;
+      expect(r.request().postDataJSON()).toEqual({ continue_from: session.id, agent: 'claude' });
+      await held;
+      await r.fulfill({ status: 409, json: { error: { code: 'e2e_refused', message: 'e2e refused the launch' } } });
+    },
+  );
+  const logged = consoleErrors.length;
+  await start.click();
+  const toolbar = page.getByRole('toolbar', { name: 'Session actions' });
+  await expect(toolbar.getByRole('button', { name: 'Summarizing session…' })).toBeDisabled();
+  await expect(hint.getByRole('button', { name: 'Summarizing session…' })).toBeDisabled();
+  release();
+  await expect(page.getByText('e2e refused the launch')).toBeVisible();
+  await expect(start).toBeEnabled();
+  expect(launches).toBe(1);
+  await page.unrouteAll({ behavior: 'wait' });
+  // The browser logs the refusal this test staged; nothing else may be logged meanwhile.
+  expect(consoleErrors.splice(logged)).toEqual(['Failed to load resource: the server responded with a status of 409 (Conflict)']);
+
+  // Dismissed: gone, also after a reload, until the agent compacts again.
+  await hint.getByRole('button', { name: 'Dismiss' }).click();
+  await expect(hint).toHaveCount(0);
+  await page.reload();
+  await expect(page.getByRole('toolbar', { name: 'Session actions' })).toBeVisible();
+  await expect(hint).toHaveCount(0);
+  writeFileSync(file, `${lines('second', Date.now() - 5_000).join('\n')}\n`, { flag: 'a' });
+  await expect(hint).toBeVisible({ timeout: 30_000 });
+});
+
 test('files on hub: first-run banner, mode toggle, preview and a conflict badge', async () => {
   const secret = join(env.repo, '.env');
   const conflict = join(env.repo, 'notes.conflict-laptop-20260101-000000.md');

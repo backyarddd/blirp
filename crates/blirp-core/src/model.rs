@@ -282,6 +282,11 @@ pub struct Session {
     pub title_updated_at: i64,
     #[serde(default)]
     pub project_updated_at: i64,
+    /// When the agent last compacted its context: the time of the newest
+    /// compaction summary in its transcript (§8); null when it never did.
+    /// Written by the owner's ingest, like tokens.
+    #[serde(default)]
+    pub compacted_at: Option<i64>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]

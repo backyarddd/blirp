@@ -441,6 +441,7 @@ impl<'e> StoreSink<'e> {
                 stopped_by_user: false,
                 title_updated_at: 0,
                 project_updated_at: 0,
+                compacted_at: None,
             }
         });
         if s.agent_session_id.is_none() {
@@ -467,6 +468,14 @@ impl<'e> StoreSink<'e> {
         if let Some(v) = m.cost_usd.filter(|c| c.is_finite()) {
             s.cost_usd = v;
         }
+        // Stamped like the events themselves (see the flush).
+        let compacted = p
+            .events
+            .iter()
+            .filter(|(_, _, kind, _, meta)| is_compaction(*kind, meta.as_ref()))
+            .map(|(_, ts, ..)| ts.or(p.last_ts).unwrap_or(self.mtime_ms))
+            .max();
+        s.compacted_at = s.compacted_at.max(compacted);
         if let Some(t) = last_ts {
             s.last_activity_at = s.last_activity_at.max(t);
         }
@@ -487,6 +496,17 @@ impl<'e> StoreSink<'e> {
         }
         s
     }
+}
+
+/// The agent compacted its context: a compaction summary (claude
+/// `isCompactSummary`, opencode summary messages, pi `compaction`), not a pi
+/// branch summary.
+fn is_compaction(kind: EventKind, meta: Option<&Value>) -> bool {
+    kind == EventKind::Summary
+        && !meta
+            .and_then(|m| m.get("branch_summary"))
+            .and_then(Value::as_bool)
+            .unwrap_or(false)
 }
 
 fn normalize(kind: EventKind, text: &str, meta: Option<Value>) -> (String, Option<Value>) {
@@ -632,5 +652,20 @@ impl Notifier {
         for s in due {
             (self.emit)(ServerEvent::SessionUpdated { session: s });
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn compaction_summaries_count_but_pi_branch_summaries_do_not() {
+        assert!(is_compaction(EventKind::Summary, None));
+        assert!(is_compaction(EventKind::Summary, Some(&json!({"x": 1}))));
+        let branch = json!({"branch_summary": true});
+        assert!(!is_compaction(EventKind::Summary, Some(&branch)));
+        assert!(!is_compaction(EventKind::System, None));
     }
 }
