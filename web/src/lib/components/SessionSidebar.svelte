@@ -87,8 +87,8 @@
     const ctx = app.liveContext();
     return groupSessions(list, app.projectById).map((g) => ({
       ...g,
-      open: expanded.has(g.projectId),
-      preview: previewSessions(g.sessions, expanded.has(g.projectId) ? Infinity : GROUP_PREVIEW, selectedId, ctx),
+      open: expanded.has(g.key),
+      preview: previewSessions(g.sessions, expanded.has(g.key) ? Infinity : GROUP_PREVIEW, selectedId, ctx),
     }));
   });
   // Previous/next session shortcuts walk the cards as shown here.
@@ -177,9 +177,9 @@
             {/each}
           </ul>
           {#if g.preview.hidden > 0}
-            <button type="button" class="link-btn" onclick={() => expanded.add(g.projectId)}>Show {g.preview.hidden} more</button>
+            <button type="button" class="link-btn" onclick={() => expanded.add(g.key)}>Show {g.preview.hidden} more</button>
           {:else if g.open && g.sessions.length > GROUP_PREVIEW}
-            <button type="button" class="link-btn" onclick={() => expanded.delete(g.projectId)}>Show fewer</button>
+            <button type="button" class="link-btn" onclick={() => expanded.delete(g.key)}>Show fewer</button>
           {/if}
         </section>
       {/each}
