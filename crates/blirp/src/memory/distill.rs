@@ -1131,6 +1131,8 @@ fn is_rate_limit(text: &str) -> bool {
         "status 429",
         "quota",
         "overloaded",
+        "api error: 429",
+        "api error: 529",
     ]
     .iter()
     .any(|w| msg.contains(w))
@@ -1142,14 +1144,24 @@ fn is_rate_limit(text: &str) -> bool {
 /// session instead of pausing every distill.
 fn is_claude_limit_reply(result: &str) -> bool {
     let t = result.trim();
-    t.chars().count() < 300
+    let n = t.chars().count();
+    let notice = n < 300
         && [
             "You've hit your",
             "You\u{2019}ve hit your",
             "Claude AI usage limit reached",
         ]
         .iter()
-        .any(|p| t.starts_with(p))
+        .any(|p| t.starts_with(p));
+    // Claude Code's text for a failed API call ("API Error: 529 {...}");
+    // whether `is_error` is set for it is not documented.
+    let api = n < 2000 && t.starts_with("API Error:") && {
+        let l = t.to_lowercase();
+        ["429", "529", "overloaded", "rate"]
+            .iter()
+            .any(|w| l.contains(w))
+    };
+    notice || api
 }
 
 /// A failure of the summarizer itself (credentials, installation, limits),
@@ -1885,6 +1897,23 @@ mod tests {
             let env = serde_json::json!({"is_error": false, "result": reply});
             assert_eq!(parse_claude_json(&env.to_string()).unwrap(), reply);
         }
+        // Claude Code's text for a failed API call pauses too, when it is a
+        // limit or overload.
+        for text in [
+            "API Error: 529 {\"type\":\"error\",\"error\":{\"type\":\"overloaded_error\"}}",
+            "API Error: 429 {\"type\":\"error\",\"error\":{\"type\":\"rate_limit_error\"}}",
+            "API Error: 529",
+        ] {
+            let env = serde_json::json!({"is_error": false, "result": text});
+            let err = parse_claude_json(&env.to_string()).unwrap_err();
+            assert_eq!(
+                classify(&DistillError::Backend(err)),
+                Some(DistillPause::RateLimited),
+                "{text}"
+            );
+        }
+        let env = serde_json::json!({"is_error": false, "result": "API Error: 400 bad request"});
+        assert!(parse_claude_json(&env.to_string()).is_ok());
         let long = format!("You've hit your {}", "x".repeat(400));
         let env = serde_json::json!({"is_error": false, "result": long});
         assert!(parse_claude_json(&env.to_string()).is_ok());
