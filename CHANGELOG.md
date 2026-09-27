@@ -37,7 +37,8 @@ so every tag needs one.
 - **Update now** runs `blirp update` in the background: the daemon restarts
   with the new version and the page reloads (a browser tab signs in again
   with `blirp open`). If anything fails, the old version keeps running and
-  About shows why. New routes `POST /api/update/check` and
+  About shows why. The desktop app then offers **Restart app** to relaunch
+  its own new version, a stale browser page **Reload**. New routes `POST /api/update/check` and
   `POST /api/update/apply` (admin; apply only on the machine's own
   listener).
 - `blirp update` prints the version before and after and records each

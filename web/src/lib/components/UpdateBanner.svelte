@@ -26,6 +26,19 @@
       </span>
     {/if}
   </div>
+{:else if updates.stale && !updates.staleDismissed}
+  <div class="update-banner" role="status" data-testid="restart-banner">
+    <span><strong>blirp was updated</strong> to {app.health?.version}.</span>
+    {#if updates.stale === 'restart'}
+      <button type="button" class="btn sm primary" onclick={() => updates.restartApp()}>Restart app</button>
+    {:else}
+      <button type="button" class="btn sm primary" onclick={() => location.reload()}>Reload</button>
+    {/if}
+    <span class="spacer"></span>
+    <button type="button" class="icon-btn sm" aria-label="Dismiss" title="Dismiss" onclick={() => (updates.staleDismissed = true)}>
+      <X size={14} />
+    </button>
+  </div>
 {:else if updates.banner && status}
   <div class="update-banner" role="status" data-testid="update-banner">
     <span><strong>blirp {updates.banner} is available</strong> <span class="hide-sm">(this machine runs {status.current})</span></span>

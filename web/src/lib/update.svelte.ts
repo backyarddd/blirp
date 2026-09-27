@@ -4,13 +4,29 @@
 import { ApiError, api, errorMessage } from './api/client';
 import { app } from './app.svelte';
 import type { UpdateStatus } from './api/types.gen';
-import { bannerVersion, readDismissed, restartStep, writeDismissed, type Probe } from './update';
+import {
+  DESKTOP_RESTART_PATH,
+  bannerVersion,
+  clearPending,
+  desktopVersion,
+  loadPending,
+  readDismissed,
+  savePending,
+  restartStep,
+  staleNotice,
+  writeDismissed,
+  type Probe,
+} from './update';
 
 /** The daemon's cache decides when GitHub is actually asked (at most daily). */
 const POLL_MS = 3 * 60 * 60 * 1000;
 const RESTART_POLL_MS = 2000;
 /** Downloads on a slow connection plus a restart; after this the page says what to do. */
 const RESTART_TIMEOUT_MS = 10 * 60 * 1000;
+/** After the reload the updater may still be writing its log entry (it restarts the daemon first). */
+const AFTER_RELOAD_MS = 2 * 60 * 1000;
+/** This window's own session: survives the reload that follows an update. */
+const windowStorage = (): Storage => sessionStorage;
 
 export type UpdatePhase = 'idle' | 'updating' | 'failed' | 'stuck';
 
@@ -28,11 +44,22 @@ class UpdateState {
   target: string | null = $state(null);
   #dismissed: string | null = $state(readDismissed());
   banner: string | null = $derived(bannerVersion(this.status, this.#dismissed));
+  /**
+   * The daemon was updated past what shows it: relaunch the desktop app, or reload this page.
+   * Recomputed when health changes (sessionStorage is read then, after main.ts filled it).
+   */
+  stale: 'restart' | 'reload' | null = $derived(
+    staleNotice(app.health?.version, __APP_VERSION__, desktopVersion(() => sessionStorage)),
+  );
+  /** Hidden for this page only; it comes back after a reload while still stale. */
+  staleDismissed = $state(false);
   #timer: ReturnType<typeof setInterval> | undefined;
 
   /** Polls while the app shell is shown; returns the stop function. */
   start(): () => void {
-    void this.refresh();
+    const pending = loadPending(windowStorage);
+    if (pending && this.phase === 'idle') void this.#afterReload(pending.before);
+    else void this.refresh();
     clearInterval(this.#timer);
     this.#timer = setInterval(() => void this.refresh(), POLL_MS);
     return () => clearInterval(this.#timer);
@@ -58,6 +85,11 @@ class UpdateState {
     } finally {
       this.checking = false;
     }
+  }
+
+  /** "Restart app": the desktop shell relaunches itself on this navigation (and cancels it). */
+  restartApp(): void {
+    location.assign(DESKTOP_RESTART_PATH);
   }
 
   dismiss(): void {
@@ -86,7 +118,27 @@ class UpdateState {
     this.failure = null;
     this.target = version;
     this.phase = 'updating';
+    savePending({ before, target: version, startedAt: Date.now() }, windowStorage);
     void this.#waitForRestart(before);
+  }
+
+  /** The page reloaded after an update this window started: show its result if it failed. */
+  async #afterReload(before: number | null): Promise<void> {
+    const deadline = Date.now() + AFTER_RELOAD_MS;
+    for (;;) {
+      await this.refresh();
+      const status = this.status;
+      const step = status ? restartStep({ kind: 'status', status }, false, before) : 'wait';
+      if (step !== 'wait' || Date.now() > deadline) {
+        clearPending(windowStorage);
+        if (typeof step === 'object') {
+          this.failure = step.failed;
+          this.phase = 'failed';
+        }
+        return;
+      }
+      await new Promise((r) => setTimeout(r, RESTART_POLL_MS));
+    }
   }
 
   async #waitForRestart(before: number | null): Promise<void> {
@@ -113,6 +165,7 @@ class UpdateState {
         return;
       }
       if (probe.kind === 'status') this.status = probe.status;
+      clearPending(windowStorage);
       this.failure = step.failed;
       this.phase = 'failed';
       return;

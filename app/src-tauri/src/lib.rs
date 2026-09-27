@@ -2,11 +2,13 @@
 //! the daemon. It starts the daemon (bundled `blirp` sidecar) when needed,
 //! logs the window in via `/#token=` (the SPA keeps the token in its own
 //! origin's storage), forwards `blirp://join/...` deep links and keeps a
-//! tray icon. Updates are `blirp update` (the web UI's
-//! Settings > About says when one is available); the app has no updater.
+//! tray icon. Updates are `blirp update` or the web UI's Update now, which
+//! replace this app too; the app has no updater of its own.
 //!
 //! The remote UI gets no Tauri IPC: only the bundled loading page may call
-//! the three commands below (see `capabilities/main.json`).
+//! the three commands below (see `capabilities/main.json`). The one thing
+//! the UI can ask of the shell is a relaunch after an update, by navigating
+//! to [`RESTART_PATH`] on the daemon's origin; the navigation is cancelled.
 
 mod daemon;
 
@@ -23,6 +25,11 @@ use tauri_plugin_dialog::{DialogExt as _, MessageDialogButtons, MessageDialogKin
 use tauri_plugin_opener::OpenerExt as _;
 
 const MAIN: &str = "main";
+
+/// Navigating the window to this path of the daemon's origin relaunches
+/// the app (the web UI's "Restart app" once the daemon is newer than this
+/// shell). Only the shell's navigation handler sees it.
+const RESTART_PATH: &str = "/desktop/restart";
 
 fn lock<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
     // Plain data; a panic elsewhere cannot leave it half-written.
@@ -142,11 +149,22 @@ fn start(app: AppHandle) {
 
 /// Where to sign the window in to `info`'s daemon: the SPA route it shows
 /// (kept across a daemon restart), else the start page. The SPA takes the
-/// token out of the fragment and keeps the rest of the URL.
+/// token and this app's version (`app`, to offer a relaunch once the daemon
+/// is newer) out of the fragment and keeps the rest of the URL.
 fn login_url(info: &RuntimeInfo, route: Option<&Url>) -> String {
     let (path, query) = route.map_or(("/", None), |u| (u.path(), u.query()));
     let query = query.map(|q| format!("?{q}")).unwrap_or_default();
-    format!("{}{path}{query}#token={}", info.base_url(), info.token)
+    format!(
+        "{}{path}{query}#token={}&app={}",
+        info.base_url(),
+        info.token,
+        env!("CARGO_PKG_VERSION")
+    )
+}
+
+/// The web UI asks for a relaunch (see [`RESTART_PATH`]).
+fn is_restart_request(url: &Url, daemon: bool) -> bool {
+    daemon && url.path() == RESTART_PATH
 }
 
 /// Whether the window, signed in to `origin` with `token`, is signed in to
@@ -525,7 +543,15 @@ pub fn run() -> anyhow::Result<()> {
                 // Only the loading page and the daemon's UI render in the
                 // window; every other link opens in the default browser.
                 .on_navigation(move |url| {
-                    if is_local_page(url) || nav_shell.is_daemon_url(url) {
+                    let daemon = nav_shell.is_daemon_url(url);
+                    if is_restart_request(url, daemon) {
+                        // A newer daemon runs than this app: start the
+                        // updated app. The daemon keeps running.
+                        tracing::info!("relaunching after an update");
+                        nav_app.request_restart();
+                        return false;
+                    }
+                    if is_local_page(url) || daemon {
                         return true;
                     }
                     open_external(&nav_app, url);
@@ -664,15 +690,37 @@ mod tests {
     fn sign_in_keeps_the_route() {
         let t = "c".repeat(64);
         let info = runtime(47771, &t);
+        let v = env!("CARGO_PKG_VERSION");
         assert_eq!(
             login_url(&info, None),
-            format!("http://127.0.0.1:47771/#token={t}")
+            format!("http://127.0.0.1:47771/#token={t}&app={v}")
         );
         let route = Url::parse("http://127.0.0.1:47770/settings/sync?join=x#y").unwrap();
         assert_eq!(
             login_url(&info, Some(&route)),
-            format!("http://127.0.0.1:47771/settings/sync?join=x#token={t}")
+            format!("http://127.0.0.1:47771/settings/sync?join=x#token={t}&app={v}")
         );
+    }
+
+    #[test]
+    fn only_the_daemon_origin_asks_for_a_relaunch() {
+        let url = |s: &str| Url::parse(s).unwrap();
+        assert!(is_restart_request(
+            &url("http://127.0.0.1:47770/desktop/restart"),
+            true
+        ));
+        assert!(!is_restart_request(
+            &url("https://example.com/desktop/restart"),
+            false
+        ));
+        assert!(!is_restart_request(
+            &url("http://127.0.0.1:47770/desktop/restart/x"),
+            true
+        ));
+        assert!(!is_restart_request(
+            &url("http://127.0.0.1:47770/settings"),
+            true
+        ));
     }
 
     #[test]

@@ -95,10 +95,16 @@
     </div>
     {#if updates.loadError}<p class="hint">Could not ask the daemon: {updates.loadError}</p>{/if}
   {/if}
-  {#if last}
+  {#if last && (last.installed || !last.ok)}
     <p class="hint" data-testid="last-update">
       Last update ({formatDateTime(last.finished_at)}):
-      {#if last.ok}{last.from} to {last.to}.{:else}to {last.to} failed, {last.from} stayed installed: {last.error ?? 'unknown error'}{/if}
+      {#if last.installed && last.ok}
+        {last.from} to {last.to}.
+      {:else if last.installed}
+        blirp {last.to} was installed, but the daemon did not start again: {last.error ?? 'unknown error'}
+      {:else}
+        updating{last.to ? ` to ${last.to}` : ''} failed, {last.from} stayed installed: {last.error ?? 'unknown error'}
+      {/if}
     </p>
   {/if}
 </section>
