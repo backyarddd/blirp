@@ -10,7 +10,11 @@ so every tag needs one.
 
 ## [Unreleased]
 
-## [0.1.1] - 2026-09-26
+## [0.2.0] - 2026-09-27
+
+Project files sync through the hub, projects without a folder, Chats for
+sessions outside projects, a one-command VPS hub, agent skills, in-app
+updates and working notifications.
 
 ### Added
 
@@ -92,8 +96,6 @@ so every tag needs one.
 - `blirp service install` on Linux prints the `sudo loginctl enable-linger`
   hint only when linger is off, naming the user, and finds the user's
   systemd without `XDG_RUNTIME_DIR` (after `sudo -iu`) when linger is on.
-
-### Changed
 
 - `memory.summarizer = "auto"` now uses your default agent for new sessions
   (`agents.default`) when that is Claude Code or Codex and it is installed
@@ -200,6 +202,6 @@ done before it.
   all-or-nothing) and `blirp uninstall`; classic NSIS, MSI, DMG, deb, rpm
   and AppImage packages.
 
-[Unreleased]: https://github.com/backyarddd/blirp/compare/v0.1.1...HEAD
-[0.1.1]: https://github.com/backyarddd/blirp/compare/v0.1.0...v0.1.1
+[Unreleased]: https://github.com/backyarddd/blirp/compare/v0.2.0...HEAD
+[0.2.0]: https://github.com/backyarddd/blirp/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/backyarddd/blirp/releases/tag/v0.1.0
