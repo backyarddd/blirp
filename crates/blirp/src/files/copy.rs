@@ -124,6 +124,7 @@ fn base_of(e: &IndexEntry) -> Base {
     Base {
         version: e.version,
         content: e.content.clone(),
+        mode_x: e.mode_x,
         skipped: false,
         rejected: None,
     }
@@ -157,24 +158,56 @@ struct Planned {
 /// Changes of `files` (what the scan found) against `bases`. Paths that
 /// could not be read this time are left alone; a vanished path that still
 /// exists on disk is excluded now and is forgotten rather than deleted.
+/// Whether `path` lies in (or is) one of the folders the scan could not
+/// read completely.
+fn under_unreadable(path: &str, dirs: &[String]) -> bool {
+    dirs.iter().any(|d| {
+        d.is_empty()
+            || path == d
+            || path
+                .strip_prefix(d.as_str())
+                .is_some_and(|r| r.starts_with('/'))
+    })
+}
+
+/// An upload plan: changes to send, and bases to drop without telling the
+/// hub (a copy's own exclusions).
+#[derive(Debug, Default)]
+struct UploadPlan {
+    changes: Vec<Planned>,
+    drop_bases: Vec<String>,
+}
+
+/// Changes of `files` (what the scan found) against `bases`. Paths that
+/// could not be read this time, or lie in a folder that could not be
+/// listed, are left alone. A vanished path that still exists on disk is
+/// excluded now: the origin stops syncing it for everyone, a copy only
+/// forgets it here. Only a path confirmed gone is deleted.
 fn plan_upload(
     root: &Path,
     files: &[Hashed],
     bases: &HashMap<String, Base>,
     unreadable: &HashSet<String>,
+    unreadable_dirs: &[String],
     origin: bool,
-) -> Vec<Planned> {
-    let mut out = Vec::new();
+) -> UploadPlan {
+    let mut out = UploadPlan::default();
     let mut seen = HashSet::new();
     for f in files {
         seen.insert(f.path.as_str());
         let content = to_content(&f.content);
         let base = bases.get(&f.path);
+        // Windows cannot see the executable bit: keep the synced one.
+        let mode_x = if cfg!(unix) {
+            f.mode_x
+        } else {
+            base.is_some_and(|b| b.mode_x)
+        };
         if let Some(b) = base {
-            if b.skipped || b.content.as_ref() == Some(&content) {
+            if b.skipped || (b.content.as_ref() == Some(&content) && b.mode_x == mode_x) {
                 continue;
             }
-            if origin && b.rejected.as_deref() == Some(content_hash(&content)) {
+            if b.rejected.as_deref() == Some(content_hash(&content)) {
                 continue;
             }
         }
@@ -182,40 +215,48 @@ fn plan_upload(
             Content::Blob(hash) => ChangeOp::Put {
                 hash: hash.clone(),
                 size: i64::try_from(f.size).unwrap_or(i64::MAX),
-                mode_x: f.mode_x,
+                mode_x,
                 mtime: f.mtime_ns / 1_000_000,
             },
             Content::Link(target) => ChangeOp::Link {
                 target: target.clone(),
             },
         };
-        out.push(Planned {
+        out.changes.push(Planned {
             change: FileChange {
                 path: f.path.clone(),
                 base_version: base.map_or(0, |b| b.version),
                 op,
             },
-            local: Some(f.clone()),
+            local: Some(Hashed {
+                mode_x,
+                ..f.clone()
+            }),
         });
     }
     let mut gone: Vec<(&String, &Base)> = bases
         .iter()
         .filter(|(p, b)| !seen.contains(p.as_str()) && !b.skipped && b.content.is_some())
-        .filter(|(p, _)| !unreadable.contains(*p))
+        .filter(|(p, _)| !unreadable.contains(*p) && !under_unreadable(p, unreadable_dirs))
         .filter(|(_, b)| b.rejected.as_deref() != Some(REJECTED_DELETE))
         .collect();
     gone.sort_by(|a, b| a.0.cmp(b.0));
     for (path, b) in gone {
-        let on_disk = std::fs::symlink_metadata(wpath::to_local(root, path)).is_ok();
-        out.push(Planned {
+        let op = match std::fs::symlink_metadata(wpath::to_local(root, path)) {
+            Ok(_) if origin => ChangeOp::Forget,
+            Ok(_) => {
+                out.drop_bases.push(path.clone());
+                continue;
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => ChangeOp::Delete,
+            // Cannot tell (permissions, I/O): never read as a delete.
+            Err(_) => continue,
+        };
+        out.changes.push(Planned {
             change: FileChange {
                 path: path.clone(),
                 base_version: b.version,
-                op: if on_disk {
-                    ChangeOp::Forget
-                } else {
-                    ChangeOp::Delete
-                },
+                op,
             },
             local: None,
         });
@@ -269,9 +310,18 @@ pub async fn upload(env: &Env, copy: &Copy) -> Result<UploadReport, CopyError> {
     let (store, key) = (env.store.clone(), copy.key.clone());
     let bases = blocking(move || store.file_bases(&key).map_err(local)).await?;
     let unreadable: HashSet<String> = ls.hashed.unreadable.iter().cloned().collect();
+    let dirs = ls.scan.unreadable.clone();
     let (r, files, origin) = (root.clone(), ls.hashed.files.clone(), copy.origin);
     let b2 = bases.clone();
-    let mut plan = blocking(move || Ok(plan_upload(&r, &files, &b2, &unreadable, origin))).await?;
+    let planned =
+        blocking(move || Ok(plan_upload(&r, &files, &b2, &unreadable, &dirs, origin))).await?;
+    if !planned.drop_bases.is_empty() {
+        let drops: Vec<(String, Option<Base>)> =
+            planned.drop_bases.into_iter().map(|p| (p, None)).collect();
+        let (store, key) = (env.store.clone(), copy.key.clone());
+        blocking(move || store.update_file_bases(&key, &drops).map_err(local)).await?;
+    }
+    let mut plan = planned.changes;
     if plan.is_empty() {
         return Ok(report);
     }
@@ -346,6 +396,7 @@ pub async fn upload(env: &Env, copy: &Copy) -> Result<UploadReport, CopyError> {
                     let base = p.local.as_ref().map(|l| Base {
                         version,
                         content: Some(to_content(&l.content)),
+                        mode_x: l.mode_x,
                         skipped: false,
                         rejected: None,
                     });
@@ -399,18 +450,25 @@ async fn resolve_conflict(
         Some(c) => content_hash(c).to_string(),
         None => REJECTED_DELETE.to_string(),
     };
+    // Remember what the hub refused, so it is not sent again: only when
+    // the hub kept it (a conflict copy of a write; a refused delete keeps
+    // nothing to lose). Otherwise the next pass simply tries again.
     let remember = |base: Option<&Base>| {
         vec![(
             path.clone(),
             Some(Base {
                 version: base.map_or(0, |b| b.version),
                 content: base.and_then(|b| b.content.clone()),
+                mode_x: base.is_some_and(|b| b.mode_x),
                 skipped: false,
                 rejected: Some(rejected.clone()),
             }),
         )]
     };
-    if copy.origin || (mine.is_some() && saved.is_none()) {
+    if mine.is_some() && saved.is_none() {
+        return Vec::new();
+    }
+    if copy.origin {
         return remember(base);
     }
     let root = copy.root();
@@ -442,6 +500,7 @@ async fn resolve_conflict(
                 Some(Base {
                     version: *version,
                     content: Some(EntryContent::Blob { hash: hash.clone() }),
+                    mode_x: false,
                     skipped: false,
                     rejected: None,
                 }),
@@ -580,20 +639,14 @@ fn local_state(root: &Path, path: &str) -> Local {
 
 /// Decide one path. `fresh`: a copy being created, where the hub wins over
 /// whatever the clone checked out.
-fn decide(
-    e: &IndexEntry,
-    base: Option<&Base>,
-    now: &Local,
-    origin: bool,
-    fresh: bool,
-) -> Option<Act> {
+fn decide(e: &IndexEntry, base: Option<&Base>, now: &Local, fresh: bool) -> Option<Act> {
     if base.is_some_and(|b| b.version >= e.version) {
         return None;
     }
     let matches_base = |c: &EntryContent| base.is_some_and(|b| b.content.as_ref() == Some(c));
-    let preserved = |c: &EntryContent| {
-        origin && base.is_some_and(|b| b.rejected.as_deref() == Some(content_hash(c)))
-    };
+    // Content the hub refused and kept in a conflict copy may be replaced.
+    let preserved =
+        |c: &EntryContent| base.is_some_and(|b| b.rejected.as_deref() == Some(content_hash(c)));
     match &e.content {
         None => match now {
             Local::Missing | Local::Other => base.map(|_| Act::DropBase),
@@ -637,12 +690,7 @@ pub async fn incoming(
     fresh: bool,
 ) -> Result<(Vec<Incoming>, i64), CopyError> {
     let (entries, head) = env.hub.index(&copy.root_id, 0).await?;
-    let (store, key, root, origin) = (
-        env.store.clone(),
-        copy.key.clone(),
-        copy.root(),
-        copy.origin,
-    );
+    let (store, key, root) = (env.store.clone(), copy.key.clone(), copy.root());
     blocking(move || {
         let bases = store.file_bases(&key).map_err(local)?;
         let mut out = Vec::new();
@@ -670,7 +718,7 @@ pub async fn incoming(
                 ))
             } else {
                 let now = local_state(&root, &e.path);
-                decide(e, base, &now, origin, fresh)
+                decide(e, base, &now, fresh)
             };
             if let Some(act) = act {
                 out.push(Incoming {
@@ -749,6 +797,7 @@ pub async fn apply(env: &Env, copy: &Copy, fresh: bool) -> Result<ApplyReport, C
                 Some(Base {
                     version: e.version,
                     content: None,
+                    mode_x: false,
                     skipped: false,
                     rejected: None,
                 }),
@@ -887,6 +936,7 @@ mod tests {
             content: Some(EntryContent::Blob {
                 hash: content.into(),
             }),
+            mode_x: false,
             skipped: false,
             rejected: None,
         }
@@ -902,38 +952,29 @@ mod tests {
         let b = base(3, "old");
         // Up to date.
         assert_eq!(
-            decide(
-                &entry("f", 3, Some("x")),
-                Some(&b),
-                &has("old"),
-                false,
-                false
-            ),
+            decide(&entry("f", 3, Some("x")), Some(&b), &has("old"), false),
             None
         );
         // Unchanged since base: fast-forward over exactly that.
         assert_eq!(
-            decide(&e, Some(&b), &has("old"), false, false),
+            decide(&e, Some(&b), &has("old"), false),
             Some(Act::Write(Expect::Blob("old".into())))
         );
         // Changed here: conflict copy, never an overwrite.
         assert_eq!(
-            decide(&e, Some(&b), &has("mine"), false, false),
+            decide(&e, Some(&b), &has("mine"), false),
             Some(Act::ConflictCopy)
         );
         // Already there.
-        assert_eq!(
-            decide(&e, Some(&b), &has("new"), false, false),
-            Some(Act::Ack)
-        );
+        assert_eq!(decide(&e, Some(&b), &has("new"), false), Some(Act::Ack));
         // Deleted here, changed there: modify wins.
         assert_eq!(
-            decide(&e, Some(&b), &Local::Missing, false, false),
+            decide(&e, Some(&b), &Local::Missing, false),
             Some(Act::Write(Expect::Absent))
         );
         // New file.
         assert_eq!(
-            decide(&e, None, &Local::Missing, false, false),
+            decide(&e, None, &Local::Missing, false),
             Some(Act::Write(Expect::Absent))
         );
         // An origin's content the hub kept as a conflict copy may be replaced.
@@ -942,35 +983,32 @@ mod tests {
             ..b.clone()
         };
         assert_eq!(
-            decide(&e, Some(&rej), &has("mine"), true, false),
+            decide(&e, Some(&rej), &has("mine"), false),
             Some(Act::Write(Expect::Blob("mine".into())))
         );
         // Tombstones: delete only what is unchanged; keep edits.
         let t = entry("f", 5, None);
         assert_eq!(
-            decide(&t, Some(&b), &has("old"), false, false),
+            decide(&t, Some(&b), &has("old"), false),
             Some(Act::Delete(Expect::Blob("old".into())))
         );
+        assert_eq!(decide(&t, Some(&b), &has("mine"), false), Some(Act::Rebase));
         assert_eq!(
-            decide(&t, Some(&b), &has("mine"), false, false),
-            Some(Act::Rebase)
-        );
-        assert_eq!(
-            decide(&t, Some(&b), &Local::Missing, false, false),
+            decide(&t, Some(&b), &Local::Missing, false),
             Some(Act::DropBase)
         );
-        assert_eq!(decide(&t, None, &has("x"), false, false), Some(Act::Rebase));
+        assert_eq!(decide(&t, None, &has("x"), false), Some(Act::Rebase));
         // A fresh copy takes the hub's state over the clone's.
         assert_eq!(
-            decide(&t, None, &has("x"), false, true),
+            decide(&t, None, &has("x"), true),
             Some(Act::Delete(Expect::Blob("x".into())))
         );
         assert_eq!(
-            decide(&e, None, &has("x"), false, true),
+            decide(&e, None, &has("x"), true),
             Some(Act::Write(Expect::Blob("x".into())))
         );
         assert_eq!(
-            decide(&e, None, &Local::Other, false, false),
+            decide(&e, None, &Local::Other, false),
             Some(Act::Skip("a folder is in the way".into()))
         );
     }
@@ -993,6 +1031,7 @@ mod tests {
             ("deleted".to_string(), base(3, "a")),
             ("excluded.log".to_string(), base(4, "a")),
             ("unreadable".to_string(), base(5, "a")),
+            ("locked/x".to_string(), base(7, "a")),
             (
                 "refused".to_string(),
                 Base {
@@ -1008,8 +1047,11 @@ mod tests {
             file("refused", "b"),
         ];
         let unreadable = HashSet::from(["unreadable".to_string()]);
-        let plan = plan_upload(root, &files, &bases, &unreadable, true);
+        let dirs = vec!["locked".to_string()];
+        let plan = plan_upload(root, &files, &bases, &unreadable, &dirs, true);
+        assert!(plan.drop_bases.is_empty());
         let got: Vec<(&str, i64, &str)> = plan
+            .changes
             .iter()
             .map(|p| {
                 let op = match &p.change.op {
@@ -1030,8 +1072,12 @@ mod tests {
                 ("excluded.log", 4, "forget")
             ]
         );
-        // A non-origin copy sends content the hub refused again.
-        let plan = plan_upload(root, &files, &bases, &unreadable, false);
-        assert!(plan.iter().any(|p| p.change.path == "refused"));
+        // A copy's own exclusions only drop its base; the hub keeps the file.
+        let plan = plan_upload(root, &files, &bases, &unreadable, &dirs, false);
+        assert_eq!(plan.drop_bases, ["excluded.log"]);
+        assert!(!plan.changes.iter().any(|p| p.change.path == "refused"));
+        // A folder the scan could not list at all deletes nothing.
+        let plan = plan_upload(root, &[], &bases, &HashSet::new(), &[String::new()], true);
+        assert!(plan.changes.is_empty(), "{:?}", plan.changes);
     }
 }

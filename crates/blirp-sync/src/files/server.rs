@@ -16,6 +16,8 @@ use std::sync::Arc;
 use std::time::Duration;
 
 const OPEN_TIMEOUT: Duration = Duration::from_secs(20);
+/// Streams served per connection at once.
+const STREAMS_PER_CONN: usize = super::proto::STREAMS * 2 + 1;
 
 fn err(e: &HubError) -> Reply {
     if matches!(
@@ -44,7 +46,13 @@ pub async fn serve(
     machine_name: String,
 ) -> Result<()> {
     let mut notifier: Option<tokio::task::JoinHandle<()>> = None;
+    // Streams a machine may have open at once (a node uses 1 + STREAMS):
+    // more wait, so one machine cannot fill the hub with partial uploads.
+    let streams = Arc::new(tokio::sync::Semaphore::new(STREAMS_PER_CONN));
     let result = loop {
+        let Ok(permit) = streams.clone().acquire_owned().await else {
+            break Ok(());
+        };
         let (send, recv) = match conn.accept_bi().await {
             Ok(s) => s,
             Err(e) => break Err(SyncError::connection(e)),
@@ -54,6 +62,7 @@ pub async fn serve(
         }
         let (hub, id, name) = (hub.clone(), machine_id.clone(), machine_name.clone());
         tokio::spawn(async move {
+            let _permit = permit;
             if let Err(e) = stream(send, recv, hub, &id, &name).await {
                 tracing::debug!(node = %id, error = %e, "file stream ended");
             }
@@ -166,7 +175,9 @@ async fn control(
                         let keep = entries
                             .iter()
                             .take_while(|e| {
-                                bytes += e.path.len() + 200;
+                                // Links carry their target: measure it all.
+                                bytes +=
+                                    serde_json::to_vec(e).map_or(usize::MAX / 2, |v| v.len() + 8);
                                 bytes <= INDEX_PAGE_BYTES
                             })
                             .count()

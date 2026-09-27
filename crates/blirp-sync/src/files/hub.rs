@@ -76,6 +76,9 @@ pub struct HubFiles {
     quota: AtomicU64,
     keep_ms: AtomicI64,
     changed: broadcast::Sender<RootChanged>,
+    /// Serializes blob files and their rows (store, collect): a blob being
+    /// stored is never removed by a collection running at the same time.
+    blob_lock: std::sync::Mutex<()>,
 }
 
 impl std::fmt::Debug for HubFiles {
@@ -96,6 +99,7 @@ impl HubFiles {
             quota: AtomicU64::new(quota),
             keep_ms: AtomicI64::new(keep_ms),
             changed: broadcast::channel(256).0,
+            blob_lock: std::sync::Mutex::new(()),
         }
     }
 
@@ -108,8 +112,17 @@ impl HubFiles {
         self.quota.load(Ordering::Relaxed)
     }
 
+    fn blob_guard(&self) -> std::sync::MutexGuard<'_, ()> {
+        // Guards no data; a poisoned lock is as good as a fresh one.
+        self.blob_lock
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
+    /// Bytes the stored blobs and partial uploads take.
     pub fn usage(&self) -> Result<u64, HubError> {
-        Ok(u64::try_from(self.store.hub_blob_usage()?).unwrap_or(0))
+        let stored = u64::try_from(self.store.hub_blob_usage()?).unwrap_or(0);
+        Ok(stored.saturating_add(self.blobs.parts_bytes()))
     }
 
     /// Roots with their totals, and every project's mode.
@@ -150,6 +163,10 @@ impl HubFiles {
             return Err(HubError::Invalid(format!("invalid hash {bad:.16}")));
         }
         let known = self.store.hub_blobs_known(hashes)?;
+        // A commit will use them: keep them out of the next collection.
+        let known_list: Vec<String> = known.iter().cloned().collect();
+        self.store
+            .hub_touch_blobs(&known_list, blirp_core::now_ms())?;
         Ok(hashes
             .iter()
             .filter(|h| !known.contains(*h) || !self.blobs.has(h))
@@ -203,6 +220,7 @@ impl HubFiles {
 
     /// The part of `hash` holds `len` bytes: verify and store it.
     pub fn finish_put(&self, hash: &str, len: u64) -> Result<(), HubError> {
+        let _g = self.blob_guard();
         let stored = self.blobs.finish(hash, len)?;
         self.store.hub_blob_added(
             hash,
@@ -216,9 +234,12 @@ impl HubFiles {
     /// The hub's own engine: store a local file as `hash` (verified).
     pub fn import(&self, hash: &str, src: &Path, len: u64) -> Result<(), HubError> {
         if self.store.hub_blob_size(hash)?.is_some() && self.blobs.has(hash) {
+            self.store
+                .hub_touch_blobs(&[hash.to_string()], blirp_core::now_ms())?;
             return Ok(());
         }
         self.reserve(len)?;
+        let _g = self.blob_guard();
         let (size, stored) = self.blobs.import(hash, src)?;
         self.store.hub_blob_added(
             hash,
@@ -293,12 +314,16 @@ impl HubFiles {
 
     /// Remove unreferenced blobs older than the grace period.
     fn collect(&self, now: i64) -> Result<usize, HubError> {
-        let unused = self.store.hub_unreferenced_blobs(now - BLOB_GRACE_MS)?;
-        for h in &unused {
+        let before = now - BLOB_GRACE_MS;
+        let unused = self.store.hub_unreferenced_blobs(before)?;
+        let _g = self.blob_guard();
+        // Re-checked in the delete's own transaction: a commit that started
+        // using one meanwhile keeps it.
+        let gone = self.store.hub_forget_blobs(&unused, before)?;
+        for h in &gone {
             self.blobs.remove(h);
         }
-        self.store.hub_forget_blobs(&unused)?;
-        Ok(unused.len())
+        Ok(gone.len())
     }
 
     /// Daily retention and mark-and-sweep: old history and tombstones,
@@ -309,6 +334,7 @@ impl HubFiles {
         let blobs = self.collect(now)?;
         self.blobs.sweep_parts(PART_AGE);
         let store = self.store.clone();
+        let _g = self.blob_guard();
         self.blobs
             .sweep_orphans(Duration::from_millis(BLOB_GRACE_MS as u64), &|h| {
                 store.hub_blob_size(h).ok().flatten().is_some()

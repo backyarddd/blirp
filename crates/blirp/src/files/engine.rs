@@ -359,7 +359,12 @@ impl Engine {
             "unknown_root" if !t.copy.origin => {
                 // The hub copy was deleted: this copy detaches (its files stay).
                 let (store, k) = (self.env.store.clone(), key.clone());
-                let _ = tokio::task::spawn_blocking(move || store.remove_file_copy(&k)).await;
+                // Kept as detached: it must never turn into an origin of its own.
+                match tokio::task::spawn_blocking(move || store.detach_file_copy(&k)).await {
+                    Ok(Ok(())) => {}
+                    Ok(Err(e)) => tracing::warn!(error = %e, "detaching a copy failed"),
+                    Err(e) => tracing::warn!(error = %e, "detaching a copy failed"),
+                }
                 tracing::info!("a downloaded copy's hub copy is gone; it no longer syncs");
                 (
                     CopyState::Off,
@@ -431,8 +436,11 @@ fn tracked_folders(
                 || blirp_core::files::root_id(&st.machine.id, &p.path),
                 |r| r.root_id.clone(),
             );
-            let never =
-                super::local::never_synced(store, st.paths.home(), &s.project, Path::new(&p.path));
+            let never = if row.is_some_and(|r| r.detached) {
+                Some("the hub copy was deleted; this folder no longer syncs".to_string())
+            } else {
+                super::local::never_synced(store, st.paths.home(), &s.project, Path::new(&p.path))
+            };
             let effective = modes
                 .get(&s.project.id)
                 .copied()
@@ -445,6 +453,7 @@ fn tracked_folders(
                     origin: true,
                     seen: 0,
                     created_at: blirp_core::now_ms(),
+                    detached: false,
                 })?;
             }
             out.push(Tracked {

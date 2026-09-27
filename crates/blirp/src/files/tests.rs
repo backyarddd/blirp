@@ -88,6 +88,7 @@ async fn world(copies: usize) -> World {
                 origin: false,
                 seen: 0,
                 created_at: 0,
+                detached: false,
             })
             .unwrap();
         let e = env(&w, i);

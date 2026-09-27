@@ -39,8 +39,23 @@ fn fold(component: &str) -> String {
 pub fn is_vcs_component(component: &str) -> bool {
     let base = component.split(':').next().unwrap_or(component);
     let f = fold(base);
-    VCS.contains(&f.as_str())
-        || (f.starts_with("git~") && f[4..].bytes().all(|b| b.is_ascii_digit()))
+    if VCS.contains(&f.as_str()) {
+        return true;
+    }
+    // 8.3 short names: `GIT~1`, `HG~1`, `SVN~1`, `JJ~1`, or the hashed
+    // form Windows uses once those are taken (`GI1A2B~1`).
+    let Some((prefix, n)) = f.split_once('~') else {
+        return false;
+    };
+    if prefix.is_empty() || n.is_empty() || !n.bytes().all(|b| b.is_ascii_digit()) {
+        return false;
+    }
+    VCS.iter().map(|v| &v[1..]).any(|v| {
+        v.starts_with(prefix)
+            || (prefix.len() == 6
+                && v.starts_with(&prefix[..2])
+                && prefix[2..].bytes().all(|b| b.is_ascii_hexdigit()))
+    })
 }
 
 /// Validate a wire path from anywhere: 1..=4096 bytes, `/`-separated
@@ -140,6 +155,8 @@ mod tests {
             "a",
             "src/main.rs",
             "a b/c",
+            "MYDOCU~1/x",
+            "a~b",
             "dir/.gitignore",
             "x/.github/w.yml",
             "aux.c",
@@ -162,6 +179,10 @@ mod tests {
             (".git./config", PathError::Vcs),
             (".git /config", PathError::Vcs),
             ("GIT~1/config", PathError::Vcs),
+            ("HG~1/hgrc", PathError::Vcs),
+            ("svn~2/x", PathError::Vcs),
+            ("JJ~1/repo", PathError::Vcs),
+            ("GI7F3A~1/config", PathError::Vcs),
             (".git::$INDEX_ALLOCATION/config", PathError::Vcs),
             (".hg/hgrc", PathError::Vcs),
             (".svn/x", PathError::Vcs),

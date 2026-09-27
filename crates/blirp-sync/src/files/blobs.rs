@@ -187,6 +187,16 @@ impl BlobStore {
         }
     }
 
+    /// Bytes held by partial transfers.
+    pub fn parts_bytes(&self) -> u64 {
+        std::fs::read_dir(self.dir.join("tmp")).map_or(0, |rd| {
+            rd.flatten()
+                .filter_map(|e| e.metadata().ok())
+                .map(|m| m.len())
+                .sum()
+        })
+    }
+
     /// Remove partial transfers not touched for `age`.
     pub fn sweep_parts(&self, age: Duration) -> usize {
         let Ok(rd) = std::fs::read_dir(self.dir.join("tmp")) else {

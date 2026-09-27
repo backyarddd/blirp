@@ -486,7 +486,11 @@ async fn delete_root(
     let (store, r) = (s.store.clone(), root.clone());
     blocking(move || {
         for c in store.file_copies()?.into_iter().filter(|c| c.root_id == r) {
-            store.remove_file_copy(&c.path)?;
+            if c.origin {
+                store.remove_file_copy(&c.path)?;
+            } else {
+                store.detach_file_copy(&c.path)?;
+            }
         }
         Ok(())
     })

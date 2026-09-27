@@ -71,6 +71,9 @@ pub struct Scan {
     pub excluded: Vec<Excluded>,
     /// Secrets that `.blirpignore` re-includes (by name).
     pub reincluded_secrets: Vec<String>,
+    /// Folders (wire paths, "" for the root) that could not be listed
+    /// completely: nothing below them may be read as deleted.
+    pub unreadable: Vec<String>,
     /// Bytes of the found files.
     pub bytes: u64,
     pub state: ScanState,
@@ -126,7 +129,11 @@ fn is_exec(m: &std::fs::Metadata) -> bool {
 }
 
 /// `target` of a symlink at `link` (wire path) when it is relative and
-/// stays inside the root; links leaving the root are never synced.
+/// stays inside the root; links leaving the root are never synced. `..`
+/// may only lead the target: after a name, that name could itself be a
+/// link, and the text would no longer say where the link goes (`a -> .`,
+/// `b -> a/..` is the root's parent). With `..` only in front, every link
+/// resolves from the real folder it lives in, so chains stay inside too.
 pub fn link_inside(link: &str, target: &Path) -> Option<String> {
     if target.is_absolute() || target.has_root() {
         return None;
@@ -134,13 +141,18 @@ pub fn link_inside(link: &str, target: &Path) -> Option<String> {
     let raw = target.to_str()?.replace('\\', "/");
     let mut depth: Vec<&str> = link.split('/').collect();
     depth.pop();
+    let mut named = false;
     for c in raw.split('/') {
         match c {
             "" | "." => {}
+            ".." if named => return None,
             ".." => {
                 depth.pop()?;
             }
-            c => depth.push(c),
+            c => {
+                named = true;
+                depth.push(c);
+            }
         }
     }
     let resolved = depth.join("/");
@@ -171,10 +183,21 @@ impl Walk<'_> {
     /// Returns false once a cap is hit (the walk stops).
     fn dir(&mut self, dir: &Path, rel: &str, frames: &mut Vec<Frame>) -> bool {
         frames.push(Frame::load(dir));
+        let folder = rel.trim_end_matches('/').to_string();
         let mut entries: Vec<std::fs::DirEntry> = match std::fs::read_dir(dir) {
-            Ok(r) => r.filter_map(|e| e.ok()).collect(),
+            Ok(r) => {
+                let mut ok = Vec::new();
+                for e in r {
+                    match e {
+                        Ok(e) => ok.push(e),
+                        Err(_) => self.out.unreadable.push(folder.clone()),
+                    }
+                }
+                ok
+            }
             Err(e) => {
                 tracing::debug!(dir = %dir.display(), error = %e, "cannot list folder; skipped");
+                self.out.unreadable.push(folder);
                 frames.pop();
                 return true;
             }
@@ -198,7 +221,10 @@ impl Walk<'_> {
                 continue;
             }
             let abs = entry.path();
-            let Ok(ft) = entry.file_type() else { continue };
+            let Ok(ft) = entry.file_type() else {
+                self.out.unreadable.push(wire);
+                continue;
+            };
             let is_dir = ft.is_dir();
             if is_dir && self.data_key.as_ref().is_some_and(|d| path_key(&abs) == *d) {
                 continue;
@@ -295,6 +321,7 @@ pub fn scan(root: &Path, git: bool, cfg: &ScanConfig) -> std::io::Result<Scan> {
             found: Vec::new(),
             excluded: Vec::new(),
             reincluded_secrets: Vec::new(),
+            unreadable: Vec::new(),
             bytes: 0,
             state: ScanState::Ok,
         },
@@ -667,6 +694,10 @@ mod tests {
         assert_eq!(link_inside("a/l", Path::new("../../out")), None);
         assert_eq!(link_inside("l", Path::new("/etc/passwd")), None);
         assert_eq!(link_inside("l", Path::new(".git/config")), None);
+        // A name followed by `..` could be a link itself.
+        assert_eq!(link_inside("b", Path::new("a/..")), None);
+        assert_eq!(link_inside("d/b", Path::new("../x/../y")), None);
+        assert_eq!(link_inside("a", Path::new(".")).as_deref(), Some("."));
     }
 
     #[cfg(unix)]

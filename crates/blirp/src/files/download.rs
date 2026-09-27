@@ -236,7 +236,13 @@ async fn run(
     let progress = |line: String| Downloads::update(jobs, id, |j| j.progress = Some(line));
     let manifest = root.manifest.clone().unwrap_or_default();
     let mut note = None;
-    let cloned = match manifest.remote.clone() {
+    // The manifest comes from another machine: network remotes only (a
+    // local path or file:// would clone this machine's own repositories).
+    let remote = manifest
+        .remote
+        .as_deref()
+        .and_then(|u| crate::clone::sanitize_url(u).ok());
+    let cloned = match remote {
         Some(url) if blirp_core::git::is_installed() => {
             progress(format!("Cloning {url}"));
             let (d, u, jobs2, id2) = (
@@ -302,6 +308,7 @@ async fn run(
             origin: false,
             seen: 0,
             created_at: blirp_core::now_ms(),
+            detached: false,
         })?;
         store
             .add_project_folder(&pid, &machine, Path::new(&k))

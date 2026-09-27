@@ -338,7 +338,8 @@ ALTER TABLE projects ADD COLUMN merged_into TEXT;
 ///
 /// Every machine: `file_copies` (its working copies of roots: its own
 /// origin folders and downloaded copies; `seen` is the root version up to
-/// which it compared the hub's entries), `file_base` (per path the version
+/// which it compared the hub's entries; `detached` once the hub copy is
+/// gone, so the folder never becomes an origin of its own), `file_base` (per path the version
 /// it last agreed on with the hub; `skipped` paths it cannot hold,
 /// `rejected` content the hub refused as a conflict that an origin keeps
 /// until "Bring changes here", `-` for a refused delete) and `file_hashes`
@@ -401,7 +402,7 @@ CREATE TABLE file_copies(
     path       TEXT PRIMARY KEY,
     root_id    TEXT NOT NULL,
     origin     INTEGER NOT NULL,
-    mode       TEXT NOT NULL CHECK(mode IN ('on_demand','keep_synced')),
+    mode       TEXT NOT NULL CHECK(mode IN ('on_demand','keep_synced','detached')),
     seen       INTEGER NOT NULL DEFAULT 0,
     created_at INTEGER NOT NULL
 );
@@ -411,6 +412,7 @@ CREATE TABLE file_base(
     version  INTEGER NOT NULL,
     hash     TEXT NULL,
     link     TEXT NULL,
+    mode_x   INTEGER NOT NULL DEFAULT 0,
     skipped  INTEGER NOT NULL DEFAULT 0,
     rejected TEXT NULL,
     PRIMARY KEY(copy, path)

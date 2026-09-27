@@ -166,6 +166,8 @@ struct Committer<'a, 'b> {
     root: &'a str,
     input: &'a CommitInput<'a>,
     head: i64,
+    /// The root's origin machine: only it may forget a path.
+    origin: &'a str,
 }
 
 impl Committer<'_, '_> {
@@ -322,6 +324,14 @@ impl Committer<'_, '_> {
                 })
             }
             None => {
+                // A copy may exclude what its origin syncs (other caps,
+                // other ignore files): only the origin drops a path for all.
+                if ch.op == ChangeOp::Forget && self.input.machine_id != self.origin {
+                    return Ok(reject(
+                        "forget_origin_only",
+                        "only the origin folder can stop syncing a file",
+                    ));
+                }
                 let Some(l) = live else {
                     return Ok(ChangeResult::Ok {
                         version: cur_version,
@@ -528,6 +538,7 @@ impl Store {
                 root: input.root_id,
                 input,
                 head,
+                origin: &origin_machine,
             };
             let mut results = Vec::with_capacity(input.changes.len());
             for ch in input.changes {
@@ -673,10 +684,37 @@ impl Store {
         })
     }
 
-    pub fn hub_forget_blobs(&self, hashes: &[String]) -> Result<()> {
+    /// Drop the rows of those `hashes` that are still unreferenced and
+    /// older than `before`, in one write transaction (so a commit that
+    /// starts using one meanwhile keeps it). Returns the dropped ones;
+    /// their files may go.
+    pub fn hub_forget_blobs(&self, hashes: &[String], before: i64) -> Result<Vec<String>> {
+        self.write(|tx| {
+            let mut out = Vec::new();
+            for h in hashes {
+                let n = tx.execute(
+                    "DELETE FROM file_blobs WHERE hash = ?1 AND created_at < ?2
+                       AND NOT EXISTS (SELECT 1 FROM file_entries e WHERE e.hash = ?1)
+                       AND NOT EXISTS (SELECT 1 FROM file_history h WHERE h.hash = ?1)",
+                    params![h, before],
+                )?;
+                if n > 0 {
+                    out.push(h.clone());
+                }
+            }
+            Ok(out)
+        })
+    }
+
+    /// Blobs a writer was just told the hub has: keep them past the next
+    /// collection's grace period.
+    pub fn hub_touch_blobs(&self, hashes: &[String], now: i64) -> Result<()> {
         self.write(|tx| {
             for h in hashes {
-                tx.execute("DELETE FROM file_blobs WHERE hash = ?1", params![h])?;
+                tx.execute(
+                    "UPDATE file_blobs SET created_at = ?2 WHERE hash = ?1 AND created_at < ?2",
+                    params![h, now],
+                )?;
             }
             Ok(())
         })
@@ -941,6 +979,13 @@ mod tests {
             base_version: 1,
             op: ChangeOp::Forget,
         };
+        // A copy's own exclusions never drop a file for everyone.
+        let out = h
+            .commit("copy", false, std::slice::from_ref(&forget))
+            .unwrap();
+        assert!(
+            matches!(&out.results[0], ChangeResult::Rejected { code, .. } if code == "forget_origin_only")
+        );
         h.commit("origin", false, &[forget]).unwrap();
         let (entries, _) = h.store.hub_file_index(&h.root, 0, 10).unwrap().unwrap();
         assert_eq!(
@@ -966,7 +1011,7 @@ mod tests {
         let mut want = vec![hash_bytes(b"a"), hash_bytes(b"c"), hash_bytes(b"d")];
         want.sort();
         assert_eq!(unused, want);
-        h.store.hub_forget_blobs(&unused).unwrap();
+        assert_eq!(h.store.hub_forget_blobs(&unused, 1).unwrap().len(), 3);
         assert_eq!(h.store.hub_blob_usage().unwrap(), 1);
         assert!(h.store.hub_delete_file_root(&h.root).unwrap());
         assert!(h.store.hub_file_root(&h.root).unwrap().is_none());

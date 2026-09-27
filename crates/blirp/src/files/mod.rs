@@ -188,25 +188,31 @@ pub async fn fast_forward(state: &SharedState, cwd: &std::path::Path) {
     let key = blirp_core::paths::path_key(cwd);
     let Some(t) = e.tracked().into_iter().find(|t| {
         !t.copy.origin
+            && t.effective
+            && t.never.is_none()
             && key.starts_with(blirp_core::paths::path_key(std::path::Path::new(
                 &t.copy.key,
             )))
     }) else {
         return;
     };
-    let run = async {
-        let _work = e.work.lock().await;
-        copy::apply(&e.env, &t.copy, false).await
-    };
+    // Its own task: a start that stops waiting leaves the apply running to
+    // the end (with the work lock), never cut off between writes and bases.
+    let e2 = e.clone();
+    let run = tokio::spawn(async move {
+        let _work = e2.work.lock().await;
+        copy::apply(&e2.env, &t.copy, false).await
+    });
     match tokio::time::timeout(FAST_FORWARD, run).await {
-        Ok(Ok(r)) if r.written + r.deleted + r.conflicts.len() > 0 => tracing::info!(
+        Ok(Err(err)) => tracing::warn!(error = %err, "taking the hub's changes failed"),
+        Ok(Ok(Ok(r))) if r.written + r.deleted + r.conflicts.len() > 0 => tracing::info!(
             written = r.written,
             deleted = r.deleted,
             conflicts = r.conflicts.len(),
             "session folder took the hub's changes"
         ),
-        Ok(Ok(_)) => {}
-        Ok(Err(err)) => {
+        Ok(Ok(Ok(_))) => {}
+        Ok(Ok(Err(err))) => {
             tracing::warn!(error = %err, "session folder could not take the hub's changes")
         }
         Err(_) => tracing::warn!("taking the hub's changes before a session start timed out"),

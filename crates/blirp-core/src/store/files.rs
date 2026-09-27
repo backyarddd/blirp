@@ -22,6 +22,8 @@ pub struct FileCopy {
     /// Root version up to which the hub's entries were compared.
     pub seen: i64,
     pub created_at: i64,
+    /// Its hub copy was deleted: it no longer syncs (files kept).
+    pub detached: bool,
 }
 
 /// What a copy last agreed on with the hub for one path.
@@ -29,11 +31,14 @@ pub struct FileCopy {
 pub struct Base {
     pub version: i64,
     pub content: Option<EntryContent>,
+    /// Executable bit of that version (kept by writers that cannot see it).
+    pub mode_x: bool,
     /// Known on the hub but not held here (a name this OS cannot hold, a
     /// case collision, a symlink on Windows): never read as a local delete.
     pub skipped: bool,
-    /// Origin only: local content (hash, or `-` for a delete) the hub kept
-    /// as a conflict; not sent again until "Bring changes here".
+    /// Local content (hash, or `-` for a delete) the hub refused as a
+    /// conflict and kept in a conflict copy: not sent again; an origin
+    /// takes the winner on "Bring changes here".
     pub rejected: Option<String>,
 }
 
@@ -47,6 +52,7 @@ fn copy_row(r: &Row<'_>) -> rusqlite::Result<FileCopy> {
         origin: r.get("origin")?,
         seen: r.get("seen")?,
         created_at: r.get("created_at")?,
+        detached: r.get::<_, String>("mode")? == "detached",
     })
 }
 
@@ -83,15 +89,48 @@ impl Store {
     }
 
     /// Record a working copy (kept as is when it exists for the same root).
+    /// A folder that becomes a copy of another root (or changes between
+    /// origin and copy) starts over: its bases and hash cache are dropped.
     pub fn put_file_copy(&self, copy: &FileCopy) -> Result<()> {
         self.write(|tx| {
+            let old: Option<(String, bool)> = one(
+                tx,
+                "SELECT root_id, origin FROM file_copies WHERE path = ?1",
+                params![copy.path],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )?;
+            if old.as_ref().is_some_and(|(r, o)| *r == copy.root_id && *o == copy.origin) {
+                return Ok(());
+            }
+            tx.execute("DELETE FROM file_base WHERE copy = ?1", params![copy.path])?;
+            tx.execute("DELETE FROM file_hashes WHERE copy = ?1", params![copy.path])?;
             tx.execute(
                 "INSERT INTO file_copies(path, root_id, origin, mode, seen, created_at)
-                 VALUES (?1, ?2, ?3, 'on_demand', ?4, ?5)
-                 ON CONFLICT(path) DO UPDATE SET root_id = excluded.root_id, origin = excluded.origin
-                 WHERE file_copies.root_id <> excluded.root_id OR file_copies.origin <> excluded.origin",
-                params![copy.path, copy.root_id, copy.origin, copy.seen, copy.created_at],
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6)
+                 ON CONFLICT(path) DO UPDATE SET root_id = excluded.root_id, origin = excluded.origin,
+                   mode = excluded.mode, seen = excluded.seen",
+                params![
+                    copy.path,
+                    copy.root_id,
+                    copy.origin,
+                    if copy.detached { "detached" } else { "on_demand" },
+                    copy.seen,
+                    copy.created_at
+                ],
             )?;
+            Ok(())
+        })
+    }
+
+    /// Its hub copy is gone: the folder stops syncing, keeps its files and
+    /// never turns into an origin of its own.
+    pub fn detach_file_copy(&self, path: &str) -> Result<()> {
+        self.write(|tx| {
+            tx.execute(
+                "UPDATE file_copies SET mode = 'detached' WHERE path = ?1",
+                params![path],
+            )?;
+            tx.execute("DELETE FROM file_base WHERE copy = ?1", params![path])?;
             Ok(())
         })
     }
@@ -121,7 +160,7 @@ impl Store {
         let rows = self.read(|c| {
             all(
                 c,
-                "SELECT path, version, hash, link, skipped, rejected FROM file_base WHERE copy = ?1",
+                "SELECT path, version, hash, link, skipped, rejected, mode_x FROM file_base WHERE copy = ?1",
                 params![copy],
                 |r| {
                     Ok((
@@ -131,6 +170,7 @@ impl Store {
                             content: content_of(r.get(2)?, r.get(3)?),
                             skipped: r.get(4)?,
                             rejected: r.get(5)?,
+                            mode_x: r.get(6)?,
                         },
                     ))
                 },
@@ -150,12 +190,12 @@ impl Store {
                     Some(b) => {
                         let (hash, link) = split_content(b.content.as_ref());
                         tx.execute(
-                            "INSERT INTO file_base(copy, path, version, hash, link, skipped, rejected)
-                             VALUES (?1,?2,?3,?4,?5,?6,?7)
+                            "INSERT INTO file_base(copy, path, version, hash, link, skipped, rejected, mode_x)
+                             VALUES (?1,?2,?3,?4,?5,?6,?7,?8)
                              ON CONFLICT(copy, path) DO UPDATE SET version = excluded.version,
                                hash = excluded.hash, link = excluded.link, skipped = excluded.skipped,
-                               rejected = excluded.rejected",
-                            params![copy, path, b.version, hash, link, b.skipped, b.rejected],
+                               rejected = excluded.rejected, mode_x = excluded.mode_x",
+                            params![copy, path, b.version, hash, link, b.skipped, b.rejected, b.mode_x],
                         )?;
                     }
                     None => {
@@ -258,6 +298,7 @@ mod tests {
             origin: true,
             seen: 0,
             created_at: 1,
+            detached: false,
         };
         s.put_file_copy(&copy).unwrap();
         s.set_file_copy_seen("/p", 7).unwrap();
@@ -265,6 +306,7 @@ mod tests {
         let base = Base {
             version: 3,
             content: Some(EntryContent::Blob { hash: "h".into() }),
+            mode_x: true,
             skipped: false,
             rejected: Some(REJECTED_DELETE.into()),
         };
@@ -298,6 +340,19 @@ mod tests {
         s.save_file_hash_cache("/p", &[], Some(&HashSet::from(["a".to_string()])))
             .unwrap();
         assert_eq!(s.file_hash_cache("/p").unwrap().len(), 1);
+        // The same folder as a copy of another root starts over.
+        s.put_file_copy(&copy).unwrap();
+        assert_eq!(s.file_bases("/p").unwrap().len(), 1, "unchanged: kept");
+        s.put_file_copy(&FileCopy {
+            root_id: "1".repeat(32),
+            origin: false,
+            ..copy.clone()
+        })
+        .unwrap();
+        assert!(s.file_bases("/p").unwrap().is_empty());
+        assert!(s.file_hash_cache("/p").unwrap().is_empty());
+        s.detach_file_copy("/p").unwrap();
+        assert!(s.file_copy("/p").unwrap().unwrap().detached);
         s.remove_file_copy("/p").unwrap();
         assert!(s.file_copies().unwrap().is_empty());
         assert!(s.file_bases("/p").unwrap().is_empty());
