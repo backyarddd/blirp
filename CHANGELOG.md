@@ -13,19 +13,20 @@ so every tag needs one.
 ### Added
 
 - Continue in / Start new session from this session summarizes the source
-  session first when it has moved on since its last summary, so the handoff
-  carries a current summary instead of one up to 5 minutes old (or none).
-  The launch waits at most 90 s and the button reads "Summarizing
-  session..." meanwhile; when the summary cannot be refreshed (summarizer
-  off or paused, daily budget used up, failure, timeout, or a session of
-  another machine, which that machine summarizes) the session starts anyway
-  and the handoff says why.
+  session first when it has new prompts or replies since its last summary,
+  so the handoff carries a current summary instead of one up to 5 minutes
+  old (or none). The launch waits at most 90 s and the button reads
+  "Summarizing session..." meanwhile; when the summary cannot be refreshed
+  (summarizer off or paused, daily budget used up, failure, timeout, or a
+  session of another machine, which that machine summarizes) the session
+  starts anyway and the handoff says why. A second handoff from the same
+  session while the first is prepared is refused instead of starting two.
 - When the agent of a running session compacts its context (Claude Code,
-  Codex, opencode, pi), the session page suggests starting a new session from it.
-  Dismissible per session until the next compaction. Sessions carry the time
-  of their latest compaction (`compacted_at`; database migration 12).
-  Codex sessions also show it when a call uses 90% of the context window
-  Codex reports (`context_near_full_at`; migration 14).
+  Codex, opencode, pi), the session page suggests starting a new session
+  from it. Dismissible per session until the next compaction. Sessions
+  carry the time of their latest compaction (`compacted_at`; database
+  migration 16). Codex sessions also show it when a call uses 90% of the
+  context window Codex reports (`context_near_full_at`; migration 18).
 - Codex Desktop subagents are listed under their parent session, and a
   forked subagent no longer repeats its parent's conversation (the copy of
   the parent's history at the start of its rollout is skipped). A one-time
@@ -33,6 +34,9 @@ so every tag needs one.
   parents, removes the repeated conversation from forks on every synced
   machine, fixes their titles, and removes memory records only a fork's
   own summary produced.
+- `blirp doctor`, `blirp hub status` and Settings > Machines & Sync say
+  which machine to update when hub and node run releases that cannot sync
+  (`update_needed` in `GET /api/sync/status`).
 
 ### Changed
 
@@ -47,6 +51,42 @@ so every tag needs one.
   hub's Chats as a normal project ("Chats (<hub>)") and lost which project a
   merged project went into. Every machine re-sends its projects once after
   updating, which repairs them.
+- Renaming or moving a session of another machine is no longer lost: a
+  status update the running machine sent before the rename reached it no
+  longer reverts it (title and project each keep their newest edit), and a
+  change to a session or folder the hub has not received yet waits on the
+  hub for that row instead of being dropped.
+- A session launched on another machine can be opened, renamed, moved and
+  deleted here right away instead of answering "not found" until it
+  replicated; renames and moves of it go to that machine.
+- The hub no longer keeps reporting a machine it refused for another
+  release after that machine updated or was revoked.
+- A long session started outside blirp is no longer distilled at every
+  short pause (up to the whole daily budget): a session marked completed
+  after two quiet minutes now waits `memory.distill_idle_secs` like an idle
+  one, and a session is distilled again only when a new prompt or reply
+  arrived since its last distill.
+- Claude Code's session and weekly limits, API limit and overload errors
+  are recognized: automatic distilling pauses and the budget unit is given
+  back instead of the session failing.
+- A distill reply with keys outside the output contract is accepted (the
+  extra keys are ignored) instead of failing and costing a retry.
+- A distill job waiting to start (a session that just ended) no longer
+  holds up ready ones, summaries for handoffs run first, and the distill
+  worker stops at daemon shutdown instead of working through its queue.
+- Scripted agent runs (`claude -p`, the Claude Agent SDK, `codex exec`) no
+  longer become sessions: bots and automation that call an agent in a loop
+  created a session (and sometimes a project) per run, used up the distill
+  budget and filled project memory. A scripted run resumed interactively
+  still becomes a session, and sessions blirp launched are always kept.
+  A run with a second prompt (an app you chat in over the Agent SDK) is a
+  session too. On first start, sessions of such runs stored before are
+  removed like a user delete, with the records the distiller made from them
+  (pinned or edited ones stay) and projects that held nothing else.
+  Subagents of kept sessions are kept.
+- Background-task notifications and other lines Claude Code writes itself
+  are no longer shown as your prompts and no longer make a session due for
+  distilling again.
 - Project file sync: an empty file no longer keeps its whole folder from
   uploading, and copies made elsewhere get empty files too.
 - Project file sync: a project folder that is no longer on disk (deleted,
@@ -75,28 +115,15 @@ so every tag needs one.
 - The hub's storage quota no longer loses track of uploads that stop
   midway or run twice at once, and partial downloads left by stopped
   transfers are removed after a day.
-- A long session started outside blirp is no longer distilled at every
-  short pause (up to the whole daily budget): a session marked completed
-  after two quiet minutes now waits `memory.distill_idle_secs` like an idle
-  one, and a session is distilled again only when a new prompt or reply
-  arrived since its last distill.
-- Claude Code's "You've hit your session limit" (and weekly limit) is
-  recognized as a usage limit: automatic distilling pauses and the budget
-  unit is given back instead of the session failing.
-- Scripted agent runs (`claude -p`, the Claude Agent SDK, `codex exec`) no
-  longer become sessions: bots and automation that call an agent in a loop
-  created a session (and sometimes a project) per run, used up the distill
-  budget and filled project memory. A scripted run resumed interactively
-  still becomes a session, and sessions blirp launched are always kept.
-  A run with a second prompt (an app you chat in over the Agent SDK) is a
-  session too. On first start, sessions of such runs stored before are
-  removed like a user delete, with the records the distiller made from them
-  (pinned or edited ones stay) and projects that held nothing else.
-- Background-task notifications and other lines Claude Code writes itself
-  are no longer shown as your prompts and no longer make a session due for
-  distilling again.
-- A distill reply with keys outside the output contract is accepted (the
-  extra keys are ignored) instead of failing and costing a retry.
+- A refused terminal upload (too large, or a session that is not running)
+  answers with its error instead of a reset connection.
+- macOS: no warning is logged when a finished session's process group can
+  no longer be signaled.
+- CLI: `blirp sessions --project` and `blirp mem recent|search --project`
+  fail for an unknown project, `--limit 0` is refused, project ids are
+  encoded in requests, and `blirp devices list` shows a hint that fits the
+  machine's role. `blirp worktrees` and the exit code of
+  `blirp service status` are documented.
 
 ## [0.2.0] - 2026-09-27
 
