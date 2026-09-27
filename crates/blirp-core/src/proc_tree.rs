@@ -225,8 +225,14 @@ impl ProcessTree {
         let rc = unsafe { libc::killpg(pgid, sig) };
         if rc != 0 {
             let err = std::io::Error::last_os_error();
-            if err.raw_os_error() != Some(libc::ESRCH) {
-                tracing::warn!(error = %err, pgid, sig, "killpg failed");
+            match err.raw_os_error() {
+                Some(libc::ESRCH) => {}
+                // As in `alive`: the group exists, but none of its members
+                // may be signaled (macOS answers so for a group left with
+                // exiting or zombie members). Live members are signaled
+                // one by one by the callers and `escalate`.
+                Some(libc::EPERM) => tracing::debug!(error = %err, pgid, sig, "killpg denied"),
+                _ => tracing::warn!(error = %err, pgid, sig, "killpg failed"),
             }
         }
         true
