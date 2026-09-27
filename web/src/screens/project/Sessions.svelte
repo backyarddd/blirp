@@ -33,7 +33,9 @@
         limit: 50,
       });
       if (t !== token) return;
-      items = reset ? page.items : [...items, ...page.items];
+      // Sort keys (activity, status) change between pages, so a session can come back twice.
+      const seen = new Set(reset ? [] : items.map((s) => s.id));
+      items = [...(reset ? [] : items), ...page.items.filter((s) => !seen.has(s.id) && seen.add(s.id))];
       cursor = page.next_cursor;
     } catch (e) {
       if (t === token) error = errorMessage(e);

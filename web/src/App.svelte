@@ -47,12 +47,16 @@
   }
 
   function switchSession(delta: number): void {
-    const order = groupSessions(app.topSessions, app.projectById).flatMap((g) => g.sessions);
+    // The cards the sidebar shows, in its order; every session when the sidebar is not on screen.
+    const order =
+      app.sidebarOrder.length > 0
+        ? app.sidebarOrder
+        : groupSessions(app.topSessions, app.projectById).flatMap((g) => g.sessions.map((s) => s.id));
     if (order.length === 0) return;
     const current = route.name === 'sessions' ? route.sessionId : null;
-    const i = order.findIndex((s) => s.id === current);
+    const i = current === null ? -1 : order.indexOf(current);
     const next = order[i < 0 ? 0 : (i + delta + order.length) % order.length];
-    if (next) navigate(href.sessions(next.id));
+    if (next) navigate(href.sessions(next));
   }
 
   function onKey(e: KeyboardEvent): void {

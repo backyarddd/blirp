@@ -996,7 +996,7 @@ test('sessions list: recent activity first, every machine labeled and filterable
   const [longRunning, recentStart] = [randomUUID(), randomUUID()];
   const dir = join(env.userHome, '.claude', 'projects', 'e2e-order');
   mkdirSync(dir, { recursive: true });
-  writeFileSync(join(dir, `${longRunning}.jsonl`), `${transcript(longRunning, 'Long running order check', now - 3 * 3_600_000, now - 60_000)}\n`);
+  writeFileSync(join(dir, `${longRunning}.jsonl`), `${transcript(longRunning, 'Long running order check', now - 3 * 3_600_000, now - 5 * 60_000)}\n`);
   writeFileSync(join(dir, `${recentStart}.jsonl`), `${transcript(recentStart, 'Recently started order check', now - 30 * 60_000, now - 20 * 60_000)}\n`);
   const ingested = async (): Promise<number> =>
     (await apiCall<{ items: SessionRow[] }>('GET', '/api/sessions?agent=claude&limit=500')).items.filter(

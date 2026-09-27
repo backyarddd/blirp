@@ -113,26 +113,53 @@ export function groupSessions(sessions: readonly Session[], projects: ReadonlyMa
 }
 
 /**
- * The daemon's list order (`GET /api/sessions`): live sessions first, since a process is
- * attached and the user can act on them even after hours of idling, then most recent activity
- * (a long-running session started yesterday but working now is not buried), then id.
+ * How long another machine's live session counts as live without a replicated update (the
+ * daemon's `REMOTE_LIVE_MS`): a replica cannot tell a quiet session from a machine that went away.
  */
-export function compareSessions(a: Session, b: Session): number {
-  const live = Number(isLive(b.status)) - Number(isLive(a.status));
-  if (live !== 0) return live;
-  if (a.last_activity_at !== b.last_activity_at) return b.last_activity_at - a.last_activity_at;
-  return a.id < b.id ? 1 : a.id > b.id ? -1 : 0;
+export const REMOTE_LIVE_MS = 30 * 60_000;
+
+/** A live status reported by another machine that has not been updated for `REMOTE_LIVE_MS`. */
+export function isStale(
+  s: Pick<Session, 'status' | 'machine_id' | 'last_activity_at'>,
+  selfId: string | null,
+  now: number,
+): boolean {
+  return isLive(s.status) && selfId !== null && s.machine_id !== selfId && now - s.last_activity_at > REMOTE_LIVE_MS;
+}
+
+/** Sorts first in lists: live, and (on another machine) recently updated. */
+export function isPinned(s: Session, selfId: string | null, now: number): boolean {
+  return isLive(s.status) && !isStale(s, selfId, now);
 }
 
 /**
- * The first `limit` sessions of a group, plus any later live or `keepId` (selected) session, so
+ * The daemon's list order (`GET /api/sessions`): pinned sessions first, since a process is
+ * attached and the user can act on them even after hours of idling, then most recent activity
+ * (a long-running session started yesterday but working now is not buried), then id.
+ */
+export function sessionOrder(selfId: string | null, now = Date.now()): (a: Session, b: Session) => number {
+  return (a, b) => {
+    const pinned = Number(isPinned(b, selfId, now)) - Number(isPinned(a, selfId, now));
+    if (pinned !== 0) return pinned;
+    if (a.last_activity_at !== b.last_activity_at) return b.last_activity_at - a.last_activity_at;
+    return a.id < b.id ? 1 : a.id > b.id ? -1 : 0;
+  };
+}
+
+/** Sessions a project group in the sidebar shows before "Show N more". */
+export const GROUP_PREVIEW = 5;
+
+/**
+ * The first `limit` sessions of a group, plus any later pinned or `keepId` (selected) session, so
  * one busy project does not push every other project off screen. `hidden` is how many are left.
  */
 export function previewSessions(
   sessions: readonly Session[],
   limit: number,
   keepId: string | null,
+  selfId: string | null,
+  now = Date.now(),
 ): { shown: Session[]; hidden: number } {
-  const shown = sessions.filter((s, i) => i < limit || isLive(s.status) || s.id === keepId);
+  const shown = sessions.filter((s, i) => i < limit || s.id === keepId || isPinned(s, selfId, now));
   return { shown, hidden: sessions.length - shown.length };
 }

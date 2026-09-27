@@ -45,10 +45,10 @@ Paste a screenshot or a copied file into a terminal pane (Ctrl+V or Ctrl+Shift+V
 
 The Sessions sidebar lists every session this machine knows: its own, and on paired machines the other machines' sessions, which replicate. Order:
 
-- Running sessions (Starting, Working, Idle, Waiting) come first: a process is attached, so they are the ones you can act on, even after hours of idling.
-- Then by most recent activity (the last transcript event or terminal output), not by start time, so a session started yesterday that is working now is not buried.
+- Running sessions (Starting, Working, Idle, Waiting) come first: a process is attached, so they are the ones you can act on, even after hours of idling. Another machine's running session stays on top only while updates for it arrive: after 30 minutes without one it sorts by its last activity and its chip reads **No update**, since its machine may be offline (hover the chip for the last known status).
+- Then by most recent activity, not by start time: for sessions started outside blirp the time of the latest transcript event, for sessions blirp launched the last status change (working, idle, waiting, ended) reported by hooks or detected from terminal output. So a session started yesterday that is working now is not buried.
 
-Sessions are grouped by project, groups ordered by their most recent session. A group shows its 5 most recent sessions, plus any running one and the one that is open; **Show N more** lists the rest. The sidebar loads the 200 most recent sessions and **Load older sessions** fetches the next 200.
+Sessions are grouped by project, groups ordered by their first session in that order. A group shows its first 5 sessions, plus any running one and the one that is open; **Show N more** lists the rest. The sidebar loads the first 200 sessions and **Load older sessions** fetches the next 200. The previous/next session shortcuts follow the cards as the sidebar shows them.
 
 The filter box matches title, folder, branch and agent over all sessions (it asks the daemon, so it also finds sessions not loaded yet). On paired machines each card shows the machine it runs on, this machine's included, and a machine picker narrows the list to one machine. The project page's Sessions tab lists one project's sessions in the same order, with a status filter.
 

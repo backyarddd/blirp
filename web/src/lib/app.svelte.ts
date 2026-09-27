@@ -13,7 +13,7 @@ import type {
   SyncStatus,
 } from './api/types.gen';
 import { backoffDelay } from './terminal/protocol';
-import { compareSessions, hasTerminal, isSubagent, sessionTitle } from './status';
+import { hasTerminal, isSubagent, sessionOrder, sessionTitle } from './status';
 import { readPref, writePref } from './prefs';
 import {
   EVENT_TEXT,
@@ -83,6 +83,8 @@ class AppState {
   /** More sessions than loaded exist when set; `loadMoreSessions` fetches the next page. */
   sessionsCursor: string | null = $state(null);
   sessionsLoadingMore = $state(false);
+  /** Session ids as the Sessions sidebar shows them (filtered, previewed); empty when it is not mounted. */
+  sidebarOrder: string[] = $state.raw([]);
   projects: ProjectSummary[] = $state.raw([]);
   projectsLoaded = $state(false);
   projectsError: string | null = $state(null);
@@ -262,7 +264,7 @@ class AppState {
   async refreshSessions(): Promise<void> {
     try {
       const page = await api.sessions.list({ limit: SIDEBAR_LIMIT });
-      this.sessions = [...page.items].sort(compareSessions);
+      this.sessions = [...page.items].sort(sessionOrder(this.selfId));
       this.sessionsCursor = page.next_cursor;
       this.sessionsError = null;
     } catch (e) {
@@ -282,7 +284,7 @@ class AppState {
       // A refresh meanwhile started the list over; this page belongs to the old one.
       if (this.sessionsCursor !== cursor) return;
       const known = this.sessionById;
-      this.sessions = [...this.sessions, ...page.items.filter((s) => !known.has(s.id))].sort(compareSessions);
+      this.sessions = [...this.sessions, ...page.items.filter((s) => !known.has(s.id))].sort(sessionOrder(this.selfId));
       this.sessionsCursor = page.next_cursor;
     } catch (e) {
       this.toast(`Could not load more sessions: ${errorMessage(e)}`);
@@ -318,7 +320,7 @@ class AppState {
     // A session started or ended somewhere: keep-awake follows within a status tick.
     if (!prev || hasTerminal(prev) !== hasTerminal(s)) this.#awakeSoon();
     // Activity and status move a session within the list, not only its arrival.
-    this.sessions = (prev ? this.sessions.map((x) => (x.id === s.id ? s : x)) : [s, ...this.sessions]).sort(compareSessions);
+    this.sessions = (prev ? this.sessions.map((x) => (x.id === s.id ? s : x)) : [s, ...this.sessions]).sort(sessionOrder(this.selfId));
     if (prev) this.#maybeNotify(prev, s);
     // Answered somewhere else: it no longer waits for anyone.
     if (s.status === 'working' || s.status === 'starting') this.#seen(s.id);

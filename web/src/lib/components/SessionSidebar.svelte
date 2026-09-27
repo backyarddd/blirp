@@ -8,7 +8,7 @@
   import type { Session } from '../api/types.gen';
   import { app } from '../app.svelte';
   import { href } from '../router';
-  import { agentLabel, basename, compareSessions, groupSessions, previewSessions, sessionTitle } from '../status';
+  import { GROUP_PREVIEW, agentLabel, basename, groupSessions, previewSessions, sessionOrder, sessionTitle } from '../status';
   import { formatRelative } from '../time';
   import StatusChip from './StatusChip.svelte';
   import Loadable from './Loadable.svelte';
@@ -18,8 +18,6 @@
   /** `selectedChildren`: subagent count of the selected session (lists leave subagents out). */
   let { selectedId, selectedChildren }: { selectedId: string | null; selectedChildren: number } = $props();
 
-  /** Sessions a project group shows before "Show N more" (live and selected ones always show). */
-  const GROUP_PREVIEW = 5;
   const PAGE = 100;
 
   let filter = $state('');
@@ -83,9 +81,23 @@
     const byId = new Map<string, Session>();
     for (const s of found) byId.set(s.id, app.sessionById.get(s.id) ?? s);
     for (const s of app.topSessions) if (matches(s)) byId.set(s.id, s);
-    return [...byId.values()].filter((s) => !app.deletedSessions.has(s.id) && matches(s)).sort(compareSessions);
+    return [...byId.values()].filter((s) => !app.deletedSessions.has(s.id) && matches(s)).sort(sessionOrder(app.selfId));
   });
-  const groups = $derived(groupSessions(list, app.projectById));
+  const groups = $derived.by(() => {
+    const now = Date.now();
+    return groupSessions(list, app.projectById).map((g) => ({
+      ...g,
+      open: expanded.has(g.projectId),
+      preview: previewSessions(g.sessions, expanded.has(g.projectId) ? Infinity : GROUP_PREVIEW, selectedId, app.selfId, now),
+    }));
+  });
+  // Previous/next session shortcuts walk the cards as shown here.
+  $effect(() => {
+    app.sidebarOrder = groups.flatMap((g) => g.preview.shown.map((s) => s.id));
+  });
+  $effect(() => () => {
+    app.sidebarOrder = [];
+  });
   const more = $derived(filtering ? foundCursor !== null : app.sessionsCursor !== null);
   const loadingMore = $derived(filtering ? foundLoading && found.length > 0 : app.sessionsLoadingMore);
   const machines = $derived(app.machines.length > 1 ? app.machines : []);
@@ -115,8 +127,6 @@
         {#if !filtering && app.control}<button class="btn primary sm" type="button" onclick={() => app.openNewSession()}>New session</button>{/if}
       {/snippet}
       {#each groups as g (g.projectId)}
-        {@const open = expanded.has(g.projectId)}
-        {@const preview = previewSessions(g.sessions, open ? Infinity : GROUP_PREVIEW, selectedId)}
         <section class="group" aria-label={g.name}>
           <header>
             <a class="gname ellipsis" href={href.project(g.projectId)}>{g.name}</a>
@@ -131,7 +141,7 @@
             {/if}
           </header>
           <ul class="list-plain">
-            {#each preview.shown as s (s.id)}
+            {#each g.preview.shown as s (s.id)}
               <li>
                 <a
                   class="scard"
@@ -162,9 +172,9 @@
               </li>
             {/each}
           </ul>
-          {#if preview.hidden > 0}
-            <button type="button" class="link-btn" onclick={() => expanded.add(g.projectId)}>Show {preview.hidden} more</button>
-          {:else if open && g.sessions.length > GROUP_PREVIEW}
+          {#if g.preview.hidden > 0}
+            <button type="button" class="link-btn" onclick={() => expanded.add(g.projectId)}>Show {g.preview.hidden} more</button>
+          {:else if g.open && g.sessions.length > GROUP_PREVIEW}
             <button type="button" class="link-btn" onclick={() => expanded.delete(g.projectId)}>Show fewer</button>
           {/if}
         </section>
