@@ -89,6 +89,8 @@ pub enum Reply {
         entries: Vec<IndexEntry>,
         head: i64,
         more: bool,
+        /// The root's incarnation: pages of another one do not combine.
+        incarnation: String,
     },
     Missing {
         blobs: Vec<MissingBlob>,
@@ -96,6 +98,7 @@ pub enum Reply {
     CommitResult {
         results: Vec<ChangeResult>,
         head: i64,
+        incarnation: String,
     },
     /// Blob streams: the hub continues an upload at `offset`.
     Ready {

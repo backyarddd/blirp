@@ -16,7 +16,7 @@ use blirp_core::files::path::TMP_PREFIX;
 use blirp_core::files::scan::ScanState;
 use blirp_core::files::{FilesMode, RootInfo};
 use blirp_core::model::{CopyState, LocalFiles, ServerEvent};
-use blirp_core::store::FileCopy;
+use blirp_core::store::{CopyMode, FileCopy};
 use notify_debouncer_full::notify::{RecommendedWatcher, RecursiveMode};
 use notify_debouncer_full::{DebounceEventResult, Debouncer, RecommendedCache, new_debouncer};
 use std::collections::{BTreeSet, HashMap, HashSet};
@@ -72,10 +72,9 @@ pub struct Engine {
     kick: mpsc::UnboundedSender<Kick>,
     stop: watch::Sender<bool>,
     task: Mutex<Option<tokio::task::JoinHandle<()>>>,
-    /// Serializes work on copies (uploads, updates, downloads' overlays):
-    /// bases must not be written by two passes at once.
-    // ponytail: one lock for all copies; per-copy locks if folders queue.
-    pub work: tokio::sync::Mutex<()>,
+    /// Paths each folder's last pass held by the mass-delete guard: what
+    /// "Delete on hub too" confirms (nothing more).
+    held: Mutex<HashMap<String, Vec<String>>>,
 }
 
 impl std::fmt::Debug for Engine {
@@ -99,7 +98,7 @@ impl Engine {
             kick,
             stop,
             task: Mutex::default(),
-            work: tokio::sync::Mutex::new(()),
+            held: Mutex::default(),
         });
         let task = tokio::spawn(run(engine.clone(), rx, stop_rx));
         *lock(&engine.task) = Some(task);
@@ -189,19 +188,31 @@ impl Engine {
         }
     }
 
+    /// The paths the last pass over `key` held (mass-delete guard).
+    pub fn held_deletes(&self, key: &str) -> Vec<String> {
+        lock(&self.held).get(key).cloned().unwrap_or_default()
+    }
+
     /// Recompute the tracked folders.
     async fn reconcile(&self) {
         let Some(st) = self.weak.upgrade() else {
             return;
         };
-        if let Err(e) = self.refresh_roots().await {
-            tracing::warn!(error = %e, "cannot read project file roots from the hub");
-        }
+        // Only a hub that answered can say a root is gone.
+        let roots = match self.refresh_roots().await {
+            Ok(r) => Some(r),
+            Err(e) => {
+                tracing::warn!(error = %e, "cannot read project file roots from the hub");
+                None
+            }
+        };
         let modes = self.modes();
         let global = st.config().sync.project_files;
         let s = st.clone();
-        let tracked =
-            tokio::task::spawn_blocking(move || tracked_folders(&s, &modes, global)).await;
+        let tracked = tokio::task::spawn_blocking(move || {
+            tracked_folders(&s, &modes, global, roots.as_deref())
+        })
+        .await;
         match tracked {
             Ok(Ok(t)) => *lock(&self.tracked) = t,
             Ok(Err(e)) => tracing::warn!(error = %e, "listing folders for file sync failed"),
@@ -210,7 +221,7 @@ impl Engine {
     }
 
     /// Whether uploads may run now (grace period over, not paused).
-    fn gate(&self) -> Result<(), CopyState> {
+    pub(crate) fn gate(&self) -> Result<(), CopyState> {
         let Some(st) = self.weak.upgrade() else {
             return Err(CopyState::Waiting);
         };
@@ -288,14 +299,16 @@ impl Engine {
         }
         self.set_status(&key, |s| s.state = CopyState::Uploading);
         self.emit();
-        let result = {
-            let _work = self.work.lock().await;
-            copy::upload(&self.env, &t.copy).await
-        };
+        let result = copy::upload(&self.env, &t.copy).await;
         match result {
             Ok(r) => {
                 let now = blirp_core::now_ms();
                 let held = r.held_deletes.len();
+                if held > 0 {
+                    lock(&self.held).insert(key.clone(), r.held_deletes.clone());
+                } else {
+                    lock(&self.held).remove(&key);
+                }
                 if held > 0 {
                     tracing::warn!(files = held, "upload held: many files disappeared at once");
                 }
@@ -381,6 +394,14 @@ impl Engine {
                     Some("the hub copy was deleted; this folder no longer syncs".into()),
                 )
             }
+            "root_replaced" => {
+                // Reconcile: the copy detaches, the origin starts over.
+                let _ = self.kick.send(Kick::Rescan);
+                (
+                    CopyState::Waiting,
+                    Some("the hub copy was made again; checking this folder".into()),
+                )
+            }
             "hub_quota" => (
                 CopyState::Error,
                 Some("the hub's storage for project files is full".into()),
@@ -420,13 +441,58 @@ pub fn grace_until(state: &AppState) -> Option<i64> {
         .and_then(|v| v.as_i64())
 }
 
-/// This machine's folders the engine works on.
+/// Check this machine's copies against the hub's roots: a root gone from
+/// the hub or made again under a new incarnation voids a copy's bases. An
+/// origin then starts over (every file uploads again, a deleted hub copy is
+/// made anew); any other copy detaches. Copies that know no incarnation yet
+/// adopt the current one.
+pub(crate) fn check_roots(
+    store: &blirp_core::store::Store,
+    roots: &[RootInfo],
+) -> Result<(), blirp_core::store::StoreError> {
+    for c in store.file_copies()? {
+        if c.mode != CopyMode::OnDemand {
+            continue;
+        }
+        let root = roots.iter().find(|r| r.root_id == c.root_id);
+        match (c.origin, root) {
+            (_, Some(r)) if c.incarnation.is_empty() => {
+                store.set_file_copy_incarnation(&c.path, &r.incarnation, false)?;
+            }
+            (_, Some(r)) if r.incarnation == c.incarnation => {}
+            (true, Some(r)) => {
+                tracing::info!("the hub copy of a folder was made again; uploading it all");
+                store.set_file_copy_incarnation(&c.path, &r.incarnation, true)?;
+            }
+            (true, None) if !c.incarnation.is_empty() => {
+                tracing::info!("the hub copy of a folder was deleted; uploading it anew");
+                store.set_file_copy_incarnation(&c.path, "", true)?;
+            }
+            (true, None) => {}
+            (false, _) => {
+                tracing::info!("a downloaded copy's hub copy is gone; it no longer syncs");
+                store.detach_file_copy(&c.path)?;
+            }
+        }
+    }
+    Ok(())
+}
+
+/// This machine's folders the engine works on. With the hub's roots at
+/// hand (`roots`), each copy is checked against them first: a root gone
+/// from the hub or made again under a new incarnation means the copy's
+/// bases are void. An origin then starts over (every file uploads again, a
+/// deleted hub copy is made anew); any other copy detaches.
 fn tracked_folders(
     st: &SharedState,
     modes: &HashMap<String, FilesMode>,
     global: bool,
+    roots: Option<&[RootInfo]>,
 ) -> Result<Vec<Tracked>, blirp_core::store::StoreError> {
     let store = &st.store;
+    if let Some(roots) = roots {
+        check_roots(store, roots)?;
+    }
     let rows: HashMap<String, FileCopy> = store
         .file_copies()?
         .into_iter()
@@ -461,10 +527,14 @@ fn tracked_folders(
                 || blirp_core::files::root_id(&st.machine.id, p),
                 |r| r.root_id.clone(),
             );
-            let never = if row.is_some_and(|r| r.detached) {
-                Some("the hub copy was deleted; this folder no longer syncs".to_string())
-            } else {
-                super::local::never_synced(store, st.paths.home(), &s.project, Path::new(p))
+            let never = match row.map(|r| r.mode) {
+                Some(CopyMode::Detached) => {
+                    Some("the hub copy was deleted; this folder no longer syncs".to_string())
+                }
+                Some(CopyMode::Pending) => {
+                    Some("the download did not finish: Update from hub completes it".to_string())
+                }
+                _ => super::local::never_synced(store, st.paths.home(), &s.project, Path::new(p)),
             };
             let effective = modes
                 .get(&s.project.id)
@@ -478,7 +548,8 @@ fn tracked_folders(
                     origin: true,
                     seen: 0,
                     created_at: blirp_core::now_ms(),
-                    detached: false,
+                    mode: CopyMode::OnDemand,
+                    incarnation: String::new(),
                 })?;
             }
             out.push(Tracked {
@@ -486,6 +557,7 @@ fn tracked_folders(
                     key: p.clone(),
                     root_id,
                     origin,
+                    incarnation: row.map(|r| r.incarnation.clone()).unwrap_or_default(),
                 },
                 project_id: s.project.id.clone(),
                 never,
@@ -493,9 +565,15 @@ fn tracked_folders(
             });
         }
     }
-    // Copies whose folder was unregistered (project deleted) detach.
-    for path in rows.keys().filter(|p| !live.contains(*p)) {
-        store.remove_file_copy(path)?;
+    // Folders no longer registered (project deleted): an origin's state
+    // goes; a downloaded copy stays detached, so it never turns into an
+    // origin if its folder is registered again.
+    for (path, row) in rows.iter().filter(|(p, _)| !live.contains(*p)) {
+        if row.origin {
+            store.remove_file_copy(path)?;
+        } else if row.mode != CopyMode::Detached && row.mode != CopyMode::Pending {
+            store.detach_file_copy(path)?;
+        }
     }
     Ok(out)
 }
@@ -529,9 +607,17 @@ fn start_watcher(tx: mpsc::UnboundedSender<Kick>) -> Option<Watcher> {
 
 /// Paths blirp writes itself or that never sync do not wake the engine.
 fn relevant(p: &Path) -> bool {
+    // Build output and caches (the denylist's folders) change all the time
+    // during builds and never sync: their events wake nothing.
+    let build_dirs = blirp_core::files::rules::BUILD
+        .iter()
+        .filter_map(|b| b.strip_suffix('/'));
+    let build: Vec<&str> = build_dirs.collect();
     !p.components().any(|c| {
         let s = c.as_os_str().to_string_lossy();
-        blirp_core::files::path::is_vcs_component(&s) || s.starts_with(TMP_PREFIX)
+        blirp_core::files::path::is_vcs_component(&s)
+            || s.starts_with(TMP_PREFIX)
+            || build.iter().any(|b| s.eq_ignore_ascii_case(b))
     })
 }
 

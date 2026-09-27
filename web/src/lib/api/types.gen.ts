@@ -1062,7 +1062,12 @@ head: number, files: number, bytes: number,
 /**
  * Live conflict copies (`*.conflict-*`).
  */
-conflicts: number, created_at: number, updated_at: number, manifest: GitManifest | null, };
+conflicts: number, created_at: number, updated_at: number, manifest: GitManifest | null, 
+/**
+ * Changes when a deleted hub copy is made again: copies of the old
+ * one hold versions that mean nothing in the new one.
+ */
+incarnation: string, };
 
 /**
  * Git facts of a root, read with plain git commands on its origin and

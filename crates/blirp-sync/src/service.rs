@@ -43,6 +43,8 @@ const PRESENCE_EVERY: Duration = Duration::from_secs(60);
 /// QUIC application close codes.
 const CLOSE_OK: u32 = 0;
 const CLOSE_FORBIDDEN: u32 = 403;
+/// `blirp/files/1` connections one machine may hold on the hub at once.
+const MAX_FILES_CONNS: usize = 3;
 
 #[derive(Debug, Clone)]
 pub enum Role {
@@ -671,11 +673,17 @@ async fn handle_incoming(inner: &Arc<Inner>, incoming: Incoming) -> Result<()> {
             }
             // Tracked with the machine's other connections, so revoking it
             // closes this one too.
-            lock(&inner.peers)
-                .entry(remote.clone())
-                .or_default()
-                .files
-                .push(conn.clone());
+            {
+                let mut peers = lock(&inner.peers);
+                let peer = peers.entry(remote.clone()).or_default();
+                // A node needs one; a few allow reconnects to overlap.
+                if peer.files.len() >= MAX_FILES_CONNS {
+                    drop(peers);
+                    close(&conn, CLOSE_FORBIDDEN, b"too many file connections");
+                    return Ok(());
+                }
+                peer.files.push(conn.clone());
+            }
             let store = inner.store.clone();
             let id = remote.clone();
             let name = blocking(move || Ok(store.get_machine(&id)?.map(|m| m.name)))

@@ -7,7 +7,7 @@ pub mod hub;
 pub mod proto;
 pub mod server;
 
-pub use client::{Committed, FileHub, LocalHub, RemoteHub, Welcome};
+pub use client::{Committed, FileHub, LocalHub, RemoteHub, RootIndex, Welcome};
 pub use hub::{GcStats, HubError, HubFiles, RootChanged};
 
 #[cfg(test)]

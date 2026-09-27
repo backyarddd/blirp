@@ -21,6 +21,7 @@ use blirp_core::model::{
     FilesRoot, HeldAction, IncomingAction, IncomingFile, LocalFiles, MachineRole, PauseFiles,
     ProjectFiles, ResolveHeld, SetFilesMode,
 };
+use blirp_core::store::CopyMode;
 use serde::Deserialize;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -345,12 +346,20 @@ async fn preview(
 
 /// This machine's working copy for `root` (a folder of the project here).
 fn local_copy(e: &Engine, s: &SharedState, id: &str, root: Option<&str>) -> ApiResult<Copy> {
+    tracked_copy(e, s, id, root).map(|t| t.copy)
+}
+
+fn tracked_copy(
+    e: &Engine,
+    s: &SharedState,
+    id: &str,
+    root: Option<&str>,
+) -> ApiResult<super::engine::Tracked> {
     let folder = local_root(s, id, root)?;
     let key = folder.display().to_string();
     e.tracked()
         .into_iter()
         .find(|t| t.copy.key == key)
-        .map(|t| t.copy)
         .ok_or_else(|| ApiError::conflict("not_synced", "this folder does not sync with the hub"))
 }
 
@@ -420,10 +429,36 @@ async fn apply(
     let e = need_engine(&s)?;
     let st = s.clone();
     let (e2, id2, root) = (e.clone(), id.clone(), body.root.clone());
-    let copy = blocking(move || local_copy(&e2, &st, &id2, Some(&root))).await?;
-    let report = {
-        let _work = e.work.lock().await;
-        if let Err(err) = copy::upload(&e.env, &copy).await {
+    let (tracked, pending) = blocking(move || {
+        let t = tracked_copy(&e2, &st, &id2, Some(&root))?;
+        let pending = st
+            .store
+            .file_copy(&t.copy.key)?
+            .is_some_and(|c| c.mode == CopyMode::Pending);
+        Ok((t, pending))
+    })
+    .await?;
+    let copy = tracked.copy.clone();
+    let report = if pending {
+        // An unfinished download: write the hub's files, then it syncs.
+        let r = copy::apply(&e.env, &copy, true)
+            .await
+            .map_err(files_error)?;
+        if r.failed.is_empty() {
+            let (store, key) = (s.store.clone(), copy.key.clone());
+            blocking(move || Ok(store.finish_file_copy(&key)?)).await?;
+            e.rescan();
+        }
+        r
+    } else {
+        // Local changes go up first, but only where uploads may run now
+        // (the machine's switch, the project's mode, Pause, the grace
+        // period): taking the hub's changes never uploads behind them.
+        if tracked.effective
+            && tracked.never.is_none()
+            && e.gate().is_ok()
+            && let Err(err) = copy::upload(&e.env, &copy).await
+        {
             // Still take the hub's changes; the upload retries on its own.
             tracing::warn!(error = %err, "uploading before taking the hub's changes failed");
         }
@@ -472,10 +507,19 @@ async fn resolve_held(
     let (e2, id2, root) = (e.clone(), id.clone(), body.root.clone());
     let copy = blocking(move || local_copy(&e2, &st, &id2, Some(&root))).await?;
     let out = {
-        let _work = e.work.lock().await;
         match body.action {
             HeldAction::Delete => {
-                let r = copy::upload_with(&e.env, &copy, copy::Deletes::Confirm)
+                // Only what the folder showed as held; anything that
+                // disappeared since waits for its own confirmation.
+                let shown: std::collections::HashSet<String> =
+                    e.held_deletes(&copy.key).into_iter().collect();
+                if shown.is_empty() {
+                    return Err(ApiError::conflict(
+                        "nothing_held",
+                        "no deletes are waiting for a confirmation",
+                    ));
+                }
+                let r = copy::upload_with(&e.env, &copy, copy::Deletes::Confirm(shown))
                     .await
                     .map_err(files_error)?;
                 tracing::info!(files = r.sent, "confirmed deleting files on the hub");
@@ -607,7 +651,7 @@ fn destination(s: &SharedState, root: &RootInfo, body: &DownloadFiles) -> ApiRes
     }
 }
 
-fn empty_or_missing(p: &Path) -> bool {
+pub(crate) fn empty_or_missing(p: &Path) -> bool {
     match std::fs::symlink_metadata(p) {
         Err(_) => true,
         Ok(m) if m.is_dir() && !m.file_type().is_symlink() => {

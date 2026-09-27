@@ -176,8 +176,9 @@ async fn uploads_commits_downloads_and_resumes() {
     assert_eq!(out.results, [ChangeResult::Ok { version: 1 }]);
     let (roots, _) = fh.roots().await.unwrap();
     assert_eq!(roots[0].files, 1);
-    let (entries, head) = fh.index(&r.root, 0).await.unwrap();
-    assert_eq!((entries.len(), head), (1, 1));
+    let index = fh.index(&r.root, 0).await.unwrap();
+    assert_eq!((index.entries.len(), index.head), (1, 1));
+    assert_eq!(index.incarnation, out.incarnation);
     for _ in 0..100 {
         if !r.notes.lock().unwrap().is_empty() {
             break;

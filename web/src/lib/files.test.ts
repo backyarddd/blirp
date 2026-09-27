@@ -24,6 +24,7 @@ function root(id: string, hub: Partial<RootInfo> | null): FilesRoot {
           created_at: 0,
           updated_at: 0,
           manifest: null,
+          incarnation: 'i',
           ...hub,
         }
       : null,

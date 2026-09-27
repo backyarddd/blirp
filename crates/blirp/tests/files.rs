@@ -437,6 +437,39 @@ async fn concurrent_edits_keep_both_versions_and_modify_beats_delete() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn bring_changes_here_uploads_nothing_while_paused() {
+    if !in_temp_home("bring_changes_here_uploads_nothing_while_paused") {
+        return;
+    }
+    let r = rig().await;
+    r.b.pause(true).await;
+    write(&r.origin.join("new.txt"), "made while paused");
+    // Taking the hub's changes uploads first only where uploads may run:
+    // the upload inside the request would have finished before it returns.
+    let applied: AppliedFiles =
+        r.b.ok(
+            Method::POST,
+            &format!("/api/projects/{}/files-sync/apply", r.project),
+            Some(json!({ "root": r.origin })),
+        )
+        .await;
+    assert!(applied.failed.is_empty(), "{applied:?}");
+    assert_eq!(
+        hub_files(&r.hub, &r.project).await.map(|(_, n)| n),
+        Some(2),
+        "uploaded while paused"
+    );
+    r.b.pause(false).await;
+    eventually("the new file uploaded after Resume", || async {
+        hub_files(&r.hub, &r.project)
+            .await
+            .is_some_and(|(_, n)| n == 3)
+    })
+    .await;
+    r.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn revoked_machines_are_refused_and_off_pauses_uploads() {
     if !in_temp_home("revoked_machines_are_refused_and_off_pauses_uploads") {
         return;

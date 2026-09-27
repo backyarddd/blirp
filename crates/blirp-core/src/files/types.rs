@@ -155,4 +155,7 @@ pub struct RootInfo {
     pub created_at: i64,
     pub updated_at: i64,
     pub manifest: Option<GitManifest>,
+    /// Changes when a deleted hub copy is made again: copies of the old
+    /// one hold versions that mean nothing in the new one.
+    pub incarnation: String,
 }

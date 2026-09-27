@@ -11,7 +11,7 @@ use crate::state::SharedState;
 use blirp_core::files::{GitManifest, RootInfo};
 use blirp_core::model::{CloneState, DownloadJob};
 use blirp_core::process;
-use blirp_core::store::FileCopy;
+use blirp_core::store::{CopyMode, FileCopy};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
@@ -168,10 +168,12 @@ impl Downloads {
         };
         {
             let mut jobs = lock(&self.jobs);
-            if jobs
-                .values()
-                .any(|j| j.state == CloneState::Running && j.root_id == root.root_id)
-            {
+            let dest_key = blirp_core::paths::path_key(&dest);
+            if jobs.values().any(|j| {
+                j.state == CloneState::Running
+                    && (j.root_id == root.root_id
+                        || blirp_core::paths::path_key(Path::new(&j.dest)) == dest_key)
+            }) {
                 return Err(DownloadError::Conflict(
                     "a copy of this folder is being made already".into(),
                 ));
@@ -234,6 +236,34 @@ async fn run(
     id: &str,
 ) -> Result<Option<String>, String> {
     let progress = |line: String| Downloads::update(jobs, id, |j| j.progress = Some(line));
+    // Checked again right before anything is written: another download or
+    // a folder filled meanwhile must not be written over.
+    {
+        let (store, d) = (st.store.clone(), dest.to_path_buf());
+        let taken = tokio::task::spawn_blocking(move || {
+            let key = dunce::canonicalize(&d)
+                .unwrap_or_else(|_| d.clone())
+                .display()
+                .to_string();
+            Ok::<bool, blirp_core::store::StoreError>(
+                // An empty folder the engine noted as an origin of its own
+                // (a workspace never uploaded) may become the copy.
+                store
+                    .file_copy(&key)?
+                    .is_some_and(|c| !c.origin || !c.incarnation.is_empty())
+                    || !super::api::empty_or_missing(&d),
+            )
+        })
+        .await
+        .map_err(|e| e.to_string())?
+        .map_err(|e| e.to_string())?;
+        if taken {
+            return Err(format!(
+                "{} is no longer empty or already holds a copy",
+                dest.display()
+            ));
+        }
+    }
     let manifest = root.manifest.clone().unwrap_or_default();
     let mut note = None;
     // The manifest comes from another machine: network remotes only (a
@@ -305,30 +335,29 @@ async fn run(
     }
     let canonical = dunce::canonicalize(dest).map_err(|e| e.to_string())?;
     let key = canonical.display().to_string();
-    // Register first: the overlay's bases belong to this copy.
-    let (store, pid, machine, rid, k) = (
+    // Register first (the overlay's bases belong to this copy), pending:
+    // the engine uploads nothing from it until the hub's files are all
+    // written. Folder and copy rows go in one transaction, so the folder is
+    // never seen without its copy row (it would count as an origin). A
+    // workspace stays folderless: the project gets no folder row.
+    let (store, pid, machine, k) = (
         st.store.clone(),
         root.project_id.clone(),
         st.machine.id.clone(),
-        root.root_id.clone(),
         key.clone(),
     );
+    let row = FileCopy {
+        path: k,
+        root_id: root.root_id.clone(),
+        origin: false,
+        seen: 0,
+        created_at: blirp_core::now_ms(),
+        mode: CopyMode::Pending,
+        incarnation: root.incarnation.clone(),
+    };
     tokio::task::spawn_blocking(move || {
-        store.put_file_copy(&FileCopy {
-            path: k.clone(),
-            root_id: rid,
-            origin: false,
-            seen: 0,
-            created_at: blirp_core::now_ms(),
-            detached: false,
-        })?;
-        // A workspace stays folderless: the project has no folder row.
-        if workspace {
-            return Ok(());
-        }
-        store
-            .add_project_folder(&pid, &machine, Path::new(&k))
-            .map(|_| ())
+        let project = (!workspace).then_some((pid.as_str(), machine.as_str()));
+        store.register_download(&row, project)
     })
     .await
     .map_err(|e| e.to_string())?
@@ -338,22 +367,35 @@ async fn run(
     });
     progress("Writing the hub's files".into());
     let copy = Copy {
-        key,
+        key: key.clone(),
         root_id: root.root_id.clone(),
         origin: false,
+        incarnation: root.incarnation.clone(),
     };
-    let report = {
-        let _work = engine.work.lock().await;
-        copy::apply(&engine.env, &copy, true)
-            .await
-            .map_err(|e| e.to_string())?
+    let (jobs2, id2) = (jobs.clone(), id.to_string());
+    let shown = move |done: usize, total: usize| {
+        Downloads::update(&jobs2, &id2, |j| {
+            j.progress = Some(format!("Downloading files from the hub: {done} of {total}"));
+        });
     };
+    let report = copy::apply_with(&engine.env, &copy, true, Some(&shown))
+        .await
+        .map_err(|e| e.to_string())?;
     if !report.failed.is_empty() {
         tracing::warn!(
             failed = report.failed.len(),
             "some files of a new copy could not be written"
         );
+        return Err(format!(
+            "{} file(s) could not be written; the copy does not sync until Update from hub completes it",
+            report.failed.len()
+        ));
     }
+    let store = st.store.clone();
+    tokio::task::spawn_blocking(move || store.finish_file_copy(&key))
+        .await
+        .map_err(|e| e.to_string())?
+        .map_err(|e| e.to_string())?;
     if !report.skipped.is_empty() {
         let n = report.skipped.len();
         let more = format!("{n} file(s) cannot be held on this system and were skipped");

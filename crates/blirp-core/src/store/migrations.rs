@@ -329,7 +329,9 @@ ALTER TABLE projects ADD COLUMN merged_into TEXT;
 /// Project file sync through the hub (docs/project-files.md). New tables
 /// only, none replicated through `hub_log`.
 ///
-/// Hub: `file_roots` (one per origin folder; `head` is the root's sequence),
+/// Hub: `file_roots` (one per origin folder; `head` is the root's sequence,
+/// which never restarts: a deleted hub copy keeps its row with `deleted_at`,
+/// and a root made again gets a new `incarnation`),
 /// `file_entries` (current version of every path, `hash` and `link` both
 /// NULL for a tombstone), `file_history` (replaced versions, kept
 /// `files.keep_versions_days`), `file_blobs` (content-addressed blobs in
@@ -338,8 +340,9 @@ ALTER TABLE projects ADD COLUMN merged_into TEXT;
 ///
 /// Every machine: `file_copies` (its working copies of roots: its own
 /// origin folders and downloaded copies; `seen` is the root version up to
-/// which it compared the hub's entries; `detached` once the hub copy is
-/// gone, so the folder never becomes an origin of its own), `file_base` (per path the version
+/// which it compared the hub's entries; `incarnation` the hub root it
+/// belongs to; `detached` once the hub copy is gone, so the folder never
+/// becomes an origin of its own; `pending` while a download writes it), `file_base` (per path the version
 /// it last agreed on with the hub; `skipped` paths it cannot hold,
 /// `rejected` content the hub refused as a conflict that an origin keeps
 /// until "Bring changes here", `-` for a refused delete) and `file_hashes`
@@ -355,7 +358,9 @@ CREATE TABLE file_roots(
     head          INTEGER NOT NULL DEFAULT 0,
     manifest_json TEXT NULL,
     created_at    INTEGER NOT NULL,
-    updated_at    INTEGER NOT NULL
+    updated_at    INTEGER NOT NULL,
+    incarnation   TEXT NOT NULL DEFAULT '',
+    deleted_at    INTEGER NULL
 );
 CREATE TABLE file_entries(
     root_id    TEXT NOT NULL,
@@ -402,9 +407,10 @@ CREATE TABLE file_copies(
     path       TEXT PRIMARY KEY,
     root_id    TEXT NOT NULL,
     origin     INTEGER NOT NULL,
-    mode       TEXT NOT NULL CHECK(mode IN ('on_demand','keep_synced','detached')),
+    mode       TEXT NOT NULL CHECK(mode IN ('on_demand','keep_synced','detached','pending')),
     seen       INTEGER NOT NULL DEFAULT 0,
-    created_at INTEGER NOT NULL
+    created_at INTEGER NOT NULL,
+    incarnation TEXT NOT NULL DEFAULT ''
 );
 CREATE TABLE file_base(
     copy     TEXT NOT NULL,

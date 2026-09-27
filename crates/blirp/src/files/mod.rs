@@ -86,6 +86,7 @@ pub fn hub_files(state: &SharedState) -> Arc<HubFiles> {
     let mut h = lock(&state.files.hub);
     if let Some(hub) = h.as_ref() {
         hub.set_limits(quota, keep);
+        hub.set_max_file(u64::from(state.config().files.max_file_mb) << 20);
         return hub.clone();
     }
     let hub = Arc::new(HubFiles::new(
@@ -94,6 +95,7 @@ pub fn hub_files(state: &SharedState) -> Arc<HubFiles> {
         quota,
         keep,
     ));
+    hub.set_max_file(u64::from(state.config().files.max_file_mb) << 20);
     *h = Some(hub.clone());
     hub
 }
@@ -150,6 +152,8 @@ pub async fn start(state: &SharedState, svc: &Arc<SyncService>) {
         data_dir: state.paths.home().to_path_buf(),
         scan: local::scan_config(&cfg.files, state.paths.home()),
         gate: state.files.hash_gate.clone(),
+        work: Arc::default(),
+        after_scan: None,
     };
     let e = Engine::start(state, env);
     *lock(&state.files.engine) = Some(e);
@@ -186,6 +190,11 @@ const FAST_FORWARD: std::time::Duration = std::time::Duration::from_secs(30);
 pub async fn fast_forward(state: &SharedState, cwd: &std::path::Path) {
     let Some(e) = engine(state) else { return };
     let key = blirp_core::paths::path_key(cwd);
+    // Paused (or still in the first-run grace period): nothing is written
+    // into folders either.
+    if e.gate().is_err() {
+        return;
+    }
     let Some(t) = e.tracked().into_iter().find(|t| {
         !t.copy.origin
             && t.effective
@@ -199,10 +208,7 @@ pub async fn fast_forward(state: &SharedState, cwd: &std::path::Path) {
     // Its own task: a start that stops waiting leaves the apply running to
     // the end (with the work lock), never cut off between writes and bases.
     let e2 = e.clone();
-    let run = tokio::spawn(async move {
-        let _work = e2.work.lock().await;
-        copy::apply(&e2.env, &t.copy, false).await
-    });
+    let run = tokio::spawn(async move { copy::apply(&e2.env, &t.copy, false).await });
     match tokio::time::timeout(FAST_FORWARD, run).await {
         Ok(Err(err)) => tracing::warn!(error = %err, "taking the hub's changes failed"),
         Ok(Ok(Ok(r))) if r.written + r.deleted + r.conflicts.len() > 0 => tracing::info!(

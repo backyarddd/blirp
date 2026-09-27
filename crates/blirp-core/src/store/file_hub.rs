@@ -65,6 +65,15 @@ pub struct CommitInput<'a> {
 pub struct CommitOutcome {
     pub results: Vec<ChangeResult>,
     pub head: i64,
+    pub incarnation: String,
+}
+
+/// A page of a root's index.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct IndexSlice {
+    pub entries: Vec<IndexEntry>,
+    pub head: i64,
+    pub incarnation: String,
 }
 
 fn entry_row(r: &Row<'_>) -> rusqlite::Result<IndexEntry> {
@@ -96,13 +105,14 @@ fn root_info_row(r: &Row<'_>) -> rusqlite::Result<RootInfo> {
         created_at: r.get("created_at")?,
         updated_at: r.get("updated_at")?,
         manifest: manifest.and_then(|m| serde_json::from_str(&m).ok()),
+        incarnation: r.get("incarnation")?,
     })
 }
 
 const ROOTS_SQL: &str = "SELECT r.root_id,
        coalesce(pp.project_id, m2.merged_into, m1.merged_into, r.project_id) AS project_id,
        r.machine_id, coalesce(m.name, '') AS machine_name, coalesce(m.revoked, 0) AS revoked,
-       r.path, r.head, r.created_at, r.updated_at, r.manifest_json,
+       r.path, r.head, r.created_at, r.updated_at, r.manifest_json, r.incarnation,
        (SELECT count(*) FROM file_entries e WHERE e.root_id = r.root_id
           AND (e.hash IS NOT NULL OR e.link IS NOT NULL)) AS files,
        (SELECT coalesce(sum(e.size), 0) FROM file_entries e WHERE e.root_id = r.root_id
@@ -113,7 +123,8 @@ const ROOTS_SQL: &str = "SELECT r.root_id,
      LEFT JOIN project_paths pp ON pp.machine_id = r.machine_id AND pp.path = r.path
      LEFT JOIN projects m1 ON m1.id = r.project_id
      LEFT JOIN projects m2 ON m2.id = m1.merged_into
-     LEFT JOIN machines m ON m.id = r.machine_id";
+     LEFT JOIN machines m ON m.id = r.machine_id
+     WHERE r.deleted_at IS NULL";
 
 fn get_entry(c: &Connection, root: &str, path: &str) -> Result<Option<IndexEntry>> {
     one(
@@ -274,13 +285,10 @@ impl Committer<'_, '_> {
         let (prefix, ext) = conflict_prefix(path);
         let mut copies: Vec<IndexEntry> = all(
             self.tx,
-            "SELECT * FROM file_entries WHERE root_id = ?1 AND substr(path, 1, ?3) = ?2
+            // `length` and `substr` both count characters.
+            "SELECT * FROM file_entries WHERE root_id = ?1 AND substr(path, 1, length(?2)) = ?2
                AND (hash IS NOT NULL OR link IS NOT NULL) ORDER BY version",
-            params![
-                self.root,
-                prefix,
-                i64::try_from(prefix.len()).unwrap_or(i64::MAX)
-            ],
+            params![self.root, prefix],
             entry_row,
         )?
         .into_iter()
@@ -320,7 +328,8 @@ impl Committer<'_, '_> {
                     Some(EntryContent::Blob { hash: hash.clone() }),
                     *size,
                     *mode_x,
-                    *mtime,
+                    // A writer's clock is its own: keep mtimes plausible.
+                    (*mtime).clamp(0, self.input.now.saturating_add(24 * 3600 * 1000)),
                 ))
             }
             ChangeOp::Link { target } => {
@@ -421,7 +430,7 @@ impl Store {
         self.read(|c| {
             one(
                 c,
-                &format!("{ROOTS_SQL} WHERE r.root_id = ?1"),
+                &format!("{ROOTS_SQL} AND r.root_id = ?1"),
                 params![root_id],
                 root_info_row,
             )
@@ -469,13 +478,13 @@ impl Store {
         root_id: &str,
         after: i64,
         limit: usize,
-    ) -> Result<Option<(Vec<IndexEntry>, i64)>> {
+    ) -> Result<Option<IndexSlice>> {
         self.read(|c| {
-            let Some(head) = one(
+            let Some((head, incarnation)) = one(
                 c,
-                "SELECT head FROM file_roots WHERE root_id = ?1",
+                "SELECT head, incarnation FROM file_roots WHERE root_id = ?1 AND deleted_at IS NULL",
                 params![root_id],
-                |r| r.get::<_, i64>(0),
+                |r| Ok((r.get::<_, i64>(0)?, r.get::<_, String>(1)?)),
             )?
             else {
                 return Ok(None);
@@ -486,7 +495,11 @@ impl Store {
                 params![root_id, after, i64::try_from(limit).unwrap_or(i64::MAX)],
                 entry_row,
             )?;
-            Ok(Some((entries, head)))
+            Ok(Some(IndexSlice {
+                entries,
+                head,
+                incarnation,
+            }))
         })
     }
 
@@ -501,13 +514,24 @@ impl Store {
             return Ok(Err(CommitRefused::BadRoot("invalid root id".into())));
         }
         self.write(|tx| {
-            let root: Option<(String, String, String, i64)> = one(
+            let row: Option<(String, String, String, i64, String, Option<i64>)> = one(
                 tx,
-                "SELECT machine_id, path, project_id, head FROM file_roots WHERE root_id = ?1",
+                "SELECT machine_id, path, project_id, head, incarnation, deleted_at FROM file_roots
+                 WHERE root_id = ?1",
                 params![input.root_id],
-                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?, r.get(5)?)),
             )?;
-            let (origin_machine, origin_path, stored_project, head) = match (root, input.claim_path) {
+            // A deleted hub copy's sequence continues if its origin makes it
+            // again (under a new incarnation); nobody else can write to it.
+            let (root, deleted_head) = match row {
+                Some((m, p, pr, h, inc, None)) => (Some((m, p, pr, h, inc)), None),
+                Some((_, _, _, h, _, Some(_))) => (None, Some(h)),
+                None => (None, None),
+            };
+            let (origin_machine, origin_path, stored_project, head, incarnation) = match (
+                root,
+                input.claim_path,
+            ) {
                 (Some(r), None) => r,
                 (Some(r), Some(p)) => {
                     if r.0 != input.machine_id || r.1 != p {
@@ -538,12 +562,19 @@ impl Store {
                     let Some(project) = project else {
                         return Ok(Err(CommitRefused::Pending));
                     };
+                    let incarnation = crate::new_id();
+                    let head = deleted_head.unwrap_or(0);
                     tx.execute(
-                        "INSERT INTO file_roots(root_id, machine_id, path, project_id, head, created_at, updated_at)
-                         VALUES (?1, ?2, ?3, ?4, 0, ?5, ?5)",
-                        params![input.root_id, input.machine_id, p, project, input.now],
+                        "INSERT INTO file_roots(root_id, machine_id, path, project_id, head, created_at,
+                           updated_at, incarnation, deleted_at)
+                         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?6, ?7, NULL)
+                         ON CONFLICT(root_id) DO UPDATE SET machine_id = excluded.machine_id,
+                           path = excluded.path, project_id = excluded.project_id,
+                           created_at = excluded.created_at, updated_at = excluded.updated_at,
+                           incarnation = excluded.incarnation, deleted_at = NULL, manifest_json = NULL",
+                        params![input.root_id, input.machine_id, p, project, head, input.now, incarnation],
                     )?;
-                    (input.machine_id.to_string(), p.to_string(), project, 0)
+                    (input.machine_id.to_string(), p.to_string(), project, head, incarnation)
                 }
             };
             // The folder may have moved to another project (merge); a
@@ -601,7 +632,11 @@ impl Store {
                    manifest_json = coalesce(?5, manifest_json) WHERE root_id = ?1",
                 params![input.root_id, head, project, input.now, manifest],
             )?;
-            Ok(Ok(CommitOutcome { results, head }))
+            Ok(Ok(CommitOutcome {
+                results,
+                head,
+                incarnation,
+            }))
         })
     }
 
@@ -628,9 +663,12 @@ impl Store {
                 "DELETE FROM file_history WHERE root_id = ?1",
                 params![root_id],
             )?;
+            // The row stays (with its head): a root made again continues the
+            // sequence, so no old version number is ever reused.
             Ok(tx.execute(
-                "DELETE FROM file_roots WHERE root_id = ?1",
-                params![root_id],
+                "UPDATE file_roots SET deleted_at = ?2, manifest_json = NULL
+                 WHERE root_id = ?1 AND deleted_at IS NULL",
+                params![root_id, crate::now_ms()],
             )? > 0)
         })
     }
@@ -667,14 +705,22 @@ impl Store {
         })
     }
 
-    pub fn hub_blob_added(&self, hash: &str, size: i64, stored: i64, now: i64) -> Result<()> {
+    /// Record a stored blob; true when it is new (its bytes count now).
+    pub fn hub_blob_added(&self, hash: &str, size: i64, stored: i64, now: i64) -> Result<bool> {
         self.write(|tx| {
+            let known = one(
+                tx,
+                "SELECT 1 FROM file_blobs WHERE hash = ?1",
+                params![hash],
+                |r| r.get::<_, i64>(0),
+            )?
+            .is_some();
             tx.execute(
                 "INSERT INTO file_blobs(hash, size, stored, created_at) VALUES (?1,?2,?3,?4)
                  ON CONFLICT(hash) DO UPDATE SET created_at = excluded.created_at",
                 params![hash, size, stored, now],
             )?;
-            Ok(())
+            Ok(!known)
         })
     }
 
@@ -739,21 +785,37 @@ impl Store {
     /// older than `before`, in one write transaction (so a commit that
     /// starts using one meanwhile keeps it). Returns the dropped ones;
     /// their files may go.
-    pub fn hub_forget_blobs(&self, hashes: &[String], before: i64) -> Result<Vec<String>> {
+    pub fn hub_forget_blobs(&self, hashes: &[String], before: i64) -> Result<Vec<(String, i64)>> {
         self.write(|tx| {
             let mut out = Vec::new();
             for h in hashes {
-                let n = tx.execute(
+                let gone: Option<i64> = one(
+                    tx,
                     "DELETE FROM file_blobs WHERE hash = ?1 AND created_at < ?2
                        AND NOT EXISTS (SELECT 1 FROM file_entries e WHERE e.hash = ?1)
-                       AND NOT EXISTS (SELECT 1 FROM file_history h WHERE h.hash = ?1)",
+                       AND NOT EXISTS (SELECT 1 FROM file_history h WHERE h.hash = ?1)
+                     RETURNING stored",
                     params![h, before],
+                    |r| r.get(0),
                 )?;
-                if n > 0 {
-                    out.push(h.clone());
+                if let Some(stored) = gone {
+                    out.push((h.clone(), stored));
                 }
             }
             Ok(out)
+        })
+    }
+
+    /// Bytes on disk of blobs no current entry uses (history only, or
+    /// nothing): what dropping all history could free at most.
+    pub fn hub_blob_reclaimable(&self) -> Result<i64> {
+        self.read(|c| {
+            Ok(c.query_row(
+                "SELECT coalesce(sum(stored), 0) FROM file_blobs b
+                 WHERE NOT EXISTS (SELECT 1 FROM file_entries e WHERE e.hash = b.hash)",
+                [],
+                |r| r.get(0),
+            )?)
         })
     }
 
@@ -875,6 +937,32 @@ mod tests {
     }
 
     #[test]
+    fn a_deleted_root_is_made_again_under_a_new_incarnation() {
+        let h = hub();
+        let first = h.commit("origin", true, &[put("x", 0, "a")]).unwrap();
+        h.commit("copy", false, &[put("y", 0, "b")]).unwrap();
+        assert!(h.store.hub_delete_file_root(&h.root).unwrap());
+        // Gone for everyone but its origin: copies cannot bring it back.
+        assert_eq!(
+            h.commit("copy", false, &[put("z", 0, "c")]).unwrap_err(),
+            CommitRefused::UnknownRoot
+        );
+        assert!(h.store.hub_file_root(&h.root).unwrap().is_none());
+        assert!(h.store.hub_file_index(&h.root, 0, 10).unwrap().is_none());
+        // The origin makes it again: new incarnation, the sequence goes on
+        // (a copy's `seen` never points past a restarted head).
+        let again = h.commit("origin", true, &[put("x", 0, "a")]).unwrap();
+        assert_ne!(again.incarnation, first.incarnation);
+        assert_eq!(again.results, [ChangeResult::Ok { version: 3 }]);
+        let slice = h.store.hub_file_index(&h.root, 0, 10).unwrap().unwrap();
+        assert_eq!(slice.head, 3);
+        assert_eq!(slice.incarnation, again.incarnation);
+        // Only the new incarnation's files are in the index.
+        let paths: Vec<&str> = slice.entries.iter().map(|e| e.path.as_str()).collect();
+        assert_eq!(paths, ["x"]);
+    }
+
+    #[test]
     fn compare_and_set_with_conflict_copies() {
         let h = hub();
         h.commit("origin", true, &[put("s/f.txt", 0, "a")]).unwrap();
@@ -934,7 +1022,8 @@ mod tests {
             h.commit("m1", false, &[del("f", 2)]).unwrap().results,
             [ChangeResult::Ok { version: 3 }]
         );
-        let (entries, head) = h.store.hub_file_index(&h.root, 2, 10).unwrap().unwrap();
+        let IndexSlice { entries, head, .. } =
+            h.store.hub_file_index(&h.root, 2, 10).unwrap().unwrap();
         assert_eq!((entries[0].content.clone(), head), (None, 3));
         // ... which any write overrides, whatever its base.
         assert_eq!(
@@ -1080,7 +1169,12 @@ mod tests {
             matches!(&out.results[0], ChangeResult::Rejected { code, .. } if code == "forget_origin_only")
         );
         h.commit("origin", false, &[forget]).unwrap();
-        let (entries, _) = h.store.hub_file_index(&h.root, 0, 10).unwrap().unwrap();
+        let entries = h
+            .store
+            .hub_file_index(&h.root, 0, 10)
+            .unwrap()
+            .unwrap()
+            .entries;
         assert_eq!(
             entries.iter().map(|e| e.path.as_str()).collect::<Vec<_>>(),
             ["g"]

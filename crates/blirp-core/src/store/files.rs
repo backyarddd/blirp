@@ -8,6 +8,7 @@ use crate::files::EntryContent;
 use crate::files::scan::Cached;
 use rusqlite::{Row, params};
 use std::collections::{HashMap, HashSet};
+use std::path::Path;
 
 // ---------------------------------------------------------------- local
 
@@ -22,8 +23,31 @@ pub struct FileCopy {
     /// Root version up to which the hub's entries were compared.
     pub seen: i64,
     pub created_at: i64,
-    /// Its hub copy was deleted: it no longer syncs (files kept).
-    pub detached: bool,
+    pub mode: CopyMode,
+    /// The hub root's incarnation it belongs to ("" until known).
+    pub incarnation: String,
+}
+
+/// What a working copy does.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CopyMode {
+    /// Uploads its edits live, takes the hub's changes on demand.
+    OnDemand,
+    /// Being downloaded: never uploads until the hub's files are written.
+    Pending,
+    /// Its hub copy is gone: it no longer syncs (files kept) and never
+    /// becomes an origin of its own.
+    Detached,
+}
+
+impl CopyMode {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::OnDemand => "on_demand",
+            Self::Pending => "pending",
+            Self::Detached => "detached",
+        }
+    }
 }
 
 /// What a copy last agreed on with the hub for one path.
@@ -52,7 +76,12 @@ fn copy_row(r: &Row<'_>) -> rusqlite::Result<FileCopy> {
         origin: r.get("origin")?,
         seen: r.get("seen")?,
         created_at: r.get("created_at")?,
-        detached: r.get::<_, String>("mode")? == "detached",
+        mode: match r.get::<_, String>("mode")?.as_str() {
+            "pending" => CopyMode::Pending,
+            "detached" => CopyMode::Detached,
+            _ => CopyMode::OnDemand,
+        },
+        incarnation: r.get("incarnation")?,
     })
 }
 
@@ -92,36 +121,99 @@ impl Store {
     /// A folder that becomes a copy of another root (or changes between
     /// origin and copy) starts over: its bases and hash cache are dropped.
     pub fn put_file_copy(&self, copy: &FileCopy) -> Result<()> {
+        self.write(|tx| put_file_copy_in(tx, copy))
+    }
+
+    /// A download registers its folder: the copy (pending until the hub's
+    /// files are written) and, for a folder rather than a workspace, this
+    /// machine's folder of the project, in one transaction, so a copy never
+    /// shows up without its row (it would count as an origin).
+    pub fn register_download(&self, copy: &FileCopy, project: Option<(&str, &str)>) -> Result<()> {
+        match project {
+            None => self.put_file_copy(copy),
+            Some((project_id, machine_id)) => self
+                .add_project_folder_then(project_id, machine_id, Path::new(&copy.path), |tx| {
+                    put_file_copy_in(tx, copy)
+                })
+                .map(|_| ()),
+        }
+    }
+
+    /// The hub's files are written: the copy starts syncing.
+    pub fn finish_file_copy(&self, path: &str) -> Result<()> {
         self.write(|tx| {
-            let old: Option<(String, bool)> = one(
-                tx,
-                "SELECT root_id, origin FROM file_copies WHERE path = ?1",
-                params![copy.path],
-                |r| Ok((r.get(0)?, r.get(1)?)),
-            )?;
-            if old.as_ref().is_some_and(|(r, o)| *r == copy.root_id && *o == copy.origin) {
-                return Ok(());
-            }
-            tx.execute("DELETE FROM file_base WHERE copy = ?1", params![copy.path])?;
-            tx.execute("DELETE FROM file_hashes WHERE copy = ?1", params![copy.path])?;
             tx.execute(
-                "INSERT INTO file_copies(path, root_id, origin, mode, seen, created_at)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6)
-                 ON CONFLICT(path) DO UPDATE SET root_id = excluded.root_id, origin = excluded.origin,
-                   mode = excluded.mode, seen = excluded.seen",
-                params![
-                    copy.path,
-                    copy.root_id,
-                    copy.origin,
-                    if copy.detached { "detached" } else { "on_demand" },
-                    copy.seen,
-                    copy.created_at
-                ],
+                "UPDATE file_copies SET mode = 'on_demand' WHERE path = ?1 AND mode = 'pending'",
+                params![path],
             )?;
             Ok(())
         })
     }
 
+    /// Record the hub root's incarnation; `fresh` drops the copy's bases
+    /// (they belong to another incarnation: everything uploads again).
+    pub fn set_file_copy_incarnation(
+        &self,
+        path: &str,
+        incarnation: &str,
+        fresh: bool,
+    ) -> Result<()> {
+        self.write(|tx| {
+            tx.execute(
+                "UPDATE file_copies SET incarnation = ?2, seen = CASE WHEN ?3 THEN 0 ELSE seen END
+                 WHERE path = ?1",
+                params![path, incarnation, fresh],
+            )?;
+            if fresh {
+                tx.execute("DELETE FROM file_base WHERE copy = ?1", params![path])?;
+            }
+            Ok(())
+        })
+    }
+}
+
+fn put_file_copy_in(tx: &rusqlite::Transaction<'_>, copy: &FileCopy) -> Result<()> {
+    let old: Option<(String, bool)> = one(
+        tx,
+        "SELECT root_id, origin FROM file_copies WHERE path = ?1",
+        params![copy.path],
+        |r| Ok((r.get(0)?, r.get(1)?)),
+    )?;
+    if old
+        .as_ref()
+        .is_some_and(|(r, o)| *r == copy.root_id && *o == copy.origin)
+    {
+        tx.execute(
+            "UPDATE file_copies SET mode = ?2,
+               incarnation = CASE WHEN ?3 = '' THEN incarnation ELSE ?3 END WHERE path = ?1",
+            params![copy.path, copy.mode.as_str(), copy.incarnation],
+        )?;
+        return Ok(());
+    }
+    tx.execute("DELETE FROM file_base WHERE copy = ?1", params![copy.path])?;
+    tx.execute(
+        "DELETE FROM file_hashes WHERE copy = ?1",
+        params![copy.path],
+    )?;
+    tx.execute(
+        "INSERT INTO file_copies(path, root_id, origin, mode, seen, created_at, incarnation)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
+         ON CONFLICT(path) DO UPDATE SET root_id = excluded.root_id, origin = excluded.origin,
+           mode = excluded.mode, seen = excluded.seen, incarnation = excluded.incarnation",
+        params![
+            copy.path,
+            copy.root_id,
+            copy.origin,
+            copy.mode.as_str(),
+            copy.seen,
+            copy.created_at,
+            copy.incarnation
+        ],
+    )?;
+    Ok(())
+}
+
+impl Store {
     /// Its hub copy is gone: the folder stops syncing, keeps its files and
     /// never turns into an origin of its own.
     pub fn detach_file_copy(&self, path: &str) -> Result<()> {
@@ -298,7 +390,8 @@ mod tests {
             origin: true,
             seen: 0,
             created_at: 1,
-            detached: false,
+            mode: CopyMode::OnDemand,
+            incarnation: String::new(),
         };
         s.put_file_copy(&copy).unwrap();
         s.set_file_copy_seen("/p", 7).unwrap();
@@ -352,7 +445,7 @@ mod tests {
         assert!(s.file_bases("/p").unwrap().is_empty());
         assert!(s.file_hash_cache("/p").unwrap().is_empty());
         s.detach_file_copy("/p").unwrap();
-        assert!(s.file_copy("/p").unwrap().unwrap().detached);
+        assert_eq!(s.file_copy("/p").unwrap().unwrap().mode, CopyMode::Detached);
         s.remove_file_copy("/p").unwrap();
         assert!(s.file_copies().unwrap().is_empty());
         assert!(s.file_bases("/p").unwrap().is_empty());

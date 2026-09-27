@@ -10,6 +10,7 @@ use super::proto::{
 };
 use crate::wire::{MAX_CONTROL_FRAME, MAX_FRAME, WireError, read_frame, write_frame};
 use crate::{Result, SyncError, blocking};
+use blirp_core::store::IndexSlice;
 use iroh::endpoint::{Connection, RecvStream, SendStream};
 use std::io::Read;
 use std::sync::Arc;
@@ -139,7 +140,12 @@ async fn stream(
             write_frame(&mut send, &welcome).await?;
             control(send, recv, hub, machine_id, machine_name).await
         }
-        Open::PutBlob { hash, len } => put_blob(send, recv, hub, hash, len).await,
+        Open::PutBlob { hash, len } => {
+            // Whatever happens, the upload's reservation ends with its stream.
+            let r = put_blob(send, recv, hub.clone(), hash.clone(), len).await;
+            hub.release(&hash);
+            r
+        }
         Open::GetBlob { hash, offset } => get_blob(send, hub, hash, offset).await,
     }
 }
@@ -168,7 +174,11 @@ async fn control(
             },
             Req::Index { root_id, after } => {
                 match run(move || h.index(&root_id, after, INDEX_PAGE)).await? {
-                    Ok((mut entries, head)) => {
+                    Ok(IndexSlice {
+                        mut entries,
+                        head,
+                        incarnation,
+                    }) => {
                         let full = entries.len() == INDEX_PAGE;
                         // Keep the frame well under the cap even with long paths.
                         let mut bytes = 0usize;
@@ -189,6 +199,7 @@ async fn control(
                             entries,
                             head,
                             more: full || trimmed,
+                            incarnation,
                         }
                     }
                     Err(e) => err(&e),
@@ -233,6 +244,7 @@ async fn control(
                     Ok(Ok(out)) => Reply::CommitResult {
                         results: out.results,
                         head: out.head,
+                        incarnation: out.incarnation,
                     },
                     Ok(Err(refused)) => Reply::Error {
                         code: refused.code().into(),

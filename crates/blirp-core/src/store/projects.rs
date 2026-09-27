@@ -795,6 +795,18 @@ impl Store {
         machine_id: &str,
         dir: &Path,
     ) -> Result<PathBuf> {
+        self.add_project_folder_then(project_id, machine_id, dir, |_| Ok(()))
+    }
+
+    /// [`Self::add_project_folder`], running `then` in the same transaction
+    /// once the folder is registered (or found registered to the project).
+    pub(crate) fn add_project_folder_then(
+        &self,
+        project_id: &str,
+        machine_id: &str,
+        dir: &Path,
+        then: impl FnOnce(&Transaction<'_>) -> Result<()>,
+    ) -> Result<PathBuf> {
         let dir = canonical_dir(dir)?;
         let repo = git::repo_info(&dir).ok().flatten();
         let (root, remote) = match repo {
@@ -815,6 +827,7 @@ impl Store {
             let paths = live_local_paths(tx, machine_id)?;
             if let Some(pp) = longest_prefix(&paths, &root) {
                 if pp.project_id == project_id {
+                    then(tx)?;
                     return Ok(PathBuf::from(&pp.path));
                 }
                 let other = live_project_in(tx, &pp.project_id)?;
@@ -825,6 +838,7 @@ impl Store {
                 )));
             }
             attach_path(tx, project_id, machine_id, &root, remote)?;
+            then(tx)?;
             Ok(root)
         })
     }

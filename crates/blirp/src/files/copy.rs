@@ -78,6 +78,14 @@ pub struct Env {
     pub scan: ScanConfig,
     /// Hashing runs one folder at a time.
     pub gate: Arc<tokio::sync::Semaphore>,
+    /// Serializes passes that write bases (uploads, the write phase of an
+    /// apply): taken inside [`upload`], [`apply`] and [`restore_missing`],
+    /// never by their callers.
+    // ponytail: one lock for all copies; per-copy locks if folders queue.
+    pub work: Arc<tokio::sync::Mutex<()>>,
+    /// Called between an upload's scan and its blob uploads (tests change
+    /// files there); None in the daemon.
+    pub after_scan: Option<Arc<dyn Fn() + Send + Sync>>,
 }
 
 /// One working copy.
@@ -88,6 +96,8 @@ pub struct Copy {
     pub root_id: String,
     /// This machine's own folder: upload-only, it registers the root.
     pub origin: bool,
+    /// The hub root incarnation its bases belong to ("" until known).
+    pub incarnation: String,
 }
 
 impl Copy {
@@ -151,24 +161,27 @@ pub struct UploadReport {
     pub held_deletes: Vec<String>,
 }
 
-/// Mass-delete guard: a pass that would delete more than this many of a
-/// root's synced files ...
-pub const MASS_DELETE_MIN: usize = 50;
-/// ... and more than this share of them (percent) commits nothing.
+/// Mass-delete guard: a pass deleting at least this many files ...
+pub const MASS_DELETE_MIN: usize = 10;
+/// ... and more than this share (percent) of the root's synced files, or
+/// every synced file of a folder that had more than one, commits nothing.
 pub const MASS_DELETE_PERCENT: usize = 30;
 
 /// Whether deleting `deletes` of `synced` files needs a confirmation.
 pub fn mass_delete(deletes: usize, synced: usize) -> bool {
-    deletes > MASS_DELETE_MIN.max(synced.saturating_mul(MASS_DELETE_PERCENT) / 100)
+    (synced > 1 && deletes >= synced)
+        || (deletes >= MASS_DELETE_MIN
+            && deletes.saturating_mul(100) > synced.saturating_mul(MASS_DELETE_PERCENT))
 }
 
 /// How an upload treats many deletions at once.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Deletes {
     /// Hold them (the default).
     Guard,
-    /// The user confirmed: delete on the hub too.
-    Confirm,
+    /// The user confirmed deleting these paths (what the folder showed);
+    /// other deletes wait for the next pass.
+    Confirm(HashSet<String>),
 }
 
 /// A change to send, with where its content is.
@@ -193,12 +206,39 @@ fn under_unreadable(path: &str, dirs: &[String]) -> bool {
     })
 }
 
-/// An upload plan: changes to send, and bases to drop without telling the
-/// hub (a copy's own exclusions).
+/// An upload plan: changes to send, paths this copy leaves out without
+/// telling the hub (its own exclusions), and paths held after a refused
+/// change.
 #[derive(Debug, Default)]
 struct UploadPlan {
     changes: Vec<Planned>,
-    drop_bases: Vec<String>,
+    left_out: Vec<String>,
+    held: Vec<String>,
+}
+
+/// Whether `path` exists under exactly this name. On case-insensitive
+/// filesystems a file renamed only in case still answers to its old name;
+/// that old name is gone (a delete), not excluded.
+fn exists_exact(root: &Path, path: &str) -> std::io::Result<bool> {
+    let full = wpath::to_local(root, path);
+    match std::fs::symlink_metadata(&full) {
+        Ok(_) => {}
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+        Err(e) => return Err(e),
+    }
+    if !case_insensitive_fs() {
+        return Ok(true);
+    }
+    let name = path.rsplit('/').next().unwrap_or(path);
+    let Some(parent) = full.parent() else {
+        return Ok(true);
+    };
+    for e in std::fs::read_dir(parent)? {
+        if e?.file_name().to_str() == Some(name) {
+            return Ok(true);
+        }
+    }
+    Ok(false)
 }
 
 /// Changes of `files` (what the scan found) against `bases`. Paths that
@@ -227,10 +267,17 @@ fn plan_upload(
             base.is_some_and(|b| b.mode_x)
         };
         if let Some(b) = base {
-            if b.skipped || (b.content.as_ref() == Some(&content) && b.mode_x == mode_x) {
+            // A skipped path found under its exact name (no longer left out
+            // here, or made by hand) uploads like any change: compared and
+            // set against the version this copy skipped.
+            if b.content.as_ref() == Some(&content) && b.mode_x == mode_x {
                 continue;
             }
-            if b.rejected.as_deref() == Some(content_hash(&content)) {
+            // The hub refused this path's last change: it waits for "Bring
+            // changes here" (or Update from hub) instead of making a new
+            // conflict copy with every save.
+            if b.rejected.is_some() {
+                out.held.push(f.path.clone());
                 continue;
             }
         }
@@ -261,17 +308,17 @@ fn plan_upload(
         .iter()
         .filter(|(p, b)| !seen.contains(p.as_str()) && !b.skipped && b.content.is_some())
         .filter(|(p, _)| !unreadable.contains(*p) && !under_unreadable(p, unreadable_dirs))
-        .filter(|(_, b)| b.rejected.as_deref() != Some(REJECTED_DELETE))
+        .filter(|(_, b)| b.rejected.is_none())
         .collect();
     gone.sort_by(|a, b| a.0.cmp(b.0));
     for (path, b) in gone {
-        let op = match std::fs::symlink_metadata(wpath::to_local(root, path)) {
-            Ok(_) if origin => ChangeOp::Forget,
-            Ok(_) => {
-                out.drop_bases.push(path.clone());
+        let op = match exists_exact(root, path) {
+            Ok(true) if origin => ChangeOp::Forget,
+            Ok(true) => {
+                out.left_out.push(path.clone());
                 continue;
             }
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => ChangeOp::Delete,
+            Ok(false) => ChangeOp::Delete,
             // Cannot tell (permissions, I/O): never read as a delete.
             Err(_) => continue,
         };
@@ -295,18 +342,18 @@ fn machine_names(store: &Store) -> HashMap<String, String> {
         .unwrap_or_default()
 }
 
-/// Scan, hash and upload `copy`'s changes. `claim` is the origin's folder
-/// (registers the root on the hub).
+/// Scan, hash and upload `copy`'s changes (an origin registers its root).
 pub async fn upload(env: &Env, copy: &Copy) -> Result<UploadReport, CopyError> {
     upload_with(env, copy, Deletes::Guard).await
 }
 
-/// [`upload`], with the mass-delete guard on or confirmed.
+/// [`upload`], with the mass-delete guard on or some deletes confirmed.
 pub async fn upload_with(
     env: &Env,
     copy: &Copy,
     deletes: Deletes,
 ) -> Result<UploadReport, CopyError> {
+    let _work = env.work.lock().await;
     let root = copy.root();
     let ls: LocalScan = {
         let _permit = env
@@ -322,6 +369,12 @@ pub async fn upload_with(
         );
         blocking(move || local::scan_copy(&store, &key, &r, &cfg).map_err(local)).await?
     };
+    // Temp files a crash left behind; nothing else would remove them.
+    for t in &ls.scan.stale_temp {
+        if let Err(e) = std::fs::remove_file(t) {
+            tracing::debug!(error = %e, "removing a stale temp file failed");
+        }
+    }
     let mut report = UploadReport {
         state: Some(ls.scan.state),
         files: ls.hashed.files.len(),
@@ -339,6 +392,9 @@ pub async fn upload_with(
     if ls.scan.state != ScanState::Ok {
         return Ok(report);
     }
+    if let Some(hook) = &env.after_scan {
+        hook();
+    }
     let (store, key) = (env.store.clone(), copy.key.clone());
     let bases = blocking(move || store.file_bases(&key).map_err(local)).await?;
     let unreadable: HashSet<String> = ls.hashed.unreadable.iter().cloned().collect();
@@ -347,18 +403,31 @@ pub async fn upload_with(
     let b2 = bases.clone();
     let planned =
         blocking(move || Ok(plan_upload(&r, &files, &b2, &unreadable, &dirs, origin))).await?;
-    if !planned.drop_bases.is_empty() {
-        let drops: Vec<(String, Option<Base>)> =
-            planned.drop_bases.into_iter().map(|p| (p, None)).collect();
+    report.pending += planned.held.len();
+    if !planned.left_out.is_empty() {
+        // Marked skipped, not dropped: without a base the next apply would
+        // see the hub's file as new here and make a conflict copy of it
+        // with every pass.
+        let marks: Vec<(String, Option<Base>)> = planned
+            .left_out
+            .into_iter()
+            .filter_map(|p| {
+                let b = bases.get(&p)?.clone();
+                Some((p, Some(Base { skipped: true, ..b })))
+            })
+            .collect();
         let (store, key) = (env.store.clone(), copy.key.clone());
-        blocking(move || store.update_file_bases(&key, &drops).map_err(local)).await?;
+        blocking(move || store.update_file_bases(&key, &marks).map_err(local)).await?;
     }
     let mut plan = planned.changes;
     if plan.is_empty() {
         return Ok(report);
     }
     // An emptied or swapped folder, not an edit: commit nothing until the
-    // user says what happened.
+    // user says what happened. A confirmation covers what it listed only.
+    if let Deletes::Confirm(ok) = &deletes {
+        plan.retain(|p| p.change.op != ChangeOp::Delete || ok.contains(&p.change.path));
+    }
     let doomed: Vec<String> = plan
         .iter()
         .filter(|p| p.change.op == ChangeOp::Delete)
@@ -378,49 +447,6 @@ pub async fn upload_with(
         return Ok(report);
     }
 
-    // Blobs first: a commit only names content the hub has.
-    let mut sources: HashMap<String, (PathBuf, u64)> = HashMap::new();
-    for p in &plan {
-        if let (ChangeOp::Put { hash, .. }, Some(l)) = (&p.change.op, &p.local) {
-            sources
-                .entry(hash.clone())
-                .or_insert_with(|| (wpath::to_local(&root, &l.path), l.size));
-        }
-    }
-    let hashes: Vec<String> = sources.keys().cloned().collect();
-    let missing = env.hub.missing(&hashes).await?;
-    let results: Vec<(String, Result<(), SyncError>)> = futures_util::stream::iter(missing)
-        .map(|m| {
-            let hub = env.hub.clone();
-            let src = sources.get(&m.hash).cloned();
-            async move {
-                let r = match src {
-                    Some((path, len)) => hub.upload(&m.hash, &path, len).await,
-                    None => Ok(()),
-                };
-                (m.hash, r)
-            }
-        })
-        .buffer_unordered(blirp_sync::files::proto::STREAMS)
-        .collect()
-        .await;
-    let mut failed: HashSet<String> = HashSet::new();
-    for (hash, r) in results {
-        match r {
-            Ok(()) => {}
-            Err(SyncError::Remote { code, .. })
-                if code == "file_changed" || code == "hash_mismatch" =>
-            {
-                // Changed since it was hashed: the next pass sends it.
-                failed.insert(hash);
-            }
-            Err(e) => return Err(e.into()),
-        }
-    }
-    let before = plan.len();
-    plan.retain(|p| !matches!(&p.change.op, ChangeOp::Put { hash, .. } if failed.contains(hash)));
-    report.pending = before - plan.len();
-
     let manifest = if copy.origin && ls.git {
         let r = root.clone();
         Some(blocking(move || Ok(local::git_manifest(&r))).await?)
@@ -428,7 +454,20 @@ pub async fn upload_with(
         None
     };
     let claim = copy.origin.then(|| copy.key.clone());
+    // Batch by batch: its blobs, then its commit, so no blob waits long
+    // between upload and the commit that uses it.
     for (i, batch) in plan.chunks(MAX_CHANGES).enumerate() {
+        let failed = upload_blobs(env, &root, batch).await?;
+        let batch: Vec<&Planned> = batch
+            .iter()
+            .filter(
+                |p| !matches!(&p.change.op, ChangeOp::Put { hash, .. } if failed.contains(hash)),
+            )
+            .collect();
+        report.pending += failed.len();
+        if batch.is_empty() {
+            continue;
+        }
         let changes: Vec<FileChange> = batch.iter().map(|p| p.change.clone()).collect();
         let out = env
             .hub
@@ -440,8 +479,32 @@ pub async fn upload_with(
             )
             .await?;
         report.head = Some(out.head);
+        if !copy.incarnation.is_empty() && out.incarnation != copy.incarnation {
+            // The hub copy was made again under us: every base here belongs
+            // to the old one. Start over (all files upload again).
+            let (store, key, inc) = (env.store.clone(), copy.key.clone(), out.incarnation.clone());
+            blocking(move || {
+                store
+                    .set_file_copy_incarnation(&key, &inc, true)
+                    .map_err(local)
+            })
+            .await?;
+            return Err(CopyError::Hub {
+                code: "root_replaced".into(),
+                message: "the hub copy was made again; uploading everything".into(),
+            });
+        }
+        if copy.incarnation.is_empty() {
+            let (store, key, inc) = (env.store.clone(), copy.key.clone(), out.incarnation.clone());
+            blocking(move || {
+                store
+                    .set_file_copy_incarnation(&key, &inc, false)
+                    .map_err(local)
+            })
+            .await?;
+        }
         let mut updates: Vec<(String, Option<Base>)> = Vec::new();
-        for (p, result) in batch.iter().zip(out.results) {
+        for (p, result) in batch.into_iter().zip(out.results) {
             match result {
                 ChangeResult::Ok { version } => {
                     report.sent += 1;
@@ -481,6 +544,57 @@ pub async fn upload_with(
         blocking(move || store.update_file_bases(&key, &updates).map_err(local)).await?;
     }
     Ok(report)
+}
+
+/// Upload the blobs of `batch` the hub lacks (a few at once). Returns the
+/// hashes whose file changed since it was hashed: those changes wait for
+/// the next pass.
+async fn upload_blobs(
+    env: &Env,
+    root: &Path,
+    batch: &[Planned],
+) -> Result<HashSet<String>, CopyError> {
+    let mut sources: HashMap<String, (PathBuf, u64)> = HashMap::new();
+    for p in batch {
+        if let (ChangeOp::Put { hash, .. }, Some(l)) = (&p.change.op, &p.local) {
+            sources
+                .entry(hash.clone())
+                .or_insert_with(|| (wpath::to_local(root, &l.path), l.size));
+        }
+    }
+    if sources.is_empty() {
+        return Ok(HashSet::new());
+    }
+    let hashes: Vec<String> = sources.keys().cloned().collect();
+    let missing = env.hub.missing(&hashes).await?;
+    let results: Vec<(String, Result<(), SyncError>)> = futures_util::stream::iter(missing)
+        .map(|m| {
+            let hub = env.hub.clone();
+            let src = sources.get(&m.hash).cloned();
+            async move {
+                let r = match src {
+                    Some((path, len)) => hub.upload(&m.hash, &path, len).await,
+                    None => Ok(()),
+                };
+                (m.hash, r)
+            }
+        })
+        .buffer_unordered(blirp_sync::files::proto::STREAMS)
+        .collect()
+        .await;
+    let mut failed = HashSet::new();
+    for (hash, r) in results {
+        match r {
+            Ok(()) => {}
+            Err(SyncError::Remote { code, .. })
+                if code == "file_changed" || code == "hash_mismatch" =>
+            {
+                failed.insert(hash);
+            }
+            Err(e) => return Err(e.into()),
+        }
+    }
+    Ok(failed)
 }
 
 /// A change of ours lost a race. The hub kept our content at `saved`
@@ -587,10 +701,27 @@ async fn write_entry_at(
     at: &str,
     expect: &Expect,
 ) -> Result<(), CopyError> {
+    write_entry_from(env, root, e, at, expect, None).await
+}
+
+/// [`write_entry_at`], from a blob downloaded already (`prefetched`, kept
+/// for other paths with the same content) or downloading it now.
+async fn write_entry_from(
+    env: &Env,
+    root: &Path,
+    e: &IndexEntry,
+    at: &str,
+    expect: &Expect,
+    prefetched: Option<&Path>,
+) -> Result<(), CopyError> {
     let data = env.data_dir.clone();
     match &e.content {
         Some(EntryContent::Blob { hash }) => {
-            let part = env.hub.download(hash).await?;
+            let owned = prefetched.is_none();
+            let part = match prefetched {
+                Some(p) => p.to_path_buf(),
+                None => env.hub.download(hash).await?,
+            };
             let (r, at, expect, hash, mode_x, mtime, p) = (
                 root.to_path_buf(),
                 at.to_string(),
@@ -613,7 +744,9 @@ async fn write_entry_at(
                     })
             })
             .await;
-            let _ = tokio::fs::remove_file(&part).await;
+            if owned {
+                let _ = tokio::fs::remove_file(&part).await;
+            }
             res
         }
         Some(EntryContent::Link { target }) => {
@@ -689,16 +822,50 @@ fn local_state(root: &Path, path: &str) -> Local {
     Local::Other
 }
 
+/// Whether something exists at `path` under a name that differs from it
+/// only in case (a case-insensitive lookup finds another file). Only asked
+/// on case-insensitive systems.
+fn other_case_on_disk(root: &Path, path: &str) -> bool {
+    if std::fs::symlink_metadata(wpath::to_local(root, path)).is_err() {
+        return false;
+    }
+    let mut dir = root.to_path_buf();
+    for part in path.split('/') {
+        let Ok(rd) = std::fs::read_dir(&dir) else {
+            return false;
+        };
+        let names: Vec<String> = rd
+            .filter_map(|d| d.ok())
+            .map(|d| d.file_name().to_string_lossy().into_owned())
+            .collect();
+        if !names.iter().any(|n| n == part) {
+            let key = case_key(part);
+            return names.iter().any(|n| case_key(n) == key);
+        }
+        dir.push(part);
+    }
+    false
+}
+
 /// Decide one path. `fresh`: a copy being created, where the hub wins over
-/// whatever the clone checked out.
-fn decide(e: &IndexEntry, base: Option<&Base>, now: &Local, fresh: bool) -> Option<Act> {
+/// whatever the clone checked out. `live` holds the content hashes the hub
+/// has now: content the hub once refused may only be replaced while it is
+/// still there (in its conflict copy).
+fn decide(
+    e: &IndexEntry,
+    base: Option<&Base>,
+    now: &Local,
+    fresh: bool,
+    live: &HashSet<&str>,
+) -> Option<Act> {
     if base.is_some_and(|b| b.version >= e.version) {
         return None;
     }
     let matches_base = |c: &EntryContent| base.is_some_and(|b| b.content.as_ref() == Some(c));
-    // Content the hub refused and kept in a conflict copy may be replaced.
-    let preserved =
-        |c: &EntryContent| base.is_some_and(|b| b.rejected.as_deref() == Some(content_hash(c)));
+    let preserved = |c: &EntryContent| {
+        base.is_some_and(|b| b.rejected.as_deref() == Some(content_hash(c)))
+            && live.contains(content_hash(c))
+    };
     match &e.content {
         None => match now {
             Local::Missing | Local::Other => base.map(|_| Act::DropBase),
@@ -735,70 +902,139 @@ pub struct Incoming {
     pub act: Act,
 }
 
+/// Decisions for every path of `index` against `bases` and the disk.
+fn plan_incoming(
+    root: &Path,
+    entries: &[IndexEntry],
+    bases: &HashMap<String, Base>,
+    fresh: bool,
+) -> Vec<Incoming> {
+    let live: HashSet<&str> = entries
+        .iter()
+        .filter_map(|e| e.content.as_ref().map(content_hash))
+        .collect();
+    // Case-only collisions on case-insensitive systems: the name this copy
+    // holds (a synced base, or the file on disk) keeps it; of new ones, the
+    // first is written. The others are skipped here and stay on the hub.
+    let ci = case_insensitive_fs();
+    let mut taken: HashMap<String, &str> = HashMap::new();
+    if ci {
+        for e in entries {
+            let held = bases
+                .get(&e.path)
+                .is_some_and(|b| !b.skipped && b.content.is_some());
+            if e.content.is_some() && held {
+                taken.entry(case_key(&e.path)).or_insert(e.path.as_str());
+            }
+        }
+    }
+    let mut out = Vec::new();
+    let mut on_hub: HashSet<&str> = HashSet::new();
+    for e in entries {
+        on_hub.insert(e.path.as_str());
+        if wpath::check(&e.path).is_err() {
+            continue;
+        }
+        let mut base = bases.get(&e.path);
+        if base.is_some_and(|b| b.skipped) && e.content.is_some() {
+            // Skipped, yet here under this exact name: left out on this
+            // machine (its own exclusions). Never written over, and the
+            // base keeps the version it had: should the file sync again,
+            // its upload is compared against that one, so a newer hub
+            // version makes a conflict copy instead of being replaced.
+            if exists_exact(root, &e.path).unwrap_or(true) {
+                continue;
+            }
+        }
+        // A case collision is looked at again: the name it collided with
+        // may be gone.
+        let skipped = ci && base.is_some_and(|b| b.skipped && b.version >= e.version);
+        if skipped {
+            base = None;
+        } else if base.is_some_and(|b| b.version >= e.version) {
+            continue;
+        }
+        let collides = ci
+            && e.content.is_some()
+            && (taken.get(&case_key(&e.path)).is_some_and(|p| *p != e.path)
+                || other_case_on_disk(root, &e.path));
+        if ci && e.content.is_some() && !collides {
+            taken.insert(case_key(&e.path), e.path.as_str());
+        }
+        let act = if collides {
+            Some(Act::Skip(
+                "another file has the same name in a different case".into(),
+            ))
+        } else {
+            decide(e, base, &local_state(root, &e.path), fresh, &live)
+        };
+        // Still skipped: nothing new to do or report.
+        if skipped && matches!(act, Some(Act::Skip(_))) {
+            continue;
+        }
+        if let Some(act) = act {
+            out.push(Incoming {
+                entry: e.clone(),
+                act,
+            });
+        }
+    }
+    // Bases of paths the hub no longer lists (forgotten, or tombstones past
+    // retention). A file still as it was synced keeps its base, so it is
+    // not uploaded again as new; otherwise only the base goes (a changed
+    // file uploads as the change it is).
+    for (p, b) in bases {
+        if on_hub.contains(p.as_str()) {
+            continue;
+        }
+        let unchanged =
+            matches!(local_state(root, p), Local::Has(c) if b.content.as_ref() == Some(&c));
+        if !unchanged {
+            out.push(Incoming {
+                entry: IndexEntry {
+                    path: p.clone(),
+                    version: 0,
+                    content: None,
+                    size: 0,
+                    mode_x: false,
+                    mtime: 0,
+                    by_machine: String::new(),
+                    at: 0,
+                },
+                act: Act::DropBase,
+            });
+        }
+    }
+    out
+}
+
+/// The hub's index of `copy`'s root, checked against the incarnation its
+/// bases belong to.
+async fn root_index(env: &Env, copy: &Copy) -> Result<blirp_sync::files::RootIndex, CopyError> {
+    let index = env.hub.index(&copy.root_id, 0).await?;
+    if !copy.incarnation.is_empty() && index.incarnation != copy.incarnation {
+        return Err(CopyError::Hub {
+            code: "root_replaced".into(),
+            message: "the hub copy was made again".into(),
+        });
+    }
+    Ok(index)
+}
+
 /// The hub's changes this copy has not taken, and the root's head.
 pub async fn incoming(
     env: &Env,
     copy: &Copy,
     fresh: bool,
 ) -> Result<(Vec<Incoming>, i64), CopyError> {
-    let (entries, head) = env.hub.index(&copy.root_id, 0).await?;
+    let index = root_index(env, copy).await?;
     let (store, key, root) = (env.store.clone(), copy.key.clone(), copy.root());
     blocking(move || {
         let bases = store.file_bases(&key).map_err(local)?;
-        let mut out = Vec::new();
-        // Case-only collisions on case-insensitive systems: the first name
-        // is written, the others as conflict copies.
-        let mut taken: HashSet<String> = HashSet::new();
-        let mut on_hub: HashSet<&str> = HashSet::new();
-        for e in &entries {
-            on_hub.insert(e.path.as_str());
-            if wpath::check(&e.path).is_err() {
-                continue;
-            }
-            let base = bases.get(&e.path);
-            if base.is_some_and(|b| b.version >= e.version) {
-                if e.content.is_some() {
-                    taken.insert(case_key(&e.path));
-                }
-                continue;
-            }
-            let collides =
-                e.content.is_some() && case_insensitive_fs() && !taken.insert(case_key(&e.path));
-            let act = if collides {
-                Some(Act::Skip(
-                    "another file has the same name in a different case".into(),
-                ))
-            } else {
-                let now = local_state(&root, &e.path);
-                decide(e, base, &now, fresh)
-            };
-            if let Some(act) = act {
-                out.push(Incoming {
-                    entry: e.clone(),
-                    act,
-                });
-            }
-        }
-        // Bases of paths the hub no longer lists (forgotten, or tombstones
-        // past retention): only the base goes; local files stay.
-        for p in bases.keys() {
-            if !on_hub.contains(p.as_str()) {
-                out.push(Incoming {
-                    entry: IndexEntry {
-                        path: p.clone(),
-                        version: 0,
-                        content: None,
-                        size: 0,
-                        mode_x: false,
-                        mtime: 0,
-                        by_machine: String::new(),
-                        at: 0,
-                    },
-                    act: Act::DropBase,
-                });
-            }
-        }
-        Ok((out, head))
+        Ok((
+            plan_incoming(&root, &index.entries, &bases, fresh),
+            index.head,
+        ))
     })
     .await
 }
@@ -821,18 +1057,19 @@ pub struct ApplyReport {
 /// hub's version of every file that is missing here but unchanged on the
 /// hub since this copy last synced it. Only while the folder itself exists.
 pub async fn restore_missing(env: &Env, copy: &Copy) -> Result<ApplyReport, CopyError> {
+    let _work = env.work.lock().await;
     let root = copy.root();
     if !std::fs::symlink_metadata(&root).is_ok_and(|m| m.is_dir()) {
         return Err(local("the folder is gone; nothing was restored"));
     }
-    let (entries, head) = env.hub.index(&copy.root_id, 0).await?;
+    let index = root_index(env, copy).await?;
     let (store, key) = (env.store.clone(), copy.key.clone());
     let bases = blocking(move || store.file_bases(&key).map_err(local)).await?;
     let mut report = ApplyReport {
-        head,
+        head: index.head,
         ..Default::default()
     };
-    for e in entries {
+    for e in index.entries {
         let Some(b) = bases.get(&e.path) else {
             continue;
         };
@@ -851,11 +1088,97 @@ pub async fn restore_missing(env: &Env, copy: &Copy) -> Result<ApplyReport, Copy
     Ok(report)
 }
 
+/// Progress of an apply: blobs downloaded so far, of how many.
+pub type Progress<'a> = &'a (dyn Fn(usize, usize) + Send + Sync);
+
+/// Download the blobs `todo` will write, a few at once and each once.
+/// Parts that fail are left out (their paths download again, and report
+/// the error, when written).
+async fn prefetch(
+    env: &Env,
+    todo: &[Incoming],
+    progress: Option<Progress<'_>>,
+) -> HashMap<String, PathBuf> {
+    let mut hashes: Vec<String> = todo
+        .iter()
+        .filter(|i| matches!(i.act, Act::Write(_) | Act::ConflictCopy))
+        .filter_map(|i| match &i.entry.content {
+            Some(EntryContent::Blob { hash }) => Some(hash.clone()),
+            _ => None,
+        })
+        .collect();
+    hashes.sort();
+    hashes.dedup();
+    let total = hashes.len();
+    let done = std::sync::atomic::AtomicUsize::new(0);
+    futures_util::stream::iter(hashes)
+        .map(|h| {
+            let hub = env.hub.clone();
+            let done = &done;
+            async move {
+                let r = hub.download(&h).await;
+                let n = done.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
+                if let Some(p) = progress {
+                    p(n, total);
+                }
+                match r {
+                    Ok(part) => Some((h, part)),
+                    Err(e) => {
+                        tracing::debug!(error = %e, "prefetching a file from the hub failed");
+                        None
+                    }
+                }
+            }
+        })
+        .buffer_unordered(blirp_sync::files::proto::STREAMS)
+        .filter_map(|x| async move { x })
+        .collect()
+        .await
+}
+
 /// Take the hub's changes into `copy`: fast-forward what is unchanged
 /// since its base, keep local changes and write the hub's versions next to
-/// them. `fresh` for a copy being created (the hub wins over the clone).
+/// them. `fresh` for a copy being created (the hub wins over the clone, and
+/// the clone's files the hub does not have are recorded as they are, never
+/// uploaded as edits). Blobs download first, outside the work lock; the
+/// writes then run under it against a fresh look at the folder.
 pub async fn apply(env: &Env, copy: &Copy, fresh: bool) -> Result<ApplyReport, CopyError> {
-    let (mut todo, head) = incoming(env, copy, fresh).await?;
+    apply_with(env, copy, fresh, None).await
+}
+
+/// [`apply`] reporting download progress.
+pub async fn apply_with(
+    env: &Env,
+    copy: &Copy,
+    fresh: bool,
+    progress: Option<Progress<'_>>,
+) -> Result<ApplyReport, CopyError> {
+    let (first, _) = incoming(env, copy, fresh).await?;
+    let parts = prefetch(env, &first, progress).await;
+    let result = apply_locked(env, copy, fresh, &parts).await;
+    for p in parts.values() {
+        let _ = tokio::fs::remove_file(p).await;
+    }
+    result
+}
+
+async fn apply_locked(
+    env: &Env,
+    copy: &Copy,
+    fresh: bool,
+    parts: &HashMap<String, PathBuf>,
+) -> Result<ApplyReport, CopyError> {
+    let _work = env.work.lock().await;
+    let index = root_index(env, copy).await?;
+    let head = index.head;
+    let (store, key, root) = (env.store.clone(), copy.key.clone(), copy.root());
+    let entries = index.entries;
+    let (mut todo, entries) = blocking(move || {
+        let bases = store.file_bases(&key).map_err(local)?;
+        let todo = plan_incoming(&root, &entries, &bases, fresh);
+        Ok((todo, entries))
+    })
+    .await?;
     let names = {
         let store = env.store.clone();
         blocking(move || Ok(machine_names(&store))).await?
@@ -871,6 +1194,15 @@ pub async fn apply(env: &Env, copy: &Copy, fresh: bool) -> Result<ApplyReport, C
     let mut report = ApplyReport {
         head,
         ..Default::default()
+    };
+    let hub_names: HashMap<String, Option<EntryContent>> = entries
+        .iter()
+        .filter(|e| e.content.is_some())
+        .map(|e| (case_key(&e.path), e.content.clone()))
+        .collect();
+    let part_of = |e: &IndexEntry| match &e.content {
+        Some(EntryContent::Blob { hash }) => parts.get(hash).map(PathBuf::as_path),
+        _ => None,
     };
     let mut updates: Vec<(String, Option<Base>)> = Vec::new();
     for i in todo {
@@ -889,15 +1221,11 @@ pub async fn apply(env: &Env, copy: &Copy, fresh: bool) -> Result<ApplyReport, C
                 }),
             )),
             Act::Skip(why) => {
-                let name = names
-                    .get(&e.by_machine)
-                    .cloned()
-                    .unwrap_or_else(|| "hub".into());
-                if why.contains("different case")
-                    && let Ok(p) = conflict_copy(env, &root, e, &name).await
-                {
-                    report.conflicts.push(p);
-                }
+                // Nothing is written, not even a conflict copy for a name
+                // that differs only in case: such a copy would upload as a
+                // new file, and copies made on several machines collide
+                // again (by case) with each other. The file stays on the
+                // hub, in its index and history.
                 report.skipped.push((e.path.clone(), why));
                 updates.push((
                     e.path.clone(),
@@ -926,19 +1254,21 @@ pub async fn apply(env: &Env, copy: &Copy, fresh: bool) -> Result<ApplyReport, C
                     Err(err) => report.failed.push((e.path.clone(), err.to_string())),
                 }
             }
-            Act::Write(expect) => match write_entry_at(env, &root, e, &e.path, &expect).await {
-                Ok(()) => {
-                    report.written += 1;
-                    updates.push((e.path.clone(), Some(base_of(e))));
+            Act::Write(expect) => {
+                match write_entry_from(env, &root, e, &e.path, &expect, part_of(e)).await {
+                    Ok(()) => {
+                        report.written += 1;
+                        updates.push((e.path.clone(), Some(base_of(e))));
+                    }
+                    Err(err) => report.failed.push((e.path.clone(), err.to_string())),
                 }
-                Err(err) => report.failed.push((e.path.clone(), err.to_string())),
-            },
+            }
             Act::ConflictCopy => {
                 let name = names
                     .get(&e.by_machine)
                     .cloned()
                     .unwrap_or_else(|| "hub".into());
-                match conflict_copy(env, &root, e, &name).await {
+                match conflict_copy(env, &root, e, &name, part_of(e), &hub_names).await {
                     Ok(p) => {
                         report.conflicts.push(p);
                         // The local version uploads over the hub's (which
@@ -955,6 +1285,42 @@ pub async fn apply(env: &Env, copy: &Copy, fresh: bool) -> Result<ApplyReport, C
                 }
             }
         }
+    }
+    if fresh {
+        // The clone's files the hub does not know: recorded as they are
+        // (version 0), so they are not uploaded as edits of this copy.
+        let on_hub: HashSet<String> = entries.iter().map(|e| e.path.clone()).collect();
+        let (store, key, r, cfg) = (
+            env.store.clone(),
+            copy.key.clone(),
+            root.clone(),
+            env.scan.clone(),
+        );
+        let written: HashSet<String> = updates.iter().map(|(p, _)| p.clone()).collect();
+        let recorded = blocking(move || {
+            let ls = local::scan_copy(&store, &key, &r, &cfg).map_err(local)?;
+            Ok(ls
+                .hashed
+                .files
+                .into_iter()
+                .filter(|f| !on_hub.contains(&f.path) && !written.contains(&f.path))
+                .map(|f| {
+                    let content = Some(to_content(&f.content));
+                    (
+                        f.path,
+                        Some(Base {
+                            version: 0,
+                            content,
+                            mode_x: f.mode_x,
+                            skipped: false,
+                            rejected: None,
+                        }),
+                    )
+                })
+                .collect::<Vec<_>>())
+        })
+        .await?;
+        updates.extend(recorded);
     }
     let (store, key, all_ok) = (
         env.store.clone(),
@@ -978,9 +1344,20 @@ async fn conflict_copy(
     root: &Path,
     e: &IndexEntry,
     machine: &str,
+    prefetched: Option<&Path>,
+    on_hub: &HashMap<String, Option<EntryContent>>,
 ) -> Result<String, CopyError> {
     for n in 1..=100 {
         let name = conflict_path(&e.path, machine, e.at, n);
+        // The same copy made by another machine (names are deterministic)
+        // is already on the hub: it arrives like any file, never twice.
+        // Another file under a name equal but for case is avoided too, so
+        // copies never collide on case-insensitive systems.
+        match on_hub.get(&case_key(&name)) {
+            Some(c) if *c == e.content => return Ok(name),
+            Some(_) => continue,
+            None => {}
+        }
         let (r, nm, data) = (root.to_path_buf(), name.clone(), env.data_dir.clone());
         let free = blocking(move || {
             Target {
@@ -992,7 +1369,7 @@ async fn conflict_copy(
         })
         .await?;
         if free {
-            write_entry_at(env, root, e, &name, &Expect::Absent).await?;
+            write_entry_from(env, root, e, &name, &Expect::Absent, prefetched).await?;
             return Ok(name);
         }
     }
@@ -1034,79 +1411,105 @@ mod tests {
 
     #[test]
     fn apply_decisions() {
+        let live: HashSet<&str> = HashSet::from(["mine"]);
         let e = entry("f", 5, Some("new"));
         let b = base(3, "old");
         // Up to date.
         assert_eq!(
-            decide(&entry("f", 3, Some("x")), Some(&b), &has("old"), false),
+            decide(
+                &entry("f", 3, Some("x")),
+                Some(&b),
+                &has("old"),
+                false,
+                &live
+            ),
             None
         );
         // Unchanged since base: fast-forward over exactly that.
         assert_eq!(
-            decide(&e, Some(&b), &has("old"), false),
+            decide(&e, Some(&b), &has("old"), false, &live),
             Some(Act::Write(Expect::Blob("old".into())))
         );
         // Changed here: conflict copy, never an overwrite.
         assert_eq!(
-            decide(&e, Some(&b), &has("mine"), false),
+            decide(&e, Some(&b), &has("mine"), false, &live),
             Some(Act::ConflictCopy)
         );
         // Already there.
-        assert_eq!(decide(&e, Some(&b), &has("new"), false), Some(Act::Ack));
+        assert_eq!(
+            decide(&e, Some(&b), &has("new"), false, &live),
+            Some(Act::Ack)
+        );
         // Deleted here, changed there: modify wins.
         assert_eq!(
-            decide(&e, Some(&b), &Local::Missing, false),
+            decide(&e, Some(&b), &Local::Missing, false, &live),
             Some(Act::Write(Expect::Absent))
         );
         // New file.
         assert_eq!(
-            decide(&e, None, &Local::Missing, false),
+            decide(&e, None, &Local::Missing, false, &live),
             Some(Act::Write(Expect::Absent))
         );
-        // An origin's content the hub kept as a conflict copy may be replaced.
+        // Content the hub refused may be replaced while the hub still
+        // has it (its conflict copy) ...
         let rej = Base {
             rejected: Some("mine".into()),
             ..b.clone()
         };
         assert_eq!(
-            decide(&e, Some(&rej), &has("mine"), false),
+            decide(&e, Some(&rej), &has("mine"), false, &live),
             Some(Act::Write(Expect::Blob("mine".into())))
+        );
+        // ... and not once it is gone (copy cap, deleted, forgotten).
+        assert_eq!(
+            decide(&e, Some(&rej), &has("mine"), false, &HashSet::new()),
+            Some(Act::ConflictCopy)
         );
         // Tombstones: delete only what is unchanged; keep edits.
         let t = entry("f", 5, None);
         assert_eq!(
-            decide(&t, Some(&b), &has("old"), false),
+            decide(&t, Some(&b), &has("old"), false, &live),
             Some(Act::Delete(Expect::Blob("old".into())))
         );
-        assert_eq!(decide(&t, Some(&b), &has("mine"), false), Some(Act::Rebase));
         assert_eq!(
-            decide(&t, Some(&b), &Local::Missing, false),
+            decide(&t, Some(&b), &has("mine"), false, &live),
+            Some(Act::Rebase)
+        );
+        assert_eq!(
+            decide(&t, Some(&b), &Local::Missing, false, &live),
             Some(Act::DropBase)
         );
-        assert_eq!(decide(&t, None, &has("x"), false), Some(Act::Rebase));
+        assert_eq!(decide(&t, None, &has("x"), false, &live), Some(Act::Rebase));
         // A fresh copy takes the hub's state over the clone's.
         assert_eq!(
-            decide(&t, None, &has("x"), true),
+            decide(&t, None, &has("x"), true, &live),
             Some(Act::Delete(Expect::Blob("x".into())))
         );
         assert_eq!(
-            decide(&e, None, &has("x"), true),
+            decide(&e, None, &has("x"), true, &live),
             Some(Act::Write(Expect::Blob("x".into())))
         );
         assert_eq!(
-            decide(&e, None, &Local::Other, false),
+            decide(&e, None, &Local::Other, false, &live),
             Some(Act::Skip("a folder is in the way".into()))
         );
     }
 
     #[test]
     fn mass_delete_threshold() {
-        // At least 50, and more than 30% of the synced files.
-        assert!(!mass_delete(50, 10));
-        assert!(mass_delete(51, 10));
+        // Emptying a folder of more than one file.
+        assert!(mass_delete(40, 40));
+        assert!(mass_delete(10, 10));
+        assert!(mass_delete(5, 5));
+        assert!(mass_delete(2, 2));
+        assert!(!mass_delete(1, 1));
+        // At least 10 and more than 30%.
+        assert!(!mass_delete(9, 20));
+        assert!(mass_delete(10, 20));
         assert!(!mass_delete(300, 1000));
         assert!(mass_delete(301, 1000));
         assert!(!mass_delete(0, 0));
+        assert!(!mass_delete(3, 40));
     }
 
     proptest::proptest! {
@@ -1114,10 +1517,14 @@ mod tests {
         // larger folder, and small edits always go through.
         #[test]
         fn mass_delete_guard_bounds(deletes in 0usize..5000, synced in 0usize..20000) {
+            let deletes = deletes.min(synced);
             if !mass_delete(deletes, synced) {
-                proptest::prop_assert!(deletes <= 50 || deletes * 100 <= synced * 30);
+                // What passes is a small share, and never a whole folder.
+                proptest::prop_assert!(deletes < 10 || deletes * 100 <= synced * 30);
+                proptest::prop_assert!(synced <= 1 || deletes < synced);
             }
-            if deletes <= 50 {
+            // A few deletes from a larger folder always go through.
+            if deletes < 10 && deletes < synced {
                 proptest::prop_assert!(!mass_delete(deletes, synced));
             }
         }
@@ -1159,7 +1566,9 @@ mod tests {
         let unreadable = HashSet::from(["unreadable".to_string()]);
         let dirs = vec!["locked".to_string()];
         let plan = plan_upload(root, &files, &bases, &unreadable, &dirs, true);
-        assert!(plan.drop_bases.is_empty());
+        assert!(plan.left_out.is_empty());
+        // A path whose last change the hub refused waits.
+        assert_eq!(plan.held, ["refused"]);
         let got: Vec<(&str, i64, &str)> = plan
             .changes
             .iter()
@@ -1182,9 +1591,10 @@ mod tests {
                 ("excluded.log", 4, "forget")
             ]
         );
-        // A copy's own exclusions only drop its base; the hub keeps the file.
+        // A copy's own exclusions are only left out here; the hub keeps
+        // the file.
         let plan = plan_upload(root, &files, &bases, &unreadable, &dirs, false);
-        assert_eq!(plan.drop_bases, ["excluded.log"]);
+        assert_eq!(plan.left_out, ["excluded.log"]);
         assert!(!plan.changes.iter().any(|p| p.change.path == "refused"));
         // A folder the scan could not list at all deletes nothing.
         let plan = plan_upload(root, &[], &bases, &HashSet::new(), &[String::new()], true);

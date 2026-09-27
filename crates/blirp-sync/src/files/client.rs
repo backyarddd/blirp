@@ -392,6 +392,15 @@ pub struct LocalHub {
 pub struct Committed {
     pub results: Vec<ChangeResult>,
     pub head: i64,
+    pub incarnation: String,
+}
+
+/// A root's index as the file engine reads it.
+#[derive(Debug, Clone, Default)]
+pub struct RootIndex {
+    pub entries: Vec<IndexEntry>,
+    pub head: i64,
+    pub incarnation: String,
 }
 
 /// The hub as the file engine sees it.
@@ -435,12 +444,16 @@ impl FileHub {
         }
     }
 
-    /// Every entry of `root` after `after`, and the head.
-    pub async fn index(&self, root: &str, after: i64) -> Result<(Vec<IndexEntry>, i64)> {
-        let mut out = Vec::new();
+    /// Every entry of `root` after `after` (one per path, its newest
+    /// version, even when a path changed between pages), the head and the
+    /// root's incarnation.
+    pub async fn index(&self, root: &str, after: i64) -> Result<RootIndex> {
+        let mut by_path: HashMap<String, IndexEntry> = HashMap::new();
         let mut from = after;
+        let mut head = 0;
+        let mut incarnation: Option<String> = None;
         loop {
-            let (page, head, more) = match self {
+            let (page, page_head, more, inc) = match self {
                 Self::Remote(r) => match r
                     .request(&Req::Index {
                         root_id: root.to_string(),
@@ -452,22 +465,45 @@ impl FileHub {
                         entries,
                         head,
                         more,
-                    } => (entries, head, more),
+                        incarnation,
+                    } => (entries, head, more, incarnation),
                     other => return Err(SyncError::Protocol(format!("unexpected {other:?}"))),
                 },
                 Self::Local(l) => {
                     let (h, id) = (l.hub.clone(), root.to_string());
-                    let (entries, head) =
+                    let slice =
                         blocking(move || h.index(&id, from, INDEX_PAGE).map_err(hub_err)).await?;
-                    let more = entries.len() == INDEX_PAGE;
-                    (entries, head, more)
+                    let more = slice.entries.len() == INDEX_PAGE;
+                    (slice.entries, slice.head, more, slice.incarnation)
                 }
             };
+            match &incarnation {
+                Some(i) if *i != inc => {
+                    return Err(remote("root_replaced", "the hub copy was made again"));
+                }
+                _ => incarnation = Some(inc),
+            }
+            head = head.max(page_head);
             let last = page.last().map(|e| e.version);
-            out.extend(page);
+            for e in page {
+                match by_path.get(&e.path) {
+                    Some(old) if old.version >= e.version => {}
+                    _ => {
+                        by_path.insert(e.path.clone(), e);
+                    }
+                }
+            }
             match last {
                 Some(v) if more && v > from => from = v,
-                _ => return Ok((out, head)),
+                _ => {
+                    let mut entries: Vec<IndexEntry> = by_path.into_values().collect();
+                    entries.sort_by_key(|e| e.version);
+                    return Ok(RootIndex {
+                        entries,
+                        head,
+                        incarnation: incarnation.unwrap_or_default(),
+                    });
+                }
             }
         }
     }
@@ -558,7 +594,15 @@ impl FileHub {
                 })
                 .await?
             {
-                Reply::CommitResult { results, head } => Ok(Committed { results, head }),
+                Reply::CommitResult {
+                    results,
+                    head,
+                    incarnation,
+                } => Ok(Committed {
+                    results,
+                    head,
+                    incarnation,
+                }),
                 other => Err(SyncError::Protocol(format!("unexpected {other:?}"))),
             },
             Self::Local(l) => {
@@ -584,6 +628,7 @@ impl FileHub {
                         Ok(o) => Ok(Committed {
                             results: o.results,
                             head: o.head,
+                            incarnation: o.incarnation,
                         }),
                         Err(refused) => Err(remote(refused.code(), refused.to_string())),
                     }
