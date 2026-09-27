@@ -64,8 +64,8 @@ so every tag needs one.
   from an explicit **Enable desktop notifications** button (and a one-time
   offer), with the reason shown when it is blocked. They are on by default,
   never fire for the session on screen or one you stopped, and come with
-  in-app signals that need no permission: a toast, `(n) blirp` in the title
-  and a dot on the tab icon. Settings > Appearance > Notifications picks the
+  in-app signals that need no permission: a toast, `(n) blirp` in the window
+  title (and taskbar button) and, in a browser, a dot on the tab icon. Settings > Appearance > Notifications picks the
   events (needs input, finished, failed), an optional sound, and has
   **Send test notification**.
 

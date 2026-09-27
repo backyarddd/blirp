@@ -60,7 +60,7 @@ A session you stop with **Stop** (UI or `blirp stop <id>`) is recorded as Comple
 blirp tells you when a session becomes **Waiting** (needs input), **Completed** or **Failed** and you are not looking at it. Nothing fires for the session on screen in a focused window, or for a session you stopped yourself. Choose the events, a sound (off by default) or turn it all off under **Settings > Appearance > Notifications**; the choice is saved per browser (or per desktop app).
 
 - **Window in front, another page or session on screen:** a toast in blirp with **Open**.
-- **Window in the background or minimized:** a system notification, a count in the window title (`(2) blirp`) and a dot on the tab icon until you look at those sessions.
+- **Window in the background or minimized:** a system notification and a count in the window title and taskbar button (`(2) blirp`) until you look at those sessions; in a browser the tab icon also gets a dot.
   - **Desktop app:** a native notification (Windows notifications, macOS Notification Center, the Linux notification daemon over D-Bus), and the taskbar button flashes (the dock icon bounces on macOS). Clicking the notification does not open the session; the flashing window does.
   - **Browser** (`blirp open`, the LAN portal): the browser's own notifications. Allow them with **Enable desktop notifications** in Settings, or with the **Enable** offer blirp shows the first time one would have fired. Browsers only allow them on `https://` pages and on `localhost`/`127.0.0.1`. Clicking one opens the session.
 
