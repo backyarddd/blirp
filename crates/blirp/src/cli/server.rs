@@ -34,10 +34,31 @@ pub async fn hub_setup(paths: &Paths, lan: bool) -> anyhow::Result<ExitCode> {
     if super::service::is_root() {
         anyhow::bail!("{ROOT_REFUSAL}");
     }
-    autostart(paths).await;
+    // Before anything changes: a paired node cannot become a hub.
+    paths.ensure_dirs()?;
+    let config = Config::load_or_init(&paths.config_file())?;
+    if config.sync.role == MachineRole::Node {
+        anyhow::bail!(
+            "this machine is paired with a hub (paired_node); leave it first \
+             (Settings > Machines & Sync > Leave hub), then run `blirp hub setup` again"
+        );
+    }
+    let settings = server_settings(lan);
+    let running = crate::daemon::running_daemon(paths).await.is_some();
+    // Not running: write the config before the first start, so the daemon
+    // never advertises itself over mDNS, not even briefly.
+    let mut changes = if running {
+        Vec::new()
+    } else {
+        write_config(paths, &config, &settings)?
+    };
+    autostart(paths).await?;
     super::lifecycle::start(paths).await?;
     let client = Client::connect(paths).await?;
-    for change in apply_server_config(&client, &server_settings(lan)).await? {
+    if running {
+        changes = apply_server_config(&client, &settings).await?;
+    }
+    for change in changes {
         println!("{change}");
     }
     println!();
@@ -48,9 +69,11 @@ pub async fn hub_setup(paths: &Paths, lan: bool) -> anyhow::Result<ExitCode> {
 }
 
 /// Install the autostart service where it can work, and say plainly what
-/// happens where it cannot (containers, no user manager). Never fails the
-/// setup: the daemon still starts directly afterwards.
-async fn autostart(paths: &Paths) {
+/// happens where it cannot (containers, no user manager): the daemon then
+/// starts directly afterwards. A daemon that runs outside a freshly usable
+/// service (started before linger was on) is stopped, so the service starts
+/// and supervises the next one.
+async fn autostart(paths: &Paths) -> anyhow::Result<()> {
     #[cfg(all(unix, not(target_os = "macos")))]
     {
         use super::service::platform;
@@ -59,7 +82,7 @@ async fn autostart(paths: &Paths) {
                 "systemd is not running here (a container?): the daemon starts now but not at \
                  boot. Start `blirp daemon` from your container's entrypoint or init system."
             );
-            return;
+            return Ok(());
         }
         let user = super::service::user_name();
         match platform::linger() {
@@ -80,12 +103,24 @@ async fn autostart(paths: &Paths) {
                  `sudo -u` without linger?), so no autostart service was installed. Log in \
                  over SSH as {user}, or enable linger, and run `blirp hub setup` again."
             );
-            return;
+            return Ok(());
         }
     }
     if let Err(e) = super::service::install(paths).await {
         println!("warning: autostart was not installed ({e:#}); starting the daemon directly.");
+        return Ok(());
     }
+    #[cfg(all(unix, not(target_os = "macos")))]
+    if crate::daemon::running_daemon(paths).await.is_some()
+        && !super::service::platform::unit_active()
+    {
+        println!(
+            "Handing the running daemon over to the service: stopping it (running sessions \
+             end as Detached; resume them afterwards)."
+        );
+        let _: ExitCode = super::lifecycle::stop(paths).await?;
+    }
+    Ok(())
 }
 
 /// A config value `hub setup` sets: (section, key, value, what to print
@@ -109,7 +144,8 @@ fn server_settings(lan: bool) -> Vec<Setting> {
             "sync",
             "lan_discovery",
             false,
-            "LAN discovery (mDNS) turned off: a server has no LAN peers to find              (`--lan` keeps it on).",
+            "LAN discovery (mDNS) turned off: a server has no LAN peers to find \
+             (`--lan` keeps it on).",
         )
     }];
     if cfg!(target_os = "linux") && !lan {
@@ -117,10 +153,26 @@ fn server_settings(lan: bool) -> Vec<Setting> {
             "sessions",
             "keep_awake",
             false,
-            "Keep-awake turned off: a server does not sleep              (`[sessions] keep_awake = true` turns it back on).",
+            "Keep-awake turned off: a server does not sleep \
+             (`[sessions] keep_awake = true` turns it back on).",
         ));
     }
     out
+}
+
+/// Apply `settings` to `config.toml` directly (the daemon is not running).
+fn write_config(
+    paths: &Paths,
+    config: &Config,
+    settings: &[Setting],
+) -> anyhow::Result<Vec<&'static str>> {
+    let base = serde_json::to_value(config).context("serialize the config")?;
+    let (value, changed) = with_settings(&base, settings);
+    if !changed.is_empty() {
+        let updated: Config = serde_json::from_value(value).context("apply server settings")?;
+        updated.save(&paths.config_file())?;
+    }
+    Ok(changed)
 }
 
 /// Apply `settings` through the daemon (which applies them live), in one
@@ -353,6 +405,38 @@ mod tests {
             config["sessions"]["keep_awake"]
         );
         assert_eq!(changed, vec!["LAN discovery (mDNS) turned on."]);
+    }
+
+    #[test]
+    fn messages_have_no_broken_line_joins() {
+        for lan in [false, true] {
+            for (_, _, _, message) in server_settings(lan) {
+                assert!(!message.contains("  "), "double space in {message:?}");
+            }
+        }
+    }
+
+    #[test]
+    fn server_settings_reach_config_toml_before_the_first_start() {
+        let dir = tempfile::tempdir().unwrap();
+        let paths = Paths::at(dir.path().join(".blirp"));
+        paths.ensure_dirs().unwrap();
+        let config = Config::load_or_init(&paths.config_file()).unwrap();
+        let changed = write_config(&paths, &config, &server_settings(false)).unwrap();
+        assert!(!changed.is_empty());
+        let text = std::fs::read_to_string(paths.config_file()).unwrap();
+        let saved = Config::parse(&text, &paths.config_file()).unwrap();
+        assert!(!saved.sync.lan_discovery);
+        assert_eq!(
+            saved.sessions.keep_awake,
+            cfg!(target_os = "linux").then_some(false)
+        );
+        // Again: nothing to write.
+        assert!(
+            write_config(&paths, &saved, &server_settings(false))
+                .unwrap()
+                .is_empty()
+        );
     }
 
     #[test]

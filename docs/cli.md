@@ -157,7 +157,7 @@ blirp hub setup [--lan]   # set up this machine as an always-on hub (servers, VP
 
 `enable` fails on a paired node (`paired_node`); `invite` fails unless this machine is the hub (`not_hub`). `status` works in every role.
 
-`setup` prepares an always-on hub and is safe to repeat ([vps.md](vps.md#what-blirp-hub-setup-does)): it refuses to run as root; on Linux turns on systemd linger when polkit allows it without a password (else prints `sudo loginctl enable-linger <user>`); installs the autostart service (`blirp service install`), or where systemd or the user's systemd is not reachable (containers, `su`) says so and skips it; starts the daemon; sets `sync.lan_discovery = false` and on Linux `sessions.keep_awake = false` (`--lan`: discovery `true`, keep-awake unchanged); enables the hub and prints its status, an invite and the next steps. `install.sh --hub` runs it.
+`setup` prepares an always-on hub and is safe to repeat ([vps.md](vps.md#what-blirp-hub-setup-does)): it refuses to run as root or on a paired node (before changing anything); on Linux turns on systemd linger when polkit allows it without a password (else prints `sudo loginctl enable-linger <user>`); installs the autostart service (`blirp service install`) and hands a directly started daemon over to it (stop, then start through the service), or where systemd or the user's systemd is not reachable (containers, `su`) says so and skips it; starts the daemon; sets `sync.lan_discovery = false` and on Linux `sessions.keep_awake = false` (`--lan`: discovery `true`, keep-awake unchanged); enables the hub and prints its status, an invite and the next steps. `install.sh --hub` runs it.
 
 ## blirp backup
 

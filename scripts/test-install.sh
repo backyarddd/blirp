@@ -348,6 +348,19 @@ hub_test() {
   st=$(hub_cli "$mode" "$h" hub status 2>&1) || fail "hub/$mode: blirp hub status failed: $st"
   [ "$(printf '%s\n' "$st" | sed -n 's/^machine *//p')" = "$id1" ] || fail "hub/$mode: the machine id changed"
 
+  if [ "$mode" = systemd ]; then
+    # A daemon started directly (e.g. before linger was on) is handed over
+    # to the service by `blirp hub setup`.
+    XDG_RUNTIME_DIR=/run/user/$(id -u) systemctl --user stop blirp.service ||
+      fail "hub/$mode: cannot stop blirp.service"
+    hub_cli "$mode" "$h" daemon --detach >"$work/out.log" 2>&1 || fail "hub/$mode: blirp daemon --detach failed"
+    hub_cli "$mode" "$h" hub setup >"$work/out.log" 2>&1 || fail "hub/$mode: blirp hub setup failed"
+    grep -F 'Handing the running daemon over to the service' "$work/out.log" >/dev/null ||
+      fail "hub/$mode: the direct daemon was not handed over"
+    XDG_RUNTIME_DIR=/run/user/$(id -u) systemctl --user is-active --quiet blirp.service ||
+      fail "hub/$mode: blirp.service is not active after the takeover"
+  fi
+
   # A backup of the live database, never over an existing file.
   hub_cli "$mode" "$h" backup "$h/backup.db" >"$work/out.log" 2>&1 || fail "hub/$mode: blirp backup failed"
   [ -s "$h/backup.db" ] || fail "hub/$mode: the backup is empty"

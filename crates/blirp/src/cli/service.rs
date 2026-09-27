@@ -290,7 +290,7 @@ pub(crate) async fn install(paths: &Paths) -> anyhow::Result<ExitCode> {
 
 /// What removing the autostart entry did to a running daemon.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum Removed {
+pub(crate) enum Removed {
     NotInstalled,
     /// The entry is gone; a running daemon was left alone.
     DaemonKept,
@@ -549,19 +549,24 @@ pub(crate) mod platform {
         Ok(config.join("systemd/user").join(SYSTEMD_UNIT))
     }
 
-    /// `systemctl --user <args>`. Without `XDG_RUNTIME_DIR` (`sudo -iu`,
-    /// `su -`, a CI runner) systemctl cannot find the user manager's bus;
-    /// point it at `/run/user/<uid>` when that manager runs (linger).
+    /// `systemctl --user <args>`. Without this user's `XDG_RUNTIME_DIR`
+    /// (none after `sudo -iu` or on a CI runner, another user's after `su`)
+    /// systemctl cannot find the user manager's bus; point it at
+    /// `/run/user/<uid>` when that manager runs (linger).
     fn user_systemctl(args: &[&str]) -> anyhow::Result<(bool, String)> {
         let mut cmd = blirp_core::process::command("systemctl");
         cmd.arg("--user").args(args);
-        if std::env::var_os("XDG_RUNTIME_DIR").is_none_or(|v| v.is_empty()) {
-            let dir = PathBuf::from(format!("/run/user/{}", uid()));
-            if dir.join("bus").exists() {
-                cmd.env("XDG_RUNTIME_DIR", dir);
-            }
+        let own = PathBuf::from(format!("/run/user/{}", uid()));
+        let inherited = std::env::var_os("XDG_RUNTIME_DIR").map(PathBuf::from);
+        if inherited.as_deref() != Some(own.as_path()) && own.join("bus").exists() {
+            cmd.env("XDG_RUNTIME_DIR", own);
         }
         run_tool(cmd, "systemctl")
+    }
+
+    /// The service's daemon is running (`systemctl --user is-active`).
+    pub fn unit_active() -> bool {
+        user_systemctl(&["is-active", "--quiet", SYSTEMD_UNIT]).is_ok_and(|(ok, _)| ok)
     }
 
     fn systemctl(args: &[&str]) -> anyhow::Result<()> {

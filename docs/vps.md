@@ -77,12 +77,12 @@ Then run `blirp hub setup` again: the service records your `PATH` at setup time,
 
 `blirp hub setup [--lan]` sets up any machine as an always-on hub, also one where blirp is already installed. Each step checks first, so it is safe to repeat:
 
-1. Refuses to run as root.
+1. Refuses to run as root, and on a machine paired with another hub (leave that hub first).
 2. Linux: turns on **linger** (`loginctl enable-linger`) when polkit allows it without a password; otherwise prints `sudo loginctl enable-linger <user>` to run once. Without linger, systemd stops the user's services at logout and starts them only at the next login.
-3. Installs the autostart service (`blirp service install`: on Linux the `systemd --user` unit `~/.config/systemd/user/blirp.service` with `Restart=on-failure`, enabled and started). Where systemd is not running (a container) or the user's systemd is not reachable, it says so, installs no service and starts the daemon directly; that daemon does not come back after a reboot.
+3. Installs the autostart service (`blirp service install`: on Linux the `systemd --user` unit `~/.config/systemd/user/blirp.service` with `Restart=on-failure`, enabled and started). Where systemd is not running (a container) or the user's systemd is not reachable, it says so, installs no service and starts the daemon directly; that daemon does not come back after a reboot. A daemon that was started directly before (for example before linger was on) is stopped and started again by the service, so the service supervises it; its running sessions end as **Detached**.
 4. Starts the daemon if it is not running.
-5. Turns LAN discovery (mDNS) off (`sync.lan_discovery = false`): a VPS has no LAN peers to find, and on a provider's shared network it would advertise the hub to other customers' machines. Pairing then always uses the invite. On Linux it also turns keep-awake off (`sessions.keep_awake = false`): a server does not sleep. `--lan` is for a hub at home instead: LAN discovery on, keep-awake left as it is. Either can be changed back in `config.toml` or **Settings**.
-6. Makes the machine the hub (`blirp hub enable`; fails on a machine that is paired with another hub) and prints its status and a new invite, then the next steps.
+5. Turns LAN discovery (mDNS) off (`sync.lan_discovery = false`): a VPS has no LAN peers to find, and on a provider's shared network it would advertise the hub to other customers' machines. Pairing then always uses the invite. On Linux it also turns keep-awake off (`sessions.keep_awake = false`): a server does not sleep. `--lan` is for a hub at home instead: LAN discovery on, keep-awake left as it is. Either can be changed back in `config.toml` or **Settings**. When the daemon is not running yet, both are written to `config.toml` before its first start, so it never advertises itself, not even briefly.
+6. Makes the machine the hub (`blirp hub enable`) and prints its status and a new invite, then the next steps.
 
 Why a `systemd --user` unit with linger and not a system service: the daemon must run as the user whose agent logins, SSH keys and home folder the sessions use, and `blirp start`, `stop` and `update` already manage the user unit ([ARCHITECTURE.md](ARCHITECTURE.md#18-servers-and-vps-hubs)).
 
