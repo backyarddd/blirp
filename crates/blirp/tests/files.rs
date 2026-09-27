@@ -479,6 +479,26 @@ async fn revoked_machines_are_refused_and_off_pauses_uploads() {
     })
     .await;
 
+    // The machine's own switch is a hard opt-out, whatever the project says.
+    let settings: Value = r.b.get("/api/settings").await;
+    let mut cfg = settings["config"].clone();
+    cfg["sync"]["project_files"] = json!(false);
+    let _: Value =
+        r.b.ok(
+            Method::PATCH,
+            "/api/settings",
+            Some(json!({"config": cfg, "base": settings["config"]})),
+        )
+        .await;
+    let f = r.b.files(&r.project).await;
+    assert!(!f.effective && !f.global, "{f:?}");
+    write(
+        &r.origin.join("private.txt"),
+        "never uploaded from an opted-out machine",
+    );
+    tokio::time::sleep(Duration::from_secs(4)).await;
+    assert_eq!(hub_files(&r.hub, &r.project).await.unwrap().1, 3);
+
     // A revoked machine's edits never reach the hub.
     let _ = r
         .hub

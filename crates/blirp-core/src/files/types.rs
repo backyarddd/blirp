@@ -35,13 +35,28 @@ impl FilesMode {
     }
 
     /// Whether uploads run for a root of a project in this mode on a
-    /// machine whose `[sync] project_files` is `global`.
+    /// machine whose `[sync] project_files` is `global`. The machine's
+    /// switch is a hard opt-out: no project mode makes it upload.
     pub fn effective(self, global: bool) -> bool {
-        match self {
-            Self::Default => global,
-            Self::On => true,
-            Self::Off => false,
+        global && self != Self::Off
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_machine_switch_wins() {
+        for mode in [FilesMode::Default, FilesMode::On, FilesMode::Off] {
+            assert!(
+                !mode.effective(false),
+                "{mode:?} uploads from an opted-out machine"
+            );
         }
+        assert!(FilesMode::Default.effective(true));
+        assert!(FilesMode::On.effective(true));
+        assert!(!FilesMode::Off.effective(true));
     }
 }
 
