@@ -19,6 +19,8 @@ Terminal output is never used as memory. It only drives the live view and the Wo
 
 Shell sessions and custom agents have no transcript, so they are tracked (status, folder, duration) but add nothing to memory.
 
+Scripted runs are not sessions: a transcript of `claude -p` or the Claude Agent SDK (its lines record `entrypoint` `sdk-cli`, `sdk-ts` or `sdk-py`) or of `codex exec` (`source: "exec"`) is skipped when it records no interactive run, so bots and automation that call an agent in a loop create no session, no project and no memory. A scripted run you later resume interactively becomes a session with its whole transcript; an interactive session you continue with `claude -p --resume` stays one. Sessions blirp launched are always kept.
+
 History is permanent: deleting or rotating an agent's transcript never deletes blirp's copy.
 
 ## Redaction

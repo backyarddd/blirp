@@ -59,6 +59,11 @@ so every tag needs one.
 - Claude Code's "You've hit your session limit" (and weekly limit) is
   recognized as a usage limit: automatic distilling pauses and the budget
   unit is given back instead of the session failing.
+- Scripted agent runs (`claude -p`, the Claude Agent SDK, `codex exec`) no
+  longer become sessions: bots and automation that call an agent in a loop
+  created a session (and sometimes a project) per run, used up the distill
+  budget and filled project memory. A scripted run resumed interactively
+  still becomes a session, and sessions blirp launched are always kept.
 - A distill reply with keys outside the output contract is accepted (the
   extra keys are ignored) instead of failing and costing a retry.
 

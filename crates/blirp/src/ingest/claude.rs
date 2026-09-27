@@ -12,7 +12,8 @@ use super::jsonl::{FilePos, Lines};
 use super::pricing::{self, Usage};
 use super::text::{self, TOOL_RESULT_MAX, content_text, parse_ts};
 use super::{
-    Adapter, Cursor, EventSink, IngestEnv, Result, SessionMeta, Source, file_sources, walk_files,
+    Adapter, Cursor, EventSink, IngestEnv, Launches, Result, SessionMeta, Source, file_sources,
+    walk_files,
 };
 use blirp_core::model::EventKind;
 use blirp_core::store::Store;
@@ -46,6 +47,8 @@ struct State {
     cost_est: f64,
     cost_reported: Option<f64>,
     model: Option<String>,
+    #[serde(default)]
+    launch: Option<Launches>,
 }
 
 #[derive(Debug, Default, Serialize, Deserialize)]
@@ -103,6 +106,13 @@ fn tool_result_output(block: &Value) -> String {
     }
 }
 
+/// `entrypoint` of a scripted run: `claude -p` (`sdk-cli`) and the Agent
+/// SDKs (`sdk-ts`, `sdk-py`). Interactive ones are `cli`, `claude-vscode`,
+/// `claude-desktop`, ...
+fn is_headless_entrypoint(ep: &str) -> bool {
+    ep.starts_with("sdk-")
+}
+
 /// Plumbing a user line carries that is not something the user typed.
 fn is_system_text(s: &str) -> bool {
     let t = s.trim_start();
@@ -149,6 +159,7 @@ impl Adapter for Claude {
         if lines.reset {
             st = State::default();
         }
+        let mut launch = Launches::resume(st.launch, st.pos.line);
         let mut meta = SessionMeta {
             parent: parent.clone(),
             transcript_path: Some(src.path.display().to_string()),
@@ -166,6 +177,9 @@ impl Adapter for Claude {
                     return Ok(());
                 }
             };
+            if let Some(ep) = v.get("entrypoint").and_then(Value::as_str) {
+                launch.see(is_headless_entrypoint(ep), sink, &asid);
+            }
             let mut e = Emit::line(sink, &asid, ix);
             line(&v, &mut e, &mut st, &mut meta)?;
             super::report_cwd(sink, &asid, &meta, &mut reported);
@@ -179,9 +193,17 @@ impl Adapter for Claude {
         meta.tokens_out = Some(st.usage.output);
         meta.cost_usd = Some(st.cost_reported.unwrap_or(st.cost_est));
         meta.model = st.model.clone();
+        let reread = launch.finish(&mut meta);
         sink.session(&asid, meta);
+        st.launch = Some(launch);
+        if reread {
+            st = State {
+                launch: st.launch,
+                ..State::default()
+            };
+        }
         let mut c = Cursor::from_state(&st)?;
-        c.retry = lines.partial;
+        c.retry = lines.partial || reread;
         Ok(c)
     }
 }

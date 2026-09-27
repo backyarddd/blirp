@@ -12,7 +12,8 @@ use super::jsonl::{FilePos, Lines};
 use super::pricing::{self, Usage};
 use super::text::{self, content_text, parse_ts};
 use super::{
-    Adapter, Cursor, EventSink, IngestEnv, Result, SessionMeta, Source, file_sources, walk_files,
+    Adapter, Cursor, EventSink, IngestEnv, Launches, Result, SessionMeta, Source, file_sources,
+    walk_files,
 };
 use blirp_core::model::EventKind;
 use blirp_core::store::Store;
@@ -45,6 +46,8 @@ struct State {
     /// call_id -> tool name, to label outputs.
     #[serde(default)]
     calls: HashMap<String, String>,
+    #[serde(default)]
+    launch: Option<Launches>,
 }
 
 #[derive(Debug, Default, Clone, Copy, Serialize, Deserialize)]
@@ -144,6 +147,7 @@ impl Adapter for Codex {
         if lines.reset {
             st = State::default();
         }
+        let mut launch = Launches::resume(st.launch, st.pos.line);
         let fallback = id_from_name(&src.path).unwrap_or_else(|| src.key.clone());
         let mut meta = SessionMeta {
             transcript_path: Some(src.path.display().to_string()),
@@ -187,6 +191,10 @@ impl Adapter for Codex {
                         meta.git_remote = Some(u.to_string());
                     }
                     let asid = st.asid.clone().unwrap_or_else(|| fallback.clone());
+                    // `codex exec` records `source: "exec"`; the TUI "cli",
+                    // the desktop app and IDE "vscode", subagents an object.
+                    let exec = p.get("source").and_then(Value::as_str) == Some("exec");
+                    launch.see(exec, sink, &asid);
                     super::report_cwd(sink, &asid, &meta, &mut reported);
                     return Ok(());
                 }
@@ -242,9 +250,17 @@ impl Adapter for Codex {
             meta.cost_usd = Some(pricing::estimate(st.model.as_deref().unwrap_or(""), usage));
         }
         meta.model = st.model.clone();
+        let reread = launch.finish(&mut meta);
         sink.session(&asid, meta);
+        st.launch = Some(launch);
+        if reread {
+            st = State {
+                launch: st.launch,
+                ..State::default()
+            };
+        }
         let mut c = Cursor::from_state(&st)?;
-        c.retry = lines.partial;
+        c.retry = lines.partial || reread;
         Ok(c)
     }
 }

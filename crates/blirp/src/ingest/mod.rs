@@ -235,6 +235,92 @@ pub struct SessionMeta {
     /// `agent_session_id` of the parent session (subagents).
     pub parent: Option<String>,
     pub transcript_path: Option<String>,
+    /// The transcript is a scripted run ([`Launches::is_headless`]): the
+    /// sink stores no session for it unless a blirp launch owns it.
+    pub headless: Option<bool>,
+}
+
+/// How the runs recorded in one transcript were started (claude
+/// `entrypoint`, codex `session_meta.source`), kept in the adapter's cursor
+/// state. A transcript is headless, a scripted run such as `claude -p`, the
+/// Agent SDK or `codex exec`, when it records a headless run and no
+/// interactive one: resuming a scripted run interactively, or scripting an
+/// interactive session, keeps the session.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Serialize, Deserialize)]
+pub struct Launches {
+    #[serde(default)]
+    headless: bool,
+    #[serde(default)]
+    interactive: bool,
+    /// The sink was told the transcript is headless during some read, so
+    /// what was read then may not be stored.
+    #[serde(default)]
+    reported: bool,
+}
+
+impl Launches {
+    /// State of a source read before launches were recorded: that read
+    /// stored its session, so it counts as interactive.
+    pub fn resume(stored: Option<Launches>, lines_read: u64) -> Launches {
+        stored.unwrap_or(Launches {
+            interactive: lines_read > 0,
+            ..Launches::default()
+        })
+    }
+
+    pub fn is_headless(&self) -> bool {
+        self.headless && !self.interactive
+    }
+
+    /// Record one run (`headless` or not) of session `asid` and tell the
+    /// sink right away when that changes [`Launches::is_headless`], before
+    /// the run's events can be flushed into a new session row.
+    pub fn see(&mut self, headless: bool, sink: &mut dyn EventSink, asid: &str) {
+        let was = self.is_headless();
+        if headless {
+            self.headless = true;
+        } else {
+            self.interactive = true;
+        }
+        let now = self.is_headless();
+        self.reported |= now;
+        if now != was {
+            sink.session(
+                asid,
+                SessionMeta {
+                    headless: Some(now),
+                    ..SessionMeta::default()
+                },
+            );
+        }
+    }
+
+    /// At the end of a read: set `meta.headless` for the sink, and tell
+    /// whether the transcript must be read again from the start on the next
+    /// pass (it was reported headless before and is not any more, so what
+    /// was read then was not stored).
+    pub fn finish(&mut self, meta: &mut SessionMeta) -> bool {
+        meta.headless = Some(self.is_headless());
+        let reread = self.reported && !self.is_headless();
+        if reread {
+            self.reported = false;
+        }
+        reread
+    }
+}
+
+/// True when ingest already read `agent`'s transcript at `path` and found
+/// it headless: a hook of that run then creates no session (the sink would
+/// only drop it again).
+pub fn known_headless(store: &Store, agent: &str, path: &str) -> bool {
+    store
+        .get_cursor(agent, path)
+        .ok()
+        .flatten()
+        .and_then(|v| serde_json::from_value::<Cursor>(v).ok())
+        .and_then(|c| c.state.get("launch").cloned())
+        .and_then(|l| serde_json::from_value::<Launches>(l).ok())
+        .is_some_and(|l| l.is_headless())
 }
 
 impl SessionMeta {
@@ -262,6 +348,7 @@ impl SessionMeta {
         take(&mut self.cost_usd, o.cost_usd);
         take(&mut self.parent, o.parent);
         take(&mut self.transcript_path, o.transcript_path);
+        take(&mut self.headless, o.headless);
     }
 }
 

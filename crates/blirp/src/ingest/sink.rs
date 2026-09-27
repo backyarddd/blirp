@@ -133,6 +133,16 @@ impl<'e> StoreSink<'e> {
                 self.excluded.insert(asid);
                 continue;
             }
+            if p.meta.headless == Some(true)
+                && let Some(s) = &existing
+                && s.origin == SessionOrigin::External
+            {
+                // A scripted run (§8) whose row a hook created before its
+                // transcript was read.
+                drops.push(s.id.clone());
+                self.excluded.insert(asid);
+                continue;
+            }
             let mut link = None;
             let mut project = None;
             let mut refile = None;
@@ -186,6 +196,12 @@ impl<'e> StoreSink<'e> {
                     continue;
                 }
                 link = self.link_candidate(&p)?;
+                if p.meta.headless == Some(true) && link.is_none() {
+                    // A scripted run (`claude -p`, Agent SDK, `codex exec`,
+                    // §8): no session, no project. A blirp launch keeps it.
+                    self.excluded.insert(asid);
+                    continue;
+                }
                 // A subagent works for its parent: same project, also after
                 // the parent was moved (or its project merged). A parent in
                 // a removed project leaves the folder to decide.

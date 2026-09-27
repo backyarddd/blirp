@@ -179,6 +179,36 @@ async fn hook_lifecycle_of_an_external_session() {
     h.daemon.shutdown().await.unwrap();
 }
 
+#[tokio::test]
+async fn hooks_of_headless_runs_create_no_session() {
+    let h = Harness::start().await;
+    let (dir, _pid) = h.project("bots").await;
+    let body = |asid: &str, headless: bool| json!({"payload": {"session_id": asid, "cwd": dir}, "global": true, "headless": headless});
+    for event in ["SessionStart", "UserPromptSubmit", "Stop", "SessionEnd"] {
+        let r = h.hook("claude", event, body("bot-1", true)).await;
+        assert!(r["session_id"].is_null(), "{event}: {r}");
+        assert!(r["additional_context"].is_null(), "{event}: {r}");
+    }
+    let sessions: Value = h.get("/api/sessions").await;
+    assert!(
+        !sessions.to_string().contains("bot-1"),
+        "no row for a scripted run: {sessions}"
+    );
+    // A session blirp already tracks (e.g. `claude -p --resume` of an
+    // interactive one) keeps its updates.
+    let r = h
+        .hook("claude", "SessionStart", body("human-1", false))
+        .await;
+    let sid = r["session_id"].as_str().unwrap().to_string();
+    let r = h
+        .hook("claude", "UserPromptSubmit", body("human-1", true))
+        .await;
+    assert_eq!(r["session_id"], sid.as_str());
+    let s: Session = h.get(&format!("/api/sessions/{sid}")).await;
+    assert_eq!(s.status, SessionStatus::Working);
+    h.daemon.shutdown().await.unwrap();
+}
+
 fn urlencode(s: &str) -> String {
     s.bytes()
         .map(|b| match b {

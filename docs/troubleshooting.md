@@ -146,6 +146,7 @@ If `blirp doctor` says `CLAUDE_CODE_OAUTH_TOKEN from the environment`, the daemo
 - Aider is only found in folders registered as projects.
 - The daemon rescans every 5 minutes; hooks make it immediate.
 - Transcripts inside `~/.blirp` (summarizer runs) are skipped on purpose.
+- Scripted runs (`claude -p`, the Claude Agent SDK, `codex exec`) are skipped on purpose ([memory.md](memory.md#capture)).
 
 ## Sync does not connect
 

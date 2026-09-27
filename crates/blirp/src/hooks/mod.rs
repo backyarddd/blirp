@@ -43,6 +43,15 @@ pub struct HookIngress {
     /// The agent's hook JSON (stdin), passed through.
     #[serde(default)]
     pub payload: Value,
+    /// The hook runs inside a scripted run ([`is_headless_env`]).
+    #[serde(default)]
+    pub headless: bool,
+}
+
+/// Claude Code sets `CLAUDE_CODE_ENTRYPOINT` for its process and hooks:
+/// `sdk-cli` for `claude -p`, `sdk-ts`/`sdk-py` for the Agent SDKs.
+fn is_headless_env(agent: &str, var: &dyn Fn(&str) -> Option<String>) -> bool {
+    agent == "claude" && var("CLAUDE_CODE_ENTRYPOINT").is_some_and(|e| e.starts_with("sdk-"))
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
@@ -175,6 +184,14 @@ pub fn handle(
             let Some(asid) = asid.clone() else {
                 return Ok(HookReply::default());
             };
+            // Scripted runs get no session (§8); one blirp launched or
+            // already tracks is found above and keeps its updates.
+            if req.headless
+                || str_field(p, &["transcript_path"])
+                    .is_some_and(|t| crate::ingest::known_headless(store, agent, t))
+            {
+                return Ok(HookReply::default());
+            }
             let Some(cwd) = payload_cwd(p).or(req.cwd.clone()) else {
                 return Ok(HookReply::default());
             };
@@ -439,6 +456,7 @@ pub fn run(env: &HookEnv<'_>) -> Option<String> {
         cwd: env.cwd.as_ref().map(|c| c.display().to_string()),
         global: env.global,
         payload: payload.clone(),
+        headless: is_headless_env(env.agent, env.var),
     };
     let paths = match (env.var)(blirp_core::paths::HOME_ENV).filter(|v| !v.is_empty()) {
         Some(h) => Some(Paths::at(h)),
@@ -552,6 +570,27 @@ mod tests {
 
     fn env_fn(vars: Vec<(&'static str, String)>) -> impl Fn(&str) -> Option<String> {
         move |k| vars.iter().find(|(a, _)| *a == k).map(|(_, v)| v.clone())
+    }
+
+    #[test]
+    fn headless_claude_runs_are_flagged() {
+        for (agent, entry, want) in [
+            ("claude", Some("sdk-cli"), true),
+            ("claude", Some("sdk-ts"), true),
+            ("claude", Some("sdk-py"), true),
+            ("claude", Some("cli"), false),
+            ("claude", Some("claude-vscode"), false),
+            ("claude", None, false),
+            // A codex run started from a `claude -p` shell inherits the variable.
+            ("codex", Some("sdk-cli"), false),
+        ] {
+            let var = env_fn(
+                entry
+                    .map(|e| vec![("CLAUDE_CODE_ENTRYPOINT", e.to_string())])
+                    .unwrap_or_default(),
+            );
+            assert_eq!(is_headless_env(agent, &var), want, "{agent} {entry:?}");
+        }
     }
 
     #[test]

@@ -1809,3 +1809,205 @@ fn subagents_of_a_parent_in_a_removed_project_still_ingest() {
         }
     }
 }
+
+// ---------------------------------------------------------------- headless runs
+
+/// The Claude fixture as a `claude -p` run (`entrypoint` `sdk-cli`).
+fn claude_print_run(h: &H) -> String {
+    h.fill(&fixture("claude/session.jsonl"))
+        .replace(r#""entrypoint":"cli""#, r#""entrypoint":"sdk-cli""#)
+}
+
+fn claude_line_from(h: &H, uuid: &str, text: &str, entrypoint: &str) -> String {
+    let l = claude_line(uuid, text, h);
+    format!(
+        "{},\"entrypoint\":\"{entrypoint}\"}}\n",
+        l.strip_suffix('}').unwrap()
+    )
+}
+
+fn project_count(h: &H) -> usize {
+    let machine = h.store.machine_id().unwrap().unwrap();
+    h.store.list_project_summaries(&machine).unwrap().len()
+}
+
+#[test]
+fn headless_claude_runs_make_no_session_or_project() {
+    let h = H::new();
+    let projects = project_count(&h);
+    let path = h.put(
+        &format!(".claude/projects/x/{CLAUDE_SID}.jsonl"),
+        claude_print_run(&h).as_bytes(),
+    );
+    h.pass();
+    let none = |h: &H| {
+        h.store
+            .session_by_agent_id("claude", CLAUDE_SID)
+            .unwrap()
+            .is_none()
+    };
+    assert!(none(&h));
+    assert_eq!(project_count(&h), projects, "no project for a scripted run");
+    // More scripted turns (`claude -p --resume`): still nothing.
+    append(
+        &path,
+        claude_line_from(&h, "p2", "next tick", "sdk-cli").as_bytes(),
+    );
+    h.pass();
+    assert!(none(&h));
+
+    // Resumed interactively: the whole transcript becomes a session, the
+    // part read while it looked scripted included.
+    append(
+        &path,
+        claude_line_from(&h, "i1", "take a look yourself", "cli").as_bytes(),
+    );
+    h.pass();
+    h.pass();
+    let s = h.session("claude", CLAUDE_SID);
+    let texts: Vec<String> = h.events(&s).into_iter().map(|e| e.text).collect();
+    assert_eq!(texts.len(), 11, "{texts:?}");
+    assert!(texts[0].starts_with("Add a greeting helper"), "{texts:?}");
+    assert_eq!(texts.last().unwrap(), "take a look yourself");
+}
+
+#[test]
+fn interactive_claude_sessions_scripted_later_are_kept() {
+    let h = H::new();
+    let path = put_claude(&h);
+    h.pass();
+    let s = h.session("claude", CLAUDE_SID);
+    assert_eq!(h.events(&s).len(), 9);
+    append(
+        &path,
+        claude_line_from(&h, "p1", "scripted follow-up", "sdk-cli").as_bytes(),
+    );
+    h.pass();
+    let again = h.session("claude", CLAUDE_SID);
+    assert_eq!(again.id, s.id);
+    assert_eq!(h.events(&again).len(), 10);
+    // Its interactive subagent is a session too.
+    h.session("claude", &format!("{CLAUDE_SID}:agent-a1"));
+}
+
+#[test]
+fn headless_runs_blirp_launched_or_hook_created() {
+    let h = H::new();
+    let machine = h.store.machine_id().unwrap().unwrap();
+    let project = h.store.resolve_project("m", "box", &h.cwd).unwrap().project;
+    let row = |id: &str, asid: &str, origin: SessionOrigin| Session {
+        id: id.into(),
+        project_id: project.id.clone(),
+        machine_id: machine.clone(),
+        agent: "claude".into(),
+        agent_session_id: Some(asid.into()),
+        origin,
+        cwd: h.cwd.display().to_string(),
+        title: None,
+        status: SessionStatus::Idle,
+        branch: None,
+        worktree: None,
+        transcript_path: None,
+        started_at: 1_767_261_590_000,
+        ended_at: None,
+        last_activity_at: 1_767_261_590_000,
+        exit_code: None,
+        summary: None,
+        distilled_through_seq: 0,
+        tokens_in: 0,
+        tokens_out: 0,
+        cost_usd: 0.0,
+        parent_session_id: None,
+        stopped_by_user: false,
+        title_updated_at: 0,
+        project_updated_at: 0,
+    };
+    // A blirp launch whose transcript says headless keeps its session.
+    h.store
+        .insert_session(&row("launched", CLAUDE_SID, SessionOrigin::Blirp))
+        .unwrap();
+    h.put(
+        &format!(".claude/projects/x/{CLAUDE_SID}.jsonl"),
+        claude_print_run(&h).as_bytes(),
+    );
+    // A row a global hook created for another scripted run is dropped once
+    // its transcript is read.
+    let other = "77777777-7777-4777-8777-777777777777";
+    h.store
+        .insert_session(&row("hooked", other, SessionOrigin::External))
+        .unwrap();
+    h.put(
+        &format!(".claude/projects/x/{other}.jsonl"),
+        claude_print_run(&h).replace(CLAUDE_SID, other).as_bytes(),
+    );
+    h.pass();
+    let s = h.session("claude", CLAUDE_SID);
+    assert_eq!(s.id, "launched");
+    assert_eq!(h.events(&s).len(), 9);
+    assert!(h.store.get_session("hooked").unwrap().is_none());
+    assert!(
+        h.store
+            .session_by_agent_id("claude", other)
+            .unwrap()
+            .is_none()
+    );
+    // Later hooks of that run find it known headless and create no row.
+    let key = |asid: &str| {
+        h.home
+            .join(".claude")
+            .join("projects")
+            .join("x")
+            .join(format!("{asid}.jsonl"))
+            .to_string_lossy()
+            .into_owned()
+    };
+    assert!(blirp::ingest::known_headless(
+        &h.store,
+        "claude",
+        &key(other)
+    ));
+    put_claude(&h);
+    h.pass();
+    let interactive = h
+        .home
+        .join(".claude")
+        .join("projects")
+        .join("C--work-proj")
+        .join(format!("{CLAUDE_SID}.jsonl"));
+    assert!(!blirp::ingest::known_headless(
+        &h.store,
+        "claude",
+        &interactive.to_string_lossy()
+    ));
+    assert!(!blirp::ingest::known_headless(
+        &h.store,
+        "claude",
+        "never read"
+    ));
+}
+
+#[test]
+fn codex_exec_runs_make_no_session() {
+    let h = H::new();
+    let projects = project_count(&h);
+    let exec = h
+        .fill(&fixture("codex/rollout.jsonl"))
+        .replace(
+            r#""originator":"codex_cli_rs""#,
+            r#""originator":"codex_exec""#,
+        )
+        .replace(r#""source":"cli""#, r#""source":"exec""#);
+    assert!(exec.contains(r#""source":"exec""#));
+    h.put(
+        &format!(".codex/sessions/2026/01/02/rollout-2026-01-02T09-00-00-{CODEX_SID}.jsonl"),
+        exec.as_bytes(),
+    );
+    h.pass();
+    assert!(
+        h.store
+            .session_by_agent_id("codex", CODEX_SID)
+            .unwrap()
+            .is_none()
+    );
+    assert_eq!(project_count(&h), projects);
+}
