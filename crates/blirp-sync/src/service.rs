@@ -6,7 +6,8 @@ use crate::proxy::{self, ProxyOpen, ProxyPrincipal, ProxyReply, ProxyStream};
 use crate::repl::Presence;
 use crate::wire::{MAX_CONTROL_FRAME, read_frame, write_frame};
 use crate::{
-    ALPN_PAIR, ALPN_PROXY, ALPN_SYNC, HUB_MARKER, MDNS_SERVICE, Result, SyncError, blocking, repl,
+    ALPN_FILES, ALPN_PAIR, ALPN_PROXY, ALPN_SYNC, HUB_MARKER, MDNS_SERVICE, Result, SyncError,
+    blocking, repl,
 };
 use blirp_core::model::{Device, DeviceKind, Machine, MachineRole};
 use blirp_core::store::{Change, Store};
@@ -64,6 +65,9 @@ pub struct StartOptions {
     pub role: Role,
     pub proxy: ProxyServe,
     pub on_status: StatusHook,
+    /// Hub: the project file service (`blirp/files/1`); None turns the
+    /// protocol off.
+    pub files: Option<Arc<crate::files::HubFiles>>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -123,6 +127,7 @@ struct Inner {
     proxy: ProxyServe,
     on_status: StatusHook,
     shutdown: watch::Receiver<bool>,
+    files: Option<Arc<crate::files::HubFiles>>,
 }
 
 fn lock<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
@@ -148,7 +153,7 @@ impl std::fmt::Debug for SyncService {
 
 /// Bind an endpoint with this machine's identity, relay mode and, when
 /// `lan_discovery` is on, mDNS. Hubs mark themselves so nodes can find them.
-async fn bind(
+pub(crate) async fn bind(
     secret: &SecretKey,
     relay: &str,
     lan_discovery: bool,
@@ -223,7 +228,11 @@ impl SyncService {
     pub async fn start(opts: StartOptions) -> Result<SyncService> {
         let hub = matches!(opts.role, Role::Hub);
         let alpns = if hub {
-            vec![ALPN_PAIR.to_vec(), ALPN_SYNC.to_vec(), ALPN_PROXY.to_vec()]
+            let mut a = vec![ALPN_PAIR.to_vec(), ALPN_SYNC.to_vec(), ALPN_PROXY.to_vec()];
+            if opts.files.is_some() {
+                a.push(ALPN_FILES.to_vec());
+            }
+            a
         } else {
             vec![ALPN_PROXY.to_vec()]
         };
@@ -283,6 +292,7 @@ impl SyncService {
             proxy: opts.proxy,
             on_status: opts.on_status,
             shutdown,
+            files: opts.files,
         });
         let mut tasks = vec![tokio::spawn(accept_loop(inner.clone()))];
         if hub {
@@ -424,6 +434,16 @@ impl SyncService {
             },
         )
         .await
+    }
+
+    /// Node: a new connection to the hub for `blirp/files/1`.
+    pub async fn connect_files(&self) -> Result<Connection> {
+        match &self.inner.role {
+            Role::Node { hub } => connect(&self.inner.ep, hub, ALPN_FILES).await,
+            Role::Hub => Err(SyncError::Unavailable(
+                "the hub serves project files itself".into(),
+            )),
+        }
     }
 
     /// Node: leave the hub. Stops syncing, pushes what is still queued
@@ -634,6 +654,32 @@ async fn handle_incoming(inner: &Arc<Inner>, incoming: Incoming) -> Result<()> {
                 }
             }
             let result = serve_proxy_conn(inner, &conn, &remote).await;
+            forget_conn(inner, &remote, &conn);
+            result
+        }
+        (ALPN_FILES, Role::Hub) => {
+            let Some(files) = inner.files.clone() else {
+                close(&conn, CLOSE_FORBIDDEN, b"forbidden");
+                return Ok(());
+            };
+            if !authorized(inner, &remote).await? {
+                close(&conn, CLOSE_FORBIDDEN, b"revoked or unknown machine");
+                return Ok(());
+            }
+            // Tracked with the machine's other connections, so revoking it
+            // closes this one too.
+            lock(&inner.peers)
+                .entry(remote.clone())
+                .or_default()
+                .conns
+                .push(conn.clone());
+            let store = inner.store.clone();
+            let id = remote.clone();
+            let name = blocking(move || Ok(store.get_machine(&id)?.map(|m| m.name)))
+                .await?
+                .unwrap_or_else(|| "machine".to_string());
+            let result =
+                crate::files::server::serve(conn.clone(), files, remote.clone(), name).await;
             forget_conn(inner, &remote, &conn);
             result
         }

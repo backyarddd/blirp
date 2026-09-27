@@ -22,6 +22,8 @@ pub const ALPN_PAIR: &[u8] = b"blirp/pair/1";
 pub const ALPN_SYNC: &[u8] = b"blirp/sync/1";
 /// ALPN of the API/terminal proxy.
 pub const ALPN_PROXY: &[u8] = b"blirp/proxy/1";
+/// ALPN of project file sync (hub only).
+pub const ALPN_FILES: &[u8] = b"blirp/files/1";
 
 /// Versions of the in-band message formats this build speaks. Each protocol
 /// opens with a hello carrying the versions of the sender; the receiver

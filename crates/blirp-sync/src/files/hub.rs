@@ -196,6 +196,11 @@ impl HubFiles {
         Ok(self.blobs.append(hash, offset, raw)?)
     }
 
+    /// Drop a partial upload (the sender broke the protocol).
+    pub fn abort_put(&self, hash: &str) {
+        self.blobs.discard_part(hash);
+    }
+
     /// The part of `hash` holds `len` bytes: verify and store it.
     pub fn finish_put(&self, hash: &str, len: u64) -> Result<(), HubError> {
         let stored = self.blobs.finish(hash, len)?;

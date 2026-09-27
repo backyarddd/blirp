@@ -254,6 +254,7 @@ async fn start_service(state: &SharedState) -> ApiResult<()> {
         role,
         proxy,
         on_status,
+        files: None,
     })
     .await
     .map_err(|e| sync_error("starting sync", e))?;
