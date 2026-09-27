@@ -1,4 +1,4 @@
-import { describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import type { SessionStatus } from './api/types.gen';
 import { notifyDecision, readNotifyPrefs, type NotifyPrefs } from './notify';
 
@@ -42,7 +42,17 @@ describe('notifyDecision', () => {
 });
 
 describe('readNotifyPrefs', () => {
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
   it('defaults to on for every event with sound off when nothing is stored', () => {
     expect(readNotifyPrefs()).toEqual(PREFS);
+  });
+
+  it('keeps an earlier explicit "off" and reads the other choices', () => {
+    const stored: Record<string, string> = { 'blirp.notify': 'off', 'blirp.notify.failed': 'off', 'blirp.notify.sound': 'on' };
+    vi.stubGlobal('localStorage', { getItem: (k: string) => stored[k] ?? null });
+    expect(readNotifyPrefs()).toEqual({ enabled: false, events: { waiting: true, completed: true, failed: false }, sound: true });
   });
 });

@@ -193,7 +193,8 @@ export function playChime(): void {
 // ---------------------------------------------------------------- title and favicon badge
 
 let baseTitle: string | null = null;
-const iconHrefs = new Map<HTMLLinkElement, string>();
+/** Original href and type of each icon link, restored when the count drops to 0. */
+const icons = new Map<HTMLLinkElement, { href: string; type: string }>();
 let dotted: string | null = null;
 
 /** "(n) blirp" and a dot on the favicon while n sessions want attention; restores both at 0. */
@@ -201,16 +202,26 @@ export function setBadge(n: number): void {
   baseTitle ??= document.title;
   document.title = n > 0 ? `(${n}) ${baseTitle}` : baseTitle;
   const links = [...document.querySelectorAll<HTMLLinkElement>('link[rel="icon"]')];
-  for (const l of links) if (!iconHrefs.has(l)) iconHrefs.set(l, l.href);
+  for (const l of links) if (!icons.has(l)) icons.set(l, { href: l.href, type: l.type });
   if (n === 0) {
-    for (const [l, href] of iconHrefs) l.href = href;
+    for (const [l, orig] of icons) {
+      l.type = orig.type;
+      l.href = orig.href;
+    }
     return;
   }
+  // The dotted icon is a PNG; the SVG link must say so too or browsers skip it.
+  const showDot = (url: string): void => {
+    for (const l of links) {
+      l.type = 'image/png';
+      l.href = url;
+    }
+  };
   if (dotted) {
-    for (const l of links) l.href = dotted;
+    showDot(dotted);
     return;
   }
-  const png = links.find((l) => l.type === 'image/png') ?? links[0];
+  const png = links.find((l) => icons.get(l)?.type === 'image/png') ?? links[0];
   if (!png) return;
   const img = new Image();
   img.onload = () => {
@@ -228,7 +239,7 @@ export function setBadge(n: number): void {
     g.stroke();
     dotted = c.toDataURL('image/png');
     // Still wanted: the count may have dropped to 0 while the image loaded.
-    if (document.title !== baseTitle) for (const l of links) l.href = dotted;
+    if (document.title !== baseTitle) showDot(dotted);
   };
-  img.src = iconHrefs.get(png) ?? png.href;
+  img.src = icons.get(png)?.href ?? png.href;
 }
