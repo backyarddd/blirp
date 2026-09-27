@@ -101,6 +101,9 @@ pub struct Joined {
 struct Peer {
     conns: Vec<Connection>,
     proxy: Option<Connection>,
+    /// `blirp/files/1` connections: closed with the others on revocation,
+    /// but not what makes a machine online (its sync session does).
+    files: Vec<Connection>,
 }
 
 struct Inner {
@@ -486,7 +489,7 @@ impl SyncService {
         self.stop_tasks().await;
         let conns: Vec<Connection> = lock(&self.inner.peers)
             .drain()
-            .flat_map(|(_, p)| p.conns.into_iter().chain(p.proxy))
+            .flat_map(|(_, p)| p.conns.into_iter().chain(p.proxy).chain(p.files))
             .chain(lock(&self.inner.hub_proxy).take())
             .collect();
         for c in conns {
@@ -671,7 +674,7 @@ async fn handle_incoming(inner: &Arc<Inner>, incoming: Incoming) -> Result<()> {
             lock(&inner.peers)
                 .entry(remote.clone())
                 .or_default()
-                .conns
+                .files
                 .push(conn.clone());
             let store = inner.store.clone();
             let id = remote.clone();
@@ -696,7 +699,12 @@ async fn handle_incoming(inner: &Arc<Inner>, incoming: Incoming) -> Result<()> {
 /// Hub: close every live connection of a revoked machine.
 fn close_peer(inner: &Inner, node_id: &str) {
     if let Some(peer) = lock(&inner.peers).remove(node_id) {
-        for c in peer.conns.iter().chain(peer.proxy.iter()) {
+        for c in peer
+            .conns
+            .iter()
+            .chain(peer.proxy.iter())
+            .chain(peer.files.iter())
+        {
             close(c, CLOSE_FORBIDDEN, b"revoked");
         }
         tracing::info!(node = %node_id, "closed connections of revoked machine");
@@ -707,13 +715,14 @@ fn forget_conn(inner: &Inner, remote: &str, conn: &Connection) {
     let mut peers = lock(&inner.peers);
     if let Some(p) = peers.get_mut(remote) {
         p.conns.retain(|c| c.stable_id() != conn.stable_id());
+        p.files.retain(|c| c.stable_id() != conn.stable_id());
         if p.proxy
             .as_ref()
             .is_some_and(|c| c.stable_id() == conn.stable_id())
         {
             p.proxy = None;
         }
-        if p.conns.is_empty() && p.proxy.is_none() {
+        if p.conns.is_empty() && p.proxy.is_none() && p.files.is_empty() {
             peers.remove(remote);
         }
     }
