@@ -703,8 +703,11 @@ test('mobile width (390px) keeps sessions and project pages inside the viewport'
 });
 
 test('health reports full capabilities to the local client', async () => {
-  const health = await apiCall<{ capabilities: { admin: boolean; control_terminals: boolean; local: boolean } }>('GET', '/api/health');
-  expect(health.capabilities).toEqual({ admin: true, control_terminals: true, local: true });
+  const health = await apiCall<{ capabilities: { admin: boolean; control_terminals: boolean; local: boolean; files: boolean } }>(
+    'GET',
+    '/api/health',
+  );
+  expect(health.capabilities).toEqual({ admin: true, control_terminals: true, local: true, files: true });
 });
 
 test('deletes an ended session here, and follows a delete made by another client', async () => {
