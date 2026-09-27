@@ -49,7 +49,7 @@ blirp skills list
 ```
 
 - `blirp status` shows the new version. If the daemon is not running, `blirp start`, then `blirp logs -n 100` if it fails.
-- If `blirp skills list` shows `outdated` skills, run `blirp skills install` to refresh them (skills the user edited are left alone).
+- The update refreshes installed, unedited blirp skills itself and prints `Refreshed skill ...` for each. If `blirp skills list` still shows `outdated` or `not_installed` skills, `blirp skills install` fixes that (skills the user edited are left alone).
 
 ## Several machines
 

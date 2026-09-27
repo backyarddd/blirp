@@ -44,7 +44,7 @@ Aider and DeepSeek Harness have no documented skill folder; they can still run `
 - A skill you edited (`modified`) or a skill of the same name blirp did not write (`not_ours`) is never overwritten. `install` reports it as `skipped` and exits 1; `install --force` replaces it after copying the old file once to `SKILL.md.blirp-backup`.
 - `uninstall` removes only folders with a `.blirp-skill` whose hash still matches, including skills an older version installed and this one no longer ships. Edited skills stay (`kept_modified`), as do all other skills and files; a folder is removed only when nothing else is left in it.
 - `blirp uninstall` runs `blirp skills uninstall` for your home folders. Skills installed with `--project` stay in that project.
-- After `blirp update`, `blirp skills list` and `blirp doctor` show `outdated` until you run `blirp skills install` again (the `blirp-update` skill tells the agent to do so).
+- After a successful `blirp update`, the new binary refreshes the `outdated` skills in your home folders and prints each one it refreshed; edited and foreign skills are left alone, and a failed refresh does not fail the update. Skills installed with `--project`, and skills added by the new version, need `blirp skills install`.
 
 ## No admin tools over MCP
 

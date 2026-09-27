@@ -156,6 +156,7 @@ pub async fn update(
         )));
     }
     println!("Updated blirp {current} -> {target}");
+    super::skills::refresh_after_update(&inst.dir.join(install::CLI_FILES[0]));
     restarted?;
     Ok(ExitCode::SUCCESS)
 }

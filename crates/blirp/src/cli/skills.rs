@@ -66,6 +66,10 @@ pub enum SkillsCommand {
         #[arg(long, value_name = "DIR")]
         project: Option<PathBuf>,
     },
+    /// Refresh installed, unedited blirp skills in your home folders to
+    /// this version's text (run by `blirp update` with the new binary).
+    #[command(hide = true)]
+    Refresh,
     /// Show which blirp skills are installed where.
     List {
         #[arg(long)]
@@ -277,6 +281,42 @@ pub fn uninstall_dir(dir: &Path) -> anyhow::Result<Vec<(String, &'static str)>> 
     Ok(out)
 }
 
+/// Rewrite the `outdated` skills in `dir` (blirp's, unedited, another
+/// version's text) with this version's; nothing else is touched.
+pub fn refresh_dir(dir: &Path) -> Vec<(&'static str, anyhow::Result<&'static str>)> {
+    SKILLS
+        .iter()
+        .filter_map(|s| match state(dir, s) {
+            Ok(State::Outdated) => Some((s.name, install_one(dir, s, false))),
+            Ok(_) => None,
+            Err(e) => Some((s.name, Err(e))),
+        })
+        .collect()
+}
+
+/// After `blirp update` replaced the binary: let the new `exe` refresh the
+/// skills to its own texts. Never fails the update; problems are printed.
+pub fn refresh_after_update(exe: &Path) {
+    match blirp_core::process::command(exe)
+        .args(["skills", "refresh"])
+        .stdin(std::process::Stdio::null())
+        .output()
+    {
+        Ok(out) => {
+            print!("{}", String::from_utf8_lossy(&out.stdout));
+            eprint!("{}", String::from_utf8_lossy(&out.stderr));
+            if !out.status.success() {
+                eprintln!(
+                    "blirp: some skills were not refreshed; run `blirp skills install` to retry"
+                );
+            }
+        }
+        Err(e) => {
+            eprintln!("blirp: skills were not refreshed ({e}); run `blirp skills install` to retry")
+        }
+    }
+}
+
 /// One line for `blirp doctor`: the state counts of `t`.
 pub fn summary(t: &Target) -> String {
     let mut counts: Vec<(State, usize)> = Vec::new();
@@ -399,6 +439,19 @@ pub fn run(cmd: SkillsCommand) -> anyhow::Result<ExitCode> {
                     Err(e) => {
                         failed = true;
                         eprintln!("{:<7} error: {e:#}", t.label);
+                    }
+                }
+            }
+        }
+        SkillsCommand::Refresh => {
+            for t in home_targets()? {
+                for (name, r) in refresh_dir(&t.dir) {
+                    match r {
+                        Ok(_) => println!("Refreshed skill {name} in {}", t.dir.display()),
+                        Err(e) => {
+                            failed = true;
+                            eprintln!("skill {name} in {}: {e:#}", t.dir.display());
+                        }
                     }
                 }
             }
@@ -544,6 +597,44 @@ mod tests {
             ]
         );
         assert!(!dir.join("blirp-retired").exists());
+    }
+
+    #[test]
+    fn refresh_touches_only_outdated_skills() {
+        let d = tempfile::tempdir().unwrap();
+        let dir = d.path();
+        let write = |name: &str, text: &str, marker: Option<&str>| {
+            std::fs::create_dir_all(dir.join(name)).unwrap();
+            std::fs::write(dir.join(name).join(SKILL_FILE), text).unwrap();
+            if let Some(m) = marker {
+                std::fs::write(
+                    dir.join(name).join(MARKER),
+                    digest(m.as_bytes())
+                        + "
+",
+                )
+                .unwrap();
+            }
+        };
+        write(SKILLS[0].name, "old", Some("old")); // outdated
+        write(SKILLS[1].name, "edited", Some("old")); // modified
+        write(SKILLS[2].name, "theirs", None); // not ours
+        // SKILLS[3] not installed; SKILLS[4] current.
+        install_one(dir, &SKILLS[4], false).unwrap();
+
+        let done = refresh_dir(dir);
+        assert_eq!(done.len(), 1);
+        assert_eq!(done[0].0, SKILLS[0].name);
+        assert_eq!(*done[0].1.as_ref().unwrap(), "updated");
+        assert_eq!(state(dir, &SKILLS[0]).unwrap(), State::Installed);
+        assert_eq!(state(dir, &SKILLS[1]).unwrap(), State::Modified);
+        assert_eq!(state(dir, &SKILLS[2]).unwrap(), State::NotOurs);
+        assert_eq!(state(dir, &SKILLS[3]).unwrap(), State::NotInstalled);
+        assert!(refresh_dir(dir).is_empty());
+        assert!(refresh_dir(&dir.join("missing")).is_empty());
+        // A binary that cannot run must not panic or fail the update.
+        refresh_after_update(&dir.join("no-such-blirp"));
+        assert!(super::super::Cli::try_parse_from(["blirp", "skills", "refresh"]).is_ok());
     }
 
     #[test]

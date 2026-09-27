@@ -24,8 +24,9 @@ so every tag needs one.
   updating, memory, sessions) into `~/.claude/skills` and
   `~/.agents/skills` (Claude Code, Codex, Gemini CLI, opencode, Cursor,
   Amp, pi), or a project with `--project`. Skills you edited are never
-  overwritten without `--force` nor removed; `blirp doctor` shows their
-  state and `blirp uninstall` removes them.
+  overwritten without `--force` nor removed; `blirp update` refreshes
+  unedited ones, `blirp doctor` shows their state and `blirp uninstall`
+  removes them.
 
 ### Fixed
 
