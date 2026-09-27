@@ -1940,7 +1940,28 @@ fn headless_runs_blirp_launched_or_hook_created() {
         &format!(".claude/projects/x/{other}.jsonl"),
         claude_print_run(&h).replace(CLAUDE_SID, other).as_bytes(),
     );
+    // A row that already has history is never dropped by a read (only the
+    // one-time cleanup, which reads the whole transcript, removes rows).
+    let kept = "88888888-8888-4888-8888-888888888888";
+    h.store
+        .insert_session(&row("history", kept, SessionOrigin::External))
+        .unwrap();
+    h.store
+        .insert_event(Event {
+            session_id: "history".into(),
+            seq: 0,
+            ts: 1,
+            kind: EventKind::User,
+            text: "earlier work".into(),
+            meta: None,
+        })
+        .unwrap();
+    h.put(
+        &format!(".claude/projects/x/{kept}.jsonl"),
+        claude_print_run(&h).replace(CLAUDE_SID, kept).as_bytes(),
+    );
     h.pass();
+    assert!(h.store.get_session("history").unwrap().is_some());
     let s = h.session("claude", CLAUDE_SID);
     assert_eq!(s.id, "launched");
     assert_eq!(h.events(&s).len(), 9);

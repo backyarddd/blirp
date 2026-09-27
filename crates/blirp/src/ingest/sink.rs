@@ -136,9 +136,11 @@ impl<'e> StoreSink<'e> {
             if p.meta.headless == Some(true)
                 && let Some(s) = &existing
                 && s.origin == SessionOrigin::External
+                && store.min_event_seq(&s.id)?.is_none()
             {
                 // A scripted run (§8) whose row a hook created before its
-                // transcript was read.
+                // transcript was read (a row with stored events is left to
+                // the one-time cleanup, which reads the whole transcript).
                 drops.push(s.id.clone());
                 self.excluded.insert(asid);
                 continue;
