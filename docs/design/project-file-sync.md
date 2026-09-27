@@ -56,7 +56,7 @@ Hub-sequenced versions with compare-and-set against a base version (single seque
 - Conflict: the second commit to arrive loses; the hub stores its content at `name.conflict-<machine-name>-<YYYYMMDD-HHMMSS>.ext` (machine name sanitized to `[A-Za-z0-9-]`); the loser's copy downloads the winner and writes its own content to the conflict path locally. Never silently overwrite. Conflict copies sync as normal files, max 10 per path; older ones stay in history.
 - Delete vs modify: modify wins, file restored. Tombstones kept 90 days.
 - Renames: delete + add in v1 (no bytes move; same hash). Pairing by hash is phase 2.
-- Case-insensitive targets (Windows, default macOS): case-only collisions are written as conflict copies. Windows-invalid names (`CON`, `aux.c`, trailing dot/space, `:<>|?*`) skipped and listed.
+- Case-insensitive targets (Windows, default macOS): of names that differ only in case, the one the copy already holds stays and the others are skipped and listed (they stay on the hub). Writing them as conflict copies was dropped: copies made on several machines collided by case again and multiplied. Windows-invalid names (`CON`, `aux.c`, trailing dot/space, `:<>|?*`) skipped and listed.
 - Metadata: executable bit and mtime only. Symlinks stored as links with target text; recreated on Unix, skipped with a notice on Windows; links leaving the root never followed.
 
 ## 5. Copies on other machines
@@ -104,7 +104,7 @@ New ALPN `blirp/files/1` accepted by the hub, own connection, same `authorized()
 | `Commit{root_id, manifest?, changes[<=1000]}` | `CommitResult{per path: Ok{version} \| Conflict{current_version, copy_path}}` | Apply |
 | `DeleteRoot{root_id}` | - | Remove hub copy |
 
-Commits reference only blobs the hub has (`missing_blob` otherwise); each batch is one SQLite transaction (backpressure). Resume: partial uploads at `files/tmp/<hash>.part`, length reported in `BlobAck`/`Missing`, sender continues from offset; downloads resume with `offset`.
+Commits reference only blobs the hub has (`missing_blob` otherwise); each batch is one SQLite transaction (backpressure). Index pages are ordered by version and the next page starts after the last version seen, so a path committed again between two pages can appear twice: the reader keeps the highest version per path. Every page carries the root's incarnation; a change between pages (the hub copy was deleted and made again) aborts the read (`root_replaced`). Resume: partial uploads at `files/tmp/<hash>.part`, length reported in `BlobAck`/`Missing`, sender continues from offset; downloads resume with `offset`.
 
 The file index lives in hub-only tables (`file_roots`, `file_entries`, `file_history`, `file_projects`) with a per-root sequence; not in `hub_log` (per-save churn would bloat it and reach every node).
 

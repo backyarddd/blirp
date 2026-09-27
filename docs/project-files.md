@@ -28,17 +28,17 @@ Checked in this order, a later layer winning over an earlier one:
 
 1. Always: `.git`, `.hg`, `.svn`, `.jj`, blirp's temp files, blirp's data folder.
 2. Build output and caches: `node_modules/`, `target/`, `dist/`, `build/`, `out/`, `.next/`, `.nuxt/`, `.svelte-kit/`, `.turbo/`, `.cache/`, `__pycache__/`, `.venv/`, `venv/`, `.tox/`, `.gradle/`, `.idea/`, `*.pyc`, `.DS_Store`, `Thumbs.db`, `*.o`, `*.obj`, `*.class`, `*.dll`, `*.so`, `*.dylib`, `*.iso`, `*.dmg`, `*.exe` (except under `bin/` of folders that are not git repos), `*.zip` over 10 MB.
-3. Your `.gitignore` files (and `.git/info/exclude`); a `!pattern` there brings back build output.
-4. Secrets: `.env` and `.env.*` (not `.env.example`, `.env.sample`, `.env.template`), `*.pem`, `*.key`, `*.p12`, `*.pfx`, `*.jks`, `*.keystore`, `*.kdbx`, `*.keychain*`, `id_rsa*`, `id_ed25519*`, `id_ecdsa*`, `.npmrc`, `.pypirc`, `.netrc`, `.git-credentials`, `.dockercfg`, `.docker/config.json`, `credentials.json`, `service-account*.json`, `*.tfstate*`, `.aws/`, `.ssh/`, `.gnupg/`, and any file under 1 MiB whose first 4 KiB contain a `-----BEGIN ... PRIVATE KEY-----` header. Secrets are left out, never redacted.
+3. Your `.gitignore` files, `.git/info/exclude` and your global gitignore (`core.excludesFile`); a `!pattern` there brings back build output.
+4. Secrets: `.env`, `.env.*` and `*.env` (not `.env.example`, `.env.sample`, `.env.template`), `.envrc`, `.pgpass`, `.kube/config`, `*.pem`, `*.key`, `*.p12`, `*.pfx`, `*.jks`, `*.keystore`, `*.kdbx`, `*.keychain*`, `id_rsa*`, `id_ed25519*`, `id_ecdsa*`, `.npmrc`, `.pypirc`, `.netrc`, `.git-credentials`, `.dockercfg`, `.docker/config.json`, `credentials.json`, `service-account*.json`, `*.tfstate*`, `.aws/`, `.ssh/`, `.gnupg/`, and any file under 1 MiB whose first 4 KiB contain a `-----BEGIN ... PRIVATE KEY-----` header. Secrets are left out, never redacted.
 5. `.blirpignore` files (gitignore syntax, in any folder): leave more out, or bring anything from 2-4 back with `!pattern`. A secret brought back this way is shown in red.
 
 **Preview** on the Files on hub tab is a dry run on your machine: how many files and bytes would upload and what is left out by reason (ignored, secrets, too large, cannot sync) with the first 50 paths of each.
 
 ## Turning it on and off
 
-- **This machine**: `[sync] project_files` (default on), or **Settings > Machines & Sync > Upload project folders to the hub**. Off is a hard opt-out: this machine never uploads, whatever a project's setting says. **Pause file sync** there stops all uploads from this machine until you resume.
+- **This machine**: `[sync] project_files` (default on), or **Settings > Machines & Sync > Upload project folders to the hub**. Off is a hard opt-out: this machine never uploads, whatever a project's setting says. **Pause file sync** there stops all uploads from this machine, and the automatic update of copies when a session starts, until you resume. While paused or off, **Bring changes here** and **Update from hub** still take the hub's changes but upload nothing first.
 - **Per project** (on the project's **Files on hub** tab): **Default** and **On** upload from every machine that has file sync on, **Off** stops uploads everywhere and keeps the hub copy readable. The choice is stored on the hub and applies to every machine.
-- **Many files disappear at once** (more than 50 and more than 30% of a folder's synced files in one pass, e.g. an emptied or swapped folder): nothing uploads from that folder and its tab says "N files disappeared". **Restore from hub** writes those files back (only while the folder exists), **Delete on hub too** confirms the delete; until you choose, the folder stays paused.
+- **Many files disappear at once** (every synced file of a folder that had more than one, or at least 10 files and more than 30% of them in one pass, e.g. an emptied or swapped folder): nothing uploads from that folder and its tab says "N files disappeared". **Restore from hub** writes those files back (only while the folder exists), **Delete on hub too** confirms the delete of exactly the files listed (anything that disappears later asks again); until you choose, the folder stays paused.
 - **First run**: after upgrading or pairing, uploads wait 10 minutes. A banner says how many folders and how much will go to which hub, with **Review exclusions**, **Upload now** and **Turn off**.
 - **Delete hub copy** (only while the project is Off, or its origin machine was revoked) removes the files and their history from the hub. Folders on your machines stay as they are; copies elsewhere stop syncing.
 
@@ -46,7 +46,8 @@ Checked in this order, a later layer winning over an earlier one:
 
 - **New session on a machine without the project's folder**: the dialog offers **Download from hub** (files, size, which machine, when updated; with several folders the most recently updated one). The copy goes to `~/blirp/<folder name>` (or a folder you pick that is empty or missing; folderless projects go to their workspace folder). For a git folder whose remote can be cloned there, blirp clones it, checks out the origin's HEAD (if it is on the remote; else its branch) and writes the hub's files on top, so uncommitted work comes along. Otherwise you get plain files without git history.
 - **Cloud sessions**: running on the hub, the dialog offers **Use hub copy (includes uncommitted changes)**, the same download on the hub. Edits the session makes sync back to the hub live.
-- A copy is that machine's folder of the same project. It uploads its own edits live and takes the hub's changes when a session starts in it and on **Update from hub**.
+- A copy is that machine's folder of the same project. It uploads its own edits live and takes the hub's changes when a session starts in it and on **Update from hub**. A download that could not write every file does not sync until **Update from hub** completes it.
+- If a hub copy is deleted and its origin uploads it again, copies of the old one on other machines stop syncing (their files stay); download a new copy.
 - On the origin, the tab shows **Hub has N newer files**; **Bring changes here** lists them and replaces only files you did not change since they last synced.
 
 ## Conflicts
@@ -55,7 +56,7 @@ Every change carries the version it was based on, and the hub accepts it only if
 
 - An edit beats a delete: the file comes back.
 - Bringing the hub's version into a file you changed writes the hub's version as a conflict copy next to yours; yours uploads.
-- Names Windows cannot hold (`CON`, `aux.c`, trailing dots, `:<>|?*`), symlinks on Windows and names that differ only in case on Windows or macOS are skipped on that machine (a case collision is written as a conflict copy) and never deleted on the hub because of it.
+- Names Windows cannot hold (`CON`, `aux.c`, trailing dots, `:<>|?*`), symlinks on Windows and names that differ only in case on Windows or macOS are skipped on that machine (the name it already holds stays; the other one stays on the hub) and never deleted on the hub because of it.
 
 The tab shows a **conflict copies** badge per folder.
 
@@ -67,7 +68,7 @@ The tab shows a **conflict copies** badge per folder.
 - A folder over `max_root_gb` (2) or 100 000 files is paused as too large: add a `.blirpignore`.
 - `hub_quota_gb` (0 = half of the hub's free disk when file sync first ran there): old versions are dropped first; then new uploads are refused (`hub_quota`) while existing copies stay readable.
 - `upload_kbps` (0 = unlimited) limits uploads; at most 4 transfers run at once. Interrupted transfers resume.
-- Replaced versions are kept `keep_versions_days` (30) days, deletions 90 days.
+- Replaced versions are kept `keep_versions_days` (30) days, deletions 90 days. A copy that was offline for longer than that and missed a delete keeps its file.
 
 ## Security and privacy
 

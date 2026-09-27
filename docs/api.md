@@ -114,8 +114,8 @@ See [project-files.md](project-files.md). Mutations need `control`.
 | `PUT /api/projects/:id/files-sync` | `{mode: default\|on\|off}`, stored on the hub; `ProjectFiles` |
 | `GET /api/projects/:id/files-sync/preview?root=` | `FilesPreview {root, state, never_synced, files, bytes, excluded[{reason, count, paths}], reincluded_secrets}`: a local dry run |
 | `GET /api/projects/:id/files-sync/incoming?root=` | `FilesIncoming {root, files[{path, action (update\|new\|delete\|conflict\|skip), by_machine_name, at}]}` |
-| `POST /api/projects/:id/files-sync/apply` | `{root}`: Update from hub (a copy) or Bring changes here (the origin); `AppliedFiles {written, deleted, conflicts, skipped, failed}` |
-| `POST /api/projects/:id/files-sync/held` | `{root, action: delete\|restore}`: after many files disappeared at once (state `held_deletes`), confirm the delete on the hub or restore them from it (only while the folder exists); `AppliedFiles` |
+| `POST /api/projects/:id/files-sync/apply` | `{root}`: Update from hub (a copy) or Bring changes here (the origin); local changes upload first only where uploads may run (machine switch, project mode, pause, grace period); on a download that did not finish, writes the hub's files and then lets the copy sync; `AppliedFiles {written, deleted, conflicts, skipped, failed}` |
+| `POST /api/projects/:id/files-sync/held` | `{root, action: delete\|restore}`: after many files disappeared at once (state `held_deletes`), confirm the delete on the hub (only the paths the folder shows as held; 409 `nothing_held` when there are none) or restore them from it (only while the folder exists); `AppliedFiles` |
 | `DELETE /api/projects/:id/files-sync/roots/:root_id` | Delete hub copy; 409 `files_on` unless the project is Off or its origin is revoked |
 | `POST /api/machines/:id/files/download` | `{root_id, parent?, name?}`: make a copy on that machine (forwarded like clone); 202 `DownloadJob`; 409 `already_exists`, `already_copied`, `origin_here` |
 | `GET /api/machines/:id/files/download/:job` | poll a `DownloadJob {state, dest, progress, error, note}` |
