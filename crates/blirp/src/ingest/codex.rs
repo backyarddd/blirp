@@ -65,6 +65,17 @@ fn is_rollout(p: &Path) -> bool {
     name.starts_with("rollout-") && (name.ends_with(".jsonl") || name.ends_with(".jsonl.zst"))
 }
 
+/// Whether rollout line `v` records a headless run: a `session_meta` whose
+/// `source` is `exec` (`codex exec`); the TUI says `cli`, the desktop app
+/// and IDE `vscode`, subagents an object. `None` for other lines.
+pub(crate) fn launch_of(v: &Value) -> Option<bool> {
+    (v.get("type").and_then(Value::as_str) == Some("session_meta"))
+        .then(|| v.pointer("/payload/source").and_then(Value::as_str) == Some("exec"))
+}
+
+/// Bytes every line [`launch_of`] answers for contains.
+pub(crate) const LAUNCH_NEEDLE: &[u8] = b"\"session_meta\"";
+
 /// Session id from `rollout-<date>-<uuid>.jsonl`, used until `session_meta`.
 fn id_from_name(p: &Path) -> Option<String> {
     let name = p.file_name()?.to_string_lossy();
@@ -191,10 +202,9 @@ impl Adapter for Codex {
                         meta.git_remote = Some(u.to_string());
                     }
                     let asid = st.asid.clone().unwrap_or_else(|| fallback.clone());
-                    // `codex exec` records `source: "exec"`; the TUI "cli",
-                    // the desktop app and IDE "vscode", subagents an object.
-                    let exec = p.get("source").and_then(Value::as_str) == Some("exec");
-                    launch.see(exec, sink, &asid);
+                    if let Some(headless) = launch_of(&v) {
+                        launch.see(headless, sink, &asid);
+                    }
                     super::report_cwd(sink, &asid, &meta, &mut reported);
                     return Ok(());
                 }

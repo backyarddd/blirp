@@ -64,6 +64,9 @@ so every tag needs one.
   created a session (and sometimes a project) per run, used up the distill
   budget and filled project memory. A scripted run resumed interactively
   still becomes a session, and sessions blirp launched are always kept.
+  On first start, sessions of such runs stored before are removed like a
+  user delete, with the records the distiller made from them (pinned or
+  edited ones stay) and projects that held nothing else.
 - A distill reply with keys outside the output contract is accepted (the
   extra keys are ignored) instead of failing and costing a retry.
 

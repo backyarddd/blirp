@@ -3,10 +3,21 @@
 //! rows still go through [`apply_in`], so every write lands in the outbox.
 
 use super::sessions::session_row;
-use super::{Change, Result, Store, all, apply_in, one};
-use crate::model::Session;
+use super::{BY_DISTILLER, Change, Result, Store, all, apply_in, one};
+use crate::model::{Session, SessionOrigin};
 use rusqlite::{Connection, Transaction, params};
 use serde_json::Value as JsonValue;
+use std::collections::HashSet;
+
+/// What [`Store::remove_headless_sessions`] removed.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct HeadlessCleanup {
+    /// Deleted sessions, ingested subagents included.
+    pub sessions: Vec<String>,
+    pub records: usize,
+    /// Projects deleted because nothing else was in them.
+    pub projects: Vec<String>,
+}
 
 fn by_agent_id(c: &Connection, agent: &str, agent_session_id: &str) -> Result<Option<Session>> {
     one(
@@ -119,6 +130,115 @@ impl Store {
                      AND s.transcript_path = ingest_cursors.source)",
                 params![machine_id, cwd],
             )?)
+        })
+    }
+
+    /// Ingested claude and codex sessions of `machine_id` with a transcript:
+    /// the rows that can be scripted runs (§8).
+    pub fn headless_candidates(&self, machine_id: &str) -> Result<Vec<Session>> {
+        self.read(|c| {
+            all(
+                c,
+                "SELECT * FROM sessions WHERE machine_id = ?1 AND origin = 'external'
+                   AND agent IN ('claude','codex') AND transcript_path IS NOT NULL",
+                params![machine_id],
+                session_row,
+            )
+        })
+    }
+
+    /// Remove sessions of scripted runs (§8) that ingest stored before it
+    /// skipped them, the way a user delete does (tombstones and outbox, so
+    /// every machine drops them): of `ids`, the rows still external sessions
+    /// of `machine_id`, with their ingested subagents; the records the
+    /// distiller made from them (unpinned, never edited by the user); and
+    /// projects ingest created only for them (untouched, §5, and every
+    /// session going). Their ingest cursors are dropped, so a transcript
+    /// that grows later is judged from its start again. Idempotent.
+    pub fn remove_headless_sessions(
+        &self,
+        machine_id: &str,
+        ids: &[String],
+    ) -> Result<HeadlessCleanup> {
+        self.write(|tx| {
+            let get = |id: &str| {
+                one(
+                    tx,
+                    "SELECT * FROM sessions WHERE id = ?1",
+                    params![id],
+                    session_row,
+                )
+            };
+            let mut doomed: Vec<Session> = Vec::new();
+            for id in ids {
+                if let Some(s) = get(id)?
+                    && s.machine_id == machine_id
+                    && s.origin == SessionOrigin::External
+                {
+                    doomed.push(s);
+                }
+            }
+            // Deleting a session deletes its ingested subagents too.
+            let mut children = Vec::new();
+            for s in &doomed {
+                children.extend(all(
+                    tx,
+                    "SELECT * FROM sessions WHERE parent_session_id = ?1 AND origin = 'external'",
+                    params![s.id],
+                    session_row,
+                )?);
+            }
+            doomed.extend(children);
+            let mut seen = HashSet::new();
+            doomed.retain(|s| seen.insert(s.id.clone()));
+            let gone: HashSet<&str> = doomed.iter().map(|s| s.id.as_str()).collect();
+
+            let mut out = HeadlessCleanup::default();
+            let mut projects = Vec::new();
+            for (p, _) in super::projects::untouched_projects(tx, machine_id)? {
+                let members: Vec<String> = all(
+                    tx,
+                    "SELECT id FROM sessions WHERE project_id = ?1",
+                    params![p.id],
+                    |r| r.get(0),
+                )?;
+                if members.iter().all(|id| gone.contains(id.as_str())) {
+                    projects.push(p);
+                }
+            }
+            for s in &doomed {
+                let records: Vec<String> = all(
+                    tx,
+                    "SELECT id FROM records WHERE source_session_id = ?1
+                       AND updated_by = ?2 AND pinned = 0",
+                    params![s.id, BY_DISTILLER],
+                    |r| r.get(0),
+                )?;
+                for id in records {
+                    apply_in(tx, &Change::DeleteRecord { id })?;
+                    out.records += 1;
+                }
+            }
+            for s in &doomed {
+                if get(&s.id)?.is_some() {
+                    apply_in(tx, &Change::DeleteSession { id: s.id.clone() })?;
+                }
+                if let Some(t) = &s.transcript_path {
+                    tx.execute(
+                        "DELETE FROM ingest_cursors WHERE adapter = ?1 AND source = ?2",
+                        params![s.agent, t],
+                    )?;
+                }
+                out.sessions.push(s.id.clone());
+            }
+            let now = crate::now_ms();
+            for mut p in projects {
+                p.deleted = true;
+                p.updated_at = now;
+                out.projects.push(p.id.clone());
+                apply_in(tx, &Change::Project(p))?;
+            }
+            Ok(out)
         })
     }
 

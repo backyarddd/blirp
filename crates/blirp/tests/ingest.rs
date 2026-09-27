@@ -2011,3 +2011,242 @@ fn codex_exec_runs_make_no_session() {
     );
     assert_eq!(project_count(&h), projects);
 }
+
+/// `fixture` with its placeholders filled for a transcript run in `dir`.
+fn fixture_in(name: &str, dir: &Path) -> String {
+    let json = serde_json::to_string(&dir.to_string_lossy()).unwrap();
+    fixture(name)
+        .replace("{{CWD}}", &json[1..json.len() - 1])
+        .replace("{{SECRET}}", "x")
+}
+
+/// Sessions of scripted runs stored by an earlier version are removed once,
+/// like a user delete, with the distiller's records from them and the
+/// projects ingest made only for them; nothing else is touched.
+#[test]
+fn ingested_headless_runs_are_removed_once() {
+    use blirp_core::model::{Record, RecordKind, RecordStatus};
+    use blirp_core::store::Change;
+
+    let h = H::new();
+    let machine = h.store.machine_id().unwrap().unwrap();
+    let folder = |name: &str| {
+        let d = h.root.join("work").join(name);
+        std::fs::create_dir_all(&d).unwrap();
+        std::fs::write(d.join("package.json"), "{}").unwrap();
+        dunce::canonicalize(d).unwrap()
+    };
+    let auto_project = |dir: &Path| {
+        h.store
+            .resolve_project_with(&machine, "test-box", dir, &NonProjectDirs::default())
+            .unwrap()
+            .project
+    };
+    let print = |dir: &Path| {
+        fixture_in("claude/session.jsonl", dir)
+            .replace(r#""entrypoint":"cli""#, r#""entrypoint":"sdk-cli""#)
+    };
+    let row = |id: &str, agent: &str, pid: &str, origin: SessionOrigin, t: Option<&Path>| {
+        let s = Session {
+            id: id.into(),
+            project_id: pid.into(),
+            machine_id: machine.clone(),
+            agent: agent.into(),
+            agent_session_id: Some(format!("asid-{id}")),
+            origin,
+            cwd: h.cwd.display().to_string(),
+            title: None,
+            status: SessionStatus::Completed,
+            branch: None,
+            worktree: None,
+            transcript_path: t.map(|t| t.display().to_string()),
+            started_at: 1_000,
+            ended_at: Some(2_000),
+            last_activity_at: 2_000,
+            exit_code: None,
+            summary: None,
+            distilled_through_seq: 0,
+            tokens_in: 0,
+            tokens_out: 0,
+            cost_usd: 0.0,
+            parent_session_id: None,
+            stopped_by_user: false,
+            title_updated_at: 0,
+            project_updated_at: 0,
+        };
+        h.store.insert_session(&s).unwrap();
+        s
+    };
+    let record = |id: &str, pid: &str, source: &str, by: &str, pinned: bool| {
+        let r = Record {
+            id: id.into(),
+            project_id: pid.into(),
+            kind: RecordKind::Decision,
+            title: format!("title {id}"),
+            body: String::new(),
+            status: RecordStatus::Active,
+            pinned,
+            source_session_id: Some(source.into()),
+            created_at: 1,
+            updated_at: 1,
+            updated_by: by.into(),
+        };
+        h.store.apply(Change::Record(r)).unwrap();
+    };
+
+    // An interactive project with a real session, a bot run filed into it,
+    // and a blirp launch whose transcript is scripted.
+    let proj = auto_project(&h.cwd);
+    let interactive = put_claude(&h);
+    row(
+        "human",
+        "claude",
+        &proj.id,
+        SessionOrigin::External,
+        Some(&interactive),
+    );
+    let bot_in_proj = h.put(".claude/projects/p/bot1.jsonl", print(&h.cwd).as_bytes());
+    row(
+        "bot1",
+        "claude",
+        &proj.id,
+        SessionOrigin::External,
+        Some(&bot_in_proj),
+    );
+    record("r-bot-distiller", &proj.id, "bot1", "distiller", false);
+    record("r-bot-user", &proj.id, "bot1", "user", false);
+    record("r-bot-pinned", &proj.id, "bot1", "distiller", true);
+    record("r-human", &proj.id, "human", "distiller", false);
+    row(
+        "launched",
+        "claude",
+        &proj.id,
+        SessionOrigin::Blirp,
+        Some(&bot_in_proj),
+    );
+
+    // A project ingest made only for bot runs (with a subagent and a
+    // codex exec run) is removed with them.
+    let bots_dir = folder("bots");
+    let bots = auto_project(&bots_dir);
+    let bot2 = h.put(".claude/projects/b/bot2.jsonl", print(&bots_dir).as_bytes());
+    row(
+        "bot2",
+        "claude",
+        &bots.id,
+        SessionOrigin::External,
+        Some(&bot2),
+    );
+    let mut sub = row(
+        "bot2-sub",
+        "claude",
+        &bots.id,
+        SessionOrigin::External,
+        None,
+    );
+    sub.parent_session_id = Some("bot2".into());
+    h.store.apply(Change::Session(sub)).unwrap();
+    let exec = h.put(
+        ".codex/sessions/2026/01/02/rollout-2026-01-02T09-00-00-exec.jsonl",
+        fixture_in("codex/rollout.jsonl", &bots_dir)
+            .replace(r#""source":"cli""#, r#""source":"exec""#)
+            .as_bytes(),
+    );
+    row(
+        "exec",
+        "codex",
+        &bots.id,
+        SessionOrigin::External,
+        Some(&exec),
+    );
+    record("r-bots", &bots.id, "bot2", "distiller", false);
+
+    // A project the user registered keeps existing without its bot run.
+    let mine_dir = folder("mine");
+    let mine = h.store.register_project(&machine, &mine_dir, None).unwrap();
+    let bot3 = h.put(".claude/projects/m/bot3.jsonl", print(&mine_dir).as_bytes());
+    row(
+        "bot3",
+        "claude",
+        &mine.id,
+        SessionOrigin::External,
+        Some(&bot3),
+    );
+    // A row whose transcript is gone cannot be judged and stays.
+    row(
+        "gone",
+        "claude",
+        &mine.id,
+        SessionOrigin::External,
+        Some(&h.home.join("missing.jsonl")),
+    );
+
+    let outbox = h.outbox_len();
+    h.engine.remove_headless();
+
+    let exists = |id: &str| h.store.get_session(id).unwrap().is_some();
+    for id in ["bot1", "bot2", "bot2-sub", "exec", "bot3"] {
+        assert!(!exists(id), "{id} removed");
+    }
+    for id in ["human", "launched", "gone"] {
+        assert!(exists(id), "{id} kept");
+    }
+    let records: Vec<String> = h
+        .store
+        .list_records(&proj.id, &blirp_core::store::RecordFilter::default())
+        .unwrap()
+        .into_iter()
+        .map(|r| r.id)
+        .collect();
+    let mut records = records;
+    records.sort();
+    assert_eq!(records, ["r-bot-pinned", "r-bot-user", "r-human"]);
+    assert!(h.store.get_project(&bots.id).unwrap().unwrap().deleted);
+    assert!(!h.store.get_project(&proj.id).unwrap().unwrap().deleted);
+    assert!(!h.store.get_project(&mine.id).unwrap().unwrap().deleted);
+    // Replicated like a user delete.
+    let deletes: Vec<_> = h
+        .store
+        .outbox_after(0, 1_000_000)
+        .unwrap()
+        .into_iter()
+        .skip(outbox)
+        .filter(|e| e.op == "delete")
+        .map(|e| (e.entity, e.key))
+        .collect();
+    for id in ["bot1", "bot2", "exec", "bot3"] {
+        assert!(
+            deletes.contains(&("sessions".into(), id.into())),
+            "{id}: {deletes:?}"
+        );
+    }
+    assert!(deletes.contains(&("records".into(), "r-bots".into())));
+
+    // Their transcripts are read again from the start and stay out.
+    h.pass();
+    h.pass();
+    for asid in ["bot1", "bot2", "bot3"] {
+        assert!(
+            h.store
+                .session_by_agent_id("claude", asid)
+                .unwrap()
+                .is_none(),
+            "{asid} came back"
+        );
+    }
+    // Idempotent, and it runs once.
+    let again = h
+        .store
+        .remove_headless_sessions(&machine, &["bot2".into(), "exec".into()])
+        .unwrap();
+    assert_eq!(again, blirp_core::store::HeadlessCleanup::default());
+    row(
+        "later",
+        "claude",
+        &mine.id,
+        SessionOrigin::External,
+        Some(&bot3),
+    );
+    h.engine.remove_headless();
+    assert!(exists("later"));
+}

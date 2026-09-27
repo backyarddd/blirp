@@ -260,7 +260,9 @@ pub struct Launches {
 
 impl Launches {
     /// State of a source read before launches were recorded: that read
-    /// stored its session, so it counts as interactive.
+    /// stored its session, so it counts as interactive (the one-time
+    /// cleanup, [`Engine::remove_headless`], judged those rows by their
+    /// whole transcript and dropped the cursors of the ones it removed).
     pub fn resume(stored: Option<Launches>, lines_read: u64) -> Launches {
         stored.unwrap_or(Launches {
             interactive: lines_read > 0,
@@ -306,6 +308,55 @@ impl Launches {
             self.reported = false;
         }
         reread
+    }
+}
+
+/// Ends a transcript scan early (see [`transcript_is_headless`]).
+#[derive(Debug)]
+struct Settled;
+
+impl std::fmt::Display for Settled {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("scan settled")
+    }
+}
+
+impl std::error::Error for Settled {}
+
+/// Whether the whole transcript at `path` of `agent` (claude or codex; other
+/// agents never record scripted runs) is a scripted run ([`Launches`]).
+/// Stops at the first interactive run.
+pub(crate) fn transcript_is_headless(agent: &str, path: &Path) -> Result<bool> {
+    type LaunchOf = fn(&JsonValue) -> Option<bool>;
+    let (needle, launch_of): (&[u8], LaunchOf) = match agent {
+        "claude" => (claude::LAUNCH_NEEDLE, claude::launch_of),
+        "codex" => (codex::LAUNCH_NEEDLE, codex::launch_of),
+        _ => return Ok(false),
+    };
+    let compressed = path.extension().is_some_and(|e| e == "zst");
+    let mut lines = jsonl::Lines::open(path, &jsonl::FilePos::default(), compressed)?;
+    let mut launches = Launches::default();
+    let res = lines.for_each(|_, raw| {
+        if !raw.windows(needle.len()).any(|w| w == needle) {
+            return Ok(());
+        }
+        match serde_json::from_slice(raw)
+            .ok()
+            .as_ref()
+            .and_then(launch_of)
+        {
+            Some(true) => launches.headless = true,
+            Some(false) => {
+                launches.interactive = true;
+                return Err(Settled.into());
+            }
+            None => {}
+        }
+        Ok(())
+    });
+    match res {
+        Err(e) if !e.is::<Settled>() => Err(e),
+        _ => Ok(launches.is_headless()),
     }
 }
 

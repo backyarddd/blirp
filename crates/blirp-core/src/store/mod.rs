@@ -22,7 +22,7 @@ pub use engine::{
 };
 pub use file_hub::{CommitInput, CommitOutcome, CommitRefused, IndexSlice, MAX_CONFLICT_COPIES};
 pub use files::{Base, CopyMode, FileCopy, REJECTED_DELETE};
-pub use ingest::IngestTx;
+pub use ingest::{HeadlessCleanup, IngestTx};
 pub use memory::RecordFilter;
 pub use migrations::MigrationError;
 pub use projects::{NonProjectDirs, ResolvedProject};

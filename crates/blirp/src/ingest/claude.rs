@@ -106,12 +106,17 @@ fn tool_result_output(block: &Value) -> String {
     }
 }
 
-/// `entrypoint` of a scripted run: `claude -p` (`sdk-cli`) and the Agent
-/// SDKs (`sdk-ts`, `sdk-py`). Interactive ones are `cli`, `claude-vscode`,
-/// `claude-desktop`, ...
-fn is_headless_entrypoint(ep: &str) -> bool {
-    ep.starts_with("sdk-")
+/// Whether transcript line `v` records a headless run, from its
+/// `entrypoint`: `sdk-cli` for `claude -p`, `sdk-ts`/`sdk-py` for the Agent
+/// SDKs; interactive ones are `cli`, `claude-vscode`, `claude-desktop`, ...
+/// `None` for a line without one.
+pub(crate) fn launch_of(v: &Value) -> Option<bool> {
+    let ep = v.get("entrypoint").and_then(Value::as_str)?;
+    Some(ep.starts_with("sdk-"))
 }
+
+/// Bytes every line [`launch_of`] answers for contains.
+pub(crate) const LAUNCH_NEEDLE: &[u8] = b"\"entrypoint\"";
 
 /// Plumbing a user line carries that is not something the user typed.
 fn is_system_text(s: &str) -> bool {
@@ -177,8 +182,8 @@ impl Adapter for Claude {
                     return Ok(());
                 }
             };
-            if let Some(ep) = v.get("entrypoint").and_then(Value::as_str) {
-                launch.see(is_headless_entrypoint(ep), sink, &asid);
+            if let Some(headless) = launch_of(&v) {
+                launch.see(headless, sink, &asid);
             }
             let mut e = Emit::line(sink, &asid, ix);
             line(&v, &mut e, &mut st, &mut meta)?;

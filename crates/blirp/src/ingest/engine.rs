@@ -66,6 +66,8 @@ pub struct Engine {
     known: Mutex<HashMap<usize, Vec<Source>>>,
     /// `retire_non_projects` ran (or had run before).
     retired: AtomicBool,
+    /// `remove_headless` ran (or had run before).
+    headless_removed: AtomicBool,
 }
 
 fn lock<T>(m: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
@@ -96,6 +98,7 @@ impl Engine {
             warned: Mutex::new(HashSet::new()),
             known: Mutex::new(HashMap::new()),
             retired: AtomicBool::new(false),
+            headless_removed: AtomicBool::new(false),
         }
     }
 
@@ -137,6 +140,7 @@ impl Engine {
 
     /// Run `work`; adapters run in parallel, sources within one sequentially.
     pub fn run(&self, work: &Work) -> HashMap<&'static str, PassStats> {
+        self.remove_headless();
         self.retire_non_projects();
         let mut ids: Vec<usize> = work.full.iter().chain(work.paths.keys()).copied().collect();
         ids.sort_unstable();
@@ -306,6 +310,95 @@ impl Engine {
         }
     }
 
+    /// This machine's role, or `None` (logged) when it cannot be read.
+    fn role(&self) -> Option<MachineRole> {
+        match self.store.get_machine(&self.machine.id) {
+            Ok(m) => Some(m.map_or(self.machine.role, |m| m.role)),
+            Err(e) => {
+                tracing::warn!(error = %e, "reading this machine's role failed");
+                None
+            }
+        }
+    }
+
+    /// One-time cleanup after upgrading to the rule that scripted runs are
+    /// no sessions (§8): ingested claude and codex sessions whose whole
+    /// transcript is a scripted run are deleted like a user delete, with the
+    /// distiller records made from them and the projects ingest created only
+    /// for them (`Store::remove_headless_sessions`). A row whose transcript
+    /// is gone or unreadable is kept. Runs at the start of an ingest pass,
+    /// and on a node only once a pull reached the hub's head, as
+    /// [`Engine::retire_non_projects`].
+    pub fn remove_headless(&self) {
+        const KEY: &str = "ingest.cleanup.headless";
+        if self.headless_removed.load(Ordering::Relaxed) {
+            return;
+        }
+        let Some(role) = self.role() else { return };
+        if role == MachineRole::Node && !self.store.pulled_to_head() {
+            return;
+        }
+        match self.store.get_setting(KEY) {
+            Ok(None) => {}
+            Ok(Some(_)) => {
+                self.headless_removed.store(true, Ordering::Relaxed);
+                return;
+            }
+            Err(e) => {
+                tracing::warn!(error = %e, "reading headless cleanup state failed");
+                return;
+            }
+        }
+        let candidates = match self.store.headless_candidates(&self.machine.id) {
+            Ok(c) => c,
+            Err(e) => {
+                tracing::warn!(error = %e, "listing sessions for the headless cleanup failed");
+                return;
+            }
+        };
+        let mut ids = Vec::new();
+        for s in candidates {
+            if self.stopping() {
+                return;
+            }
+            let Some(path) = &s.transcript_path else {
+                continue;
+            };
+            match super::transcript_is_headless(&s.agent, Path::new(path)) {
+                Ok(true) => ids.push(s.id),
+                Ok(false) => {}
+                Err(e) => {
+                    tracing::debug!(session = %s.id, error = %e, "transcript not readable; kept")
+                }
+            }
+        }
+        let res = self
+            .store
+            .remove_headless_sessions(&self.machine.id, &ids)
+            .and_then(|out| {
+                self.store.set_setting(KEY, &json!(blirp_core::now_ms()))?;
+                Ok(out)
+            });
+        match res {
+            Ok(out) => {
+                self.headless_removed.store(true, Ordering::Relaxed);
+                tracing::info!(
+                    sessions = out.sessions.len(),
+                    records = out.records,
+                    projects = out.projects.len(),
+                    "removed ingested scripted runs (claude -p, Agent SDK, codex exec)"
+                );
+                for id in out.sessions {
+                    self.notifier.deleted(id);
+                }
+                for p in &out.projects {
+                    self.notifier.project(p);
+                }
+            }
+            Err(e) => tracing::warn!(error = %e, "removing ingested scripted runs failed"),
+        }
+    }
+
     /// One-time cleanup after upgrading to the Chats rules (§5): projects
     /// earlier ingest created for folders that are no actual project
     /// (temp, tool, system or Codex chat folders, folders without git or a
@@ -322,13 +415,7 @@ impl Engine {
         if self.retired.load(Ordering::Relaxed) {
             return;
         }
-        let role = match self.store.get_machine(&self.machine.id) {
-            Ok(m) => m.map_or(self.machine.role, |m| m.role),
-            Err(e) => {
-                tracing::warn!(error = %e, "reading this machine's role failed");
-                return;
-            }
-        };
+        let Some(role) = self.role() else { return };
         if role == MachineRole::Node && !self.store.pulled_to_head() {
             return;
         }

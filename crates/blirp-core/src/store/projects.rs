@@ -1205,7 +1205,7 @@ impl Store {
 /// remote (another machine may have joined it by that remote), no wiki
 /// pages or resources, only unpinned distiller records and distiller brief
 /// versions.
-fn untouched_projects(
+pub(super) fn untouched_projects(
     c: &Connection,
     machine_id: &str,
 ) -> Result<Vec<(Project, Vec<ProjectPath>)>> {
