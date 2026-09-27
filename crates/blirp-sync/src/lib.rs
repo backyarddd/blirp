@@ -184,13 +184,13 @@ mod tests {
                 updated_at: 0,
                 deleted: false,
                 chats: false,
-                merged_into: None,
+                merged_into: Some(s()),
             }),
             Change::ProjectPath(ProjectPath {
                 project_id: s(),
                 machine_id: s(),
                 path: s(),
-                git_remote: None,
+                git_remote: Some(s()),
             }),
             Change::DeleteProjectPath {
                 machine_id: s(),
@@ -201,24 +201,24 @@ mod tests {
                 project_id: s(),
                 machine_id: s(),
                 agent: s(),
-                agent_session_id: None,
+                agent_session_id: Some(s()),
                 origin: SessionOrigin::Blirp,
                 cwd: s(),
-                title: None,
+                title: Some(s()),
                 status: SessionStatus::Idle,
-                branch: None,
-                worktree: None,
-                transcript_path: None,
+                branch: Some(s()),
+                worktree: Some(s()),
+                transcript_path: Some(s()),
                 started_at: 0,
-                ended_at: None,
+                ended_at: Some(0),
                 last_activity_at: 0,
-                exit_code: None,
-                summary: None,
+                exit_code: Some(0),
+                summary: Some(serde_json::json!({})),
                 distilled_through_seq: 0,
                 tokens_in: 0,
                 tokens_out: 0,
                 cost_usd: 0.0,
-                parent_session_id: None,
+                parent_session_id: Some(s()),
                 stopped_by_user: false,
             }),
             Change::DeleteSession { id: s() },
@@ -228,7 +228,7 @@ mod tests {
                 ts: 0,
                 kind: EventKind::User,
                 text: s(),
-                meta: None,
+                meta: Some(serde_json::json!({})),
             }),
             Change::Record(Record {
                 id: s(),
@@ -238,7 +238,7 @@ mod tests {
                 body: s(),
                 status: RecordStatus::Active,
                 pinned: false,
-                source_session_id: None,
+                source_session_id: Some(s()),
                 created_at: 0,
                 updated_at: 0,
                 updated_by: s(),
@@ -269,7 +269,7 @@ mod tests {
                 kind: ResourceKind::Link,
                 url: s(),
                 title: s(),
-                meta: None,
+                meta: Some(serde_json::json!({})),
                 created_at: 0,
                 updated_at: 0,
                 deleted: false,
@@ -279,13 +279,18 @@ mod tests {
 
     /// Tripwire for the rule on [`super::SYNC_VERSIONS`]: what replication
     /// carries, pinned to the sync version. Per `Change` variant the fields
-    /// of its payload as serialized, and per table a change writes
-    /// (`Change::describe`) its columns. Adding a variant, a field (even one
-    /// with a serde default) or a column of a replicated table fails this
-    /// test: bump the version (speaking only the new one), then update the
-    /// pinned text and the version here together.
+    /// of its payload as serialized (every optional field set); the
+    /// TypeScript declaration of every payload type and of every enum a
+    /// payload carries, which lists each field whether or not serde skips
+    /// it and each enum value (a new value breaks older peers' decoding);
+    /// and the columns of every table a change writes (`Change::describe`,
+    /// plus the brief history and the tombstones). Changing any of them
+    /// fails this test: bump the version (speaking only the new one), then
+    /// update the pinned text and the version here together.
     #[test]
     fn replicated_schema_is_pinned_to_the_sync_version() {
+        use blirp_core::model::*;
+        use ts_rs::TS;
         const PINNED: &str = "\
 machine (machines upsert): id name os role last_seen revoked
 delete_machine (machines delete): id
@@ -303,7 +308,43 @@ delete_record (records delete): id
 brief (briefs upsert): id project_id body_md version updated_at updated_by machine_id
 wiki_page (wiki_pages upsert): id project_id slug title body_md updated_at updated_by deleted
 resource (resources upsert): id project_id kind url title meta created_at updated_at deleted
+type Machine = { id: string, name: string, os: string, role: MachineRole, last_seen: bigint, \
+revoked: boolean, };
+type Project = { id: string, name: string, created_at: bigint, updated_at: bigint, \
+deleted: boolean, chats: boolean, merged_into: string | null, };
+type ProjectPath = { project_id: string, machine_id: string, path: string, \
+git_remote: string | null, };
+type Session = { id: string, project_id: string, machine_id: string, agent: string, \
+agent_session_id: string | null, origin: SessionOrigin, cwd: string, title: string | null, \
+status: SessionStatus, branch: string | null, worktree: string | null, \
+transcript_path: string | null, started_at: bigint, ended_at: bigint | null, \
+last_activity_at: bigint, exit_code: number | null, summary: JsonValue | null, \
+distilled_through_seq: bigint, tokens_in: bigint, tokens_out: bigint, cost_usd: number, \
+parent_session_id: string | null, stopped_by_user: boolean, };
+type Event = { session_id: string, seq: bigint, ts: bigint, kind: EventKind, text: string, \
+meta: JsonValue | null, };
+type Record = { id: string, project_id: string, kind: RecordKind, title: string, body: string, \
+status: RecordStatus, pinned: boolean, source_session_id: string | null, created_at: bigint, \
+updated_at: bigint, updated_by: string, };
+type Brief = { id: string, project_id: string, body_md: string, version: bigint, \
+updated_at: bigint, updated_by: string, machine_id: string, };
+type WikiPage = { id: string, project_id: string, slug: string, title: string, body_md: string, \
+updated_at: bigint, updated_by: string, deleted: boolean, };
+type Resource = { id: string, project_id: string, kind: ResourceKind, url: string, \
+title: string, meta: JsonValue | null, created_at: bigint, updated_at: bigint, deleted: boolean, };
+type MachineRole = \"standalone\" | \"node\" | \"hub\";
+type SessionOrigin = \"blirp\" | \"external\";
+type SessionStatus = \"starting\" | \"working\" | \"idle\" | \"waiting\" | \"completed\" | \
+\"failed\" | \"detached\";
+type EventKind = \"user\" | \"assistant\" | \"tool_call\" | \"tool_result\" | \"system\" | \
+\"file_edit\" | \"summary\";
+type RecordKind = \"decision\" | \"plan\" | \"note\" | \"open_thread\" | \"gotcha\";
+type RecordStatus = \"active\" | \"resolved\" | \"archived\";
+type ResourceKind = \"link\" | \"repo\" | \"pr\" | \"issue\" | \"doc\" | \"file\";
+table brief_history: id project_id body_md updated_at updated_by machine_id
 table briefs: project_id body_md version updated_at updated_by history_id machine_id
+table deleted_records: id deleted_at
+table deleted_sessions: id deleted_at
 table events: session_id seq ts kind text meta_json
 table machines: id name os role last_seen revoked
 table project_paths: project_id machine_id path git_remote
@@ -338,6 +379,40 @@ table wiki_pages: id project_id slug title body_md updated_at updated_by deleted
                 fields.join(" ")
             ));
         }
+        // Field docs are not the schema: drop `/** .. */`, one line each.
+        let bare = |mut decl: String| {
+            while let Some(start) = decl.find("/**") {
+                let end = decl[start..]
+                    .find("*/")
+                    .map_or(decl.len(), |e| start + e + 2);
+                decl.replace_range(start..end, "");
+            }
+            decl.split_whitespace().collect::<Vec<_>>().join(" ")
+        };
+        macro_rules! decls {
+            ($($t:ty),+ $(,)?) => {
+                $(schema.push_str(&format!("{}\n", bare(<$t as TS>::decl(&ts_rs::Config::new()))));)+
+            };
+        }
+        decls!(
+            Machine,
+            Project,
+            ProjectPath,
+            Session,
+            Event,
+            Record,
+            Brief,
+            WikiPage,
+            Resource,
+            MachineRole,
+            SessionOrigin,
+            SessionStatus,
+            EventKind,
+            RecordKind,
+            RecordStatus,
+            ResourceKind,
+        );
+        tables.extend(["brief_history", "deleted_sessions", "deleted_records"]);
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("blirp.db");
         drop(blirp_core::store::Store::open(&path).unwrap());

@@ -28,6 +28,7 @@ zstd.workspace = true
 [dev-dependencies]
 rusqlite.workspace = true
 tempfile.workspace = true
+ts-rs.workspace = true
 
 [lints]
 workspace = true
