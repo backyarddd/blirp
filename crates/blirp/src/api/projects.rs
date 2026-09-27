@@ -22,6 +22,12 @@ pub fn routes() -> Router<SharedState> {
         )
         .route("/api/projects/{id}/merge", post(merge))
         .route("/api/projects/{id}/folders/remove", post(remove_folder))
+        .route("/api/projects/chat-candidates", get(chat_candidates))
+        .route(
+            "/api/projects/chat-candidates/dismiss",
+            post(dismiss_chat_candidates),
+        )
+        .route("/api/projects/{id}/to-chats", post(to_chats))
         .route("/api/projects/{id}/memory", get(memory))
 }
 
@@ -168,6 +174,64 @@ async fn merge(
         project_id: summary.project.id.clone(),
     });
     Ok(Json(summary))
+}
+
+/// Local settings key: the user dismissed the chat candidates offer.
+const CANDIDATES_DISMISSED: &str = "projects.chat_candidates.dismissed";
+
+/// Projects earlier versions made for plain folders that look like chats
+/// (§5), offered once to move to Chats; empty once dismissed.
+async fn chat_candidates(State(s): State<SharedState>) -> ApiResult<Json<Vec<ProjectSummary>>> {
+    let st = s.clone();
+    Ok(Json(
+        blocking(move || {
+            if st.store.get_setting(CANDIDATES_DISMISSED)?.is_some() {
+                return Ok(Vec::new());
+            }
+            let dirs = blirp_core::store::NonProjectDirs::from_process()
+                .with_workspaces(&st.paths.workspaces_dir());
+            st.store
+                .chat_candidates(&st.machine.id, &dirs)?
+                .into_iter()
+                .map(|p| summary(&st, &p.id))
+                .collect()
+        })
+        .await?,
+    ))
+}
+
+async fn dismiss_chat_candidates(
+    State(s): State<SharedState>,
+    _: Control,
+) -> ApiResult<StatusCode> {
+    let store = s.store.clone();
+    blocking(move || {
+        Ok(store.set_setting(
+            CANDIDATES_DISMISSED,
+            &serde_json::json!(blirp_core::now_ms()),
+        )?)
+    })
+    .await?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+/// Move a whole project to Chats (the user confirmed): its sessions and
+/// records move, its folders and brief stay with the removed project.
+async fn to_chats(
+    State(s): State<SharedState>,
+    _: Control,
+    ApiPath(id): ApiPath<String>,
+) -> ApiResult<StatusCode> {
+    let st = s.clone();
+    let pid = id.clone();
+    blocking(move || {
+        Ok(st
+            .store
+            .move_project_to_chats(&pid, &st.machine.id, &st.machine.name)?)
+    })
+    .await?;
+    s.emit(ServerEvent::ProjectUpdated { project_id: id });
+    Ok(StatusCode::NO_CONTENT)
 }
 
 /// Unregister one of this machine's folders; the project stays, also with

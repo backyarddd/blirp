@@ -169,11 +169,7 @@ impl Store {
                 .workspace_of(&path)
         });
         if let Some((id, _)) = in_workspace {
-            return self.read(|c| match live_project_in(c, &id) {
-                Ok(p) => Ok(Some(p).filter(|p| !p.chats)),
-                Err(StoreError::NotFound(_)) => Ok(None),
-                Err(e) => Err(e),
-            });
+            return self.read(|c| super::projects::follow_merged(c, &id));
         }
         self.read(|c| {
             let paths = live_local_paths(c, machine_id)?;

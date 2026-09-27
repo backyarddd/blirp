@@ -1655,6 +1655,8 @@ async fn update_apply_needs_a_newer_release() {
         (409, Some("no_update"))
     );
     assert!(spawned.lock().unwrap().is_empty() && offline.lock().unwrap().is_empty());
+}
+
 // A project without folders: created with a name and brief, its sessions
 // start in this machine's blirp workspace, a folder picked for a session
 // joins it, removing that folder keeps the project, and a session moves to
@@ -1732,6 +1734,16 @@ async fn folderless_projects_start_in_their_workspace() {
         .await
         .status(),
         404
+    );
+
+    // Nothing here looks like a chat; the offer can be dismissed.
+    let offered: Vec<ProjectSummary> = h.get("/api/projects/chat-candidates").await;
+    assert!(offered.is_empty());
+    assert_eq!(
+        post("/api/projects/chat-candidates/dismiss".into(), json!({}))
+            .await
+            .status(),
+        204
     );
 
     // To Chats and back.

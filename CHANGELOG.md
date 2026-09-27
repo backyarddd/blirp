@@ -58,7 +58,9 @@ so every tag needs one.
   project folder (git, or a project file such as `package.json`,
   `Cargo.toml` or `.mcp.json`); a folder you pick in blirp still becomes one.
   Move a session into a project, a new project or back to Chats from its
-  toolbar (`POST /api/sessions/:id/move`).
+  toolbar (`POST /api/sessions/:id/move`). Projects of plain folders that
+  look like chats are offered once on the Projects page to move to Chats;
+  nothing moves without your confirmation.
 - Run the hub on a VPS: `install.sh --hub` installs the CLI and runs the new
   `blirp hub setup`, which installs the autostart service with systemd
   linger (so the hub survives logout and reboots), turns LAN discovery and
@@ -98,7 +100,8 @@ so every tag needs one.
   (`~/Documents/Codex/<date>/<chat>`). They are chats now, as are sessions
   in other folders that are no project. Projects created for them earlier are
   merged into Chats once, unless you renamed, used or edited them. The
-  machine's Home project becomes its Chats.
+  machine's Home project is merged into its Chats, unless you renamed it or
+  wrote memory for it; then it stays a project.
 - The Sessions list is ordered by most recent activity, with running
   sessions on top, instead of by start time, so a long session that is
   working now is not buried under newer finished ones. Another machine's

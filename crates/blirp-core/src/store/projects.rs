@@ -17,6 +17,7 @@ pub(super) fn project_row(r: &Row<'_>) -> rusqlite::Result<Project> {
         updated_at: r.get("updated_at")?,
         deleted: r.get("deleted")?,
         chats: r.get("chats")?,
+        merged_into: r.get("merged_into")?,
     })
 }
 
@@ -405,6 +406,7 @@ fn new_project(tx: &Transaction<'_>, name: &str, registered: bool) -> Result<Pro
         updated_at: now + i64::from(registered),
         deleted: false,
         chats: false,
+        merged_into: None,
     };
     apply_in(tx, &Change::Project(p.clone()))?;
     Ok(p)
@@ -555,7 +557,7 @@ impl Store {
         dirs: &NonProjectDirs,
     ) -> Result<ResolvedProject> {
         let cwd = canonical_dir(cwd)?;
-        if let Some(r) = self.resolve_workspace(machine_name, dirs, &cwd)? {
+        if let Some(r) = self.resolve_workspace(machine_id, machine_name, dirs, &cwd)? {
             return Ok(r);
         }
         let found =
@@ -613,7 +615,7 @@ impl Store {
             // roots and (auto) scratch folders are never project roots.
             if root.as_os_str().is_empty() || dirs.contains(&root) {
                 return Ok(ResolvedProject {
-                    project: home_project(tx, machine_name)?,
+                    project: home_project(tx, machine_id, machine_name)?,
                     root: cwd.clone(),
                     is_home: true,
                     created: false,
@@ -671,7 +673,7 @@ impl Store {
         }
         let spelled = lexical(cwd);
         let cwd = &normalize(cwd);
-        if let Some(r) = self.resolve_workspace(machine_name, dirs, cwd)? {
+        if let Some(r) = self.resolve_workspace(machine_id, machine_name, dirs, cwd)? {
             return Ok(r);
         }
         self.write(|tx| {
@@ -712,7 +714,7 @@ impl Store {
             // A gone folder cannot show it was a project (auto rules).
             if dirs.auto || dirs.contains(cwd) {
                 return Ok(ResolvedProject {
-                    project: home_project(tx, machine_name)?,
+                    project: home_project(tx, machine_id, machine_name)?,
                     root: cwd.to_path_buf(),
                     is_home: true,
                     created: false,
@@ -866,12 +868,17 @@ impl Store {
     }
 
     /// Move a session (with its ingested subagents and the records it
-    /// produced in its old project) into `into`, or into this machine's
-    /// Chats with `None`.
+    /// produced in its old project) into `into`, or with `None` (or a Chats
+    /// project) into the Chats of the session's machine. That bucket is
+    /// created only by its own machine: another machine's session moves to
+    /// Chats once that machine has one. Into Chats only the session's
+    /// unpinned distiller records move; records someone wrote or pinned stay
+    /// in the project.
     pub fn move_session(
         &self,
         session_id: &str,
         into: Option<&str>,
+        machine_id: &str,
         machine_name: &str,
     ) -> Result<Session> {
         self.write(|tx| {
@@ -882,9 +889,21 @@ impl Store {
                 super::sessions::session_row,
             )?
             .ok_or(StoreError::NotFound("session"))?;
-            let target = match into {
-                Some(id) => live_project_in(tx, id)?,
-                None => home_project(tx, machine_name)?,
+            let explicit = match into {
+                Some(id) => Some(live_project_in(tx, id)?).filter(|p| !p.chats),
+                None => None,
+            };
+            let target = match explicit {
+                Some(p) => p,
+                None if s.machine_id == machine_id => home_project(tx, machine_id, machine_name)?,
+                None => get_project_in(tx, &chats_id(&s.machine_id))?
+                    .filter(|p| p.chats && !p.deleted)
+                    .ok_or_else(|| {
+                        StoreError::Conflict(
+                            "the machine that ran this session has no Chats yet; move it there once it has synced a chat"
+                                .into(),
+                        )
+                    })?,
             };
             if s.project_id == target.id {
                 return Ok(s);
@@ -904,8 +923,9 @@ impl Store {
             }
             for mut r in all(
                 tx,
-                "SELECT * FROM records WHERE source_session_id = ?1 AND project_id = ?2",
-                params![session_id, from],
+                "SELECT * FROM records WHERE source_session_id = ?1 AND project_id = ?2
+                   AND (?3 = 0 OR (updated_by = ?4 AND pinned = 0))",
+                params![session_id, from, target.chats, super::BY_DISTILLER],
                 super::memory::record_row,
             )? {
                 r.project_id.clone_from(&target.id);
@@ -913,37 +933,50 @@ impl Store {
                 changes.push(Change::Record(r));
             }
             for c in &changes {
-                apply_in(tx, c)?;
+                super::apply_move_in(tx, c)?;
             }
             Ok(s)
         })
     }
 
-    /// Flag this machine's Home project (blirp 0.1.0) as its Chats bucket,
-    /// renaming it while it has the default name. Through `apply`, so every
-    /// machine learns it. Returns whether anything changed.
-    pub fn ensure_chats(&self, machine_name: &str) -> Result<bool> {
+    /// Give this machine its Chats bucket in place of blirp 0.1.0's Home
+    /// project: an untouched Home is merged into it (sessions and records;
+    /// the Home project is removed), one with memory someone wrote (renamed,
+    /// a user brief version, a user or pinned record, a wiki page or a
+    /// resource) stays a normal project. Through `apply`, so every machine
+    /// learns it. Returns whether anything changed.
+    pub fn ensure_chats(&self, machine_id: &str, machine_name: &str) -> Result<bool> {
         let Some(id) = self.home_project_id()? else {
             return Ok(false);
         };
         self.write(|tx| {
-            let Some(mut p) = get_project_in(tx, &id)?.filter(|p| !p.deleted && !p.chats) else {
+            let Some(old) = get_project_in(tx, &id)?.filter(|p| !p.deleted && !p.chats) else {
                 return Ok(false);
             };
-            p.chats = true;
-            if p.name == format!("Home ({machine_name})") {
-                p.name = chats_name(machine_name);
+            let authored: Option<i64> = one(
+                tx,
+                "SELECT 1 WHERE EXISTS (SELECT 1 FROM records WHERE project_id = ?1
+                                        AND (updated_by != ?2 OR pinned != 0))
+                   OR EXISTS (SELECT 1 FROM brief_history WHERE project_id = ?1 AND updated_by != ?2)
+                   OR EXISTS (SELECT 1 FROM wiki_pages WHERE project_id = ?1)
+                   OR EXISTS (SELECT 1 FROM resources WHERE project_id = ?1)",
+                params![old.id, super::BY_DISTILLER],
+                |r| r.get(0),
+            )?;
+            let untouched = authored.is_none() && old.name == format!("Home ({machine_name})");
+            let bucket = chats_bucket(tx, machine_id, machine_name)?;
+            if untouched {
+                merge_in(tx, &old.id, &bucket.id, true)?;
             }
-            p.updated_at = crate::now_ms();
-            apply_in(tx, &Change::Project(p))?;
             Ok(true)
         })
     }
 
-    /// A folder inside a blirp workspace: its live project, else (a removed
-    /// project) Chats.
+    /// A folder inside a blirp workspace: its project (or the project it
+    /// was merged into), else (a removed project) Chats.
     fn resolve_workspace(
         &self,
+        machine_id: &str,
         machine_name: &str,
         dirs: &NonProjectDirs,
         cwd: &Path,
@@ -952,7 +985,7 @@ impl Store {
             return Ok(None);
         };
         self.write(|tx| {
-            let live = get_project_in(tx, &id)?.filter(|p| !p.deleted && !p.chats);
+            let live = follow_merged(tx, &id)?;
             Ok(Some(match live {
                 Some(project) => ResolvedProject {
                     project,
@@ -961,7 +994,7 @@ impl Store {
                     created: false,
                 },
                 None => ResolvedProject {
-                    project: home_project(tx, machine_name)?,
+                    project: home_project(tx, machine_id, machine_name)?,
                     root: cwd.to_path_buf(),
                     is_home: true,
                     created: false,
@@ -987,6 +1020,9 @@ impl Store {
     pub fn delete_project(&self, id: &str) -> Result<()> {
         self.write(|tx| {
             let mut p = live_project_in(tx, id)?;
+            if p.chats {
+                return Err(StoreError::Invalid("Chats cannot be deleted".into()));
+            }
             p.deleted = true;
             p.updated_at = crate::now_ms();
             apply_in(tx, &Change::Project(p))?;
@@ -1003,24 +1039,25 @@ impl Store {
                 "cannot merge a project into itself".into(),
             ));
         }
-        self.write(|tx| merge_in(tx, from, into, false))
+        self.write(|tx| {
+            if live_project_in(tx, from)?.chats || live_project_in(tx, into)?.chats {
+                return Err(StoreError::Invalid(
+                    "Chats is no project; move sessions with the session's Move instead".into(),
+                ));
+            }
+            merge_in(tx, from, into, false)
+        })
     }
 
     /// Cleanup for projects that resolution created before `dirs` said
     /// their folder is no project (§5): each is merged into this machine's
     /// Chats, where resolution now files such sessions, without its folders
-    /// or brief. Only projects that show no sign of the user: created by
-    /// resolution and never renamed or merged into (`updated_at =
-    /// created_at`; registered ones start one higher), named after their
-    /// folder, at least one session and every session this machine's and
-    /// not started in blirp, every folder on this machine, not git with a
-    /// remote (another machine may have joined it by that remote) and
-    /// either matched by `dirs` or (auto rules) existing and no actual
-    /// project folder (no git work tree, no project marker), no wiki pages
-    /// or resources, and only unpinned distiller records and distiller brief
-    /// versions. A folder that is gone (or not reachable, e.g. an unmounted
-    /// drive) cannot show it is no project, so its project stays. Sessions, records and
-    /// suggestions move to Home; the project is soft-deleted, so every
+    /// or brief. Only projects that show no sign of the user
+    /// ([`untouched_projects`]) whose every folder matches the scratch rules
+    /// ([`NonProjectDirs::contains`]); plain folders without a project
+    /// marker are only offered ([`Store::chat_candidates`]), since blirp
+    /// 0.1.0 did not mark projects the user added. Sessions, records and
+    /// suggestions move to Chats; the project is soft-deleted, so every
     /// change replicates. Returns the merged projects (as they were).
     pub fn retire_non_projects(
         &self,
@@ -1029,55 +1066,57 @@ impl Store {
         dirs: &NonProjectDirs,
     ) -> Result<Vec<Project>> {
         self.write(|tx| {
-            let home_id: Option<String> = one(
-                tx,
-                "SELECT value_json FROM settings WHERE key = ?1",
-                params![HOME_PROJECT_KEY],
-                |r| r.get::<_, String>(0),
-            )?
-            .and_then(|v| serde_json::from_str(&v).ok());
-            let candidates = all(
-                tx,
-                "SELECT p.* FROM projects p
-                 WHERE p.deleted = 0 AND p.chats = 0 AND p.updated_at = p.created_at AND p.id != ?2
-                   AND EXISTS (SELECT 1 FROM project_paths pp WHERE pp.project_id = p.id)
-                   AND EXISTS (SELECT 1 FROM sessions s WHERE s.project_id = p.id)
-                   AND NOT EXISTS (SELECT 1 FROM project_paths pp WHERE pp.project_id = p.id
-                                   AND (pp.machine_id != ?1 OR pp.git_remote IS NOT NULL))
-                   AND NOT EXISTS (SELECT 1 FROM sessions s WHERE s.project_id = p.id
-                                   AND (s.machine_id != ?1 OR s.origin != 'external'))
-                   AND NOT EXISTS (SELECT 1 FROM records r WHERE r.project_id = p.id
-                                   AND (r.updated_by != ?3 OR r.pinned != 0))
-                   AND NOT EXISTS (SELECT 1 FROM brief_history b WHERE b.project_id = p.id
-                                   AND b.updated_by != ?3)
-                   AND NOT EXISTS (SELECT 1 FROM wiki_pages w WHERE w.project_id = p.id)
-                   AND NOT EXISTS (SELECT 1 FROM resources x WHERE x.project_id = p.id)",
-                params![machine_id, home_id.unwrap_or_default(), super::BY_DISTILLER],
-                project_row,
-            )?;
             let mut retired = Vec::new();
-            for p in candidates {
-                let paths = all(
-                    tx,
-                    "SELECT * FROM project_paths WHERE project_id = ?1",
-                    params![p.id],
-                    path_row,
-                )?;
-                let named_after = paths
+            for (p, paths) in untouched_projects(tx, machine_id)? {
+                if !paths
                     .iter()
-                    .any(|pp| folder_name(Path::new(&pp.path)) == p.name);
-                let chat_folder = |pp: &ProjectPath| {
-                    let p = normalize(Path::new(&pp.path));
-                    dirs.contains(&p) || (dirs.auto && p.is_dir() && !dirs.is_project_folder(&p))
-                };
-                if !named_after || !paths.iter().all(chat_folder) {
+                    .all(|pp| dirs.contains(&normalize(Path::new(&pp.path))))
+                {
                     continue;
                 }
-                let home = home_project(tx, machine_name)?;
+                let home = home_project(tx, machine_id, machine_name)?;
                 merge_in(tx, &p.id, &home.id, true)?;
                 retired.push(p);
             }
             Ok(retired)
+        })
+    }
+
+    /// Projects that look like chats under the auto rules and are offered
+    /// to the user to move to Chats: untouched ([`untouched_projects`]),
+    /// every folder existing and no actual project folder (no git work
+    /// tree, no project marker at or above it). A folder that is gone or
+    /// unreachable (an unmounted drive) cannot show that.
+    pub fn chat_candidates(&self, machine_id: &str, dirs: &NonProjectDirs) -> Result<Vec<Project>> {
+        let found = self.read(|c| untouched_projects(c, machine_id))?;
+        Ok(found
+            .into_iter()
+            .filter(|(_, paths)| {
+                paths.iter().all(|pp| {
+                    let p = normalize(Path::new(&pp.path));
+                    !dirs.contains(&p) && p.is_dir() && !dirs.is_project_folder(&p)
+                })
+            })
+            .map(|(p, _)| p)
+            .collect())
+    }
+
+    /// Move a whole project into this machine's Chats, as the cleanup does
+    /// (the user confirmed it): sessions, records and suggestions move, its
+    /// folders and brief stay with the removed project.
+    pub fn move_project_to_chats(
+        &self,
+        id: &str,
+        machine_id: &str,
+        machine_name: &str,
+    ) -> Result<()> {
+        self.write(|tx| {
+            if live_project_in(tx, id)?.chats {
+                return Err(StoreError::Invalid("already Chats".into()));
+            }
+            let home = home_project(tx, machine_id, machine_name)?;
+            merge_in(tx, id, &home.id, true)?;
+            Ok(())
         })
     }
 
@@ -1091,6 +1130,81 @@ impl Store {
             )
         })
     }
+}
+
+/// Projects that show no sign of the user, with their folders: created by
+/// resolution and never renamed or merged into (`updated_at = created_at`;
+/// ones the user made start one higher), no Chats, named after one of their
+/// folders, at least one session and every session this machine's and not
+/// started in blirp, every folder on this machine and none with a git
+/// remote (another machine may have joined it by that remote), no wiki
+/// pages or resources, only unpinned distiller records and distiller brief
+/// versions.
+fn untouched_projects(
+    c: &Connection,
+    machine_id: &str,
+) -> Result<Vec<(Project, Vec<ProjectPath>)>> {
+    let home_id: Option<String> = one(
+        c,
+        "SELECT value_json FROM settings WHERE key = ?1",
+        params![HOME_PROJECT_KEY],
+        |r| r.get::<_, String>(0),
+    )?
+    .and_then(|v| serde_json::from_str(&v).ok());
+    let candidates = all(
+        c,
+        "SELECT p.* FROM projects p
+         WHERE p.deleted = 0 AND p.chats = 0 AND p.updated_at = p.created_at AND p.id != ?2
+           AND EXISTS (SELECT 1 FROM project_paths pp WHERE pp.project_id = p.id)
+           AND EXISTS (SELECT 1 FROM sessions s WHERE s.project_id = p.id)
+           AND NOT EXISTS (SELECT 1 FROM project_paths pp WHERE pp.project_id = p.id
+                           AND (pp.machine_id != ?1 OR pp.git_remote IS NOT NULL))
+           AND NOT EXISTS (SELECT 1 FROM sessions s WHERE s.project_id = p.id
+                           AND (s.machine_id != ?1 OR s.origin != 'external'))
+           AND NOT EXISTS (SELECT 1 FROM records r WHERE r.project_id = p.id
+                           AND (r.updated_by != ?3 OR r.pinned != 0))
+           AND NOT EXISTS (SELECT 1 FROM brief_history b WHERE b.project_id = p.id
+                           AND b.updated_by != ?3)
+           AND NOT EXISTS (SELECT 1 FROM wiki_pages w WHERE w.project_id = p.id)
+           AND NOT EXISTS (SELECT 1 FROM resources x WHERE x.project_id = p.id)
+         ORDER BY p.name",
+        params![machine_id, home_id.unwrap_or_default(), super::BY_DISTILLER],
+        project_row,
+    )?;
+    let mut out = Vec::new();
+    for p in candidates {
+        let paths = all(
+            c,
+            "SELECT * FROM project_paths WHERE project_id = ?1",
+            params![p.id],
+            path_row,
+        )?;
+        if paths
+            .iter()
+            .any(|pp| folder_name(Path::new(&pp.path)) == p.name)
+        {
+            out.push((p, paths));
+        }
+    }
+    Ok(out)
+}
+
+/// `id`'s live project, following merges; None for a removed project or
+/// Chats.
+pub(super) fn follow_merged(c: &Connection, id: &str) -> Result<Option<Project>> {
+    let mut id = id.to_string();
+    // Merge chains are short; the bound only guards against a cycle.
+    for _ in 0..16 {
+        match get_project_in(c, &id)? {
+            Some(p) if !p.deleted => return Ok(Some(p).filter(|p| !p.chats)),
+            Some(Project {
+                merged_into: Some(next),
+                ..
+            }) => id = next,
+            _ => return Ok(None),
+        }
+    }
+    Ok(None)
 }
 
 /// See [`Store::merge_projects`]; `retire` leaves `from`'s folders (they go
@@ -1172,13 +1286,14 @@ fn merge_in(tx: &Transaction<'_>, from: &str, into: &str, retire: bool) -> Resul
         }
     }
     for c in &changes {
-        apply_in(tx, c)?;
+        super::apply_move_in(tx, c)?;
     }
     tx.execute(
         "UPDATE suggestions SET project_id = ?1 WHERE project_id = ?2",
         params![into, from],
     )?;
     src.deleted = true;
+    src.merged_into = Some(into.to_string());
     src.updated_at = now;
     apply_in(tx, &Change::Project(src))?;
     dst.updated_at = now;
@@ -1190,9 +1305,15 @@ fn chats_name(machine_name: &str) -> String {
     format!("Chats ({machine_name})")
 }
 
-/// This machine's Chats project (called Home before 0.1.1), created on
-/// first use.
-fn home_project(tx: &Transaction<'_>, machine_name: &str) -> Result<Project> {
+/// The id of a machine's Chats bucket: fixed, so every machine finds any
+/// machine's bucket.
+fn chats_id(machine_id: &str) -> String {
+    format!("chats-{machine_id}")
+}
+
+/// This machine's Chats project, created on first use (called Home before
+/// 0.1.1, see [`Store::ensure_chats`]).
+fn home_project(tx: &Transaction<'_>, machine_id: &str, machine_name: &str) -> Result<Project> {
     let id: Option<String> = one(
         tx,
         "SELECT value_json FROM settings WHERE key = ?1",
@@ -1201,20 +1322,34 @@ fn home_project(tx: &Transaction<'_>, machine_name: &str) -> Result<Project> {
     )?
     .and_then(|v| serde_json::from_str::<String>(&v).ok());
     if let Some(id) = id
-        && let Some(p) = get_project_in(tx, &id)?.filter(|p| !p.deleted)
+        && let Some(p) = get_project_in(tx, &id)?.filter(|p| !p.deleted && p.chats)
     {
         return Ok(p);
     }
+    chats_bucket(tx, machine_id, machine_name)
+}
+
+/// Create (or bring back) `chats-<machine_id>` and record it as this
+/// machine's Chats.
+fn chats_bucket(tx: &Transaction<'_>, machine_id: &str, machine_name: &str) -> Result<Project> {
+    let id = chats_id(machine_id);
     let now = crate::now_ms();
-    let p = Project {
-        id: crate::new_id(),
-        name: chats_name(machine_name),
-        created_at: now,
-        updated_at: now,
-        deleted: false,
-        chats: true,
+    let p = match get_project_in(tx, &id)? {
+        Some(p) if !p.deleted && p.chats => p,
+        found => {
+            let p = Project {
+                id: id.clone(),
+                name: chats_name(machine_name),
+                created_at: found.as_ref().map_or(now, |p| p.created_at),
+                updated_at: now,
+                deleted: false,
+                chats: true,
+                merged_into: None,
+            };
+            apply_in(tx, &Change::Project(p.clone()))?;
+            p
+        }
     };
-    apply_in(tx, &Change::Project(p.clone()))?;
     tx.execute(
         "INSERT INTO settings(key, value_json) VALUES (?1, ?2)
          ON CONFLICT(key) DO UPDATE SET value_json = excluded.value_json",
@@ -1481,7 +1616,9 @@ mod tests {
         std::fs::create_dir_all(root.join("home/code/lib")).unwrap();
         std::fs::write(root.join("home/code/lib/Cargo.toml"), "").unwrap();
         let sub = make("home/code/lib/src");
-        // A plain folder (no git, no marker) is no project under the new rules.
+        // A plain folder (no git, no marker), shaped as blirp 0.1.0 left
+        // both an auto-created project and one the user added with Add
+        // folder (that version did not mark those): only offered.
         let notes = make("home/notes");
         // Gone (or an unmounted drive): it cannot show it is no project.
         let gone = make("home/gone");
@@ -1571,7 +1708,7 @@ mod tests {
             .map(|p| p.name)
             .collect();
         retired.sort();
-        assert_eq!(retired, ["chat", "notes", "run"]);
+        assert_eq!(retired, ["chat", "run"]);
         let home = store.home_project_id().unwrap().unwrap();
         for gone in [&chat, &tmp] {
             let p = store.get_project(&gone.id).unwrap().unwrap();
@@ -1585,7 +1722,7 @@ mod tests {
             .into_iter()
             .map(|s| s.id)
             .collect();
-        assert_eq!(moved.len(), 3);
+        assert_eq!(moved.len(), 2);
         assert!(store.get_project(&home).unwrap().unwrap().chats);
         let recs = store.list_records(&home, &Default::default()).unwrap();
         assert_eq!(recs.len(), 1);
@@ -1606,9 +1743,18 @@ mod tests {
             &sub,
             &gone,
             &bare,
+            &notes,
         ] {
             assert!(!store.get_project(&kept.id).unwrap().unwrap().deleted);
         }
+        // The plain folder is offered, and moves only when the user says so.
+        let offered: Vec<String> = store
+            .chat_candidates("m", &launch_dirs)
+            .unwrap()
+            .into_iter()
+            .map(|p| p.id)
+            .collect();
+        assert_eq!(offered, std::slice::from_ref(&notes.id));
 
         // Every change is queued for the hub: the deletes, the moved
         // sessions and records.
@@ -1638,6 +1784,20 @@ mod tests {
                 .unwrap()
                 .is_empty()
         );
+
+        store.move_project_to_chats(&notes.id, "m", "box").unwrap();
+        let n = store.get_project(&notes.id).unwrap().unwrap();
+        assert!(n.deleted);
+        assert_eq!(n.merged_into.as_deref(), Some(home.as_str()));
+        assert!(store.chat_candidates("m", &launch_dirs).unwrap().is_empty());
+        assert!(matches!(
+            store.move_project_to_chats(&home, "m", "box"),
+            Err(StoreError::Invalid(_))
+        ));
+        assert!(matches!(
+            store.delete_project(&home),
+            Err(StoreError::Invalid(_))
+        ));
     }
 
     #[test]
@@ -2027,6 +2187,7 @@ mod tests {
             .resolve_project_with("m", "box", dir.path(), &launch(dir.path()))
             .unwrap()
             .project;
+        assert_eq!(chats.id, "chats-m");
         let p = store.create_project("Real", None).unwrap();
         store
             .insert_session(&external("s", &chats.id, "m"))
@@ -2034,63 +2195,209 @@ mod tests {
         let mut child = external("c", &chats.id, "m");
         child.parent_session_id = Some("s".into());
         store.insert_session(&child).unwrap();
-        let mut rec = record("r", &chats.id, BY_DISTILLER, false);
-        rec.source_session_id = Some("s".into());
-        store.create_record(rec).unwrap();
+        let made = |id: &str, by: &str, pinned: bool| {
+            let mut r = record(id, &chats.id, by, pinned);
+            r.source_session_id = Some("s".into());
+            store.create_record(r).unwrap();
+        };
+        made("r", BY_DISTILLER, false);
+        made("mine", "user", false);
+        made("pin", BY_DISTILLER, true);
         store
             .create_record(record("other", &chats.id, BY_DISTILLER, false))
             .unwrap();
 
-        let moved = store.move_session("s", Some(&p.id), "box").unwrap();
+        let moved = store.move_session("s", Some(&p.id), "m", "box").unwrap();
         assert_eq!(moved.project_id, p.id);
         assert_eq!(store.get_session("c").unwrap().unwrap().project_id, p.id);
-        let recs = store.list_records(&p.id, &Default::default()).unwrap();
-        assert_eq!(
-            recs.iter().map(|r| r.id.as_str()).collect::<Vec<_>>(),
-            ["r"]
-        );
+        let ids = |pid: &str| {
+            let mut v: Vec<String> = store
+                .list_records(pid, &Default::default())
+                .unwrap()
+                .into_iter()
+                .map(|r| r.id)
+                .collect();
+            v.sort();
+            v
+        };
+        assert_eq!(ids(&p.id), ["mine", "pin", "r"]);
         assert!(matches!(
-            store.move_session("s", Some("nope"), "box"),
+            store.move_session("s", Some("nope"), "m", "box"),
             Err(StoreError::NotFound(_))
         ));
-        // And back to Chats.
-        let back = store.move_session("s", None, "box").unwrap();
+        // A write built from the row before the move (a status tick) keeps
+        // the project the move set.
+        let mut stale = external("s", &chats.id, "m");
+        stale.title = Some("late status".into());
+        store.apply(Change::Session(stale)).unwrap();
+        let now = store.get_session("s").unwrap().unwrap();
+        assert_eq!(now.project_id, p.id);
+        assert_eq!(now.title.as_deref(), Some("late status"));
+        // Back to Chats: only the unpinned distiller records go along.
+        let back = store.move_session("s", None, "m", "box").unwrap();
         assert_eq!(back.project_id, chats.id);
         assert_eq!(
             store.get_session("c").unwrap().unwrap().project_id,
             chats.id
         );
+        assert_eq!(ids(&p.id), ["mine", "pin"]);
+
+        // Another machine's session goes to that machine's Chats, which only
+        // that machine creates.
+        store
+            .insert_session(&external("f", &p.id, "other"))
+            .unwrap();
+        assert!(matches!(
+            store.move_session("f", None, "m", "box"),
+            Err(StoreError::Conflict(_))
+        ));
+        let theirs = Project {
+            id: "chats-other".into(),
+            name: "Chats (laptop)".into(),
+            created_at: 1,
+            updated_at: 1,
+            deleted: false,
+            chats: true,
+            merged_into: None,
+        };
+        store.apply_remote(&Change::Project(theirs)).unwrap();
+        // Also when a Chats project is named explicitly.
+        let f = store
+            .move_session("f", Some(&chats.id), "m", "box")
+            .unwrap();
+        assert_eq!(f.project_id, "chats-other");
     }
 
-    #[test]
-    fn the_old_home_project_becomes_chats_everywhere() {
-        let (dir, store) = temp_store();
-        let (_d2, other) = temp_store();
-        store.set_replication(true).unwrap();
-        // A Home project as blirp 0.1.0 made it.
-        let home = store
+    fn old_home(store: &Store, name: &str) -> Project {
+        store
             .write(|tx| {
-                let p = new_project(tx, "Home (box)", false)?;
+                let p = new_project(tx, name, false)?;
                 tx.execute(
-                    "INSERT INTO settings(key, value_json) VALUES (?1, ?2)",
+                    "INSERT INTO settings(key, value_json) VALUES (?1, ?2)
+                     ON CONFLICT(key) DO UPDATE SET value_json = excluded.value_json",
                     params![HOME_PROJECT_KEY, serde_json::to_string(&p.id)?],
                 )?;
                 Ok(p)
             })
+            .unwrap()
+    }
+
+    #[test]
+    fn the_old_home_project_gives_way_to_chats_everywhere() {
+        // Untouched: merged into the new bucket, on every machine.
+        let (dir, store) = temp_store();
+        let (_d2, other) = temp_store();
+        store.set_replication(true).unwrap();
+        let home = old_home(&store, "Home (box)");
+        store.insert_session(&external("h", &home.id, "m")).unwrap();
+        store
+            .create_record(record("d", &home.id, BY_DISTILLER, false))
             .unwrap();
         let seq = replicate(&store, 0, &other);
-        assert!(!other.get_project(&home.id).unwrap().unwrap().chats);
-        assert!(store.ensure_chats("box").unwrap());
-        assert!(!store.ensure_chats("box").unwrap());
-        let now = store.get_project(&home.id).unwrap().unwrap();
-        assert!(now.chats);
-        assert_eq!(now.name, "Chats (box)");
+        assert!(store.ensure_chats("m", "box").unwrap());
+        assert!(!store.ensure_chats("m", "box").unwrap());
+        let chats = store.get_project("chats-m").unwrap().unwrap();
+        assert!(chats.chats && chats.name == "Chats (box)");
+        assert_eq!(store.home_project_id().unwrap().as_deref(), Some("chats-m"));
+        assert_eq!(
+            store.get_session("h").unwrap().unwrap().project_id,
+            "chats-m"
+        );
+        assert_eq!(
+            store.get_record("d").unwrap().unwrap().project_id,
+            "chats-m"
+        );
+        let gone = store.get_project(&home.id).unwrap().unwrap();
+        assert!(gone.deleted);
+        assert_eq!(gone.merged_into.as_deref(), Some("chats-m"));
         replicate(&store, seq, &other);
-        assert_eq!(other.get_project(&home.id).unwrap().unwrap(), now);
-        // Resolution keeps using it.
+        assert_eq!(other.get_project("chats-m").unwrap().unwrap(), chats);
+        assert!(other.get_project(&home.id).unwrap().unwrap().deleted);
         let r = store
             .resolve_project_with("m", "box", dir.path(), &launch(dir.path()))
             .unwrap();
-        assert_eq!(r.project.id, home.id);
+        assert_eq!(r.project.id, "chats-m");
+    }
+
+    #[test]
+    fn an_old_home_project_with_user_memory_stays_a_project() {
+        for touch in ["renamed", "brief", "record", "pinned", "wiki"] {
+            let (_d, store) = temp_store();
+            let name = if touch == "renamed" {
+                "My home"
+            } else {
+                "Home (box)"
+            };
+            let home = old_home(&store, name);
+            match touch {
+                "brief" => {
+                    store.put_brief(&home.id, "mine", "user").unwrap();
+                }
+                "record" => {
+                    store
+                        .create_record(record("u", &home.id, "user", false))
+                        .unwrap();
+                }
+                "pinned" => {
+                    store
+                        .create_record(record("u", &home.id, BY_DISTILLER, true))
+                        .unwrap();
+                }
+                "wiki" => {
+                    store
+                        .create_wiki_page(&home.id, "notes", "Notes", "x", "user")
+                        .unwrap();
+                }
+                _ => {}
+            }
+            assert!(store.ensure_chats("m", "box").unwrap(), "{touch}");
+            let kept = store.get_project(&home.id).unwrap().unwrap();
+            assert!(!kept.deleted && !kept.chats, "{touch}");
+            assert!(store.get_project("chats-m").unwrap().unwrap().chats);
+            assert_eq!(store.home_project_id().unwrap().as_deref(), Some("chats-m"));
+        }
+    }
+
+    #[test]
+    fn the_chats_flag_is_sticky() {
+        let (_d, store) = temp_store();
+        let chats = store.write(|tx| home_project(tx, "m", "box")).unwrap();
+        // A copy without the flag (an older machine's rename) that is newer
+        // by time still cannot clear it.
+        let stale = Project {
+            name: "Renamed".into(),
+            updated_at: chats.updated_at + 10,
+            chats: false,
+            ..chats.clone()
+        };
+        store.apply_remote(&Change::Project(stale)).unwrap();
+        let now = store.get_project(&chats.id).unwrap().unwrap();
+        assert!(now.chats);
+        assert_eq!(now.name, "Renamed");
+    }
+
+    #[test]
+    fn a_merged_projects_workspace_follows_it() {
+        let (_d, store, root, dirs) = auto_env();
+        let workspaces = root.join("home/.blirp/workspaces");
+        let dirs = dirs.with_workspaces(&workspaces);
+        let a = store.create_project("A", None).unwrap();
+        let b = store.create_project("B", None).unwrap();
+        let ws = workspaces.join(&a.id);
+        std::fs::create_dir_all(&ws).unwrap();
+        store.merge_projects(&a.id, &b.id).unwrap();
+        let r = store.resolve_project_with("m", "box", &ws, &dirs).unwrap();
+        assert_eq!(r.project.id, b.id);
+        assert!(!r.is_home);
+        let found = store
+            .find_project_for_path("m", &ws, Some(&workspaces))
+            .unwrap();
+        assert_eq!(found.map(|p| p.id), Some(b.id.clone()));
+        // Chats is no merge target or source.
+        let chats = store.write(|tx| home_project(tx, "m", "box")).unwrap();
+        assert!(matches!(
+            store.merge_projects(&b.id, &chats.id),
+            Err(StoreError::Invalid(_))
+        ));
     }
 }

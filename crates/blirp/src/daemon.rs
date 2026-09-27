@@ -117,8 +117,8 @@ fn load_machine(store: &Store, config: &Config, id: String) -> anyhow::Result<Ma
     };
     store.upsert_machine(&machine)?;
     // blirp 0.1.0's Home project is this machine's Chats (§5).
-    if store.ensure_chats(&machine.name)? {
-        tracing::info!("the Home project is now this machine's Chats");
+    if store.ensure_chats(&machine.id, &machine.name)? {
+        tracing::info!("this machine's Home project gave way to its Chats");
     }
     Ok(machine)
 }

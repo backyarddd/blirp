@@ -1934,7 +1934,10 @@ mod tests {
     #[tokio::test]
     async fn chats_get_a_summary_and_no_project_memory() {
         let (_d, store, _pid) = seed();
-        let chats = store.move_session("s", None, "box").unwrap().project_id;
+        let chats = store
+            .move_session("s", None, "m", "box")
+            .unwrap()
+            .project_id;
         let fake = Fake::new(vec![Ok(reply(&[]))]);
         let out = run_distill(store.clone(), "s", &fake, &cfg(BriefMode::Auto))
             .await

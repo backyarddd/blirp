@@ -213,6 +213,11 @@ export const api = {
     create: (body: CreateProject) => request<ProjectSummary>('POST', '/api/projects', body),
     /** Unregister one of this machine's folders; the project stays, also with no folder left. */
     removeFolder: (id: string, path: string) => request<ProjectSummary>('POST', `${p(id)}/folders/remove`, { path }),
+    /** Projects earlier versions made for plain folders that look like chats; empty once dismissed. */
+    chatCandidates: () => request<ProjectSummary[]>('GET', '/api/projects/chat-candidates'),
+    dismissChatCandidates: () => request<void>('POST', '/api/projects/chat-candidates/dismiss'),
+    /** Sessions and records move to Chats; folders and brief stay with the removed project. */
+    toChats: (id: string) => request<void>('POST', `${p(id)}/to-chats`),
     rename: (id: string, name: string) => request<ProjectSummary>('PATCH', p(id), { name }),
     remove: (id: string) => request<void>('DELETE', p(id)),
     merge: (id: string, into: string) => request<ProjectSummary>('POST', `${p(id)}/merge`, { into }),

@@ -34,6 +34,7 @@ const project = (paths: { machine_id: string; path: string }[]): ProjectSummary 
   is_home: false,
   workspace: null,
   chats: false,
+  merged_into: null,
   session_count: 0,
   live_session_count: 0,
   last_activity_at: null,

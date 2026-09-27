@@ -145,14 +145,22 @@ impl<'e> StoreSink<'e> {
                     self.excluded.insert(asid);
                     continue;
                 }
-                let r = store.resolve_project_lenient(
-                    &eng.machine.id,
-                    &eng.machine.name,
-                    Path::new(&cwd),
-                    p.meta.git_remote.as_deref(),
-                    &eng.env.non_projects,
-                )?;
-                refile = Some((cwd, r.project.id, r.created));
+                // Only a row still in Chats (where the home folder filed it)
+                // gets a project: one the user moved keeps theirs.
+                let in_chats = store.get_project(&s.project_id)?.is_some_and(|p| p.chats)
+                    || store.home_project_id()?.as_deref() == Some(s.project_id.as_str());
+                refile = Some(if in_chats {
+                    let r = store.resolve_project_lenient(
+                        &eng.machine.id,
+                        &eng.machine.name,
+                        Path::new(&cwd),
+                        p.meta.git_remote.as_deref(),
+                        &eng.env.non_projects,
+                    )?;
+                    (cwd, r.project.id, r.created)
+                } else {
+                    (cwd, s.project_id.clone(), false)
+                });
             }
             if existing.is_none() {
                 if p.events.is_empty() {
@@ -178,7 +186,13 @@ impl<'e> StoreSink<'e> {
                     continue;
                 }
                 link = self.link_candidate(&p)?;
-                if link.is_none() {
+                if link.is_none()
+                    && let Some(par) = &parent
+                {
+                    // A subagent works for its parent: same project, also
+                    // after the parent was moved.
+                    project = Some((par.project_id.clone(), false));
+                } else if link.is_none() {
                     let dir = cwd.map_or_else(|| eng.env.home.clone(), Into::into);
                     let r = store.resolve_project_lenient(
                         &eng.machine.id,
@@ -241,7 +255,9 @@ impl<'e> StoreSink<'e> {
                     s.project_id.clone_from(pid);
                 }
                 let changed = before.as_ref() != Some(&s);
-                if changed {
+                if changed && plan.refile.is_some() {
+                    tx.apply_move(&Change::Session(s.clone()))?;
+                } else if changed {
                     tx.apply(&Change::Session(s.clone()))?;
                 }
                 for (seq, ts, kind, text, meta) in &plan.p.events {

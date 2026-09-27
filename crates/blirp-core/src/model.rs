@@ -215,11 +215,14 @@ pub struct Project {
     pub created_at: i64,
     pub updated_at: i64,
     pub deleted: bool,
-    /// A machine's Chats bucket (§5): sessions that belong to no project.
-    /// Not listed among projects; its memory is never injected. Absent in
-    /// rows from blirp 0.1.0.
+    /// A machine's Chats bucket (§5, id `chats-<machine id>`): sessions that
+    /// belong to no project. Not listed among projects; its memory is never
+    /// injected. Absent in rows from blirp 0.1.0.
     #[serde(default)]
     pub chats: bool,
+    /// Set on a deleted project that was merged into another one.
+    #[serde(default)]
+    pub merged_into: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]

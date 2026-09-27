@@ -82,7 +82,7 @@
   let mergeInto = $state('');
   let mergeBusy = $state(false);
   const mergeTargets = $derived(
-    app.projects.filter((p) => p.id !== projectId).sort((a, b) => a.name.localeCompare(b.name)),
+    app.realProjects.filter((p) => p.id !== projectId).sort((a, b) => a.name.localeCompare(b.name)),
   );
   const mergeTarget = $derived(app.projectById.get(mergeInto));
 

@@ -317,11 +317,13 @@ CREATE TABLE hub_pulls(
 "#;
 
 /// Chats (§5): each machine's bucket for sessions that belong to no
-/// project is a project flagged `chats`, so every machine can tell it
-/// apart. The daemon flags an existing Home project at start
-/// (`Store::ensure_chats`), through `apply` so the flag replicates.
+/// project is a project flagged `chats` (id `chats-<machine id>`), so every
+/// machine can tell it apart; the daemon moves an existing Home project
+/// into it at start (`Store::ensure_chats`). A merged project records its
+/// target, so a workspace of a merged project follows it.
 const V10: &str = r#"
 ALTER TABLE projects ADD COLUMN chats INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE projects ADD COLUMN merged_into TEXT;
 "#;
 
 #[derive(Debug, thiserror::Error)]

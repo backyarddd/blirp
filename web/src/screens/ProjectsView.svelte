@@ -24,6 +24,43 @@
 
   const machineCount = (p: ProjectSummary): number => new Set(p.paths.map((x) => x.machine_id)).size;
 
+  // Projects earlier versions made for plain folders that look like chats: offered once, moved only on confirm.
+  let candidates: ProjectSummary[] = $state([]);
+  let picked: Record<string, boolean> = $state({});
+  let movingChats = $state(false);
+  $effect(() => {
+    if (!app.control) return;
+    api.projects
+      .chatCandidates()
+      .then((list) => {
+        candidates = list;
+        picked = Object.fromEntries(list.map((p) => [p.id, true]));
+      })
+      .catch((e: unknown) => console.warn('blirp: could not check for projects that look like chats', e));
+  });
+
+  async function moveToChats(): Promise<void> {
+    const ids = candidates.filter((p) => picked[p.id]).map((p) => p.id);
+    movingChats = true;
+    const done = await app.act(async () => {
+      for (const id of ids) {
+        await api.projects.toChats(id);
+        app.removeProject(id);
+      }
+      await api.projects.dismissChatCandidates();
+      return true;
+    }, ids.length === 1 ? 'Moved 1 project to Chats' : `Moved ${ids.length} projects to Chats`);
+    movingChats = false;
+    // Their sessions now sit in Chats.
+    void app.refreshSessions();
+    void app.refreshProjects();
+    if (done) candidates = [];
+  }
+
+  async function dismissCandidates(): Promise<void> {
+    if (await app.act(async () => (await api.projects.dismissChatCandidates(), true))) candidates = [];
+  }
+
   function openAdd(): void {
     path = '';
     name = '';
@@ -71,6 +108,32 @@
         <button type="button" class="btn primary" onclick={openAdd}><Plus size={16} aria-hidden="true" />New project</button>
       {/if}
     </div>
+
+    {#if candidates.length > 0}
+      <section class="card candidates" aria-label="Projects that look like chats">
+        <p>
+          <strong>These projects look like chats.</strong> They are plain folders (no git, no project file) with only sessions
+          from outside blirp. Move them to Chats? Their sessions and summarized records move; the folders are unregistered.
+        </p>
+        <ul class="list-plain">
+          {#each candidates as p (p.id)}
+            <li>
+              <label class="check">
+                <input type="checkbox" bind:checked={picked[p.id]} />
+                <span>{p.name}</span>
+                <span class="mono small faint ellipsis">{p.paths[0]?.path ?? ''}</span>
+              </label>
+            </li>
+          {/each}
+        </ul>
+        <div class="row">
+          <button type="button" class="btn primary sm" onclick={moveToChats} disabled={movingChats || !candidates.some((p) => picked[p.id])}
+            >Move to Chats</button
+          >
+          <button type="button" class="btn sm" onclick={dismissCandidates} disabled={movingChats}>Keep them as projects</button>
+        </div>
+      </section>
+    {/if}
 
     <Loadable
       loading={!app.projectsLoaded}
@@ -180,5 +243,27 @@
   .err {
     color: var(--danger);
     margin: 0;
+  }
+  .candidates {
+    display: grid;
+    gap: 10px;
+    padding: 14px 16px;
+    margin-bottom: 16px;
+  }
+  .candidates p {
+    margin: 0;
+  }
+  .list-plain {
+    list-style: none;
+    margin: 0;
+    padding: 0;
+    display: grid;
+    gap: 4px;
+  }
+  .check {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    min-width: 0;
   }
 </style>

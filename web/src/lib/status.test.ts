@@ -99,6 +99,7 @@ describe('groupSessions', () => {
     is_home: false,
     workspace: null,
     chats: false,
+    merged_into: null,
     session_count: 1,
     live_session_count: 0,
     last_activity_at: null,

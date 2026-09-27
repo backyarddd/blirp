@@ -404,11 +404,37 @@ fn stamp_after_stored(tx: &Transaction<'_>, change: &mut Cow<'_, Change>) -> Res
 
 /// Write the row(s) for `change` and append it to the outbox.
 pub(crate) fn apply_in(tx: &Transaction<'_>, change: &Change) -> Result<bool> {
+    apply_inner(tx, change, false)
+}
+
+/// [`apply_in`] for a change that files a session under another project
+/// (a move, a merge, an ingest re-file). Every other local session write
+/// keeps the project stored at the time of the write, so a write built from
+/// a session read before a move (a status tick, an ingest batch) never
+/// moves it back.
+pub(crate) fn apply_move_in(tx: &Transaction<'_>, change: &Change) -> Result<bool> {
+    apply_inner(tx, change, true)
+}
+
+fn apply_inner(tx: &Transaction<'_>, change: &Change, moving: bool) -> Result<bool> {
     let mut change = match redact_memory(change) {
         Some(redacted) => Cow::Owned(redacted),
         None => Cow::Borrowed(change),
     };
     stamp_after_stored(tx, &mut change)?;
+    if !moving && let Change::Session(s) = change.as_ref() {
+        let stored: Option<String> = one(
+            tx,
+            "SELECT project_id FROM sessions WHERE id = ?1",
+            params![s.id],
+            |r| r.get(0),
+        )?;
+        if let Some(stored) = stored.filter(|p| *p != s.project_id)
+            && let Change::Session(s) = change.to_mut()
+        {
+            s.project_id = stored;
+        }
+    }
     let change = change.as_ref();
     if let Change::Session(s) = change {
         // A session filed under a project that was removed (or merged into
@@ -459,7 +485,7 @@ pub(crate) fn check_ids(change: &Change) -> Result<()> {
         Change::DeleteMachine { id }
         | Change::DeleteSession { id }
         | Change::DeleteRecord { id } => vec![Some(id)],
-        Change::Project(p) => vec![Some(&p.id)],
+        Change::Project(p) => vec![Some(&p.id), p.merged_into.as_deref()],
         Change::ProjectPath(p) => vec![Some(&p.project_id), Some(&p.machine_id)],
         Change::DeleteProjectPath { machine_id, .. } => vec![Some(machine_id)],
         Change::Session(s) => vec![
@@ -511,12 +537,19 @@ fn write_row(tx: &Transaction<'_>, change: &Change) -> Result<usize> {
         }
         Change::Project(p) => {
             let n = tx.execute(
-                "INSERT INTO projects(id, name, created_at, updated_at, deleted, chats) VALUES (?1,?2,?3,?4,?5,?6)
+                // `chats` and `merged_into` are sticky: a stale copy from
+                // before them (another machine's rename) never clears them.
+                "INSERT INTO projects(id, name, created_at, updated_at, deleted, chats, merged_into)
+                 VALUES (?1,?2,?3,?4,?5,?6,?7)
                  ON CONFLICT(id) DO UPDATE SET name=excluded.name, created_at=excluded.created_at,
-                   updated_at=excluded.updated_at, deleted=excluded.deleted, chats=excluded.chats
-                 WHERE (excluded.updated_at, excluded.deleted, excluded.name, excluded.created_at, excluded.chats)
-                     > (projects.updated_at, projects.deleted, projects.name, projects.created_at, projects.chats)",
-                params![p.id, p.name, p.created_at, p.updated_at, p.deleted, p.chats],
+                   updated_at=excluded.updated_at, deleted=excluded.deleted,
+                   chats=MAX(projects.chats, excluded.chats),
+                   merged_into=COALESCE(excluded.merged_into, projects.merged_into)
+                 WHERE (excluded.updated_at, excluded.deleted, excluded.name, excluded.created_at,
+                        excluded.chats, COALESCE(excluded.merged_into, ''))
+                     > (projects.updated_at, projects.deleted, projects.name, projects.created_at,
+                        projects.chats, COALESCE(projects.merged_into, ''))",
+                params![p.id, p.name, p.created_at, p.updated_at, p.deleted, p.chats, p.merged_into],
             )?;
             if n > 0 && p.deleted {
                 // A deleted project has no folders. Every machine drops them
@@ -864,6 +897,7 @@ pub(crate) mod tests {
             updated_at: 1,
             deleted: false,
             chats: false,
+            merged_into: None,
         };
         assert!(store.apply(Change::Project(p.clone())).unwrap());
         let ob = store.outbox_after(0, 10).unwrap();

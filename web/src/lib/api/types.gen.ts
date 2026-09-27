@@ -49,11 +49,15 @@ export type MachineInfo = { online: boolean | null, id: string, name: string, os
 
 export type Project = { id: string, name: string, created_at: number, updated_at: number, deleted: boolean, 
 /**
- * A machine's Chats bucket (§5): sessions that belong to no project.
- * Not listed among projects; its memory is never injected. Absent in
- * rows from blirp 0.1.0.
+ * A machine's Chats bucket (§5, id `chats-<machine id>`): sessions that
+ * belong to no project. Not listed among projects; its memory is never
+ * injected. Absent in rows from blirp 0.1.0.
  */
-chats: boolean, };
+chats: boolean, 
+/**
+ * Set on a deleted project that was merged into another one.
+ */
+merged_into: string | null, };
 
 export type ProjectPath = { project_id: string, machine_id: string, path: string, 
 /**
@@ -250,11 +254,15 @@ is_home: boolean,
  */
 workspace: string | null, session_count: number, live_session_count: number, last_activity_at: number | null, id: string, name: string, created_at: number, updated_at: number, deleted: boolean, 
 /**
- * A machine's Chats bucket (§5): sessions that belong to no project.
- * Not listed among projects; its memory is never injected. Absent in
- * rows from blirp 0.1.0.
+ * A machine's Chats bucket (§5, id `chats-<machine id>`): sessions that
+ * belong to no project. Not listed among projects; its memory is never
+ * injected. Absent in rows from blirp 0.1.0.
  */
-chats: boolean, };
+chats: boolean, 
+/**
+ * Set on a deleted project that was merged into another one.
+ */
+merged_into: string | null, };
 
 export type CreateProject = { 
 /**

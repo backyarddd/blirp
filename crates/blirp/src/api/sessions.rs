@@ -265,9 +265,12 @@ async fn move_session(
             .get_session(&id)?
             .ok_or_else(|| ApiError::not_found("session"))?
             .project_id;
-        let session = st
-            .store
-            .move_session(&id, body.project_id.as_deref(), &st.machine.name)?;
+        let session = st.store.move_session(
+            &id,
+            body.project_id.as_deref(),
+            &st.machine.id,
+            &st.machine.name,
+        )?;
         Ok((session, from))
     })
     .await?;

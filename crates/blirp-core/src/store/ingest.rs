@@ -45,6 +45,11 @@ impl IngestTx<'_> {
         apply_in(self.tx, change)
     }
 
+    /// [`Self::apply`] for a session re-filed under another project.
+    pub fn apply_move(&self, change: &Change) -> Result<bool> {
+        super::apply_move_in(self.tx, change)
+    }
+
     pub fn session_by_agent_id(
         &self,
         agent: &str,

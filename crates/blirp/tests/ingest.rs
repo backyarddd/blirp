@@ -1697,3 +1697,62 @@ fn workspace_transcripts_file_under_their_project() {
     assert!(!h.store.get_project(&project.id).unwrap().unwrap().deleted);
     assert_eq!(h.session("codex", CODEX_SID).project_id, project.id);
 }
+
+// A subagent transcript that arrives after its parent was moved to another
+// project files under the parent's project, not by its own folder.
+#[test]
+fn subagents_follow_their_moved_parent() {
+    let h = H::new();
+    let dir = format!(".claude/projects/C--work-proj/{CLAUDE_SID}");
+    h.put(
+        &format!("{dir}.jsonl"),
+        h.fill(&fixture("claude/session.jsonl")).as_bytes(),
+    );
+    h.pass();
+    let parent = h.session("claude", CLAUDE_SID);
+    let elsewhere = h.store.create_project("Elsewhere", None).unwrap();
+    let machine = h.store.machine_id().unwrap().unwrap();
+    h.store
+        .move_session(&parent.id, Some(&elsewhere.id), &machine, "test-box")
+        .unwrap();
+    h.put(
+        &format!("{dir}/subagents/agent-a1.jsonl"),
+        h.fill(&fixture("claude/agent-a1.jsonl")).as_bytes(),
+    );
+    h.put(
+        &format!("{dir}/subagents/agent-a1.meta.json"),
+        fixture("claude/agent-a1.meta.json").as_bytes(),
+    );
+    h.pass();
+    let child = h.session("claude", &format!("{CLAUDE_SID}:agent-a1"));
+    assert_eq!(child.parent_session_id.as_deref(), Some(parent.id.as_str()));
+    assert_eq!(child.project_id, elsewhere.id);
+    // More of the parent's transcript never moves it back.
+    h.pass();
+    assert_eq!(h.session("claude", CLAUDE_SID).project_id, elsewhere.id);
+}
+
+// Re-filing a row that was filed under the home folder never undoes a move
+// the user made meanwhile: it only corrects the folder.
+#[test]
+fn refiling_keeps_a_session_the_user_moved() {
+    let h = H::new();
+    let path = h.put(
+        &format!(".claude/projects/x/{CLAUDE_SID}.jsonl"),
+        claude_lines(&h, 0, 3, false).as_bytes(),
+    );
+    h.pass();
+    let home = h.session("claude", CLAUDE_SID);
+    assert_eq!(Path::new(&home.cwd), h.home);
+    let mine = h.store.create_project("Mine", None).unwrap();
+    let machine = h.store.machine_id().unwrap().unwrap();
+    h.store
+        .move_session(&home.id, Some(&mine.id), &machine, "test-box")
+        .unwrap();
+    append(&path, claude_lines(&h, 3, 2, true).as_bytes());
+    h.engine.repair_home_filed();
+    h.pass();
+    let s = h.session("claude", CLAUDE_SID);
+    assert_eq!(Path::new(&s.cwd), h.cwd);
+    assert_eq!(s.project_id, mine.id);
+}
