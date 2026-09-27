@@ -4,7 +4,7 @@
 use rusqlite::Connection;
 
 /// Index `i` holds the migration that moves the schema from version `i` to `i + 1`.
-pub(crate) const MIGRATIONS: &[&str] = &[V1, V2, V3, V4, V5, V6, V7, V8, V9, V10, V11];
+pub(crate) const MIGRATIONS: &[&str] = &[V1, V2, V3, V4, V5, V6, V7, V8, V9, V10, V11, V12];
 
 /// Schema of §5. Note on the FTS tables: they are external-content tables keyed
 /// by the implicit rowid of `events`/`records`. blirp never runs `VACUUM`
@@ -435,6 +435,21 @@ CREATE TABLE file_hashes(
     PRIMARY KEY(copy, path)
 );
 ALTER TABLE devices ADD COLUMN can_access_files INTEGER NOT NULL DEFAULT 0;
+"#;
+
+/// Re-send every project once (§10). Nodes still on 0.1.x pulled the
+/// projects the hub wrote with the fields of migration 10 (`chats`,
+/// `merged_into`), dropped those fields and moved their pull cursor past
+/// them, so they never got them again. The next time replication is on
+/// (`Store::set_replication`), each machine queues its current projects; the
+/// hub's copy then reaches every node, and its sticky fields win the
+/// conflict rule over a copy that lost them. Nothing to re-send without
+/// projects. Since then the sync protocol version gates replicated schema
+/// changes (§10), so an older peer never pulls rows it cannot store.
+const V12: &str = r#"
+INSERT INTO settings(key, value_json)
+    SELECT 'sync.requeue_projects', 'true' WHERE EXISTS (SELECT 1 FROM projects)
+    ON CONFLICT(key) DO NOTHING;
 "#;
 
 #[derive(Debug, thiserror::Error)]

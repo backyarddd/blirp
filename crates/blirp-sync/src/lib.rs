@@ -30,10 +30,16 @@ pub const ALPN_FILES: &[u8] = b"blirp/files/1";
 /// picks the highest common one or answers `unsupported_version`.
 pub const PROTOCOL_VERSIONS: &[u32] = &[1];
 
-/// Versions of the replication protocol (`blirp/sync/1`). 2 adds the hub's
-/// `presence` frames on the notification stream; a version 1 peer never
-/// receives them.
-pub const SYNC_VERSIONS: &[u32] = &[1, 2];
+/// Versions of the replication protocol (`blirp/sync/1`). 2 added the hub's
+/// `presence` frames on the notification stream. The version also names the
+/// replicated schema (the rows and fields that changes carry): a peer that
+/// does not know a field drops it from what it pulls and still moves its
+/// cursor past the row, so it never gets it again (0.1.x nodes lost
+/// `projects.chats` and `merged_into` that way). So a release that adds or
+/// changes a replicated field bumps the version and speaks only the new one,
+/// and older peers are refused until they update (§10). 3 = the schema of
+/// migration 10 (`projects.chats`, `projects.merged_into`).
+pub const SYNC_VERSIONS: &[u32] = &[3];
 
 /// mDNS service name blirp endpoints advertise on the local network.
 pub const MDNS_SERVICE: &str = "blirp";
@@ -105,14 +111,73 @@ pub(crate) async fn blocking<T: Send + 'static>(
 #[cfg(test)]
 mod tests {
     #[test]
-    fn sync_version_falls_back_for_older_peers() {
-        // A 0.1.0 peer only speaks 1 (no presence frames); both new speak 2.
-        assert_eq!(super::negotiate_from(super::SYNC_VERSIONS, &[1]), Some(1));
+    fn sync_refuses_peers_with_another_replicated_schema() {
+        // 0.1.0 speaks [1], 0.1.1 to 0.2.0 [1, 2]: none knows the fields of
+        // migration 10, so none may pull or push rows here.
+        for old in [&[1][..], &[1, 2]] {
+            assert_eq!(super::negotiate_from(super::SYNC_VERSIONS, old), None);
+        }
+        assert_eq!(super::negotiate_from(super::SYNC_VERSIONS, &[3]), Some(3));
+        assert_eq!(super::negotiate_from(super::SYNC_VERSIONS, &[4]), None);
+    }
+
+    /// Tripwire for the rule on [`super::SYNC_VERSIONS`]: the columns of
+    /// every replicated table, pinned to the sync version. A migration that
+    /// changes them fails this test: bump the version (speaking only the new
+    /// one), then update both here together.
+    #[test]
+    fn replicated_schema_is_pinned_to_the_sync_version() {
+        const TABLES: &[&str] = &[
+            "machines",
+            "projects",
+            "project_paths",
+            "sessions",
+            "events",
+            "records",
+            "briefs",
+            "brief_history",
+            "wiki_pages",
+            "resources",
+            "deleted_sessions",
+            "deleted_records",
+        ];
+        const PINNED: &str = "\
+            machines: id name os role last_seen revoked\n\
+            projects: id name created_at updated_at deleted chats merged_into\n\
+            project_paths: project_id machine_id path git_remote\n\
+            sessions: id project_id machine_id agent agent_session_id origin cwd title status \
+            branch worktree transcript_path started_at ended_at last_activity_at exit_code \
+            summary_json distilled_through_seq tokens_in tokens_out cost_usd parent_session_id \
+            stopped_by_user\n\
+            events: session_id seq ts kind text meta_json\n\
+            records: id project_id kind title body status pinned source_session_id created_at \
+            updated_at updated_by\n\
+            briefs: project_id body_md version updated_at updated_by history_id machine_id\n\
+            brief_history: id project_id body_md updated_at updated_by machine_id\n\
+            wiki_pages: id project_id slug title body_md updated_at updated_by deleted\n\
+            resources: id project_id kind url title meta_json created_at deleted updated_at\n\
+            deleted_sessions: id deleted_at\n\
+            deleted_records: id deleted_at\n";
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("blirp.db");
+        drop(blirp_core::store::Store::open(&path).unwrap());
+        let conn = rusqlite::Connection::open(&path).unwrap();
+        let mut schema = String::new();
+        for table in TABLES {
+            let mut st = conn
+                .prepare("SELECT name FROM pragma_table_info(?1) ORDER BY cid")
+                .unwrap();
+            let cols: Vec<String> = st
+                .query_map([table], |r| r.get(0))
+                .unwrap()
+                .collect::<Result<_, _>>()
+                .unwrap();
+            schema.push_str(&format!("{table}: {}\n", cols.join(" ")));
+        }
         assert_eq!(
-            super::negotiate_from(super::SYNC_VERSIONS, &[1, 2]),
-            Some(2)
+            (super::SYNC_VERSIONS, schema.as_str()),
+            (&[3][..], PINNED),
+            "the replicated schema changed: bump SYNC_VERSIONS (see its doc)"
         );
-        assert_eq!(super::negotiate_from(&[1], &[1, 2]), Some(1));
-        assert_eq!(super::negotiate_from(super::SYNC_VERSIONS, &[9]), None);
     }
 }

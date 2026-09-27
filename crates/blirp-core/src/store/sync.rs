@@ -21,6 +21,8 @@ use serde::{Deserialize, Serialize};
 const OUTBOX_OFF_KEY: &str = "sync.outbox_off";
 /// Events rowid up to which a backfill queued them (present while one runs).
 const BACKFILL_KEY: &str = "sync.backfill_events";
+/// Present until this machine re-sent its projects once (migration 12).
+const REQUEUE_PROJECTS_KEY: &str = "sync.requeue_projects";
 
 /// Drop outbox entries up to `upto` that are older than the session status
 /// coalescing window (`modify_session` reads the time of a session's last
@@ -530,10 +532,16 @@ impl Store {
     /// wherever stale copies meet them. Turning it on backfills: every
     /// replicated row except events is queued in this transaction, events
     /// that exist now follow in bounded, resumable batches
-    /// ([`Store::backfill_events`]). Returns how many rows were queued.
+    /// ([`Store::backfill_events`]). Staying on, it queues every project
+    /// once after migration 12 (the backfill and standalone need not).
+    /// Returns how many rows were queued.
     pub fn set_replication(&self, on: bool) -> Result<usize> {
         let queued = self.write(|tx| {
             let off = outbox_off(tx)?;
+            let requeue_projects = tx.execute(
+                "DELETE FROM settings WHERE key = ?1",
+                params![REQUEUE_PROJECTS_KEY],
+            )? > 0;
             match (on, off) {
                 (true, true) => {
                     tx.execute(
@@ -561,6 +569,19 @@ impl Store {
                     tx.execute("DELETE FROM settings WHERE key = ?1", params![BACKFILL_KEY])?;
                     tx.execute("DELETE FROM outbox_deferred", [])?;
                     Ok(0)
+                }
+                (true, false) if requeue_projects => {
+                    let projects = all(
+                        tx,
+                        "SELECT * FROM projects ORDER BY created_at",
+                        [],
+                        super::projects::project_row,
+                    )?;
+                    let n = projects.len();
+                    for p in projects {
+                        super::queue_in(tx, &Change::Project(p))?;
+                    }
+                    Ok(n)
                 }
                 _ => Ok(0),
             }
@@ -2404,5 +2425,68 @@ mod tests {
             [("q".to_string(), Some("host/o/r3".to_string()))]
         );
         assert_eq!(roots(&c), roots(&hub));
+    }
+
+    // B2 (0.2.0): the hub wrote projects with the fields of migration 10
+    // while a node still ran 0.1.x, which dropped them and moved its pull
+    // cursor past them. After upgrading to this release (migration 12, then
+    // the daemon's start turns replication on) the node gets them again.
+    #[test]
+    fn projects_pulled_without_their_new_fields_heal_after_upgrade() {
+        let (_h, hub) = temp_store();
+        let (_n, node) = temp_store();
+        machine_device(&hub, "N", false);
+        let bucket = Project {
+            id: "chats-H".into(),
+            name: "Chats (H)".into(),
+            created_at: 1,
+            updated_at: 5,
+            deleted: false,
+            chats: true,
+            merged_into: None,
+        };
+        let merged = Project {
+            id: "old".into(),
+            name: "Old".into(),
+            created_at: 1,
+            updated_at: 6,
+            deleted: true,
+            chats: false,
+            merged_into: Some("p".into()),
+        };
+        hub.apply(project("p", "P")).unwrap();
+        hub.apply(Change::Project(bucket.clone())).unwrap();
+        hub.apply(Change::Project(merged.clone())).unwrap();
+        assert_eq!(pull(&node, "N", &hub, "H"), 3);
+        // What 0.1.x stored: the rows without the fields it did not know.
+        node.write(|tx| Ok(tx.execute("UPDATE projects SET chats = 0, merged_into = NULL", [])?))
+            .unwrap();
+        pull(&node, "N", &hub, "H");
+        hub.compact_hub_log(1000).unwrap();
+        assert_eq!(pull(&node, "N", &hub, "H"), 0, "never sent again");
+        assert!(!node.get_project("chats-H").unwrap().unwrap().chats);
+
+        // Upgrade both: migration 12 runs on open, then replication is
+        // switched on as on every daemon start.
+        let reopen = |s: Store| {
+            s.write(|tx| Ok(tx.pragma_update(None, "user_version", 11)?))
+                .unwrap();
+            let path = s.path().to_owned();
+            drop(s);
+            Store::open(&path).unwrap()
+        };
+        let hub = reopen(hub);
+        let node = reopen(node);
+        assert_eq!(hub.set_replication(true).unwrap(), 3);
+        assert_eq!(node.set_replication(true).unwrap(), 3);
+        // Once only.
+        assert_eq!(hub.set_replication(true).unwrap(), 0);
+        // The node's stale copies reach the hub first and never win there.
+        push(&node, "N", &hub, "H");
+        pull(&node, "N", &hub, "H");
+        for s in [&hub, &node] {
+            assert_eq!(s.get_project("chats-H").unwrap().unwrap(), bucket);
+            assert_eq!(s.get_project("old").unwrap().unwrap(), merged);
+        }
     }
 }

@@ -123,7 +123,11 @@ pub async fn serve_hub(
             &mut send,
             &HubMsg::Error {
                 code: "unsupported_version".into(),
-                message: format!("hub speaks {:?}", crate::SYNC_VERSIONS),
+                message: format!(
+                    "the hub speaks sync protocol {:?}, this machine {versions:?}: \
+                     update blirp on both to the same release",
+                    crate::SYNC_VERSIONS
+                ),
             },
         )
         .await?;
@@ -375,6 +379,15 @@ async fn handshake(
         HubMsg::Welcome { hub_machine_id, .. } => Err(SyncError::Protocol(format!(
             "expected hub {hub_id}, got {hub_machine_id}"
         ))),
+        // An older hub's message only names its own versions.
+        HubMsg::Error { code, .. } if code == "unsupported_version" => Err(remote_err(
+            code,
+            format!(
+                "the hub runs a blirp release with another sync protocol (this machine \
+                 speaks {:?}): update blirp on the hub and here to the same release",
+                crate::SYNC_VERSIONS
+            ),
+        )),
         HubMsg::Error { code, message } => Err(remote_err(code, message)),
         other => Err(SyncError::Protocol(format!("unexpected {other:?}"))),
     }

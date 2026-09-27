@@ -10,6 +10,20 @@ so every tag needs one.
 
 ## [Unreleased]
 
+### Changed
+
+- The sync protocol version now also versions what is replicated: hub and
+  nodes that replicate different fields refuse each other until both run the
+  same release, instead of silently dropping the fields one side does not
+  know. Update the hub and every node from 0.2.0 together.
+
+### Fixed
+
+- Nodes that still ran 0.1.x while the hub already ran 0.2.0 showed the
+  hub's Chats as a normal project ("Chats (<hub>)") and lost which project a
+  merged project went into. Every machine re-sends its projects once after
+  updating, which repairs them.
+
 ## [0.2.0] - 2026-09-27
 
 Project files sync through the hub, projects without a folder, Chats for
