@@ -68,6 +68,8 @@ pub const BUILD: &[&str] = &[
 pub const SECRETS: &[&str] = &[
     ".env",
     ".env.*",
+    "*.env",
+    ".envrc",
     "!.env.example",
     "!.env.sample",
     "!.env.template",
@@ -85,6 +87,8 @@ pub const SECRETS: &[&str] = &[
     ".npmrc",
     ".pypirc",
     ".netrc",
+    ".pgpass",
+    "**/.kube/config",
     ".git-credentials",
     ".dockercfg",
     "**/.docker/config.json",
@@ -174,21 +178,53 @@ impl Frame {
         }
     }
 
-    /// `.git/info/exclude` of a repository root, as the lowest gitignore.
+    /// The user's global gitignore (`core.excludesFile`, else
+    /// `$XDG_CONFIG_HOME/git/ignore` or `~/.config/git/ignore`) and
+    /// `.git/info/exclude` of a repository root: the lowest gitignore.
     pub fn git_exclude(root: &Path) -> Frame {
-        let file = root.join(".git").join("info").join("exclude");
-        if !file.is_file() {
-            return Frame::default();
-        }
         let mut b = GitignoreBuilder::new(root);
         b.case_insensitive(crate::files::path::case_insensitive_fs())
             .ok();
-        let _ = b.add(&file);
+        let mut any = false;
+        if let Some(global) = global_gitignore().filter(|f| f.is_file()) {
+            let _ = b.add(&global);
+            any = true;
+        }
+        let file = root.join(".git").join("info").join("exclude");
+        if file.is_file() {
+            let _ = b.add(&file);
+            any = true;
+        }
+        if !any {
+            return Frame::default();
+        }
         Frame {
             gitignore: b.build().ok().filter(|g| !g.is_empty()),
             blirpignore: None,
         }
     }
+}
+
+/// The user's global gitignore file, as git finds it (read once).
+fn global_gitignore() -> Option<std::path::PathBuf> {
+    static FILE: LazyLock<Option<std::path::PathBuf>> = LazyLock::new(|| {
+        let mut c = crate::process::command("git");
+        c.args(["config", "--global", "--path", "--get", "core.excludesFile"]);
+        let configured = crate::process::run(c, std::time::Duration::from_secs(5), 64 * 1024)
+            .ok()
+            .filter(|o| o.success())
+            .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
+            .filter(|s| !s.is_empty())
+            .map(std::path::PathBuf::from);
+        configured.or_else(|| {
+            let xdg = std::env::var_os("XDG_CONFIG_HOME")
+                .map(std::path::PathBuf::from)
+                .filter(|p| p.is_absolute())
+                .or_else(|| crate::paths::user_home().map(|h| h.join(".config")))?;
+            Some(xdg.join("git").join("ignore"))
+        })
+    });
+    FILE.clone()
 }
 
 /// Deepest frame with an opinion decides (nested ignore files override

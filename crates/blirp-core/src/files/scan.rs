@@ -16,6 +16,8 @@ use std::time::UNIX_EPOCH;
 /// have changed again within the filesystem's timestamp resolution after
 /// hashing (git's "racy" rule), so its cached hash is not trusted.
 pub const RACY_NS: i64 = 2_000_000_000;
+/// A blirp temp file older than this is left over from a crash.
+pub const STALE_TEMP_SECS: u64 = 24 * 3600;
 
 #[derive(Debug, Clone)]
 pub struct ScanConfig {
@@ -74,6 +76,8 @@ pub struct Scan {
     /// Folders (wire paths, "" for the root) that could not be listed
     /// completely: nothing below them may be read as deleted.
     pub unreadable: Vec<String>,
+    /// blirp temp files a crash left behind (older than a day).
+    pub stale_temp: Vec<PathBuf>,
     /// Bytes of the found files.
     pub bytes: u64,
     pub state: ScanState,
@@ -213,7 +217,23 @@ impl Walk<'_> {
             };
             let wire = format!("{rel}{name}");
             // Layer 1: never synced, never listed.
-            if path::is_vcs_component(&name) || name.starts_with(TMP_PREFIX) {
+            if name.starts_with(TMP_PREFIX) {
+                let old = entry
+                    .metadata()
+                    .and_then(|m| m.modified())
+                    .ok()
+                    .and_then(|t| t.elapsed().ok())
+                    .is_some_and(|age| age.as_secs() > STALE_TEMP_SECS);
+                if old
+                    && entry
+                        .file_type()
+                        .is_ok_and(|t| t.is_file() || t.is_symlink())
+                {
+                    self.out.stale_temp.push(entry.path());
+                }
+                continue;
+            }
+            if path::is_vcs_component(&name) {
                 continue;
             }
             if path::check(&wire).is_err() {
@@ -322,6 +342,7 @@ pub fn scan(root: &Path, git: bool, cfg: &ScanConfig) -> std::io::Result<Scan> {
             excluded: Vec::new(),
             reincluded_secrets: Vec::new(),
             unreadable: Vec::new(),
+            stale_temp: Vec::new(),
             bytes: 0,
             state: ScanState::Ok,
         },

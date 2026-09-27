@@ -76,10 +76,14 @@ impl Target<'_> {
         if !path::valid_here(wire) {
             return Err(refused(wire, "the name is not valid on this system"));
         }
-        let target = path::to_local(self.root, wire);
         if let Some(data) = self.data_dir {
-            let data = path_key(&dunce::canonicalize(data).unwrap_or_else(|_| data.to_path_buf()));
-            if path_key(&target).starts_with(&data) && !path_key(self.root).starts_with(&data) {
+            // Both canonical: a root reached through another spelling
+            // (a link, short names, a different case) is still caught.
+            let canon =
+                |p: &Path| path_key(&dunce::canonicalize(p).unwrap_or_else(|_| p.to_path_buf()));
+            let (data, root) = (canon(data), canon(self.root));
+            let target = path_key(&path::to_local(&root, wire));
+            if target.starts_with(&data) && !root.starts_with(&data) {
                 return Err(refused(wire, "inside blirp's data folder"));
             }
         }
@@ -123,7 +127,9 @@ impl Target<'_> {
 
     /// Whether the file at `target` is what `expect` says.
     fn matches(&self, wire: &str, target: &Path, expect: &Expect) -> Result<bool, WriteError> {
-        let meta = match std::fs::symlink_metadata(target) {
+        // A file deleted while a scanner still has it open lingers as
+        // "delete pending" and answers access denied for a moment.
+        let meta = match retry_busy(|| std::fs::symlink_metadata(target)) {
             Ok(m) => Some(m),
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
             Err(e) => return Err(io(wire)(e)),
@@ -132,7 +138,10 @@ impl Target<'_> {
             (Expect::Any, _) => true,
             (Expect::Absent, m) => m.is_none(),
             (Expect::Blob(h), Some(m)) if m.is_file() => {
-                super::scan::hash_file(target).map_err(io(wire))?.0 == *h
+                retry_busy(|| super::scan::hash_file(target))
+                    .map_err(io(wire))?
+                    .0
+                    == *h
             }
             (Expect::Link(t), Some(m)) if m.file_type().is_symlink() => std::fs::read_link(target)
                 .ok()
@@ -229,8 +238,10 @@ impl Target<'_> {
             }
             #[cfg(not(unix))]
             let _ = mode_x;
-            if let Some(ms) = mtime_ms.and_then(|m| u64::try_from(m).ok()) {
-                let t = std::time::UNIX_EPOCH + std::time::Duration::from_millis(ms);
+            // A time the OS cannot represent is left as it is (now).
+            if let Some(t) = mtime_ms.and_then(|m| u64::try_from(m).ok()).and_then(|ms| {
+                std::time::UNIX_EPOCH.checked_add(std::time::Duration::from_millis(ms))
+            }) {
                 f.set_modified(t).map_err(io(wire))?;
             }
             f.sync_all().map_err(io(wire))?;
@@ -254,7 +265,17 @@ impl Target<'_> {
         target: &Path,
         expect: &Expect,
     ) -> Result<(), WriteError> {
+        let stat = |p: &Path| {
+            std::fs::symlink_metadata(p)
+                .ok()
+                .map(|m| (m.len(), m.modified().ok()))
+        };
+        let before = stat(target);
         if !self.matches(wire, target, expect)? {
+            return Err(WriteError::Changed(wire.to_string()));
+        }
+        // Written to while it was being checked: leave it alone.
+        if stat(target) != before {
             return Err(WriteError::Changed(wire.to_string()));
         }
         if *expect == Expect::Absent {
@@ -294,12 +315,13 @@ impl Target<'_> {
         #[cfg(not(unix))]
         let made: Result<(), WriteError> =
             Err(refused(wire, "symlinks are not recreated on this system"));
-        made?;
-        let result = if self.matches(wire, &target, expect)? {
-            retry_busy(|| std::fs::rename(&tmp, &target)).map_err(io(wire))
-        } else {
-            Err(WriteError::Changed(wire.to_string()))
-        };
+        let result = made.and_then(|()| {
+            if self.matches(wire, &target, expect)? {
+                retry_busy(|| std::fs::rename(&tmp, &target)).map_err(io(wire))
+            } else {
+                Err(WriteError::Changed(wire.to_string()))
+            }
+        });
         if std::fs::symlink_metadata(&tmp).is_ok() {
             let _ = std::fs::remove_file(&tmp);
         }
@@ -338,7 +360,12 @@ fn retry_busy<T>(mut f: impl FnMut() -> std::io::Result<T>) -> std::io::Result<T
     let mut left = if cfg!(windows) { 20 } else { 0 };
     loop {
         match f() {
-            Err(e) if e.kind() == std::io::ErrorKind::PermissionDenied && left > 0 => {
+            // Access denied, or ERROR_SHARING_VIOLATION / ERROR_LOCK_VIOLATION.
+            Err(e)
+                if left > 0
+                    && (e.kind() == std::io::ErrorKind::PermissionDenied
+                        || matches!(e.raw_os_error(), Some(32 | 33))) =>
+            {
                 left -= 1;
                 std::thread::sleep(std::time::Duration::from_millis(50));
             }
