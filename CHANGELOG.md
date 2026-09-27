@@ -21,7 +21,7 @@ so every tag needs one.
   another machine, which that machine summarizes) the session starts anyway
   and the handoff says why.
 - When the agent of a running session compacts its context (Claude Code,
-  opencode, pi), the session page suggests starting a new session from it.
+  Codex, opencode, pi), the session page suggests starting a new session from it.
   Dismissible per session until the next compaction. Sessions carry the time
   of their latest compaction (`compacted_at`; database migration 12).
 

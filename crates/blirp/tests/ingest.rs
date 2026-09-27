@@ -782,6 +782,30 @@ fn codex_external_session_gets_folder_project() {
     h.common(&s);
 }
 
+// A `compacted` rollout line (synthetic, in the format of a real codex 0.153
+// rollout): the history was replaced by a compacted one.
+#[test]
+fn codex_compaction_marks_the_session() {
+    let h = H::new();
+    let path = h.put(
+        &format!(".codex/sessions/2026/01/02/rollout-2026-01-02T09-00-00-{CODEX_SID}.jsonl"),
+        h.fill(&fixture("codex/rollout.jsonl")).as_bytes(),
+    );
+    h.pass();
+    assert_eq!(h.session("codex", CODEX_SID).compacted_at, None);
+    append(&path, fixture("codex/compacted.jsonl").as_bytes());
+    h.pass();
+    let s = h.session("codex", CODEX_SID);
+    assert_eq!(s.compacted_at, Some(1_767_345_000_000)); // 2026-01-02T09:10:00Z
+    let ev = h.events(&s);
+    let n = ev.len();
+    assert_eq!(
+        (ev[n - 2].kind, ev[n - 2].text.as_str()),
+        (EventKind::Summary, "conversation compacted")
+    );
+    assert_eq!(ev[n - 1].text, "Continuing after the compaction.");
+}
+
 #[test]
 fn codex_rollouts_in_scratch_folders_create_no_project() {
     let h = H::new();

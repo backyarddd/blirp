@@ -1,0 +1,2 @@
+{"timestamp":"2026-01-02T09:10:00.000Z","ordinal":20,"type":"compacted","payload":{"message":"","replacement_history":[{"type":"message","id":"msg_1","role":"user","content":[{"type":"input_text","text":"Rename the build script"}]}],"window_number":1,"first_window_id":"w1","previous_window_id":"w1","window_id":"w2","compaction_response_id":"resp_1"}}
+{"timestamp":"2026-01-02T09:10:01.000Z","ordinal":21,"type":"response_item","payload":{"type":"message","role":"assistant","content":[{"type":"output_text","text":"Continuing after the compaction."}]}}

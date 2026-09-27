@@ -171,6 +171,7 @@ Distinct `(type, payload.type)` combinations observed:
 | `turn_context` | — | per-turn cwd, workspace_roots, sandbox/approval policy, model, collaboration_mode |
 | `world_state` | — | environment/skills/personality/multi-agent-mode snapshot |
 | `token_usage_record` | — | per-response + per-turn + per-thread token usage |
+| `compacted` | — | `{message, replacement_history[], window_number, window_id, previous_window_id, compaction_response_id, ...}`: the context was compacted and the history replaced (`message` is the summary; empty when compacted remotely, observed in 0.153). blirp stores a `summary` event and sets `compacted_at` |
 | `inter_agent_communication_metadata` | — | multi-agent turn-trigger flag |
 | `response_item` | `message` | chat message (role, content[] of `{type:"output_text"/"input_text",text}`) |
 | `response_item` | `reasoning` | `{id, summary:[], encrypted_content}` — hidden reasoning, no plaintext |

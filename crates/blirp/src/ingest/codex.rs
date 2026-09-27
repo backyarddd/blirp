@@ -255,6 +255,19 @@ impl Adapter for Codex {
                     }
                     return Ok(());
                 }
+                "compacted" => {
+                    // Codex replaced its history with a compacted one (its
+                    // context filled up). `message` is its summary; empty
+                    // when the model compacted remotely.
+                    let msg = p
+                        .get("message")
+                        .and_then(Value::as_str)
+                        .map(str::trim)
+                        .filter(|m| !m.is_empty())
+                        .unwrap_or("conversation compacted");
+                    let asid = st.asid.clone().unwrap_or_else(|| fallback.clone());
+                    return Emit::line(sink, &asid, ix).text(ts, EventKind::Summary, msg, None);
+                }
                 "response_item" => {}
                 _ => return Ok(()),
             }
