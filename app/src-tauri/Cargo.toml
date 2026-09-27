@@ -34,7 +34,9 @@ serde_json.workspace = true
 tauri = { version = "2", features = ["tray-icon", "image-png"] }
 tauri-plugin-deep-link = "2"
 tauri-plugin-dialog = "2"
-tauri-plugin-notification = "=2.4.0"
+# Native notifications (the version tauri-plugin-notification 2.x uses), called
+# directly: the plugin discards show() errors on desktop.
+notify-rust = "=4.18.0"
 tauri-plugin-opener = "2"
 tauri-plugin-single-instance = { version = "2", features = ["deep-link"] }
 tauri-plugin-window-state = "2"

@@ -365,7 +365,10 @@ fn build(state: SharedState, listener: Listener) -> Router {
     let mut app = app
         .fallback(crate::static_files::serve)
         .layer(middleware::from_fn(check_origin))
-        .layer(middleware::from_fn(security_headers));
+        .layer(middleware::from_fn_with_state(
+            listener == Listener::Local,
+            security_headers,
+        ));
     if listener == Listener::Local {
         app = app.layer(middleware::from_fn_with_state(
             state.clone(),
@@ -547,30 +550,33 @@ img-src 'self' data:; font-src 'self'; object-src 'none'; base-uri 'self'; \
 form-action 'self'; frame-ancestors 'none'";
 
 /// `connect-src` names the same-origin WebSocket URLs explicitly: older
-/// browsers do not match `ws:`/`wss:` against `'self'`. It also allows the
-/// desktop app's IPC endpoint (`http://ipc.localhost` on Windows, `ipc:`
-/// elsewhere), which carries its `notify` command; a browser has no such
-/// endpoint.
-const IPC: &str = "http://ipc.localhost ipc:";
+/// browsers do not match `ws:`/`wss:` against `'self'`. On the loopback
+/// listener (the one the desktop app shows) it also allows the app's IPC
+/// endpoint (`http://ipc.localhost` on Windows, `ipc:` elsewhere), which
+/// carries its `notify` command.
+const IPC: &str = " http://ipc.localhost ipc:";
 
-fn csp(host: Option<&str>) -> String {
+fn csp(host: Option<&str>, desktop_ipc: bool) -> String {
     let host = host.filter(|h| {
         !h.is_empty()
             && h.bytes()
                 .all(|b| b.is_ascii_alphanumeric() || b".-:[]".contains(&b))
     });
+    let ipc = if desktop_ipc { IPC } else { "" };
     match host {
-        Some(h) => format!("{CSP_BASE}; connect-src 'self' ws://{h} wss://{h} {IPC}"),
-        None => format!("{CSP_BASE}; connect-src 'self' {IPC}"),
+        Some(h) => format!("{CSP_BASE}; connect-src 'self' ws://{h} wss://{h}{ipc}"),
+        None => format!("{CSP_BASE}; connect-src 'self'{ipc}"),
     }
 }
 
-async fn security_headers(req: Request, next: Next) -> Response {
+async fn security_headers(State(local): State<bool>, req: Request, next: Next) -> Response {
     let is_api = req.uri().path().starts_with("/api/");
-    let policy = csp(req
-        .headers()
-        .get(header::HOST)
-        .and_then(|h| h.to_str().ok()));
+    let policy = csp(
+        req.headers()
+            .get(header::HOST)
+            .and_then(|h| h.to_str().ok()),
+        local,
+    );
     let mut resp = next.run(req).await;
     let h = resp.headers_mut();
     match HeaderValue::from_str(&policy) {
@@ -630,20 +636,25 @@ mod tests {
 
     #[test]
     fn csp_allows_same_origin_websockets_only() {
-        let p = csp(Some("127.0.0.1:47770"));
+        let p = csp(Some("127.0.0.1:47770"), true);
         assert!(p.contains("script-src 'self';"));
         assert!(p.ends_with(
             "connect-src 'self' ws://127.0.0.1:47770 wss://127.0.0.1:47770 http://ipc.localhost ipc:"
         ));
-        assert!(csp(Some("[::1]:47770")).contains("ws://[::1]:47770"));
+        // The portal and proxy listeners never allow the desktop IPC endpoint.
+        assert!(
+            csp(Some("192.168.0.5:47771"), false)
+                .ends_with("connect-src 'self' ws://192.168.0.5:47771 wss://192.168.0.5:47771")
+        );
+        assert!(csp(Some("[::1]:47770"), true).contains("ws://[::1]:47770"));
         // A hostile Host header must not be able to add directives.
         for bad in ["evil; script-src *", "a b", ""] {
             assert!(
-                csp(Some(bad)).ends_with("connect-src 'self' http://ipc.localhost ipc:"),
+                csp(Some(bad), false).ends_with("connect-src 'self'"),
                 "{bad}"
             );
         }
-        assert!(csp(None).ends_with("connect-src 'self' http://ipc.localhost ipc:"));
+        assert!(csp(None, true).ends_with("connect-src 'self' http://ipc.localhost ipc:"));
     }
 
     #[test]

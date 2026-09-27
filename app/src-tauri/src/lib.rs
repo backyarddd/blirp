@@ -529,7 +529,6 @@ pub fn run() -> anyhow::Result<()> {
         )
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_opener::init())
-        .plugin(tauri_plugin_notification::init())
         .manage(shell.clone())
         .invoke_handler(tauri::generate_handler![
             startup_state,
@@ -571,6 +570,13 @@ pub fn run() -> anyhow::Result<()> {
                 .on_new_window(move |url, _features| {
                     open_external(&popup_app, &url);
                     NewWindowResponse::Deny
+                })
+                // The SPA's title carries the attention count ("(2) blirp");
+                // mirror it on the window and its taskbar button.
+                .on_document_title_changed(|win, title| {
+                    if let Err(e) = win.set_title(&title) {
+                        tracing::warn!(error = %e, "set window title");
+                    }
                 })
                 .on_page_load(|win, payload| {
                     if payload.event() == PageLoadEvent::Finished {

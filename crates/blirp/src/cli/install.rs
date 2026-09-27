@@ -394,8 +394,10 @@ fn remove_install(inst: &install::Installed) -> bool {
 
 /// The desktop app registers `blirp://` for itself when it runs (Linux and
 /// Windows, see app/src-tauri/src/lib.rs), and on Windows its notification
-/// sender (app/src-tauri/src/notify.rs); drop the link handler when it points
-/// at the app being removed, and the sender with it.
+/// sender (app/src-tauri/src/notify.rs). Drop the link handler when it points
+/// at the app being removed. The sender names no path, so it goes whenever a
+/// desktop app is removed; another installed copy registers it again on its
+/// next start.
 fn remove_url_handler(inst: &install::Installed) -> bool {
     let Some(app) = inst.receipt.app() else {
         return true;

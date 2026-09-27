@@ -1,7 +1,7 @@
 {
   "$schema": "../gen/schemas/desktop-schema.json",
   "identifier": "main-local",
-  "description": "The bundled loading/error page may read the startup state, retry and open the log folder. The daemon's web UI (remote origin) gets no IPC.",
+  "description": "The bundled loading/error page may read the startup state, retry and open the log folder. The daemon's web UI (remote origin) gets only notify (daemon-ui.json).",
   "local": true,
   "windows": ["main"],
   "permissions": ["allow-startup-state", "allow-retry", "allow-open-logs"]
