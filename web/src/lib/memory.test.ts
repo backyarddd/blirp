@@ -72,6 +72,9 @@ describe('describeAutoSummarizer', () => {
     expect(describeAutoSummarizer({ backend: 'ollama', model: 'llama3', default_agent: 'claude', fallback: 'not_installed' })).toBe(
       'Automatic uses Ollama (llama3): your default agent, Claude Code, is not installed.',
     );
+    expect(describeAutoSummarizer({ backend: 'claude', model: 'sonnet', default_agent: 'codex', fallback: 'outdated' })).toBe(
+      'Automatic uses Claude Code (Sonnet): your default agent, Codex, is too old to summarize (update it).',
+    );
     expect(describeAutoSummarizer({ backend: 'claude', model: 'sonnet', default_agent: 'claude', fallback: 'not_logged_in' })).toContain(
       'but it is not signed in',
     );

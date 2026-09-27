@@ -747,7 +747,7 @@ default_agent: string,
  */
 fallback: SummarizerFallback | null, };
 
-export type SummarizerFallback = "no_backend" | "not_installed" | "not_logged_in";
+export type SummarizerFallback = "no_backend" | "not_installed" | "not_logged_in" | "outdated";
 
 /**
  * `GET /api/sync/status` (§10).

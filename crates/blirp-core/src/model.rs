@@ -1066,6 +1066,9 @@ pub enum SummarizerFallback {
     NotInstalled,
     /// Its CLI reports it is not logged in.
     NotLoggedIn,
+    /// Its CLI is older than the summarizer supports (codex before 0.153),
+    /// or its version is unknown.
+    Outdated,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize, TS)]

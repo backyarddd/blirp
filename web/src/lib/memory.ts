@@ -85,6 +85,8 @@ export function describeAutoSummarizer(p: SummarizerPick): string {
       return `Automatic uses ${name}: your default agent, ${agent}, has no summarizer.`;
     case 'not_installed':
       return `Automatic uses ${name}: your default agent, ${agent}, is not installed.`;
+    case 'outdated':
+      return `Automatic uses ${name}: your default agent, ${agent}, is too old to summarize (update it).`;
     case 'not_logged_in':
       return p.backend === p.default_agent
         ? `Automatic uses ${name}, your default agent, but it is not signed in: distilling pauses until you sign in.`

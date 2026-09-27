@@ -359,6 +359,9 @@ enum Cli {
     Missing,
     /// On PATH, but its own status command says it is not logged in.
     LoggedOut,
+    /// On PATH, but older than the version its flags were checked against
+    /// (or its version is unknown): its run would fail on them.
+    Outdated,
     /// On PATH and logged in (or its login state is unknown).
     Ready,
 }
@@ -367,7 +370,7 @@ enum Cli {
 /// preselect; only claude and codex have one), else claude, else a
 /// reachable ollama. Last resort, a logged-out CLI (the default agent's
 /// first): its run fails with its own sign-in error, which pauses
-/// distilling with that reason. Codex is picked only as the default agent:
+/// distilling with that reason. An outdated codex is never picked. Codex is picked only as the default agent:
 /// the user already runs it on these projects with every tool on, while
 /// the summarizer run turns off every tool it can (see [`codex_args`]).
 fn pick_auto(
@@ -385,6 +388,7 @@ fn pick_auto(
         None => Some(SummarizerFallback::NoBackend),
         Some((_, Cli::Missing)) => Some(SummarizerFallback::NotInstalled),
         Some((_, Cli::LoggedOut)) => Some(SummarizerFallback::NotLoggedIn),
+        Some((_, Cli::Outdated)) => Some(SummarizerFallback::Outdated),
         Some((_, Cli::Ready)) => None,
     };
     let backend = match own {
@@ -398,6 +402,21 @@ fn pick_auto(
     (backend, fallback)
 }
 
+/// Oldest codex whose feature names [`codex_args`] were checked against.
+const CODEX_MIN_VERSION: (u64, u64, u64) = (0, 153, 0);
+
+/// `codex-cli 0.153.2` (first line of `codex --version`) as numbers; a
+/// pre-release suffix (`0.154.0-alpha.1`) is ignored.
+fn parse_codex_version(line: &str) -> Option<(u64, u64, u64)> {
+    let v = line.split_whitespace().last()?;
+    let mut parts = v.split(['.', '-', '+']).map(str::parse::<u64>);
+    Some((
+        parts.next()?.ok()?,
+        parts.next()?.ok()?,
+        parts.next()?.ok()?,
+    ))
+}
+
 /// `codex exec` for a summarizer run: the user's `config.toml` is not
 /// loaded (its MCP servers, plugins and hooks; `-c mcp_servers={}` does not
 /// remove configured servers), web search, hooks, shell and exec tools,
@@ -405,7 +424,9 @@ fn pick_auto(
 /// read-only sandbox, no persisted session; the reply goes to `last`.
 /// Checked against codex 0.153.2 by capturing the request it sends: no tool
 /// at all (with the user's config, `mcp_servers={}` and no `web_search` it
-/// sent the user's MCP servers and `web_search`).
+/// sent the user's MCP servers and `web_search`). An older codex refuses a
+/// feature name it does not know ("Unknown feature flag"), so `auto` needs
+/// [`CODEX_MIN_VERSION`].
 fn codex_args(last: &Path) -> Vec<OsString> {
     let mut args: Vec<OsString> = [
         "exec",
@@ -432,6 +453,11 @@ fn codex_args(last: &Path) -> Vec<OsString> {
         "computer_use",
         "multi_agent",
         "image_generation",
+        "sleep_tool",
+        "goals",
+        "tool_suggest",
+        "skill_search",
+        "code_mode_host",
     ] {
         args.push("--disable".into());
         args.push(feature.into());
@@ -503,16 +529,44 @@ pub async fn select_backend(
     }
 }
 
+/// How long [`resolve_auto`] answers from its cache.
+const PICK_TTL: Duration = Duration::from_secs(30);
+
+/// What the cached pick depends on besides PATH and logins, which the TTL
+/// covers: `agents.default`, `memory.ollama_model` and claude's stored token.
+type PickKey = (String, String, blirp_core::claude_token::Stamp);
+
 /// What `auto` resolves to now, for Settings (`GET /api/settings/summarizer`).
-pub async fn resolve_auto(
-    cfg: &MemoryConfig,
-    default_agent: &str,
-    paths: &Paths,
-) -> Result<SummarizerPick, String> {
+/// Cached for [`PICK_TTL`]: every miss runs the login probes.
+pub async fn resolve_auto(state: &SharedState) -> Result<SummarizerPick, String> {
+    let config = state.config();
+    let paths = state.paths.clone();
+    let stamp = tokio::task::spawn_blocking(move || blirp_core::claude_token::stamp(&paths))
+        .await
+        .map_err(|e| format!("reading the claude login token state: {e}"))?;
+    let key: PickKey = (
+        config.agents.default.clone(),
+        config.memory.ollama_model.clone(),
+        stamp,
+    );
+    if let Some((at, seen, pick)) = lock(&state.distiller.pick_cache).as_ref()
+        && at.elapsed() < PICK_TTL
+        && *seen == key
+    {
+        return Ok(pick.clone());
+    }
     let (claude_exe, codex_exe) = which_summarizers().await?;
-    Ok(resolve(cfg, default_agent, paths, claude_exe, codex_exe)
-        .await?
-        .1)
+    let pick = resolve(
+        &config.memory,
+        &config.agents.default,
+        &state.paths,
+        claude_exe,
+        codex_exe,
+    )
+    .await?
+    .1;
+    *lock(&state.distiller.pick_cache) = Some((std::time::Instant::now(), key, pick.clone()));
+    Ok(pick)
 }
 
 /// PATH scans touch the filesystem: off the async runtime.
@@ -564,11 +618,18 @@ async fn resolve(
     let codex = match &codex_exe {
         Some(exe) if default_agent == "codex" => {
             let exe = exe.clone();
-            cli(
-                tokio::task::spawn_blocking(move || crate::agents::probe_codex_auth(&exe))
-                    .await
-                    .map_err(|e| format!("checking the codex login: {e}"))?,
-            )
+            tokio::task::spawn_blocking(move || {
+                let version = crate::agents::probe_version(&exe)
+                    .as_deref()
+                    .and_then(parse_codex_version);
+                if version.is_none_or(|v| v < CODEX_MIN_VERSION) {
+                    Cli::Outdated
+                } else {
+                    cli(crate::agents::probe_codex_auth(&exe))
+                }
+            })
+            .await
+            .map_err(|e| format!("checking the codex version and login: {e}"))?
         }
         _ => Cli::Missing,
     };
@@ -1079,6 +1140,8 @@ pub fn classify(e: &DistillError) -> Option<DistillPause> {
         "not on path",
         "not reachable",
         "connection refused",
+        // An older codex refusing a feature name of `codex_args`.
+        "unknown feature flag",
     ]) {
         Some(DistillPause::Unavailable)
     } else {
@@ -1141,6 +1204,8 @@ pub struct Distiller {
     breaker: Mutex<Breaker>,
     /// Day on which "budget used up" was last logged (once per day).
     budget_logged: Mutex<Option<String>>,
+    /// Last [`resolve_auto`] answer, when and for what.
+    pick_cache: Mutex<Option<(std::time::Instant, PickKey, SummarizerPick)>>,
 }
 
 impl Default for Distiller {
@@ -1152,6 +1217,7 @@ impl Default for Distiller {
             queued: Mutex::new(HashSet::new()),
             breaker: Mutex::new(Breaker::default()),
             budget_logged: Mutex::new(None),
+            pick_cache: Mutex::new(None),
         }
     }
 }
@@ -1573,9 +1639,9 @@ mod tests {
 
     #[test]
     fn auto_follows_the_default_agent_then_falls_back() {
-        use Cli::{LoggedOut as Out, Missing as No, Ready as Ok};
+        use Cli::{LoggedOut as Out, Missing as No, Outdated as Old, Ready as Ok};
         use Summarizer::{Claude, Codex, Ollama};
-        use SummarizerFallback::{NoBackend, NotInstalled, NotLoggedIn};
+        use SummarizerFallback::{NoBackend, NotInstalled, NotLoggedIn, Outdated};
         type Case = (
             &'static str,
             Cli,
@@ -1603,6 +1669,11 @@ mod tests {
             ("codex", Out, Out, false, Some(Codex), Some(NotLoggedIn)),
             ("codex", No, No, true, Some(Ollama), Some(NotInstalled)),
             ("codex", No, No, false, None, Some(NotInstalled)),
+            // A codex too old for the summarizer flags is never run.
+            ("codex", Ok, Old, false, Some(Claude), Some(Outdated)),
+            ("codex", No, Old, true, Some(Ollama), Some(Outdated)),
+            ("codex", No, Old, false, None, Some(Outdated)),
+            ("codex", Out, Old, false, Some(Claude), Some(Outdated)),
             // No summarizer of its own: claude, ollama, never codex.
             ("opencode", Ok, Ok, true, Some(Claude), Some(NoBackend)),
             ("opencode", No, Ok, true, Some(Ollama), Some(NoBackend)),
@@ -1620,6 +1691,19 @@ mod tests {
                 "{agent} claude={claude:?} codex={codex:?} ollama={ollama}"
             );
         }
+    }
+
+    #[test]
+    fn codex_versions_are_parsed() {
+        assert_eq!(parse_codex_version("codex-cli 0.153.2"), Some((0, 153, 2)));
+        assert_eq!(
+            parse_codex_version("codex-cli 0.154.0-alpha.1"),
+            Some((0, 154, 0))
+        );
+        assert_eq!(parse_codex_version("codex-cli 1.2"), None);
+        assert_eq!(parse_codex_version("garbage"), None);
+        assert!(parse_codex_version("codex-cli 0.152.9").unwrap() < CODEX_MIN_VERSION);
+        assert!(parse_codex_version("codex-cli 0.153.0").unwrap() >= CODEX_MIN_VERSION);
     }
 
     #[test]
@@ -2080,6 +2164,13 @@ mod tests {
         );
         assert_eq!(
             classify(&backend("cannot start claude: program not found")),
+            Some(DistillPause::Unavailable)
+        );
+        // An older codex refusing a feature name of `codex_args`.
+        assert_eq!(
+            classify(&backend(
+                "codex produced no reply (exit Some(1); stderr: Error: Unknown feature flag: sleep_tool)"
+            )),
             Some(DistillPause::Unavailable)
         );
         assert_eq!(

@@ -61,7 +61,7 @@ A failed run keeps the earlier summary, stores the error on the session (shown o
 |---|---|---|---|
 | `auto` (default) | the summarizer of your default agent for new sessions (`agents.default`: `claude` or `codex`), else `claude`, else Ollama answering at `$OLLAMA_HOST` or `http://127.0.0.1:11434` (see below) | depends on the pick | depends on the pick |
 | `claude` | `claude -p --model sonnet --output-format json --safe-mode --strict-mcp-config --no-session-persistence --tools ""` | Anthropic, under your Claude Code login | Uses your Claude plan's usage limits or your API key's billing. One run sends up to about 60 000 characters (roughly 15 000 tokens) plus the brief and records to Sonnet, which uses noticeably more of your plan (or API spend) per run than Haiku did before 0.1.1. |
-| `codex` | `codex exec --json --ephemeral --skip-git-repo-check --ignore-user-config --sandbox read-only -c web_search="disabled"` plus `--disable` for `hooks`, `shell_tool`, `unified_exec`, `view_image`, `apps`, `plugins`, `browser_use`, `computer_use`, `multi_agent`, `image_generation` | OpenAI, under your Codex login | Your `~/.codex/config.toml` is not loaded (no MCP servers, plugins or hooks), so Codex's built-in default model and provider are used; counts against your ChatGPT plan or API billing. |
+| `codex` | `codex exec --json --ephemeral --skip-git-repo-check --ignore-user-config --sandbox read-only -c web_search="disabled"` plus `--disable` for `hooks`, `shell_tool`, `unified_exec`, `view_image`, `apps`, `plugins`, `browser_use`, `computer_use`, `multi_agent`, `image_generation`, `sleep_tool`, `goals`, `tool_suggest`, `skill_search`, `code_mode_host` (needs codex 0.153 or newer) | OpenAI, under your Codex login | Your `~/.codex/config.toml` is not loaded (no MCP servers, plugins or hooks), so Codex's built-in default model and provider are used; counts against your ChatGPT plan or API billing. |
 | `ollama` | `POST /api/chat` with model `memory.ollama_model` (default `qwen2.5:7b`) | stays on the machine running Ollama | free; quality depends on the model (7B+ recommended) |
 | `none` | nothing | nowhere | none |
 
@@ -69,7 +69,7 @@ Every CLI run happens in an empty scratch folder `~/.blirp/distill/run-*` (delet
 
 How `auto` picks, every run:
 
-1. Your default agent's summarizer, when that agent is Claude Code or Codex, it is on PATH, and its own status command (`claude auth status`, `codex login status`; local, no model call) does not say it is logged out.
+1. Your default agent's summarizer, when that agent is Claude Code or Codex, it is on PATH, and its own status command (`claude auth status`, `codex login status`; local, no model call) does not say it is logged out. Codex must also be 0.153 or newer: older versions refuse the switches that turn its tools off.
 2. Else `claude` (on PATH and not logged out). Other default agents (opencode, custom agents, ...) have no summarizer and start here.
 3. Else Ollama, if it answers.
 4. Else a CLI that is installed but logged out, the default agent's first: its run fails with its own sign-in error, which pauses automatic distilling with that reason.

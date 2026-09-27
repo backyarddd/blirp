@@ -63,17 +63,29 @@
   // login probes for it), again after a save.
   let autoPick: SummarizerPick | null = $state(null);
   let autoError: string | null = $state(null);
+  // Bumped by every request and every save: an answer to an older one is dropped, so a reply
+  // computed before a save never shows after it.
+  let autoRequest = 0;
   let autoLoading = false;
+  let autoRefresh = $state(0);
   $effect(() => {
+    void autoRefresh; // a save asks again
     if (form.summarizer !== 'auto' || autoPick || autoError || autoLoading) return;
+    const mine = ++autoRequest;
     autoLoading = true;
     api.settings
       .summarizer()
       .then(
-        (p) => (autoPick = p),
-        (e: unknown) => (autoError = errorMessage(e)),
+        (p) => {
+          if (mine === autoRequest) autoPick = p;
+        },
+        (e: unknown) => {
+          if (mine === autoRequest) autoError = errorMessage(e);
+        },
       )
-      .finally(() => (autoLoading = false));
+      .finally(() => {
+        if (mine === autoRequest) autoLoading = false;
+      });
   });
 
   async function save(e: SubmitEvent): Promise<void> {
@@ -97,8 +109,11 @@
     );
     saving = false;
     if (s) {
+      autoRequest++;
+      autoLoading = false;
       autoPick = null;
       autoError = null;
+      autoRefresh++;
       onsaved(s);
     }
   }

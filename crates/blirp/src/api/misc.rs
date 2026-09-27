@@ -106,10 +106,10 @@ async fn get_settings(State(s): State<SharedState>) -> ApiResult<Json<SettingsVi
 }
 
 /// What `memory.summarizer = "auto"` resolves to now. Its own route, not
-/// part of `GET /api/settings`: it runs local login probes (about a second).
+/// part of `GET /api/settings`: a cache miss runs local login probes
+/// (about a second).
 async fn summarizer(State(s): State<SharedState>) -> ApiResult<Json<SummarizerPick>> {
-    let config = s.config();
-    crate::memory::distill::resolve_auto(&config.memory, &config.agents.default, &s.paths)
+    crate::memory::distill::resolve_auto(&s)
         .await
         .map(Json)
         .map_err(|e| ApiError::internal("resolving the summarizer", e))
