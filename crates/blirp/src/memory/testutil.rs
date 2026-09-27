@@ -54,6 +54,8 @@ pub fn session(id: &str, project: &str, started_at: i64) -> Session {
         cost_usd: 0.0,
         parent_session_id: None,
         stopped_by_user: false,
+        title_updated_at: 0,
+        project_updated_at: 0,
     }
 }
 

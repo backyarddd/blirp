@@ -217,6 +217,8 @@ pub fn handle(
                 cost_usd: 0.0,
                 parent_session_id: None,
                 stopped_by_user: false,
+                title_updated_at: 0,
+                project_updated_at: 0,
             };
             // Ingest may have created it since the lookup: use that row.
             let (s, inserted) = store.insert_session_unless_known(&s)?;

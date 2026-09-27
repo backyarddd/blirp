@@ -87,7 +87,13 @@ summary: JsonValue | null, distilled_through_seq: number, tokens_in: number, tok
 /**
  * Ended by a user Stop: `status` is `completed` and `exit_code` null.
  */
-stopped_by_user: boolean, };
+stopped_by_user: boolean, 
+/**
+ * When `title` was last set, and `project_id` below. Other machines
+ * may retitle or move a session, so each converges on its newest edit
+ * by this time, independent of the rest of the row (§10). 0: never.
+ */
+title_updated_at: number, project_updated_at: number, };
 
 export type Event = { session_id: string, seq: number, ts: number, kind: EventKind, 
 /**
@@ -431,7 +437,13 @@ summary: JsonValue | null, distilled_through_seq: number, tokens_in: number, tok
 /**
  * Ended by a user Stop: `status` is `completed` and `exit_code` null.
  */
-stopped_by_user: boolean, };
+stopped_by_user: boolean, 
+/**
+ * When `title` was last set, and `project_id` below. Other machines
+ * may retitle or move a session, so each converges on its newest edit
+ * by this time, independent of the rest of the row (§10). 0: never.
+ */
+title_updated_at: number, project_updated_at: number, };
 
 export type LaunchSession = { 
 /**

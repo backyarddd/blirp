@@ -274,6 +274,14 @@ pub struct Session {
     // Default: rows replicated from older versions do not carry it.
     #[serde(default)]
     pub stopped_by_user: bool,
+    /// When `title` was last set, and `project_id` below. Other machines
+    /// may retitle or move a session, so each converges on its newest edit
+    /// by this time, independent of the rest of the row (§10). 0: never.
+    // Default: changes queued before these existed do not carry them.
+    #[serde(default)]
+    pub title_updated_at: i64,
+    #[serde(default)]
+    pub project_updated_at: i64,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]

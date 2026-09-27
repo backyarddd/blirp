@@ -420,23 +420,49 @@ pub(crate) fn apply_move_in(tx: &Transaction<'_>, change: &Change) -> Result<boo
     apply_inner(tx, change, true)
 }
 
+/// A local write `new` of the stored session `old`: its title and project
+/// each converge on their newest edit (§10), so a write that changes one
+/// is stamped after the stored edit (also when the stored one came from a
+/// machine whose clock runs ahead), and a write built from an older version
+/// of the row (a status tick or ingest batch read before a rename or move
+/// arrived) keeps the stored one. Only a move (`moving`) changes the
+/// project.
+fn stamp_session_edits(old: &Session, new: &Session, moving: bool) -> Session {
+    let now = crate::now_ms();
+    let mut s = new.clone();
+    if moving && s.project_id != old.project_id {
+        s.project_updated_at = now.max(old.project_updated_at + 1);
+    } else {
+        s.project_id.clone_from(&old.project_id);
+        s.project_updated_at = old.project_updated_at;
+    }
+    if s.title_updated_at < old.title_updated_at || s.title == old.title {
+        s.title.clone_from(&old.title);
+        s.title_updated_at = old.title_updated_at;
+    } else {
+        s.title_updated_at = now.max(old.title_updated_at + 1);
+    }
+    s
+}
+
 fn apply_inner(tx: &Transaction<'_>, change: &Change, moving: bool) -> Result<bool> {
     let mut change = match redact_memory(change) {
         Some(redacted) => Cow::Owned(redacted),
         None => Cow::Borrowed(change),
     };
     stamp_after_stored(tx, &mut change)?;
-    if !moving && let Change::Session(s) = change.as_ref() {
-        let stored: Option<String> = one(
+    if let Change::Session(s) = change.as_ref() {
+        let stored = one(
             tx,
-            "SELECT project_id FROM sessions WHERE id = ?1",
+            "SELECT * FROM sessions WHERE id = ?1",
             params![s.id],
-            |r| r.get(0),
+            sessions::session_row,
         )?;
-        if let Some(stored) = stored.filter(|p| *p != s.project_id)
-            && let Change::Session(s) = change.to_mut()
-        {
-            s.project_id = stored;
+        if let Some(old) = stored {
+            let edited = stamp_session_edits(&old, s, moving);
+            if edited != *s {
+                *change.to_mut() = Change::Session(edited);
+            }
         }
     }
     let change = change.as_ref();
@@ -581,11 +607,22 @@ fn write_row(tx: &Transaction<'_>, change: &Change) -> Result<usize> {
             "INSERT INTO sessions(id, project_id, machine_id, agent, agent_session_id, origin, cwd, title,
                status, branch, worktree, transcript_path, started_at, ended_at, last_activity_at, exit_code,
                summary_json, distilled_through_seq, tokens_in, tokens_out, cost_usd, parent_session_id,
-               stopped_by_user)
-             VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,?19,?20,?21,?22,?23)
-             ON CONFLICT(id) DO UPDATE SET project_id=excluded.project_id, machine_id=excluded.machine_id,
+               stopped_by_user, title_updated_at, project_updated_at)
+             VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,?19,?20,?21,?22,?23,?24,?25)
+             ON CONFLICT(id) DO UPDATE SET
+               -- Title and project: each keeps its newest edit by its own
+               -- time (ties by value), whatever the rest of the row is (§10).
+               project_id=CASE WHEN (excluded.project_updated_at, excluded.project_id)
+                   > (sessions.project_updated_at, sessions.project_id)
+                 THEN excluded.project_id ELSE sessions.project_id END,
+               project_updated_at=MAX(sessions.project_updated_at, excluded.project_updated_at),
+               title=CASE WHEN (excluded.title_updated_at, COALESCE(excluded.title, ''))
+                   > (sessions.title_updated_at, COALESCE(sessions.title, ''))
+                 THEN excluded.title ELSE sessions.title END,
+               title_updated_at=MAX(sessions.title_updated_at, excluded.title_updated_at),
+               machine_id=excluded.machine_id,
                agent=excluded.agent, agent_session_id=excluded.agent_session_id, origin=excluded.origin,
-               cwd=excluded.cwd, title=excluded.title, status=excluded.status, branch=excluded.branch,
+               cwd=excluded.cwd, status=excluded.status, branch=excluded.branch,
                worktree=excluded.worktree, transcript_path=excluded.transcript_path,
                started_at=excluded.started_at, ended_at=excluded.ended_at,
                last_activity_at=excluded.last_activity_at, exit_code=excluded.exit_code,
@@ -596,7 +633,8 @@ fn write_row(tx: &Transaction<'_>, change: &Change) -> Result<usize> {
                 s.id, s.project_id, s.machine_id, s.agent, s.agent_session_id, s.origin, s.cwd, s.title,
                 s.status, s.branch, s.worktree, s.transcript_path, s.started_at, s.ended_at,
                 s.last_activity_at, s.exit_code, json_text(&s.summary), s.distilled_through_seq,
-                s.tokens_in, s.tokens_out, s.cost_usd, s.parent_session_id, s.stopped_by_user
+                s.tokens_in, s.tokens_out, s.cost_usd, s.parent_session_id, s.stopped_by_user,
+                s.title_updated_at, s.project_updated_at
             ],
         )?,
         Change::DeleteSession { id } => {

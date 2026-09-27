@@ -4,7 +4,8 @@
 use rusqlite::Connection;
 
 /// Index `i` holds the migration that moves the schema from version `i` to `i + 1`.
-pub(crate) const MIGRATIONS: &[&str] = &[V1, V2, V3, V4, V5, V6, V7, V8, V9, V10, V11, V12, V13];
+pub(crate) const MIGRATIONS: &[&str] =
+    &[V1, V2, V3, V4, V5, V6, V7, V8, V9, V10, V11, V12, V13, V14];
 
 /// Schema of §5. Note on the FTS tables: they are external-content tables keyed
 /// by the implicit rowid of `events`/`records`. blirp never runs `VACUUM`
@@ -467,6 +468,15 @@ CREATE TABLE hub_parked(
     PRIMARY KEY(origin_machine, origin_seq)
 );
 CREATE INDEX hub_parked_row ON hub_parked(entity, key);
+"#;
+
+/// A session's title and project are edited by other machines too (§10):
+/// each converges on its newest edit by its own time, so the owner's
+/// full-row writes (status ticks) never revert a newer rename or move.
+/// Existing rows read as never edited (0).
+const V14: &str = r#"
+ALTER TABLE sessions ADD COLUMN title_updated_at INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE sessions ADD COLUMN project_updated_at INTEGER NOT NULL DEFAULT 0;
 "#;
 
 #[derive(Debug, thiserror::Error)]

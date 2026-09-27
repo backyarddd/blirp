@@ -144,20 +144,19 @@ fn backfill_rows_in(tx: &Transaction<'_>) -> Result<usize> {
 pub const MAX_ENTRY_BYTES: usize = 4 << 20;
 
 /// Another machine's write of session `old`: it may re-point the session to
-/// another project (merge), retitle it and change its status fields;
-/// everything else is the owner's (what it runs and reads: resume argv,
-/// folder, worktree, transcript; and what it derives from its transcript:
-/// summary, distill position, tokens, cost), so it is kept from `old`. A
-/// foreign copy carries whatever version of those fields it last saw.
+/// another project (merge) and retitle it, each kept only where newer than
+/// the stored edit (`write_row`); everything else is the owner's (its
+/// status, which only the machine running the session knows; what it runs
+/// and reads: resume argv, folder, worktree, transcript; and what it
+/// derives from its transcript: summary, distill position, tokens, cost),
+/// so it is kept from `old`. A foreign copy carries whatever version of
+/// those fields it last saw.
 fn foreign_session_write(old: Session, new: &Session) -> Session {
     Session {
         project_id: new.project_id.clone(),
+        project_updated_at: new.project_updated_at,
         title: new.title.clone(),
-        status: new.status,
-        ended_at: new.ended_at,
-        last_activity_at: new.last_activity_at,
-        exit_code: new.exit_code,
-        stopped_by_user: new.stopped_by_user,
+        title_updated_at: new.title_updated_at,
         ..old
     }
 }
@@ -570,11 +569,18 @@ fn compact_batch_in(
     pos: &(String, i64),
     batch: usize,
 ) -> Result<(Compacted, Option<(String, i64)>)> {
+    // Another machine's session write (a rename or move) is kept: its title
+    // or project can be newer than those of every later owner write, which
+    // keep their own edit times (`write_row`).
     let rows = all(
         tx,
-        "SELECT hub_seq, key, origin_machine, origin_seq, payload_json = '' FROM hub_log
-         WHERE op = 'upsert' AND entity = ?1 AND (key, hub_seq) > (?2, ?3) AND hub_seq <= ?4
-         ORDER BY key, hub_seq LIMIT ?5",
+        &format!(
+            "SELECT l.hub_seq, l.key, l.origin_machine, l.origin_seq, l.payload_json = '' FROM hub_log l
+             WHERE l.op = 'upsert' AND l.entity = ?1 AND (l.key, l.hub_seq) > (?2, ?3)
+               AND l.hub_seq <= ?4
+               AND (l.entity <> 'sessions' OR coalesce(({owner}) = l.origin_machine, 1))
+             ORDER BY l.key, l.hub_seq LIMIT ?5"
+        ),
         params![entity, pos.0, pos.1, floor, batch as i64],
         |r| {
             Ok((
@@ -1258,14 +1264,17 @@ impl Store {
                         // Events are append-only, deletes of sessions and
                         // records always win (tombstones) and shared rows
                         // keep the newest version (`write_row`); only owned
-                        // rows are last-writer-wins by hub order.
+                        // rows are last-writer-wins by hub order. Not
+                        // sessions: only the owner writes their other
+                        // fields, and title and project keep their newest
+                        // edit by time, so no write of either can be
+                        // reverted by applying one received here.
                         let by_hub_order = matches!(
                             change,
                             Change::Machine(_)
                                 | Change::DeleteMachine { .. }
                                 | Change::ProjectPath(_)
                                 | Change::DeleteProjectPath { .. }
-                                | Change::Session(_)
                         );
                         if by_hub_order
                             && later_own.exists(params![entry.entity, entry.key, own_seen])?
@@ -1401,6 +1410,18 @@ mod tests {
             chats: false,
             merged_into: None,
         })
+    }
+
+    /// Write `s` as the daemon's writers do: built on the stored row, so it
+    /// carries the stored title and project edit times.
+    fn write_session(st: &Store, s: crate::model::Session) {
+        let stored = st.get_session(&s.id).unwrap();
+        st.apply(Change::Session(crate::model::Session {
+            title_updated_at: stored.as_ref().map_or(0, |r| r.title_updated_at),
+            project_updated_at: stored.as_ref().map_or(0, |r| r.project_updated_at),
+            ..s
+        }))
+        .unwrap();
     }
 
     fn name_of(s: &Store, id: &str) -> String {
@@ -1907,6 +1928,8 @@ mod tests {
             cost_usd: 0.0,
             parent_session_id: None,
             stopped_by_user: false,
+            title_updated_at: 0,
+            project_updated_at: 0,
         }
     }
 
@@ -2176,6 +2199,8 @@ mod tests {
             cost_usd: 0.0,
             parent_session_id: None,
             stopped_by_user: false,
+            title_updated_at: 0,
+            project_updated_at: 0,
         };
         store.insert_session(&s).unwrap();
         store.rebind_machine("old", "new").unwrap();
@@ -2254,12 +2279,14 @@ mod tests {
         a.apply(machine("first")).unwrap();
         let s1 = session_of("s1", "A");
         for i in 0..4 {
-            a.apply(Change::Session(crate::model::Session {
-                title: Some(format!("t{i}")),
-                tokens_in: i,
-                ..s1.clone()
-            }))
-            .unwrap();
+            write_session(
+                &a,
+                crate::model::Session {
+                    title: Some(format!("t{i}")),
+                    tokens_in: i,
+                    ..s1.clone()
+                },
+            );
         }
         for seq in 1..=3 {
             a.apply(Change::Event(event("s1", seq))).unwrap();
@@ -2283,12 +2310,14 @@ mod tests {
         pull(&b, "B", &hub, "H");
         // A writes s1 once more and deletes s2; then B retitles s1 (a
         // foreign write after A's last one).
-        a.apply(Change::Session(crate::model::Session {
-            title: Some("owner last".into()),
-            tokens_in: 9,
-            ..s1.clone()
-        }))
-        .unwrap();
+        write_session(
+            &a,
+            crate::model::Session {
+                title: Some("owner last".into()),
+                tokens_in: 9,
+                ..s1.clone()
+            },
+        );
         a.delete_session("s2").unwrap();
         push(&a, "A", &hub, "H");
         pull(&b, "B", &hub, "H");
@@ -2300,8 +2329,10 @@ mod tests {
         .unwrap();
         push(&b, "B", &hub, "H");
         pull(&a, "A", &hub, "H");
-        // A's last write hides B's retitle (B's only logged row: it stays
-        // as B's marker); the hub's retitle after it stays.
+        // A retitles once more after B; the hub's retitle after it stays.
+        // B's retitle is kept in the log (another machine's session write:
+        // a later owner write need not carry a newer title), though A's
+        // newer title replaced it.
         a.apply(Change::Session(crate::model::Session {
             title: Some("owner final".into()),
             ..a.get_session("s1").unwrap().unwrap()
@@ -2324,10 +2355,11 @@ mod tests {
         let rows = log_rows(&hub).len();
 
         let done = hub.compact_hub_log(2).unwrap();
-        // s1's upserts between its first and A's last one. First upserts
-        // stay (s1's events need it; so does the first machine row), and
-        // s2's is followed by its delete, not by a newer upsert.
-        assert_eq!((done.removed, done.stripped), (4, 1), "{done:?}");
+        // A's upserts of s1 between its first and last one. First upserts
+        // stay (s1's events need it; so does the first machine row), s2's
+        // is followed by its delete, not by a newer upsert, and B's retitle
+        // is another machine's.
+        assert_eq!((done.removed, done.stripped), (4, 0), "{done:?}");
         assert_eq!(log_rows(&hub).len(), rows - done.removed);
         assert_eq!((own_seen("A"), own_seen("B")), before);
         assert_eq!(hub.compact_hub_log(2).unwrap(), Compacted::default());
@@ -2342,17 +2374,10 @@ mod tests {
             .count();
         assert_eq!(events, 3, "s1's events once, none of deleted s2");
         assert!(
-            !page.entries.iter().any(
+            page.entries.iter().any(
                 |e| matches!(e, PulledEntry::Remote { origin_machine, .. } if origin_machine == "B")
             ),
-            "B's compacted row is only B's marker"
-        );
-        let marker = hub.hub_page("B", 0, 1000, 4 << 20).unwrap();
-        assert!(
-            marker
-                .entries
-                .iter()
-                .any(|e| matches!(e, PulledEntry::Own { .. }))
+            "B's retitle stays"
         );
         pull(&c, "C", &hub, "H");
         let s1_hub = hub.get_session("s1").unwrap().unwrap();
@@ -2385,21 +2410,19 @@ mod tests {
         machine_device(&hub, "R", true);
         a.apply(project("p", "shared")).unwrap();
         let s1 = session_of("s1", "A");
-        let title = |i: i64| {
-            Change::Session(crate::model::Session {
-                title: Some(format!("t{i}")),
-                ..s1.clone()
-            })
+        let title = |i: i64| crate::model::Session {
+            title: Some(format!("t{i}")),
+            ..s1.clone()
         };
         for i in 0..3 {
-            a.apply(title(i)).unwrap();
+            write_session(&a, title(i));
         }
         push(&a, "A", &hub, "H");
         pull(&b, "B", &hub, "H");
         pull(&b, "B", &hub, "H");
         let slow = b.sync_cursors("H").unwrap().last_pulled_hub_seq;
         for i in 3..6 {
-            a.apply(title(i)).unwrap();
+            write_session(&a, title(i));
         }
         push(&a, "A", &hub, "H");
         pull(&a, "A", &hub, "H");
@@ -2436,8 +2459,8 @@ mod tests {
 
         // A paired node that has not pulled yet holds compaction at 0.
         machine_device(&hub, "N", false);
-        a.apply(title(6)).unwrap();
-        a.apply(title(7)).unwrap();
+        write_session(&a, title(6));
+        write_session(&a, title(7));
         push(&a, "A", &hub, "H");
         pull(&a, "A", &hub, "H");
         pull(&b, "B", &hub, "H");
@@ -2502,11 +2525,13 @@ mod tests {
         a.apply(project("p", "shared")).unwrap();
         let s1 = session_of("s1", "A");
         for i in 0..4 {
-            a.apply(Change::Session(crate::model::Session {
-                title: Some(format!("t{i}")),
-                ..s1.clone()
-            }))
-            .unwrap();
+            write_session(
+                &a,
+                crate::model::Session {
+                    title: Some(format!("t{i}")),
+                    ..s1.clone()
+                },
+            );
         }
         let batch = a.outbox_batch(0, 500, 4 << 20).unwrap();
         push(&a, "A", &hub, "H");
@@ -2538,11 +2563,13 @@ mod tests {
         a.apply(project("p", "shared")).unwrap();
         let s1 = session_of("s1", "A");
         for i in 0..4 {
-            a.apply(Change::Session(crate::model::Session {
-                title: Some(format!("t{i}")),
-                ..s1.clone()
-            }))
-            .unwrap();
+            write_session(
+                &a,
+                crate::model::Session {
+                    title: Some(format!("t{i}")),
+                    ..s1.clone()
+                },
+            );
         }
         push(&a, "A", &hub, "H");
         pull(&a, "A", &hub, "H");
@@ -2649,7 +2676,11 @@ mod tests {
         // open, then replication is switched on as on every daemon start.
         let reopen = |s: Store| {
             s.write(|tx| {
-                tx.execute_batch("DROP TABLE hub_parked")?;
+                tx.execute_batch(
+                    "DROP TABLE hub_parked;
+                     ALTER TABLE sessions DROP COLUMN title_updated_at;
+                     ALTER TABLE sessions DROP COLUMN project_updated_at;",
+                )?;
                 Ok(tx.pragma_update(None, "user_version", 11)?)
             })
             .unwrap();
@@ -2783,5 +2814,89 @@ mod tests {
             n.project_paths("p").unwrap()[0].git_remote.as_deref(),
             Some("host/o/r")
         );
+    }
+
+    // X runs session s and writes its status (full row, carrying the title
+    // and project it has); N renames and moves s. Whatever order the
+    // writes, pushes and pulls happen in, every machine ends with N's
+    // title and project and X's status.
+    #[test]
+    fn a_status_write_never_reverts_another_machines_rename_or_move() {
+        use crate::model::SessionStatus;
+        const STEPS: usize = 4;
+        let mut orders = Vec::new();
+        for a in 0..STEPS {
+            for b in 0..STEPS {
+                for c in 0..STEPS {
+                    for d in 0..STEPS {
+                        let o = [a, b, c, d];
+                        if (0..STEPS).all(|i| o.contains(&i)) {
+                            orders.push(o);
+                        }
+                    }
+                }
+            }
+        }
+        assert_eq!(orders.len(), 24);
+        for order in orders {
+            let (_h, hub) = temp_store();
+            let (_n, n) = temp_store();
+            let (_x, x) = temp_store();
+            named(&n, "N");
+            named(&x, "X");
+            machine_device(&hub, "N", false);
+            machine_device(&hub, "X", false);
+            hub.apply(project("p", "one")).unwrap();
+            hub.apply(project("p2", "two")).unwrap();
+            pull(&x, "X", &hub, "H");
+            x.apply(Change::Session(crate::model::Session {
+                title: Some("first".into()),
+                status: SessionStatus::Idle,
+                ..session_of("s", "X")
+            }))
+            .unwrap();
+            push(&x, "X", &hub, "H");
+            pull(&n, "N", &hub, "H");
+            for step in order {
+                match step {
+                    // A status tick of the running session (not coalesced).
+                    0 => {
+                        age(&x);
+                        x.modify_session("s", |s| {
+                            s.status = SessionStatus::Working;
+                            s.last_activity_at += 1;
+                        })
+                        .unwrap();
+                    }
+                    1 => {
+                        push(&x, "X", &hub, "H");
+                        pull(&x, "X", &hub, "H");
+                    }
+                    2 => {
+                        n.modify_session("s", |s| s.title = Some("renamed".into()))
+                            .unwrap();
+                        n.move_session("s", Some("p2"), "N", "n").unwrap();
+                    }
+                    _ => {
+                        push(&n, "N", &hub, "H");
+                        pull(&n, "N", &hub, "H");
+                    }
+                }
+            }
+            for _ in 0..2 {
+                push(&x, "X", &hub, "H");
+                push(&n, "N", &hub, "H");
+                pull(&x, "X", &hub, "H");
+                pull(&n, "N", &hub, "H");
+            }
+            let row = hub.get_session("s").unwrap().unwrap();
+            assert_eq!(
+                (row.title.as_deref(), row.project_id.as_str(), row.status),
+                (Some("renamed"), "p2", SessionStatus::Working),
+                "order {order:?}"
+            );
+            assert_eq!(n.get_session("s").unwrap().unwrap(), row, "order {order:?}");
+            assert_eq!(x.get_session("s").unwrap().unwrap(), row, "order {order:?}");
+        }
     }
 }

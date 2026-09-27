@@ -722,6 +722,8 @@ async fn subagent_children_are_filtered_and_counted() {
         cost_usd: 0.0,
         parent_session_id: parent.map(str::to_string),
         stopped_by_user: false,
+        title_updated_at: 0,
+        project_updated_at: 0,
     };
     store
         .insert_session(&mk("top", None, SessionOrigin::External, 1))

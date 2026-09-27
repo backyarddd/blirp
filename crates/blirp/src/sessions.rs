@@ -341,6 +341,8 @@ pub async fn launch(state: &SharedState, req: LaunchSession) -> ApiResult<Sessio
         cost_usd: 0.0,
         parent_session_id: source.as_ref().map(|s| s.id.clone()),
         stopped_by_user: false,
+        title_updated_at: 0,
+        project_updated_at: 0,
     };
     let store = state.store.clone();
     let row = session.clone();

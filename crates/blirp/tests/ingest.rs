@@ -446,6 +446,8 @@ fn claude_session_launched_by_blirp_keeps_its_fields() {
         cost_usd: 0.0,
         parent_session_id: None,
         stopped_by_user: false,
+        title_updated_at: 0,
+        project_updated_at: 0,
     };
     h.store.insert_session(&launched).unwrap();
     put_claude(&h);
@@ -685,6 +687,8 @@ fn codex_rollout_links_to_blirp_launch() {
         cost_usd: 0.0,
         parent_session_id: None,
         stopped_by_user: false,
+        title_updated_at: 0,
+        project_updated_at: 0,
     };
     // Machine id of the engine's machine.
     let machine = h.store.get_setting("machine_id").unwrap().unwrap();
@@ -1647,6 +1651,8 @@ fn transcripts_of_other_machines_sessions_are_left_alone() {
         cost_usd: 0.0,
         parent_session_id: None,
         stopped_by_user: false,
+        title_updated_at: 0,
+        project_updated_at: 0,
     };
     h.store
         .apply_remote(&blirp_core::store::Change::Session(remote.clone()))

@@ -87,6 +87,8 @@ describe('groupSessions', () => {
     cost_usd: 0,
     parent_session_id: null,
     stopped_by_user: false,
+    title_updated_at: 0,
+    project_updated_at: 0,
   });
   const alpha: ProjectSummary = {
     id: 'a',
