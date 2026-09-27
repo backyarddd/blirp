@@ -11,7 +11,7 @@ description: Check for and install blirp updates (the CLI, daemon and desktop ap
 blirp update --check
 ```
 
-Prints one line. Exit code `0` = up to date, `10` = an update is available (the line names the version and how to update). It only reads the latest published release.
+Prints one line. Exit code `0` = up to date, `10` = an update is available (the line names the version and how to update), `1` = the check failed (network, GitHub API; the message says why). It only reads the latest published release.
 
 ## Update (ask the user first)
 
@@ -49,7 +49,7 @@ blirp skills list
 ```
 
 - `blirp status` shows the new version. If the daemon is not running, `blirp start`, then `blirp logs -n 100` if it fails.
-- The update refreshes installed, unedited blirp skills itself and prints `Refreshed skill ...` for each. If `blirp skills list` still shows `outdated` or `not_installed` skills, `blirp skills install` fixes that (skills the user edited are left alone).
+- The update refreshes installed, unedited blirp skills itself and prints `Refreshed skill ...` for each. If `blirp skills list` still shows `outdated`, run `blirp skills refresh` (it rewrites only unedited blirp skills). Installing skills that are `not_installed` is the user's call (`blirp skills install`); never pass `--force` without their consent.
 
 ## Several machines
 

@@ -17,7 +17,9 @@ blirp devices list
 - `blirp hub status`: `role` (`standalone`, `hub`, `node`), `machine`, `hub`, `connected`, `pending` changes, and on a hub with the portal on its `portal` URL and `cert` fingerprint.
 - `blirp devices list` (hub only): paired machines and browser devices with id, kind, state, terminal control and name.
 
-## Pair a new machine
+## Pair a new machine (ask the user first)
+
+Run `blirp hub enable`, `blirp hub invite` or `blirp pair` only when the user asked in this conversation to link machines, and confirm each one with them before running it: they change this machine's sync role, create credentials that grant access to all synced data, or join this machine to a hub.
 
 1. On the machine that will be the hub (only a `standalone` machine can become one; a paired node fails with `paired_node`):
 
@@ -39,7 +41,7 @@ blirp devices list
    blirp pair <CODE>
    ```
 
-   The short form finds the hub on the same local network (mDNS; gives up after 5 s with `no_hub_found`, then use the full invite). Pairing waits up to 2 minutes and prints the new sync status (`role node`).
+   The short form finds the hub on the same local network (mDNS; gives up after 5 s with `no_hub_found`) and fails with `invite_required` when the hub has several open invites or LAN discovery is off; then use the full invite. Pairing waits up to 2 minutes and prints the new sync status (`role node`).
 3. Verify on both: `blirp hub status` shows `connected yes`.
 
 The invite plus code lets a machine join the user's hub and receive all synced data. Give them only to the user, never write them into files, commits, issues or chat outside this session. If the two machines are not both reachable by you, print the pair line from the invite output and let the user run it on the other machine.

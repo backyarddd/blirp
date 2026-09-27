@@ -130,8 +130,8 @@ enum Command {
         #[arg(long, value_name = "X.Y.Z")]
         version: Option<String>,
     },
-    /// Remove blirp: stops the daemon, removes autostart, agent hooks and the
-    /// installed files. Your data in ~/.blirp stays unless --purge.
+    /// Remove blirp: stops the daemon, removes autostart, agent hooks, blirp's
+    /// skills and the installed files. Your data in ~/.blirp stays unless --purge.
     Uninstall {
         /// Also delete the data folder (memory, sessions, settings).
         #[arg(long)]

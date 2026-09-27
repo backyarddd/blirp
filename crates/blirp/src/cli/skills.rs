@@ -66,9 +66,8 @@ pub enum SkillsCommand {
         #[arg(long, value_name = "DIR")]
         project: Option<PathBuf>,
     },
-    /// Refresh installed, unedited blirp skills in your home folders to
-    /// this version's text (run by `blirp update` with the new binary).
-    #[command(hide = true)]
+    /// Bring blirp's installed, unedited skills in your home folders up to
+    /// this version (also run by `blirp update`); nothing else is touched.
     Refresh,
     /// Show which blirp skills are installed where.
     List {
@@ -79,21 +78,22 @@ pub enum SkillsCommand {
     },
 }
 
-/// The two skill folders agents read.
+/// The skill folders agents read.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 enum Loc {
-    /// `.claude/skills`
+    /// `.claude/skills` (in the home directory `$CLAUDE_CONFIG_DIR/skills`)
     Claude,
+    /// `~/.claude/skills` whatever `CLAUDE_CONFIG_DIR` says: Amp's own user
+    /// folder is `~/.config/agents/skills`, but it also reads this one.
+    Amp,
     /// `.agents/skills`
     Agents,
 }
 
 /// Agents that load `SKILL.md` skills, and the folder blirp installs them in.
-/// Amp's own user folder is `~/.config/agents/skills`, but it also reads
-/// `~/.claude/skills`, so the two folders cover it.
 const AGENTS: &[(&str, Loc)] = &[
     ("claude", Loc::Claude),
-    ("amp", Loc::Claude),
+    ("amp", Loc::Amp),
     ("codex", Loc::Agents),
     ("gemini", Loc::Agents),
     ("opencode", Loc::Agents),
@@ -110,6 +110,15 @@ pub struct Target {
 fn target(loc: Loc, project: Option<&Path>) -> anyhow::Result<Target> {
     let home_err = "cannot determine the home directory";
     Ok(match loc {
+        Loc::Amp => Target {
+            label: "amp",
+            dir: match project {
+                Some(p) => p.to_path_buf(),
+                None => blirp_core::paths::user_home().context(home_err)?,
+            }
+            .join(".claude")
+            .join("skills"),
+        },
         Loc::Claude => Target {
             label: "claude",
             dir: match project {
@@ -130,12 +139,27 @@ fn target(loc: Loc, project: Option<&Path>) -> anyhow::Result<Target> {
     })
 }
 
-/// Both skill folders in the home directory (`blirp doctor`, `blirp uninstall`).
+/// The folders of `locs`, each once (Claude and Amp share one unless
+/// `CLAUDE_CONFIG_DIR` moves Claude's).
+fn targets(locs: &[Loc], project: Option<&Path>) -> anyhow::Result<Vec<Target>> {
+    if let Some(p) = project
+        && !p.is_dir()
+    {
+        bail!("{} is not a folder", p.display());
+    }
+    let mut out: Vec<Target> = Vec::new();
+    for l in locs {
+        let t = target(*l, project)?;
+        if !out.iter().any(|o| o.dir == t.dir) {
+            out.push(t);
+        }
+    }
+    Ok(out)
+}
+
+/// Every skill folder in the home directory (`blirp doctor`, `blirp uninstall`).
 pub fn home_targets() -> anyhow::Result<Vec<Target>> {
-    [Loc::Claude, Loc::Agents]
-        .into_iter()
-        .map(|l| target(l, None))
-        .collect()
+    targets(&[Loc::Claude, Loc::Amp, Loc::Agents], None)
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -176,12 +200,20 @@ fn read_opt(path: &Path) -> anyhow::Result<Option<Vec<u8>>> {
 }
 
 /// Is the `SKILL.md` in `folder` the one blirp wrote there (unedited)?
-/// `None` when the folder has no blirp marker.
+/// `None` when it is not blirp's. A file identical to this version's text
+/// counts as blirp's whatever the marker says, so an install interrupted
+/// between writing the file and its marker is not taken for an edit.
 fn ours_unedited(folder: &Path) -> anyhow::Result<Option<bool>> {
+    let file = read_opt(&folder.join(SKILL_FILE))?;
+    let name = folder.file_name().and_then(|n| n.to_str());
+    if let (Some(f), Some(s)) = (&file, SKILLS.iter().find(|s| Some(s.name) == name))
+        && f.as_slice() == s.body.as_bytes()
+    {
+        return Ok(Some(true));
+    }
     let Some(marker) = read_opt(&folder.join(MARKER))? else {
         return Ok(None);
     };
-    let file = read_opt(&folder.join(SKILL_FILE))?;
     let marker = String::from_utf8_lossy(&marker);
     Ok(Some(file.is_some_and(|f| digest(&f) == marker.trim())))
 }
@@ -201,9 +233,42 @@ pub fn state(dir: &Path, skill: &Skill) -> anyhow::Result<State> {
 
 /// Temp file + rename, so an agent never reads a half-written skill.
 fn write_atomic(path: &Path, bytes: &[u8]) -> anyhow::Result<()> {
-    let tmp = PathBuf::from(format!("{}.blirp-tmp", path.display()));
+    let mut tmp = path.as_os_str().to_owned();
+    tmp.push(".blirp-tmp");
+    let tmp = PathBuf::from(tmp);
     std::fs::write(&tmp, bytes).with_context(|| format!("writing {}", tmp.display()))?;
-    std::fs::rename(&tmp, path).with_context(|| format!("replacing {}", path.display()))
+    std::fs::rename(&tmp, path).map_err(|e| {
+        let _ = std::fs::remove_file(&tmp);
+        anyhow::Error::new(e).context(format!("replacing {}", path.display()))
+    })
+}
+
+/// Copy `file` to `SKILL.md.blirp-backup` (then `.1`, `.2`, ...), unless a
+/// backup with the same content exists already: no edit is ever lost.
+fn backup(file: &Path) -> anyhow::Result<()> {
+    let current = std::fs::read(file).with_context(|| format!("reading {}", file.display()))?;
+    let folder = file.parent().context("skill file has no folder")?;
+    for n in 0..1000 {
+        let name = match n {
+            0 => format!("{SKILL_FILE}.blirp-backup"),
+            n => format!("{SKILL_FILE}.blirp-backup.{n}"),
+        };
+        let path = folder.join(name);
+        match read_opt(&path)? {
+            Some(b) if b == current => return Ok(()),
+            Some(_) => {}
+            None => {
+                std::fs::write(&path, &current).with_context(|| {
+                    format!("backing up {} to {}", file.display(), path.display())
+                })?;
+                return Ok(());
+            }
+        }
+    }
+    bail!(
+        "{} has too many backups; remove some first",
+        folder.display()
+    )
 }
 
 /// Install `skill` into `dir`; returns what happened, one word.
@@ -211,25 +276,22 @@ pub fn install_one(dir: &Path, skill: &Skill, force: bool) -> anyhow::Result<&'s
     let before = state(dir, skill)?;
     let folder = dir.join(skill.name);
     let file = folder.join(SKILL_FILE);
+    let marker = format!("{}\n", digest(skill.body.as_bytes()));
     match before {
-        State::Installed => return Ok("unchanged"),
-        State::Modified | State::NotOurs if !force => return Ok("skipped"),
-        State::Modified | State::NotOurs => {
-            let backup = folder.join(format!("{SKILL_FILE}.blirp-backup"));
-            if !backup.exists() {
-                std::fs::copy(&file, &backup).with_context(|| {
-                    format!("backing up {} to {}", file.display(), backup.display())
-                })?;
+        State::Installed => {
+            // Repair a marker an interrupted install left stale.
+            if read_opt(&folder.join(MARKER))?.as_deref() != Some(marker.as_bytes()) {
+                write_atomic(&folder.join(MARKER), marker.as_bytes())?;
             }
+            return Ok("unchanged");
         }
+        State::Modified | State::NotOurs if !force => return Ok("skipped"),
+        State::Modified | State::NotOurs => backup(&file)?,
         State::Outdated | State::NotInstalled => {}
     }
     std::fs::create_dir_all(&folder).with_context(|| format!("creating {}", folder.display()))?;
     write_atomic(&file, skill.body.as_bytes())?;
-    write_atomic(
-        &folder.join(MARKER),
-        format!("{}\n", digest(skill.body.as_bytes())).as_bytes(),
-    )?;
+    write_atomic(&folder.join(MARKER), marker.as_bytes())?;
     Ok(match before {
         State::NotInstalled => "installed",
         State::Outdated => "updated",
@@ -247,12 +309,12 @@ pub fn uninstall_dir(dir: &Path) -> anyhow::Result<Vec<(String, &'static str)>> 
     };
     let mut out = Vec::new();
     for entry in entries {
-        let folder = entry
-            .with_context(|| format!("reading {}", dir.display()))?
-            .path();
-        if !folder.is_dir() {
+        let entry = entry.with_context(|| format!("reading {}", dir.display()))?;
+        // Symlinks are not followed: a linked skill folder is not blirp's.
+        if !entry.file_type().is_ok_and(|t| t.is_dir()) {
             continue;
         }
+        let folder = entry.path();
         let name = folder
             .file_name()
             .map(|n| n.to_string_lossy().into_owned())
@@ -338,7 +400,7 @@ pub fn summary(t: &Target) -> String {
     }
     let parts: Vec<String> = counts.iter().map(|(k, n)| format!("{n} {k}")).collect();
     let hint = if counts.iter().any(|(k, _)| *k == State::Outdated) {
-        "; `blirp skills install` refreshes them"
+        "; `blirp skills refresh` updates them"
     } else {
         ""
     };
@@ -368,7 +430,7 @@ fn locs(agent: Option<&str>, detect: bool) -> anyhow::Result<Vec<Loc>> {
                 .map(|(_, l)| *l)
                 .collect()
         }
-        None => vec![Loc::Claude, Loc::Agents],
+        None => vec![Loc::Claude, Loc::Amp, Loc::Agents],
     };
     out.sort();
     out.dedup();
@@ -395,8 +457,7 @@ pub fn run(cmd: SkillsCommand) -> anyhow::Result<ExitCode> {
                 );
             }
             let mut skipped = false;
-            for loc in locs {
-                let t = target(loc, project.as_deref())?;
+            for t in targets(&locs, project.as_deref())? {
                 for s in SKILLS {
                     match install_one(&t.dir, s, force) {
                         Ok(what) => {
@@ -424,8 +485,7 @@ pub fn run(cmd: SkillsCommand) -> anyhow::Result<ExitCode> {
             }
         }
         SkillsCommand::Uninstall { agent, project } => {
-            for loc in locs(agent.as_deref(), false)? {
-                let t = target(loc, project.as_deref())?;
+            for t in targets(&locs(agent.as_deref(), false)?, project.as_deref())? {
                 match uninstall_dir(&t.dir) {
                     Ok(list) => {
                         for (name, what) in list {
@@ -457,8 +517,7 @@ pub fn run(cmd: SkillsCommand) -> anyhow::Result<ExitCode> {
             }
         }
         SkillsCommand::List { agent, project } => {
-            for loc in locs(agent.as_deref(), false)? {
-                let t = target(loc, project.as_deref())?;
+            for t in targets(&locs(agent.as_deref(), false)?, project.as_deref())? {
                 for s in SKILLS {
                     match state(&t.dir, s) {
                         Ok(st) => println!(
@@ -568,6 +627,48 @@ mod tests {
     }
 
     #[test]
+    fn interrupted_install_and_repeated_force_lose_nothing() {
+        let d = tempfile::tempdir().unwrap();
+        let dir = d.path();
+        let s = &SKILLS[0];
+        let folder = dir.join(s.name);
+        // New SKILL.md written, marker still the old version's.
+        std::fs::create_dir_all(&folder).unwrap();
+        std::fs::write(folder.join(SKILL_FILE), s.body).unwrap();
+        std::fs::write(folder.join(MARKER), digest(b"old") + "\n").unwrap();
+        assert_eq!(state(dir, s).unwrap(), State::Installed);
+        assert_eq!(install_one(dir, s, false).unwrap(), "unchanged");
+        assert_eq!(
+            std::fs::read_to_string(folder.join(MARKER)).unwrap(),
+            digest(s.body.as_bytes()) + "\n"
+        );
+
+        // Two different edits forced over: both are kept.
+        for edit in ["first edit", "second edit", "second edit"] {
+            std::fs::write(folder.join(SKILL_FILE), edit).unwrap();
+            assert_eq!(install_one(dir, s, true).unwrap(), "replaced");
+        }
+        let read = |n: &str| std::fs::read_to_string(folder.join(n)).unwrap();
+        assert_eq!(read("SKILL.md.blirp-backup"), "first edit");
+        assert_eq!(read("SKILL.md.blirp-backup.1"), "second edit");
+        assert!(!folder.join("SKILL.md.blirp-backup.2").exists());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn uninstall_skips_symlinked_skill_folders() {
+        let d = tempfile::tempdir().unwrap();
+        let elsewhere = d.path().join("elsewhere");
+        let dir = d.path().join("skills");
+        install_one(&elsewhere, &SKILLS[0], false).unwrap();
+        std::fs::create_dir_all(&dir).unwrap();
+        std::os::unix::fs::symlink(elsewhere.join(SKILLS[0].name), dir.join(SKILLS[0].name))
+            .unwrap();
+        assert!(uninstall_dir(&dir).unwrap().is_empty());
+        assert!(elsewhere.join(SKILLS[0].name).join(SKILL_FILE).exists());
+    }
+
+    #[test]
     fn outdated_skills_are_refreshed_and_old_ones_removed() {
         let d = tempfile::tempdir().unwrap();
         let dir = d.path();
@@ -650,7 +751,16 @@ mod tests {
         );
         assert_eq!(locs(Some("codex"), true).unwrap(), vec![Loc::Agents]);
         assert_eq!(locs(Some("claude"), true).unwrap(), vec![Loc::Claude]);
-        assert_eq!(locs(None, false).unwrap(), vec![Loc::Claude, Loc::Agents]);
+        assert_eq!(locs(Some("amp"), true).unwrap(), vec![Loc::Amp]);
+        assert_eq!(
+            locs(None, false).unwrap(),
+            vec![Loc::Claude, Loc::Amp, Loc::Agents]
+        );
+        // Claude and Amp share the project's .claude/skills.
+        let d = tempfile::tempdir().unwrap();
+        let ts = targets(&[Loc::Claude, Loc::Amp, Loc::Agents], Some(d.path())).unwrap();
+        assert_eq!(ts.len(), 2);
+        assert!(targets(&[Loc::Claude], Some(&d.path().join("missing"))).is_err());
         assert!(locs(Some("aider"), false).is_err());
     }
 

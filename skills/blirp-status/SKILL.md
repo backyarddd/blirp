@@ -1,6 +1,6 @@
 ---
 name: blirp-status
-description: Check and troubleshoot the local blirp installation (daemon running, version, data folder, detected agents, Claude login, transcript ingest, global hooks, installed skills, daemon log). Use when the user asks whether blirp works or why blirp sessions, memory, hooks or sync misbehave, and before other blirp tasks.
+description: Check and troubleshoot the local blirp installation (daemon running, version, data folder, detected agents, Claude login, transcript ingest, global hooks, installed skills, daemon log). Use when the user asks whether blirp works or why blirp sessions, memory, hooks or sync misbehave.
 ---
 
 # blirp status and troubleshooting
@@ -30,13 +30,14 @@ blirp skills list
 | daemon not running | `blirp start` (safe; returns once the daemon answers) |
 | `[FAIL] config` | show the user the key named in the message (`~/.blirp/config.toml`); edit only with their consent |
 | `[FAIL] database` | stop and tell the user; never delete, move or copy `blirp.db` yourself |
-| agent missing | the daemon's PATH lacks it; tell the user. After they fix PATH, `blirp service install` (with their consent) records the new PATH for autostart |
+| agent missing | the daemon's PATH lacks it; tell the user. After they fix PATH the daemon needs a restart (`blirp stop`, then `blirp start`; ends running sessions, so only with their consent). On macOS and Linux with autostart, `blirp service install` (with their consent) first records the new PATH |
 | claude not logged in for the daemon | the user runs `claude setup-token`, then `blirp agents set-token claude` and pastes the token; never handle, print or store the token yourself |
 | hooks `not_installed` for an agent the user runs outside blirp | offer `blirp hooks install --agent <AGENT>`; it edits that agent's user config (reversible) |
-| skills `outdated` | `blirp skills install` |
+| skills `outdated` | `blirp skills refresh` (rewrites only unedited blirp skills) |
 
 ## Rules
 
 - Ask before `blirp stop`, `blirp service install`, `blirp service uninstall`, `blirp hooks install` and `blirp hooks uninstall`: they change the user's machine setup. `blirp stop` ends every running session, possibly including the one you run in (`BLIRP_SESSION_ID` is set inside blirp sessions).
+- Never pass `--force` to `blirp skills install` without the user's consent: it replaces skills they edited.
 - Never print `~/.blirp/runtime.json`, `~/.blirp/identity.key` or anything under `~/.blirp/secrets/`.
 - Linking machines: skill `blirp-link-machines`. Updating: skill `blirp-update`.
