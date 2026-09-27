@@ -58,6 +58,7 @@ async fn list(
         parent: q.parent,
         cursor: q.cursor,
         limit: q.limit.unwrap_or(50),
+        local_machine: Some(s.machine.id.clone()),
     };
     Ok(Json(blocking(move || Ok(store.list_sessions(&f)?)).await?))
 }

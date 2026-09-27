@@ -73,14 +73,25 @@ pub struct SessionFilter {
     /// Opaque cursor from a previous page.
     pub cursor: Option<String>,
     pub limit: i64,
+    /// This machine: its live sessions always sort first. Another machine's
+    /// only while their activity is younger than [`REMOTE_LIVE_MS`], since a
+    /// replica cannot tell a quiet session from a machine that went away.
+    /// `None` treats every live status as current.
+    pub local_machine: Option<String>,
 }
+
+/// How long another machine's live session stays pinned (and reads as
+/// live in the UI) without a replicated update.
+pub const REMOTE_LIVE_MS: i64 = 30 * 60_000;
 
 /// SQL condition for "is an ingested subagent session" (§8): continue/fork
 /// sessions also carry a parent but are the user's own (origin `blirp`).
 const IS_CHILD: &str = "(origin = 'external' AND parent_session_id IS NOT NULL)";
 
-/// SQL for [`SessionStatus::is_live`] as 1/0.
-const LIVE: &str = "(status IN ('starting','working','idle','waiting'))";
+/// 1 when the session sorts as live (see [`SessionFilter::local_machine`]);
+/// `?1` is the local machine id (or NULL), `?2` the remote activity cutoff.
+const LIVE: &str = "(status IN ('starting','working','idle','waiting')
+    AND (?1 IS NULL OR machine_id = ?1 OR last_activity_at >= ?2))";
 
 /// `live:last_activity_at:id` from [`Store::list_sessions`].
 fn parse_cursor(c: &str) -> Option<(i64, i64, String)> {
@@ -300,83 +311,82 @@ impl Store {
 
     /// Live sessions first (a process is attached, so the user can act on
     /// them even after hours of idling), then by most recent activity,
-    /// keyset-paginated on `(live, last_activity_at, id)`. A session whose
-    /// activity moves it ahead of a cursor already handed out is not
-    /// repeated on later pages; clients see it through `session_updated`.
+    /// keyset-paginated on `(live, last_activity_at, id)`.
+    ///
+    /// The sort keys change while a client pages (activity, status, a remote
+    /// session going stale), so a session can be skipped (it moved ahead of
+    /// a cursor already handed out) or returned twice (it moved behind it).
+    /// Clients dedupe by id and learn about moved sessions through
+    /// `session_updated`.
     pub fn list_sessions(&self, f: &SessionFilter) -> Result<SessionsPage> {
-        let mut sql = format!("SELECT *, {LIVE} AS live FROM sessions WHERE 1=1");
-        let mut args: Vec<Value> = Vec::new();
-        let mut push = |clause: &str, v: Value, sql: &mut String| {
+        let mut args: Vec<Value> = vec![
+            f.local_machine.clone().map_or(Value::Null, Value::from),
+            (crate::now_ms() - REMOTE_LIVE_MS).into(),
+        ];
+        let mut bind = |v: Value| {
             args.push(v);
-            sql.push_str(&clause.replace('?', &format!("?{}", args.len())));
+            format!("?{}", args.len())
         };
+        let mut sql = format!("SELECT *, {LIVE} AS live FROM sessions WHERE 1=1");
         if let Some(p) = &f.project_id {
-            push(" AND project_id = ?", p.clone().into(), &mut sql);
+            sql += &format!(" AND project_id = {}", bind(p.clone().into()));
         }
         if let Some(s) = f.status {
-            push(" AND status = ?", s.as_str().to_string().into(), &mut sql);
+            sql += &format!(" AND status = {}", bind(s.as_str().to_string().into()));
         }
         if let Some(a) = &f.agent {
-            push(" AND agent = ?", a.clone().into(), &mut sql);
+            sql += &format!(" AND agent = {}", bind(a.clone().into()));
         }
         if let Some(m) = &f.machine_id {
-            push(" AND machine_id = ?", m.clone().into(), &mut sql);
+            sql += &format!(" AND machine_id = {}", bind(m.clone().into()));
         }
         if let Some(p) = &f.parent {
-            push(
-                &format!(" AND {IS_CHILD} AND parent_session_id = ?"),
-                p.clone().into(),
-                &mut sql,
+            sql += &format!(
+                " AND {IS_CHILD} AND parent_session_id = {}",
+                bind(p.clone().into())
             );
         } else if f.hide_children {
-            sql.push_str(&format!(" AND NOT {IS_CHILD}"));
+            sql += &format!(" AND NOT {IS_CHILD}");
         }
         if let Some(q) = f.q.as_deref().map(str::trim).filter(|q| !q.is_empty()) {
-            let pat = like_escape(q);
-            push(
-                " AND (title LIKE ? ESCAPE '\\'",
-                pat.clone().into(),
-                &mut sql,
+            let pat = bind(like_escape(q).into());
+            sql += &format!(
+                " AND (title LIKE {pat} ESCAPE '\\' OR cwd LIKE {pat} ESCAPE '\\'
+                   OR branch LIKE {pat} ESCAPE '\\' OR agent LIKE {pat} ESCAPE '\\')"
             );
-            push(" OR cwd LIKE ? ESCAPE '\\'", pat.clone().into(), &mut sql);
-            push(
-                " OR branch LIKE ? ESCAPE '\\'",
-                pat.clone().into(),
-                &mut sql,
-            );
-            push(" OR agent LIKE ? ESCAPE '\\')", pat.into(), &mut sql);
         }
         if let Some(cursor) = &f.cursor {
             let (live, ts, id) =
                 parse_cursor(cursor).ok_or_else(|| StoreError::Invalid("invalid cursor".into()))?;
-            push(&format!(" AND ({LIVE} < ?"), live.into(), &mut sql);
-            push(&format!(" OR ({LIVE} = ?"), live.into(), &mut sql);
-            push(" AND (last_activity_at < ?", ts.into(), &mut sql);
-            push(" OR (last_activity_at = ?", ts.into(), &mut sql);
-            push(" AND id < ?))))", id.into(), &mut sql);
+            let (live, ts, id) = (bind(live.into()), bind(ts.into()), bind(id.into()));
+            sql += &format!(
+                " AND ({LIVE} < {live} OR ({LIVE} = {live} AND (last_activity_at < {ts}
+                   OR (last_activity_at = {ts} AND id < {id}))))"
+            );
         }
         let limit = f.limit.clamp(1, 500);
         // Note: no index; scans matching sessions. Add an index on
         // (live, last_activity_at) if lists get slow.
-        sql.push_str(&format!(
+        sql += &format!(
             " ORDER BY live DESC, last_activity_at DESC, id DESC LIMIT {}",
             limit + 1
-        ));
-        let mut items = self.read(|c| all(c, &sql, params_from_iter(args), session_row))?;
-        let next_cursor = if items.len() as i64 > limit {
-            items.truncate(limit as usize);
-            items.last().map(|s| {
-                format!(
-                    "{}:{}:{}",
-                    i64::from(s.status.is_live()),
-                    s.last_activity_at,
-                    s.id
-                )
+        );
+        let mut rows = self.read(|c| {
+            all(c, &sql, params_from_iter(args), |r| {
+                Ok((session_row(r)?, r.get::<_, i64>("live")?))
             })
+        })?;
+        let next_cursor = if rows.len() as i64 > limit {
+            rows.truncate(limit as usize);
+            rows.last()
+                .map(|(s, live)| format!("{live}:{}:{}", s.last_activity_at, s.id))
         } else {
             None
         };
-        Ok(SessionsPage { items, next_cursor })
+        Ok(SessionsPage {
+            items: rows.into_iter().map(|(s, _)| s).collect(),
+            next_cursor,
+        })
     }
 
     /// Subagent sessions recorded under `id` (see [`SessionFilter::parent`]).
@@ -677,6 +687,34 @@ pub(super) mod tests {
             }),
             ["old-live", "long-running", "tie-b", "oldest"]
         );
+        // Seen from "pc": its own idle session stays pinned however old, the
+        // other machine's "working" session without an update for longer
+        // than REMOTE_LIVE_MS sorts by its activity (its machine may be gone),
+        // and a fresh one of that machine is pinned.
+        let mut fresh = session("mac-fresh", "p", 5);
+        fresh.machine_id = "mac".into();
+        fresh.last_activity_at = crate::now_ms() - REMOTE_LIVE_MS + 60_000;
+        store.insert_session(&fresh).unwrap();
+        for limit in [1, 3, 50] {
+            assert_eq!(
+                all_pages(SessionFilter {
+                    local_machine: Some("pc".into()),
+                    limit,
+                    ..Default::default()
+                }),
+                [
+                    "mac-fresh",
+                    "old-live",
+                    "long-running",
+                    "new-ended",
+                    "tie-b",
+                    "tie-a",
+                    "working",
+                    "oldest",
+                ],
+                "limit {limit}"
+            );
+        }
         // Search also matches the branch.
         store
             .modify_session("tie-a", |s| s.branch = Some("feature/zebra".into()))
