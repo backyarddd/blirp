@@ -806,6 +806,48 @@ fn codex_compaction_marks_the_session() {
     assert_eq!(ev[n - 1].text, "Continuing after the compaction.");
 }
 
+// A fork (Codex Desktop subagent) starts with a copy of its parent's
+// rollout, the parent's compactions included (synthetic, in the format of
+// real codex 0.153 forks): only the fork's own compaction counts.
+#[test]
+fn codex_fork_ignores_the_parents_copied_compactions() {
+    let h = H::new();
+    let fork = "0198a1b2-c3d4-7e5f-8a9b-0c1d2e3f4f0f";
+    let path = h.put(
+        &format!(".codex/sessions/2026/01/02/rollout-2026-01-02T10-00-00-{fork}.jsonl"),
+        h.fill(&fixture("codex/fork.jsonl")).as_bytes(),
+    );
+    let text = std::fs::read_to_string(&path).unwrap();
+    let head: String = text
+        .lines()
+        .take(6)
+        .map(|l| {
+            format!(
+                "{l}
+"
+            )
+        })
+        .collect();
+    std::fs::write(&path, head).unwrap();
+    h.pass();
+    let s = h.session("codex", fork);
+    assert_eq!(
+        s.compacted_at, None,
+        "the parent's compaction is not the fork's"
+    );
+    std::fs::write(&path, text).unwrap();
+    h.pass();
+    let s = h.session("codex", fork);
+    assert_eq!(s.compacted_at, Some(1_767_349_800_000)); // 2026-01-02T10:30:00Z
+    let summaries: Vec<String> = h
+        .events(&s)
+        .into_iter()
+        .filter(|e| e.kind == EventKind::Summary)
+        .map(|e| e.text)
+        .collect();
+    assert_eq!(summaries, ["The subagent renamed build.sh."]);
+}
+
 #[test]
 fn codex_rollouts_in_scratch_folders_create_no_project() {
     let h = H::new();

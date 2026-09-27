@@ -48,7 +48,17 @@ struct State {
     calls: HashMap<String, String>,
     #[serde(default)]
     launch: Option<Launches>,
+    /// A fork (a Codex Desktop subagent): when it started. Its rollout
+    /// begins with a copy of the parent's (the parent's `session_meta`
+    /// second, then its history, compactions included).
+    #[serde(default)]
+    fork_at: Option<i64>,
 }
+
+/// Lines of a fork stamped within this of its start are the parent's copied
+/// history: the copy is written at once (observed: within 1 ms, codex
+/// 0.153), while a compaction of the fork's own needs model turns first.
+const FORK_COPY_MS: i64 = 1_000;
 
 #[derive(Debug, Default, Clone, Copy, Serialize, Deserialize)]
 struct Tokens {
@@ -207,6 +217,17 @@ impl Adapter for Codex {
             }
             match ty {
                 "session_meta" => {
+                    let id = p
+                        .get("id")
+                        .or_else(|| p.get("session_id"))
+                        .and_then(Value::as_str);
+                    if st.fork_at.is_none()
+                        && st.asid.is_some()
+                        && id.is_some()
+                        && id != st.asid.as_deref()
+                    {
+                        st.fork_at = ts.or(meta.started_at);
+                    }
                     if let Some(c) = p.get("cwd").and_then(Value::as_str) {
                         meta.cwd = Some(c.to_string());
                     }
@@ -258,7 +279,13 @@ impl Adapter for Codex {
                 "compacted" => {
                     // Codex replaced its history with a compacted one (its
                     // context filled up). `message` is its summary; empty
-                    // when the model compacted remotely.
+                    // when the model compacted remotely. A fork's copy of its
+                    // parent's compactions is not its own.
+                    if let Some(f) = st.fork_at
+                        && ts.is_none_or(|t| t - f < FORK_COPY_MS)
+                    {
+                        return Ok(());
+                    }
                     let msg = p
                         .get("message")
                         .and_then(Value::as_str)
