@@ -146,7 +146,7 @@ impl NonProjectDirs {
     /// Map folders inside `dir` (`BLIRP_HOME/workspaces`) to their projects.
     #[must_use]
     pub fn with_workspaces(mut self, dir: &Path) -> Self {
-        self.workspaces = Some(canonical_or_same(dir));
+        self.workspaces = Some(normalize(dir));
         self
     }
 
@@ -181,7 +181,7 @@ impl NonProjectDirs {
     /// For sessions the user starts in blirp: only home and roots.
     pub fn launch() -> Self {
         Self {
-            home: crate::paths::user_home().map(|h| canonical_or_same(&h)),
+            home: crate::paths::user_home().map(|h| normalize(&h)),
             ..Self::default()
         }
     }
@@ -198,25 +198,27 @@ impl NonProjectDirs {
         }
         let mut dirs = Self::auto(crate::paths::user_home(), scratch);
         if let Some(d) = crate::paths::documents_dir().filter(|d| d.is_absolute()) {
-            dirs.documents.push(canonical_or_same(&d));
+            dirs.documents.push(normalize(&d));
         }
         dirs
     }
 
-    /// Auto rules for `home` (with `home/Documents`) and `scratch`
-    /// (canonicalized where they exist).
+    /// Auto rules for `home` (with `home/Documents`) and `scratch`.
+    /// Folders are kept [`normalize`]d, the form every path they are
+    /// matched against has: `$TMPDIR` on macOS is `/private/var/folders/..`
+    /// and a Windows `%TEMP%` in 8.3 form (`RUNNER~1`) is the long name.
     pub fn auto(home: Option<PathBuf>, scratch: Vec<PathBuf>) -> Self {
-        let home = home.map(|h| canonical_or_same(&h));
+        let home = home.map(|h| normalize(&h));
         Self {
             documents: home
                 .iter()
-                .map(|h| canonical_or_same(&h.join("Documents")))
+                .map(|h| normalize(&h.join("Documents")))
                 .collect(),
             home,
             scratch: scratch
                 .into_iter()
                 .filter(|d| d.is_absolute())
-                .map(|d| canonical_or_same(&d))
+                .map(|d| normalize(&d))
                 .collect(),
             auto: true,
             workspaces: None,
@@ -277,10 +279,6 @@ fn is_iso_date(s: &str) -> bool {
             4 | 7 => b == b'-',
             _ => b.is_ascii_digit(),
         })
-}
-
-fn canonical_or_same(p: &Path) -> PathBuf {
-    dunce::canonicalize(p).unwrap_or_else(|_| p.to_path_buf())
 }
 
 /// A recorded folder in the spelling [`canonical_dir`] gives existing ones:
@@ -1418,11 +1416,80 @@ mod tests {
     use crate::model::{Record, RecordKind, RecordStatus, SessionOrigin};
     use crate::store::BY_DISTILLER;
 
+    /// Like [`NonProjectDirs::launch`] for `home`: in the form candidates
+    /// are matched in (a tempdir under macOS `/var` is `/private/var`, a
+    /// Windows `%TEMP%` may be 8.3), so the tests do not depend on the OS.
     fn launch(home: &Path) -> NonProjectDirs {
         NonProjectDirs {
-            home: Some(home.to_path_buf()),
+            home: Some(normalize(home)),
             ..NonProjectDirs::default()
         }
+    }
+
+    /// Another spelling of existing folder `real`: a symlink (unix), the
+    /// 8.3 short name (Windows; the long name where the volume has none).
+    fn alias_of(real: &Path) -> PathBuf {
+        #[cfg(unix)]
+        {
+            let link = real.with_file_name(format!(
+                "{}-link",
+                real.file_name().unwrap().to_string_lossy()
+            ));
+            std::os::unix::fs::symlink(real, &link).unwrap();
+            link
+        }
+        #[cfg(windows)]
+        {
+            use std::os::windows::ffi::{OsStrExt, OsStringExt};
+            use windows_sys::Win32::Storage::FileSystem::GetShortPathNameW;
+            let wide: Vec<u16> = real.as_os_str().encode_wide().chain([0]).collect();
+            let mut buf = vec![0u16; 1024];
+            // SAFETY: `wide` is NUL-terminated; `buf` holds `buf.len()` u16s.
+            #[allow(unsafe_code)]
+            let n = unsafe { GetShortPathNameW(wide.as_ptr(), buf.as_mut_ptr(), 1024) };
+            assert!(
+                n > 0 && (n as usize) < buf.len(),
+                "GetShortPathNameW failed"
+            );
+            PathBuf::from(std::ffi::OsString::from_wide(&buf[..n as usize]))
+        }
+    }
+
+    #[test]
+    fn roots_match_whatever_spelling_they_were_given_in() {
+        let (_d, _store, root, _) = auto_env();
+        let tmp = root.join("a long scratch folder");
+        let other = root.join("another long folder");
+        for d in [&tmp, &other] {
+            std::fs::create_dir_all(d.join("run")).unwrap();
+        }
+        let (tmp_alias, other_alias) = (alias_of(&tmp), alias_of(&other));
+        let home_alias = alias_of(&root.join("home"));
+        // Existing roots, and a gone one below an existing folder.
+        let dirs = NonProjectDirs::auto(
+            Some(home_alias.clone()),
+            vec![tmp_alias.clone(), other_alias.join("gone")],
+        );
+        assert!(dirs.contains(&canonical_dir(&tmp.join("run")).unwrap()));
+        assert!(dirs.contains(&canonical_dir(&tmp_alias.join("run")).unwrap()));
+        assert!(dirs.contains(&normalize(&tmp_alias.join("gone/x"))));
+        assert!(dirs.contains(&normalize(&other_alias.join("gone/x"))));
+        assert!(dirs.contains(&normalize(&other.join("gone"))));
+        assert!(!dirs.contains(&canonical_dir(&other_alias.join("run")).unwrap()));
+        assert!(dirs.contains(&canonical_dir(&root.join("home")).unwrap()));
+        assert!(!launch(&root.join("home")).contains(&canonical_dir(&tmp).unwrap()));
+        assert!(launch(&home_alias).contains(&canonical_dir(&root.join("home")).unwrap()));
+    }
+
+    #[test]
+    fn the_process_temp_folder_is_scratch() {
+        // `temp_dir()` as the OS spells it: `/var/folders/..` on macOS,
+        // possibly 8.3 on Windows runners. Candidates arrive canonical.
+        let t = tempfile::tempdir().unwrap();
+        std::fs::create_dir(t.path().join("run")).unwrap();
+        let p = NonProjectDirs::from_process();
+        assert!(p.contains(&canonical_dir(&t.path().join("run")).unwrap()));
+        assert!(p.contains(&normalize(&t.path().join("gone/run"))));
     }
 
     /// A temp root with `home/` and `tmp/` (the scratch folder), canonical.
