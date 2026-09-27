@@ -24,8 +24,9 @@ Without a command, `blirp` does what [`blirp app`](#blirp-app) does.
 | [`skills`](#blirp-skills) | no | install/remove blirp's Agent Skills for agents |
 | [`agents`](#blirp-agents) | no | store or remove the Claude login token for a headless hub |
 | [`pair`](#blirp-pair) | yes | pair this machine with a hub |
-| [`hub`](#blirp-hub) | yes | hub role, invites, sync status |
+| [`hub`](#blirp-hub) | yes (`setup` starts it) | hub role, invites, sync status, server setup |
 | [`devices`](#blirp-devices) | yes | paired machines and browser devices |
+| [`backup`](#blirp-backup) | no | consistent copy of the database |
 | [`service`](#blirp-service) | no | autostart at login |
 | [`update`](#blirp-update) | no | update blirp and the desktop app |
 | [`uninstall`](#blirp-uninstall) | no | remove blirp (and with `--purge` its data) |
@@ -85,7 +86,7 @@ Shows the daemon log (`~/.blirp/logs/blirpd.<date>.log`). Run `blirp logs --help
 
 ## blirp doctor
 
-Checks, one line each, `[ ok ]` or `[FAIL]`: data directory writable, `config.toml` valid, database opens and passes `quick_check` (schema version shown), daemon reachable, `git` on PATH. Then `[info]` lines: LAN discovery (on or off, the running daemon's latest mDNS send failure when it logged one in the last 11 minutes, and on macOS a hint about the Local Network permission), detected agents with versions, how claude logs in (`claude auth`: a login token from the environment, a stored token or the keychain / credentials file, and whether `claude auth status` reports it logged in; asked from the running daemon, else from this shell), per transcript adapter the store it found, the number of sources and the time of the last ingest, and the state of blirp's skills in both skill folders. Exit code 1 if any check failed. Works without the daemon; run it in the same environment the daemon runs in (PATH matters for agent detection).
+Checks, one line each, `[ ok ]` or `[FAIL]`: data directory writable, `config.toml` valid, database opens and passes `quick_check` (schema version shown), daemon reachable, `git` on PATH. Then the sync role and the autostart service (and on Linux whether systemd linger is on; on a hub without autostart or linger these are `[warn]` lines, which do not fail the check), for a hub or node whether the sync endpoint reaches a relay (`[ ok ]` with its URL, `[warn]` without one), then `[info]` lines: LAN discovery (on or off, the running daemon's latest mDNS send failure when it logged one in the last 11 minutes, and on macOS a hint about the Local Network permission), detected agents with versions, how claude logs in (`claude auth`: a login token from the environment, a stored token or the keychain / credentials file, and whether `claude auth status` reports it logged in; asked from the running daemon, else from this shell), per transcript adapter the store it found, the number of sources and the time of the last ingest, and the state of blirp's skills in both skill folders. Exit code 1 if any check failed. Works without the daemon; run it in the same environment the daemon runs in (PATH matters for agent detection).
 
 ## blirp mem
 
@@ -151,9 +152,20 @@ blirp hub enable    # become the hub; prints status and a first invite
 blirp hub invite    # another invite + code (10 minutes, single use)
 blirp hub status    # role, machine id, hub, connected, pending changes, portal URL + fingerprint
 blirp hub disable   # back to standalone; paired machines stay known
+blirp hub setup [--lan]   # set up this machine as an always-on hub (servers, VPS)
 ```
 
 `enable` fails on a paired node (`paired_node`); `invite` fails unless this machine is the hub (`not_hub`). `status` works in every role.
+
+`setup` prepares an always-on hub and is safe to repeat ([vps.md](vps.md#what-blirp-hub-setup-does)): it refuses to run as root; on Linux turns on systemd linger when polkit allows it without a password (else prints `sudo loginctl enable-linger <user>`); installs the autostart service (`blirp service install`), or where systemd or the user's systemd is not reachable (containers, `su`) says so and skips it; starts the daemon; sets `sync.lan_discovery = false` (`--lan`: `true`); enables the hub and prints its status, an invite and the next steps. `install.sh --hub` runs it.
+
+## blirp backup
+
+```
+blirp backup <FILE>
+```
+
+Writes a consistent, compacted copy of `blirp.db` to `FILE` with SQLite `VACUUM INTO`, also while the daemon runs (it reads one snapshot and does not block the daemon). `FILE` must not exist; it is created with mode `0600` on macOS and Linux. `identity.key` and `config.toml` are not included; keep copies of them too ([vps.md](vps.md#backups)). Does not need the daemon.
 
 ## blirp devices
 

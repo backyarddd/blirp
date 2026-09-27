@@ -189,6 +189,20 @@ impl Store {
         self.read(|c| Ok(c.query_row("PRAGMA quick_check", [], |r| r.get(0))?))
     }
 
+    /// Write a consistent, compacted copy of the database to `dest` with
+    /// `VACUUM INTO`, which reads one snapshot and does not block the
+    /// daemon's writers (WAL). `dest` must not exist or be an empty file;
+    /// the caller creates it empty to choose its permissions.
+    pub fn backup_to(&self, dest: &Path) -> Result<()> {
+        let dest = dest.to_str().ok_or_else(|| {
+            StoreError::Invalid(format!("backup path is not UTF-8: {}", dest.display()))
+        })?;
+        self.read(|c| {
+            c.execute("VACUUM INTO ?1", [dest])?;
+            Ok(())
+        })
+    }
+
     /// Run `f` on a pooled read-only connection.
     pub(crate) fn read<T>(&self, f: impl FnOnce(&Connection) -> Result<T>) -> Result<T> {
         let pooled = lock(&self.readers).pop();
@@ -710,6 +724,31 @@ pub(crate) mod tests {
         let dir = tempfile::tempdir().unwrap();
         let store = Store::open(&dir.path().join("blirp.db")).unwrap();
         (dir, store)
+    }
+
+    #[test]
+    fn backup_is_a_complete_snapshot_from_a_read_only_store() {
+        let (dir, store) = temp_store();
+        let mut values = std::collections::BTreeMap::new();
+        values.insert("backup.probe".to_string(), Some(serde_json::json!(42)));
+        store.set_settings(&values).unwrap();
+        // The CLI backs up through a read-only handle next to the daemon.
+        let ro = Store::open_read_only(store.path()).unwrap();
+        let dest = dir.path().join("copy.db");
+        std::fs::File::create(&dest).unwrap();
+        ro.backup_to(&dest).unwrap();
+        let copy = Store::open_read_only(&dest).unwrap();
+        assert_eq!(
+            copy.schema_version().unwrap(),
+            store.schema_version().unwrap()
+        );
+        assert_eq!(copy.quick_check().unwrap(), "ok");
+        assert_eq!(
+            copy.get_setting("backup.probe").unwrap(),
+            Some(serde_json::json!(42))
+        );
+        // Never overwrites an existing backup.
+        assert!(ro.backup_to(&dest).is_err());
     }
 
     #[test]

@@ -18,6 +18,14 @@ pub enum HubAction {
     Invite,
     /// Show the sync role and connection state.
     Status,
+    /// Set up this machine as an always-on hub (a VPS or home server):
+    /// autostart that survives logout and reboots, LAN discovery off, hub
+    /// role, and an invite for your PC. Safe to run again.
+    Setup {
+        /// Keep LAN discovery (mDNS) on, for a hub on your home network.
+        #[arg(long)]
+        lan: bool,
+    },
 }
 
 #[derive(Subcommand)]
@@ -88,6 +96,8 @@ pub async fn hub(client: &Client, action: HubAction) -> anyhow::Result<ExitCode>
             print_invite(&i);
         }
         HubAction::Status => print_status(&client.get("/api/sync/status").await?),
+        // Dispatched before a client exists (it starts the daemon).
+        HubAction::Setup { .. } => return Ok(ExitCode::from(2)),
     }
     Ok(ExitCode::SUCCESS)
 }

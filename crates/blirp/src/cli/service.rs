@@ -201,8 +201,13 @@ fn remove_if_exists(path: &Path) -> anyhow::Result<bool> {
 
 /// Run a helper tool; returns (success, combined output).
 fn tool(program: &str, args: &[&str]) -> anyhow::Result<(bool, String)> {
-    let out = blirp_core::process::command(program)
-        .args(args)
+    let mut cmd = blirp_core::process::command(program);
+    cmd.args(args);
+    run_tool(cmd, program)
+}
+
+fn run_tool(mut cmd: std::process::Command, program: &str) -> anyhow::Result<(bool, String)> {
+    let out = cmd
         .stdin(std::process::Stdio::null())
         .output()
         .with_context(|| format!("run {program}"))?;
@@ -211,6 +216,7 @@ fn tool(program: &str, args: &[&str]) -> anyhow::Result<(bool, String)> {
     Ok((out.status.success(), text.trim().to_string()))
 }
 
+#[cfg_attr(all(unix, not(target_os = "macos")), allow(dead_code))]
 fn must(program: &str, args: &[&str]) -> anyhow::Result<()> {
     let (ok, out) = tool(program, args)?;
     if !ok {
@@ -224,9 +230,55 @@ fn user_home() -> anyhow::Result<PathBuf> {
     blirp_core::paths::user_home().context("cannot determine the home directory")
 }
 
+/// `sudo loginctl enable-linger <user>`: the command an administrator runs
+/// so this user's services run without a login session and start at boot.
+#[cfg_attr(any(windows, target_os = "macos"), allow(dead_code))]
+pub(crate) fn linger_command(user: &str) -> String {
+    format!("sudo loginctl enable-linger {user}")
+}
+
+/// `loginctl show-user <uid> --property=Linger --value` -> lingering?
+/// logind forgets a user without sessions or linger ("not logged in or
+/// lingering"), which means off. None: logind could not be asked.
+#[cfg_attr(any(windows, target_os = "macos"), allow(dead_code))]
+fn parse_linger(ok: bool, out: &str) -> Option<bool> {
+    match (ok, out.trim()) {
+        (true, "yes") => Some(true),
+        (true, "no") => Some(false),
+        (false, o) if o.contains("not logged in or lingering") => Some(false),
+        _ => None,
+    }
+}
+
+/// The user's name for printed commands: `$USER`, `$LOGNAME`, else the
+/// numeric uid (loginctl accepts both).
+#[cfg(unix)]
+#[cfg_attr(target_os = "macos", allow(dead_code))]
+pub(crate) fn user_name() -> String {
+    ["USER", "LOGNAME"]
+        .iter()
+        .find_map(|k| std::env::var(k).ok().filter(|v| !v.is_empty()))
+        .unwrap_or_else(|| uid().to_string())
+}
+
+#[cfg(unix)]
+#[allow(unsafe_code)]
+pub(crate) fn uid() -> u32 {
+    // SAFETY: getuid has no preconditions and cannot fail.
+    unsafe { libc::getuid() }
+}
+
+/// Whether this process runs as root (effective uid 0).
+#[cfg(unix)]
+#[allow(unsafe_code)]
+pub(crate) fn is_root() -> bool {
+    // SAFETY: geteuid has no preconditions and cannot fail.
+    unsafe { libc::geteuid() == 0 }
+}
+
 // ------------------------------------------------------------------ install
 
-async fn install(paths: &Paths) -> anyhow::Result<ExitCode> {
+pub(crate) async fn install(paths: &Paths) -> anyhow::Result<ExitCode> {
     let exe = std::env::current_exe().context("locate the blirp executable")?;
     // Autostart must not point into a mount that is gone after a reboot.
     let exe = crate::memory::persistent_exe(exe)?;
@@ -343,6 +395,11 @@ fn default_home() -> Option<PathBuf> {
     blirp_core::paths::user_home().map(|h| h.join(".blirp"))
 }
 
+/// The installed autostart entry and its state (`blirp doctor`).
+pub(crate) fn installed() -> anyhow::Result<Option<String>> {
+    platform::status()
+}
+
 async fn status(paths: &Paths) -> anyhow::Result<ExitCode> {
     let installed = platform::status()?;
     match &installed {
@@ -371,10 +428,7 @@ mod platform {
     }
 
     fn domain() -> String {
-        #[allow(unsafe_code)]
-        // SAFETY: getuid has no preconditions and cannot fail.
-        let uid = unsafe { libc::getuid() };
-        format!("gui/{uid}")
+        format!("gui/{}", uid())
     }
 
     fn loaded() -> anyhow::Result<bool> {
@@ -484,7 +538,7 @@ mod platform {
 }
 
 #[cfg(all(unix, not(target_os = "macos")))]
-mod platform {
+pub(crate) mod platform {
     use super::*;
 
     fn unit_path() -> anyhow::Result<PathBuf> {
@@ -495,13 +549,77 @@ mod platform {
         Ok(config.join("systemd/user").join(SYSTEMD_UNIT))
     }
 
+    /// `systemctl --user <args>`. Without `XDG_RUNTIME_DIR` (`sudo -iu`,
+    /// `su -`, a CI runner) systemctl cannot find the user manager's bus;
+    /// point it at `/run/user/<uid>` when that manager runs (linger).
+    fn user_systemctl(args: &[&str]) -> anyhow::Result<(bool, String)> {
+        let mut cmd = blirp_core::process::command("systemctl");
+        cmd.arg("--user").args(args);
+        if std::env::var_os("XDG_RUNTIME_DIR").is_none_or(|v| v.is_empty()) {
+            let dir = PathBuf::from(format!("/run/user/{}", uid()));
+            if dir.join("bus").exists() {
+                cmd.env("XDG_RUNTIME_DIR", dir);
+            }
+        }
+        run_tool(cmd, "systemctl")
+    }
+
     fn systemctl(args: &[&str]) -> anyhow::Result<()> {
-        let mut all = vec!["--user"];
-        all.extend_from_slice(args);
-        must("systemctl", &all).context(
-            "systemd --user is not available; start `blirp daemon --detach` from your \
-             session startup instead",
+        user_systemctl(args)
+            .and_then(|(ok, out)| {
+                if !ok {
+                    bail!("`systemctl --user {}` failed: {out}", args.join(" "));
+                }
+                Ok(())
+            })
+            .context(
+                "systemd --user is not available; start `blirp daemon --detach` from your \
+                 session startup instead",
+            )
+    }
+
+    /// systemd is PID 1 (`sd_booted`), so user services can exist at all.
+    /// False in most containers and on distributions without systemd.
+    pub fn systemd_booted() -> bool {
+        Path::new("/run/systemd/system").is_dir()
+    }
+
+    /// This user's systemd manager answers (it runs for a login session or
+    /// because of linger). Waits up to `wait` for one that is starting.
+    pub async fn user_manager_ready(wait: std::time::Duration) -> bool {
+        let deadline = std::time::Instant::now() + wait;
+        loop {
+            if user_systemctl(&["show-environment"]).is_ok_and(|(ok, _)| ok) {
+                return true;
+            }
+            if std::time::Instant::now() >= deadline {
+                return false;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(250)).await;
+        }
+    }
+
+    /// Whether logind keeps this user's services running without a login
+    /// session. None when logind cannot be asked (no loginctl, no systemd).
+    pub fn linger() -> Option<bool> {
+        let uid = uid().to_string();
+        let (ok, out) = tool(
+            "loginctl",
+            &["show-user", &uid, "--property=Linger", "--value"],
         )
+        .ok()?;
+        parse_linger(ok, &out)
+    }
+
+    /// Try `loginctl enable-linger` without asking for a password (polkit
+    /// allows it for some users, e.g. in an active local session). True
+    /// when linger is on afterwards.
+    pub fn enable_linger() -> bool {
+        let uid = uid().to_string();
+        // The outcome is read back below; a refusal is the expected case
+        // for SSH users without polkit rights.
+        let _ = tool("loginctl", &["--no-ask-password", "enable-linger", &uid]);
+        linger() == Some(true)
     }
 
     pub async fn install(paths: &Paths, exe: &Path, running: Option<u32>) -> anyhow::Result<()> {
@@ -513,11 +631,7 @@ mod platform {
         );
         let changed = write_if_changed(&unit, &contents)?;
         systemctl(&["daemon-reload"])?;
-        let active = tool(
-            "systemctl",
-            &["--user", "is-active", "--quiet", SYSTEMD_UNIT],
-        )?
-        .0;
+        let active = user_systemctl(&["is-active", "--quiet", SYSTEMD_UNIT])?.0;
         let unit_s = unit.display();
         if active {
             systemctl(&["enable", SYSTEMD_UNIT])?;
@@ -537,10 +651,13 @@ mod platform {
             systemctl(&["enable", "--now", SYSTEMD_UNIT])?;
             println!("Autostart installed and started ({unit_s}).");
         }
-        println!(
-            "On a headless machine, also run `loginctl enable-linger $USER` so the \
-             daemon runs without an open login session."
-        );
+        if linger() != Some(true) {
+            println!(
+                "On a server, also run `{}` once so the daemon runs without an open \
+                 login session and starts at boot.",
+                linger_command(&user_name())
+            );
+        }
         Ok(())
     }
 
@@ -581,11 +698,8 @@ mod platform {
         if !unit_usable(home)? {
             return Ok(false);
         }
-        let enabled = tool(
-            "systemctl",
-            &["--user", "is-enabled", "--quiet", SYSTEMD_UNIT],
-        )
-        .is_ok_and(|(ok, _)| ok);
+        let enabled =
+            user_systemctl(&["is-enabled", "--quiet", SYSTEMD_UNIT]).is_ok_and(|(ok, _)| ok);
         if !enabled {
             return Ok(false);
         }
@@ -598,8 +712,8 @@ mod platform {
         if !unit.exists() {
             return Ok(None);
         }
-        let (_, enabled) = tool("systemctl", &["--user", "is-enabled", SYSTEMD_UNIT])?;
-        let (_, active) = tool("systemctl", &["--user", "is-active", SYSTEMD_UNIT])?;
+        let (_, enabled) = user_systemctl(&["is-enabled", SYSTEMD_UNIT])?;
+        let (_, active) = user_systemctl(&["is-active", SYSTEMD_UNIT])?;
         Ok(Some(format!("{} ({enabled}, {active})", unit.display())))
     }
 }
@@ -838,6 +952,28 @@ WantedBy=default.target
         let home = default_home().unwrap_or_else(|| PathBuf::from("/h"));
         let gone = systemd_unit(Path::new("/nonexistent/blirp"), None, None);
         assert!(!usable(&gone, unit_exe(&gone), "", &home));
+    }
+
+    #[test]
+    fn linger_state_from_loginctl() {
+        assert_eq!(parse_linger(true, "yes\n"), Some(true));
+        assert_eq!(parse_linger(true, "no"), Some(false));
+        assert_eq!(
+            parse_linger(
+                false,
+                "Failed to get user: User ID 1001 is not logged in or lingering"
+            ),
+            Some(false)
+        );
+        assert_eq!(
+            parse_linger(false, "System has not been booted with systemd"),
+            None
+        );
+        assert_eq!(parse_linger(true, ""), None);
+        assert_eq!(
+            linger_command("deploy"),
+            "sudo loginctl enable-linger deploy"
+        );
     }
 
     #[test]

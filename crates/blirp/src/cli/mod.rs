@@ -4,6 +4,7 @@ mod agents;
 mod install;
 mod lifecycle;
 mod mem;
+mod server;
 pub mod service;
 mod skills;
 mod sync;
@@ -105,6 +106,11 @@ enum Command {
         #[command(subcommand)]
         action: sync::HubAction,
     },
+    /// Write a consistent copy of the database (safe while the daemon runs).
+    Backup {
+        /// Where to write it; must not exist yet.
+        file: std::path::PathBuf,
+    },
     /// Paired machines and browser devices (hub).
     Devices {
         #[command(subcommand)]
@@ -177,6 +183,7 @@ pub fn main() -> ExitCode {
         Command::Hooks(cmd) => report(mem::run_hooks(cmd)),
         Command::Skills(cmd) => report(skills::run(cmd)),
         Command::Agents(cmd) => report(agents::run(&paths, cmd)),
+        Command::Backup { file } => report(server::backup(&paths, &file)),
         command => run_async(command, paths),
     }
 }
@@ -271,6 +278,9 @@ async fn run(cmd: Command, paths: Paths) -> anyhow::Result<ExitCode> {
         Command::Pair { first, code } => {
             sync::pair(&Client::connect(&paths).await?, first, code).await
         }
+        Command::Hub {
+            action: sync::HubAction::Setup { lan },
+        } => server::hub_setup(&paths, lan).await,
         Command::Hub { action } => sync::hub(&Client::connect(&paths).await?, action).await,
         Command::Devices { action } => sync::devices(&Client::connect(&paths).await?, action).await,
         Command::Service { cmd } => service::run(&cmd, &paths).await,
@@ -284,6 +294,7 @@ async fn run(cmd: Command, paths: Paths) -> anyhow::Result<ExitCode> {
         | Command::Hooks(_)
         | Command::Skills(_)
         | Command::Agents(_)
+        | Command::Backup { .. }
         | Command::Logs { .. }
         | Command::Worktrees(worktrees::WorktreesCommand::List) => Ok(ExitCode::from(2)),
     }
@@ -499,6 +510,13 @@ async fn doctor(paths: &Paths) -> anyhow::Result<ExitCode> {
     );
 
     let config = cfg.unwrap_or_default();
+    let client = match &daemon {
+        Some(_) => Client::connect(paths).await.ok(),
+        None => None,
+    };
+    for line in server::doctor_lines(&config, client.as_ref()).await {
+        println!("{line}");
+    }
     println!(
         "[info] LAN discovery: {}",
         lan_discovery_line(&config, paths, daemon.is_some())
@@ -526,11 +544,8 @@ async fn doctor(paths: &Paths) -> anyhow::Result<ExitCode> {
 
     // What matters is the daemon's view (its environment, its keychain
     // access); this shell's is the fallback when it is not running.
-    let from_daemon = match &daemon {
-        Some(_) => match Client::connect(paths).await {
-            Ok(c) => c.get::<Vec<AgentInfo>>("/api/agents").await.ok(),
-            Err(_) => None,
-        },
+    let from_daemon = match &client {
+        Some(c) => c.get::<Vec<AgentInfo>>("/api/agents").await.ok(),
         None => None,
     };
     let claude = match from_daemon {
