@@ -81,7 +81,7 @@ Then run `blirp hub setup` again: the service records your `PATH` at setup time,
 2. Linux: turns on **linger** (`loginctl enable-linger`) when polkit allows it without a password; otherwise prints `sudo loginctl enable-linger <user>` to run once. Without linger, systemd stops the user's services at logout and starts them only at the next login.
 3. Installs the autostart service (`blirp service install`: on Linux the `systemd --user` unit `~/.config/systemd/user/blirp.service` with `Restart=on-failure`, enabled and started). Where systemd is not running (a container) or the user's systemd is not reachable, it says so, installs no service and starts the daemon directly; that daemon does not come back after a reboot.
 4. Starts the daemon if it is not running.
-5. Turns LAN discovery (mDNS) off (`sync.lan_discovery = false`): a VPS has no LAN peers to find, and on a provider's shared network it would advertise the hub to other customers' machines. Pairing then always uses the invite. `--lan` turns it on instead, for a hub at home.
+5. Turns LAN discovery (mDNS) off (`sync.lan_discovery = false`): a VPS has no LAN peers to find, and on a provider's shared network it would advertise the hub to other customers' machines. Pairing then always uses the invite. On Linux it also turns keep-awake off (`sessions.keep_awake = false`): a server does not sleep. `--lan` is for a hub at home instead: LAN discovery on, keep-awake left as it is. Either can be changed back in `config.toml` or **Settings**.
 6. Makes the machine the hub (`blirp hub enable`; fails on a machine that is paired with another hub) and prints its status and a new invite, then the next steps.
 
 Why a `systemd --user` unit with linger and not a system service: the daemon must run as the user whose agent logins, SSH keys and home folder the sessions use, and `blirp start`, `stop` and `update` already manage the user unit ([ARCHITECTURE.md](ARCHITECTURE.md#18-servers-and-vps-hubs)).
@@ -120,7 +120,7 @@ Usually you do not need either: the desktop app or `blirp` on your PC shows the 
 - **A dedicated, non-root user** for blirp ([step 1](#1-create-a-user-for-blirp)). Paired machines can start sessions on the hub (turn **Terminal control** off per machine on the hub if one should only read).
 - **SSH:** key-only logins (`PasswordAuthentication no`), no root login (`PermitRootLogin no`) in `/etc/ssh/sshd_config`, and automatic security updates (`sudo apt install unattended-upgrades`). Your provider's hardening guide covers the rest.
 - **Revoke** retired machines and devices (`blirp devices list|revoke`), and rotate any secret that ever appeared in a session: redaction is pattern based ([security.md](security.md#redaction-limits)).
-- Keep-awake does not matter on a server. If logind refuses the sleep lock to the service, blirp logs `cannot keep this machine awake` at most once per 10 minutes; nothing else happens.
+- Keep-awake does not matter on a server; `blirp hub setup` turns it off. Turned back on, a sleep lock logind refuses is logged (`cannot keep this machine awake`) at most once per 10 minutes; nothing else happens.
 
 ## Backups
 

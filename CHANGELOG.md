@@ -45,8 +45,8 @@ so every tag needs one.
   attempt in `logs/update.log`.
 - Run the hub on a VPS: `install.sh --hub` installs the CLI and runs the new
   `blirp hub setup`, which installs the autostart service with systemd
-  linger (so the hub survives logout and reboots), turns LAN discovery off,
-  enables the hub and prints an invite and the next steps. It refuses to run
+  linger (so the hub survives logout and reboots), turns LAN discovery and
+  (on Linux) keep-awake off, enables the hub and prints an invite and the next steps. It refuses to run
   as root, and without systemd (containers) it says so and starts the daemon
   directly. Guide: `docs/vps.md`.
 - `blirp backup <file>` writes a consistent copy of the database while the

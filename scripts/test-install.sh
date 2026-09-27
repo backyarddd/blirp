@@ -309,6 +309,8 @@ hub_test() {
     fail "hub/$mode: LAN discovery was not turned off"
   grep -E '^lan_discovery = false' "$h/.blirp/config.toml" >/dev/null ||
     fail "hub/$mode: config.toml does not keep LAN discovery off"
+  grep -E '^keep_awake = false' "$h/.blirp/config.toml" >/dev/null ||
+    fail "hub/$mode: keep-awake was not turned off"
   grep -F 'blirp agents set-token claude' "$work/out.log" >/dev/null || fail "hub/$mode: no next steps"
   if [ "$mode" = systemd ]; then
     grep -F 'Linger is on' "$work/out.log" >/dev/null || fail "hub/$mode: linger not reported on"

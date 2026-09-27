@@ -37,15 +37,8 @@ pub async fn hub_setup(paths: &Paths, lan: bool) -> anyhow::Result<ExitCode> {
     autostart(paths).await;
     super::lifecycle::start(paths).await?;
     let client = Client::connect(paths).await?;
-    if set_lan_discovery(&client, lan).await? {
-        println!(
-            "LAN discovery (mDNS) turned {}.",
-            if lan {
-                "on"
-            } else {
-                "off: a server has no LAN peers to find (`--lan` keeps it on)"
-            }
-        );
+    for change in apply_server_config(&client, &server_settings(lan)).await? {
+        println!("{change}");
     }
     println!();
     super::sync::hub(&client, super::sync::HubAction::Enable).await?;
@@ -95,27 +88,77 @@ async fn autostart(paths: &Paths) {
     }
 }
 
-/// Set `sync.lan_discovery` through the daemon (which applies it live).
-/// True when it changed.
-async fn set_lan_discovery(client: &Client, on: bool) -> anyhow::Result<bool> {
+/// A config value `hub setup` sets: (section, key, value, what to print
+/// when it changed).
+type Setting = (&'static str, &'static str, bool, &'static str);
+
+/// What a server hub needs: no mDNS (no LAN peers; on a provider's shared
+/// network it would advertise the hub to other customers) unless `--lan`,
+/// and on a Linux server no sleep lock (servers do not sleep; `--lan` means
+/// a machine at home, which may).
+fn server_settings(lan: bool) -> Vec<Setting> {
+    let mut out: Vec<Setting> = vec![if lan {
+        (
+            "sync",
+            "lan_discovery",
+            true,
+            "LAN discovery (mDNS) turned on.",
+        )
+    } else {
+        (
+            "sync",
+            "lan_discovery",
+            false,
+            "LAN discovery (mDNS) turned off: a server has no LAN peers to find              (`--lan` keeps it on).",
+        )
+    }];
+    if cfg!(target_os = "linux") && !lan {
+        out.push((
+            "sessions",
+            "keep_awake",
+            false,
+            "Keep-awake turned off: a server does not sleep              (`[sessions] keep_awake = true` turns it back on).",
+        ));
+    }
+    out
+}
+
+/// Apply `settings` through the daemon (which applies them live), in one
+/// change against the config it had. Returns the messages of the values
+/// that changed.
+async fn apply_server_config(
+    client: &Client,
+    settings: &[Setting],
+) -> anyhow::Result<Vec<&'static str>> {
     let view: Value = client.get("/api/settings").await?;
     let base = view
         .get("config")
         .cloned()
         .context("GET /api/settings returned no config")?;
-    if base["sync"]["lan_discovery"] == json!(on) {
-        return Ok(false);
+    let (config, changed) = with_settings(&base, settings);
+    if !changed.is_empty() {
+        client
+            .send(
+                Method::PATCH,
+                "/api/settings",
+                Some(json!({"config": config, "base": base})),
+            )
+            .await?;
     }
+    Ok(changed)
+}
+
+/// `base` with `settings` applied, and the messages of those that differ.
+fn with_settings(base: &Value, settings: &[Setting]) -> (Value, Vec<&'static str>) {
     let mut config = base.clone();
-    config["sync"]["lan_discovery"] = json!(on);
-    client
-        .send(
-            Method::PATCH,
-            "/api/settings",
-            Some(json!({"config": config, "base": base})),
-        )
-        .await?;
-    Ok(true)
+    let mut changed = Vec::new();
+    for (section, key, value, message) in settings {
+        if config[*section][*key] != json!(value) {
+            config[*section][*key] = json!(value);
+            changed.push(*message);
+        }
+    }
+    (config, changed)
 }
 
 fn next_steps() -> String {
@@ -286,6 +329,30 @@ mod tests {
             assert!(s.contains(needle), "missing {needle}");
         }
         assert!(ROOT_REFUSAL.contains("loginctl enable-linger blirp"));
+    }
+
+    #[test]
+    fn server_settings_change_only_what_differs() {
+        let base = json!({"sync": {"lan_discovery": true}, "sessions": {"keep_awake": null}});
+        let (config, changed) = with_settings(&base, &server_settings(false));
+        assert_eq!(config["sync"]["lan_discovery"], false);
+        if cfg!(target_os = "linux") {
+            assert_eq!(config["sessions"]["keep_awake"], false);
+            assert_eq!(changed.len(), 2);
+        } else {
+            assert_eq!(config["sessions"]["keep_awake"], Value::Null);
+            assert_eq!(changed.len(), 1);
+        }
+        // Run again on the result: nothing left to change.
+        assert!(with_settings(&config, &server_settings(false)).1.is_empty());
+        // --lan: discovery on, keep-awake left alone.
+        let (lan, changed) = with_settings(&config, &server_settings(true));
+        assert_eq!(lan["sync"]["lan_discovery"], true);
+        assert_eq!(
+            lan["sessions"]["keep_awake"],
+            config["sessions"]["keep_awake"]
+        );
+        assert_eq!(changed, vec!["LAN discovery (mDNS) turned on."]);
     }
 
     #[test]
