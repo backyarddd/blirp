@@ -80,14 +80,33 @@ pub struct RuntimeStatus {
     pub last_error: Option<String>,
     /// Hub: nodes with a live connection.
     pub peers: usize,
-    /// Sync refused for another replicated schema (§10): the machine to
-    /// update. Node: set by the last failed handshake. Hub: `this_machine`
-    /// while a paired machine with a newer release is refused.
+    /// Node: sync refused for another replicated schema (§10), the machine
+    /// to update, set by the last failed handshake.
     pub update_needed: Option<UpdateNeeded>,
     /// Hub: paired machines refused for running an older release.
     pub outdated: BTreeSet<String>,
     /// Hub: paired machines refused for running a newer release.
     pub newer: BTreeSet<String>,
+}
+
+impl RuntimeStatus {
+    /// Hub: `node` was refused for another release (`peer_older`: it runs
+    /// the older one).
+    fn refused(&mut self, node: &str, peer_older: bool) {
+        self.forget(node);
+        let set = if peer_older {
+            &mut self.outdated
+        } else {
+            &mut self.newer
+        };
+        set.insert(node.to_string());
+    }
+
+    /// Hub: `node` synced, was revoked or reconnects: no refusal stands.
+    fn forget(&mut self, node: &str) {
+        self.outdated.remove(node);
+        self.newer.remove(node);
+    }
 }
 
 /// A created invite, ready to show.
@@ -348,9 +367,6 @@ impl SyncService {
             .values()
             .filter(|p| !p.conns.is_empty())
             .count();
-        if !s.newer.is_empty() {
-            s.update_needed = Some(UpdateNeeded::ThisMachine);
-        }
         s
     }
 
@@ -642,8 +658,7 @@ async fn handle_incoming(inner: &Arc<Inner>, incoming: Incoming) -> Result<()> {
                 move |logged| {
                     let mut st = lock(&kick.status);
                     st.last_sync_at = Some(blirp_core::now_ms());
-                    st.outdated.remove(&node);
-                    st.newer.remove(&node);
+                    st.forget(&node);
                     drop(st);
                     if logged {
                         kick.kick.notify_one();
@@ -652,14 +667,7 @@ async fn handle_incoming(inner: &Arc<Inner>, incoming: Incoming) -> Result<()> {
             )
             .await;
             if let Err(SyncError::ReleaseMismatch { peer_older }) = &result {
-                let st = &mut *lock(&inner.status);
-                let (add, other) = if *peer_older {
-                    (&mut st.outdated, &mut st.newer)
-                } else {
-                    (&mut st.newer, &mut st.outdated)
-                };
-                other.remove(&remote);
-                add.insert(remote.clone());
+                lock(&inner.status).refused(&remote, *peer_older);
             }
             forget_conn(inner, &remote, &conn);
             refresh_online(inner, &remote);
@@ -732,6 +740,9 @@ async fn handle_incoming(inner: &Arc<Inner>, incoming: Incoming) -> Result<()> {
 
 /// Hub: close every live connection of a revoked machine.
 fn close_peer(inner: &Inner, node_id: &str) {
+    // Revoked (or reconnecting with new rights): a refusal is re-recorded
+    // if it happens again.
+    lock(&inner.status).forget(node_id);
     if let Some(peer) = lock(&inner.peers).remove(node_id) {
         for c in peer
             .conns
@@ -1328,6 +1339,22 @@ async fn node_session(inner: &Arc<Inner>, hub: &EndpointAddr) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn refusals_follow_the_last_outcome() {
+        let mut st = RuntimeStatus::default();
+        st.refused("old", true);
+        st.refused("new", false);
+        assert_eq!(st.outdated, BTreeSet::from(["old".to_string()]));
+        assert_eq!(st.newer, BTreeSet::from(["new".to_string()]));
+        // Updated past the hub: now the hub is the older one.
+        st.refused("old", false);
+        assert!(st.outdated.is_empty());
+        // Synced, revoked or reconnecting: forgotten.
+        st.forget("old");
+        st.forget("new");
+        assert_eq!(st, RuntimeStatus::default());
+    }
 
     // `.cargo/config.toml` sets BLIRP_LOOPBACK_ONLY for every `cargo test`.
     #[tokio::test]

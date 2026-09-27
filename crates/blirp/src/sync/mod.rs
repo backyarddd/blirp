@@ -16,7 +16,7 @@ use axum::routing::{delete, get, post};
 use blirp_core::config::Config;
 use blirp_core::model::{
     BrowserInvite, Device, DeviceKind, JoinHub, JoinPreview, JoinPreviewRequest, LeftHub, Machine,
-    MachineRole, PatchDevice, ServerEvent, SyncInvite, SyncStatus,
+    MachineRole, PatchDevice, ServerEvent, SyncInvite, SyncStatus, UpdateNeeded,
 };
 use blirp_sync::pair::{MachineMeta, PairError, Ticket};
 use blirp_sync::service::{ProxyServe, StatusHook};
@@ -337,20 +337,30 @@ pub async fn status(state: &SharedState) -> ApiResult<SyncStatus> {
         }
         _ => 0,
     };
-    // A machine revoked since it was refused no longer needs updating here.
-    let outdated_machines = {
+    // Refusals of machines revoked since then no longer count (their
+    // connections are closed on revocation, which forgets them too).
+    let (outdated_machines, newer) = {
         let store = state.store.clone();
-        let ids = rt.outdated.clone();
+        let (outdated, newer) = (rt.outdated.clone(), rt.newer.clone());
         blocking(move || {
-            let mut out = Vec::new();
-            for id in ids {
-                if store.machine_device(&id)?.is_some() {
-                    out.push(id);
+            let live = |ids: std::collections::BTreeSet<String>| -> Result<Vec<String>, blirp_core::store::StoreError> {
+                let mut out = Vec::new();
+                for id in ids {
+                    if store.machine_device(&id)?.is_some() {
+                        out.push(id);
+                    }
                 }
-            }
-            Ok(out)
+                Ok(out)
+            };
+            Ok((live(outdated)?, live(newer)?))
         })
         .await?
+    };
+    // A hub is the machine to update while a paired machine with a newer
+    // release is refused.
+    let update_needed = match config.sync.role {
+        MachineRole::Hub => (!newer.is_empty()).then_some(UpdateNeeded::ThisMachine),
+        _ => rt.update_needed,
     };
     let portal = crate::portal::info(state);
     Ok(SyncStatus {
@@ -363,7 +373,7 @@ pub async fn status(state: &SharedState) -> ApiResult<SyncStatus> {
         portal_url: portal.as_ref().map(|p| p.0.clone()),
         portal_cert_fingerprint: portal.map(|p| p.1),
         relay_url: state.sync.service().and_then(|s| s.home_relay()),
-        update_needed: rt.update_needed,
+        update_needed,
         outdated_machines,
     })
 }
