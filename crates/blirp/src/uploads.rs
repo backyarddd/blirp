@@ -121,7 +121,7 @@ fn save_within(
     let dir = paths.session_uploads_dir(session)?;
     let name = sanitize_name(name);
     create_private_dir(&dir)?;
-    // ponytail: check then write, so concurrent uploads to one session can
+    // Note: check then write, so concurrent uploads to one session can
     // overshoot by the files in flight (the SPA uploads one at a time); a
     // per-session lock if that ever matters.
     if used_bytes(&dir)? + bytes.len() as u64 > quota {
