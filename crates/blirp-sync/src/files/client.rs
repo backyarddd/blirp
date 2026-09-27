@@ -439,6 +439,16 @@ pub enum FileHub {
 }
 
 impl FileHub {
+    /// Remove this machine's partial downloads (and downloaded files left
+    /// unused by a crash) not touched for a day. Blocking.
+    pub fn sweep_downloads(&self) -> usize {
+        let parts = match self {
+            Self::Remote(r) => &r.parts,
+            Self::Local(l) => &l.parts,
+        };
+        parts.sweep_parts(super::hub::PART_AGE)
+    }
+
     /// The hub's file size limit as last heard (0: not known yet). Never
     /// connects: safe to ask while holding locks.
     pub fn max_file(&self) -> u64 {

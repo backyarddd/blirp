@@ -83,6 +83,32 @@ pub struct GcStats {
     pub blobs: usize,
 }
 
+type Reservations = Arc<std::sync::Mutex<HashMap<u64, (String, u64)>>>;
+
+fn lock_reserved(
+    r: &std::sync::Mutex<HashMap<u64, (String, u64)>>,
+) -> std::sync::MutexGuard<'_, HashMap<u64, (String, u64)>> {
+    // Plain map; a poisoned one is still consistent.
+    r.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
+/// Quota set aside for one upload; it ends when this drops, whatever way
+/// the upload ends (finished, failed, its task cancelled). Drop it only
+/// after the blob lock is released: `reserve` holds the reservation lock
+/// while it may collect, which takes the blob lock.
+#[must_use]
+#[derive(Debug)]
+pub struct Reservation {
+    map: Reservations,
+    id: u64,
+}
+
+impl Drop for Reservation {
+    fn drop(&mut self) {
+        lock_reserved(&self.map).remove(&self.id);
+    }
+}
+
 pub struct HubFiles {
     store: Arc<Store>,
     blobs: BlobStore,
@@ -94,9 +120,11 @@ pub struct HubFiles {
     blob_lock: std::sync::Mutex<()>,
     /// Bytes the stored blobs take (kept in step with `file_blobs`).
     stored: AtomicI64,
-    /// Uploads under way: bytes set aside per hash until they finish or
-    /// stop, so parallel uploads cannot overrun the quota together.
-    reserved: std::sync::Mutex<HashMap<String, u64>>,
+    /// Uploads under way: (hash, bytes) set aside per upload until its
+    /// [`Reservation`] drops, so parallel uploads cannot overrun the quota
+    /// together.
+    reserved: Reservations,
+    next_reservation: AtomicU64,
     /// Largest file the hub accepts (`files.max_file_mb`).
     max_file: AtomicU64,
     /// Tests move the clock forward to age blobs past the grace period.
@@ -125,7 +153,8 @@ impl HubFiles {
             changed: broadcast::channel(256).0,
             blob_lock: std::sync::Mutex::new(()),
             stored: AtomicI64::new(store_usage(&store_for_usage)),
-            reserved: std::sync::Mutex::new(HashMap::new()),
+            reserved: Reservations::default(),
+            next_reservation: AtomicU64::new(0),
             max_file: AtomicU64::new(DEFAULT_MAX_FILE),
             #[cfg(test)]
             skew_ms: AtomicI64::new(0),
@@ -148,16 +177,8 @@ impl HubFiles {
         self.max_file.load(Ordering::Relaxed)
     }
 
-    fn reserved_guard(&self) -> std::sync::MutexGuard<'_, HashMap<String, u64>> {
-        // Plain map; a poisoned one is still consistent.
-        self.reserved
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-    }
-
-    /// An upload of `hash` finished or stopped: its reservation ends.
-    pub fn release(&self, hash: &str) {
-        self.reserved_guard().remove(hash);
+    fn reserved_guard(&self) -> std::sync::MutexGuard<'_, HashMap<u64, (String, u64)>> {
+        lock_reserved(&self.reserved)
     }
 
     fn count_stored(&self, delta: i64) {
@@ -192,15 +213,17 @@ impl HubFiles {
     /// reserved, a stopped one what its part holds (until it resumes or
     /// the daily sweep drops it). `resuming`: an upload about to reserve
     /// its full length, whose part that length already covers.
-    fn pending_bytes(&self, reserved: &HashMap<String, u64>, resuming: Option<&str>) -> u64 {
+    fn pending_bytes(&self, reserved: &HashMap<u64, (String, u64)>, resuming: Option<&str>) -> u64 {
         let parts: u64 = self
             .blobs
             .parts()
             .into_iter()
-            .filter(|(h, _)| !reserved.contains_key(h) && Some(h.as_str()) != resuming)
+            .filter(|(h, _)| {
+                !reserved.values().any(|(r, _)| r == h) && Some(h.as_str()) != resuming
+            })
             .map(|(_, n)| n)
             .sum();
-        parts.saturating_add(reserved.values().sum())
+        parts.saturating_add(reserved.values().map(|(_, n)| n).sum())
     }
 
     fn stored_bytes(&self) -> u64 {
@@ -258,19 +281,22 @@ impl HubFiles {
     /// room at all. Pruning runs without the reservation lock (collecting
     /// takes the blob lock, which stores hold while they release), and the
     /// check is made again after every step.
-    fn reserve(&self, hash: &str, len: u64) -> Result<(), HubError> {
+    fn reserve(&self, hash: &str, len: u64) -> Result<Reservation, HubError> {
         let quota = self.quota();
         let mut checked_reclaimable = false;
         loop {
             {
                 let mut reserved = self.reserved_guard();
-                reserved.remove(hash);
                 let used = self
                     .stored_bytes()
                     .saturating_add(self.pending_bytes(&reserved, Some(hash)));
                 if used.saturating_add(len) <= quota {
-                    reserved.insert(hash.to_string(), len);
-                    return Ok(());
+                    let id = self.next_reservation.fetch_add(1, Ordering::Relaxed);
+                    reserved.insert(id, (hash.to_string(), len));
+                    return Ok(Reservation {
+                        map: self.reserved.clone(),
+                        id,
+                    });
                 }
                 if !checked_reclaimable {
                     let before = self.now() - BLOB_GRACE_MS;
@@ -291,8 +317,10 @@ impl HubFiles {
     }
 
     /// Start (or resume) an upload of `len` bytes: returns the offset to
-    /// continue from. Checks the quota first.
-    pub fn begin_put(&self, hash: &str, len: u64) -> Result<u64, HubError> {
+    /// continue from and the upload's quota reservation, which the caller
+    /// holds until the upload finished or stopped (after [`Self::finish_put`]
+    /// returned). Checks the quota first.
+    pub fn begin_put(&self, hash: &str, len: u64) -> Result<(u64, Reservation), HubError> {
         if !is_hash(hash) {
             return Err(HubError::Invalid("invalid hash".into()));
         }
@@ -304,13 +332,10 @@ impl HubFiles {
             self.blobs.discard_part(hash);
             return self.begin_put(hash, len);
         }
-        self.reserve(hash, len)?;
+        let reservation = self.reserve(hash, len)?;
         // The part exists from here on, so empty content (no chunk) finishes.
-        if let Err(e) = self.blobs.start_part(hash) {
-            self.release(hash);
-            return Err(e.into());
-        }
-        Ok(have)
+        self.blobs.start_part(hash)?;
+        Ok((have, reservation))
     }
 
     pub fn put_chunk(&self, hash: &str, offset: u64, raw: &[u8]) -> Result<u64, HubError> {
@@ -320,22 +345,17 @@ impl HubFiles {
     /// Drop a partial upload (the sender broke the protocol).
     pub fn abort_put(&self, hash: &str) {
         self.blobs.discard_part(hash);
-        self.release(hash);
     }
 
     /// The part of `hash` holds `len` bytes: verify and store it.
     pub fn finish_put(&self, hash: &str, len: u64) -> Result<(), HubError> {
-        let result = self.store_locked(
+        self.store_locked(
             || {
                 let stored = self.blobs.finish(hash, len)?;
                 Ok((len, stored))
             },
             hash,
-        );
-        // Released only after the blob lock is dropped: `reserve` holds the
-        // reservation lock while it may collect (which takes the blob lock).
-        self.release(hash);
-        result
+        )
     }
 
     /// Run `put` (writing blob `hash`, returning its raw and stored size)
@@ -369,9 +389,11 @@ impl HubFiles {
         if len > self.max_file() {
             return Err(HubError::TooLarge);
         }
-        self.reserve(hash, len)?;
+        let reservation = self.reserve(hash, len)?;
         let result = self.store_locked(|| Ok(self.blobs.import(hash, src)?), hash);
-        self.release(hash);
+        // Released only after the blob lock is dropped: `reserve` holds the
+        // reservation lock while it may collect (which takes the blob lock).
+        drop(reservation);
         result
     }
 
@@ -541,13 +563,13 @@ mod tests {
             t.hub.missing(std::slice::from_ref(&h)).unwrap(),
             [(h.clone(), 0)]
         );
-        assert_eq!(t.hub.begin_put(&h, a.len() as u64).unwrap(), 0);
+        assert_eq!(t.hub.begin_put(&h, a.len() as u64).unwrap().0, 0);
         t.hub.put_chunk(&h, 0, &a[..5]).unwrap();
         assert_eq!(
             t.hub.missing(std::slice::from_ref(&h)).unwrap(),
             [(h.clone(), 5)]
         );
-        assert_eq!(t.hub.begin_put(&h, a.len() as u64).unwrap(), 5);
+        assert_eq!(t.hub.begin_put(&h, a.len() as u64).unwrap().0, 5);
         t.hub.put_chunk(&h, 5, &a[5..]).unwrap();
         t.hub.finish_put(&h, a.len() as u64).unwrap();
         assert!(t.hub.missing(std::slice::from_ref(&h)).unwrap().is_empty());
@@ -699,17 +721,34 @@ mod tests {
         let t = setup(1_000);
         let data = vec![7u8; 700];
         let h = hash_bytes(&data);
-        assert_eq!(t.hub.begin_put(&h, 700).unwrap(), 0);
+        let (offset, first) = t.hub.begin_put(&h, 700).unwrap();
+        assert_eq!(offset, 0);
         t.hub.put_chunk(&h, 0, &data[..400]).unwrap();
         // The stream broke: the reservation ends, the part stays.
-        t.hub.release(&h);
+        drop(first);
         assert_eq!(t.hub.usage().unwrap(), 400);
         // Its own part counts once, inside the 700 it reserves again.
-        assert_eq!(t.hub.begin_put(&h, 700).unwrap(), 400);
+        let (offset, _second) = t.hub.begin_put(&h, 700).unwrap();
+        assert_eq!(offset, 400);
         assert_eq!(t.hub.usage().unwrap(), 700);
         t.hub.put_chunk(&h, 400, &data[400..]).unwrap();
         t.hub.finish_put(&h, 700).unwrap();
         assert!(t.hub.missing(std::slice::from_ref(&h)).unwrap().is_empty());
+    }
+
+    #[test]
+    fn each_upload_holds_its_own_reservation() {
+        let t = setup(10_000);
+        let h = hash_bytes(&[1u8; 700]);
+        // Two uploads of the same content: one ending (or its task being
+        // cancelled, which drops it the same way) leaves the other's.
+        let (_, a) = t.hub.begin_put(&h, 700).unwrap();
+        let (_, b) = t.hub.begin_put(&h, 700).unwrap();
+        assert_eq!(t.hub.usage().unwrap(), 1_400);
+        drop(a);
+        assert_eq!(t.hub.usage().unwrap(), 700);
+        drop(b);
+        assert_eq!(t.hub.usage().unwrap(), 0);
     }
 
     #[test]
@@ -730,7 +769,7 @@ mod tests {
         ));
         // A blob whose bytes do not match is not stored.
         let h = hash_bytes(b"real");
-        t.hub.begin_put(&h, 4).unwrap();
+        let _upload = t.hub.begin_put(&h, 4).unwrap();
         t.hub.put_chunk(&h, 0, b"fake").unwrap();
         assert_eq!(t.hub.finish_put(&h, 4).unwrap_err().code(), "hash_mismatch");
         assert_eq!(t.hub.missing(std::slice::from_ref(&h)).unwrap(), [(h, 0)]);

@@ -142,12 +142,7 @@ async fn stream(
             write_frame(&mut send, &welcome).await?;
             control(send, recv, hub, machine_id, machine_name).await
         }
-        Open::PutBlob { hash, len } => {
-            // Whatever happens, the upload's reservation ends with its stream.
-            let r = put_blob(send, recv, hub.clone(), hash.clone(), len).await;
-            hub.release(&hash);
-            r
-        }
+        Open::PutBlob { hash, len } => put_blob(send, recv, hub, hash, len).await,
         Open::GetBlob { hash, offset } => get_blob(send, hub, hash, offset).await,
     }
 }
@@ -283,7 +278,9 @@ async fn put_blob(
     len: u64,
 ) -> Result<()> {
     let (h, hs) = (hub.clone(), hash.clone());
-    let mut offset = match run(move || h.begin_put(&hs, len)).await? {
+    // The reservation ends when this returns or its task is cancelled,
+    // always after `finish_put` released the blob lock.
+    let (mut offset, _reservation) = match run(move || h.begin_put(&hs, len)).await? {
         Ok(o) => o,
         Err(e) => {
             write_frame(&mut send, &err(&e)).await?;

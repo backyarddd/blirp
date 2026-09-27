@@ -126,7 +126,7 @@ async fn uploads_commits_downloads_and_resumes() {
     // A 2.5-chunk file whose first chunk already reached the hub.
     let data = noise(b"big", CHUNK * 5 / 2);
     let h = hash_bytes(&data);
-    r.hub.begin_put(&h, data.len() as u64).unwrap();
+    drop(r.hub.begin_put(&h, data.len() as u64).unwrap());
     r.hub.put_chunk(&h, 0, &data[..CHUNK]).unwrap();
     let missing = fh.missing(std::slice::from_ref(&h)).await.unwrap();
     assert_eq!(
@@ -254,6 +254,18 @@ async fn empty_content_uploads_and_downloads() {
         "{err}"
     );
     assert!(!r.parts.part_path(&none).unwrap().exists());
+    // A stopped download's part goes once it is a day old.
+    r.parts.append(&none, 0, b"partial").unwrap();
+    assert_eq!(fh.sweep_downloads(), 0);
+    let part = r.parts.part_path(&none).unwrap();
+    std::fs::OpenOptions::new()
+        .write(true)
+        .open(&part)
+        .unwrap()
+        .set_modified(std::time::SystemTime::now() - std::time::Duration::from_secs(2 * 86_400))
+        .unwrap();
+    assert_eq!(fh.sweep_downloads(), 1);
+    assert!(!part.exists());
     r.node_ep.close().await;
     r.hub_ep.close().await;
 }
