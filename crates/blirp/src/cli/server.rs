@@ -226,6 +226,7 @@ Next steps
                `blirp agents set-token claude` here
        codex:  `codex login --device-auth`
      then run `blirp hub setup` again so the service sees them on its PATH.
+     Optional: `blirp skills install` teaches them to operate blirp here.
   3. Check everything with `blirp doctor`.
 Guide: {GUIDE}
 "
@@ -376,6 +377,7 @@ mod tests {
             "blirp agents set-token claude",
             "codex login --device-auth",
             "blirp hub setup",
+            "blirp skills install",
             "docs/vps.md",
         ] {
             assert!(s.contains(needle), "missing {needle}");

@@ -71,7 +71,7 @@ The hub syncs memory without any agent installed. To run [cloud sessions](cloud-
 - **Codex:** `codex login --device-auth` prints a link and a one-time code to enter in a browser anywhere (device code login must be allowed in your ChatGPT security settings). Alternatives from the [Codex authentication docs](https://developers.openai.com/codex/auth): `printenv OPENAI_API_KEY | codex login --with-api-key`, copying `~/.codex/auth.json` from a machine where you logged in (treat it like a password), or `ssh -L 1455:localhost:1455 blirp@<server>` and `codex login`, finishing the login in your local browser.
 - **Git:** sessions and **Clone on <hub>** use the server's own git credentials. Give the server its own SSH key (`ssh-keygen -t ed25519`) and add it to your Git host as a deploy key or a key of a separate account, so a leaked server key does not open all your repositories.
 
-Then run `blirp hub setup` again: the service records your `PATH` at setup time, so it finds agents installed since (this restarts the daemon when the `PATH` changed). `blirp doctor` shows the agents the daemon sees and how claude logs in.
+Then run `blirp hub setup` again: the service records your `PATH` at setup time, so it finds agents installed since (this restarts the daemon when the `PATH` changed). `blirp doctor` shows the agents the daemon sees and how claude logs in. Optional: `blirp skills install` gives those agents blirp's [skills](skills.md), so a session on the hub can check and operate blirp there itself.
 
 ## What `blirp hub setup` does
 
@@ -144,7 +144,7 @@ Restore: `blirp stop`, copy the backup to `~/.blirp/blirp.db` (remove `blirp.db-
 blirp update
 ```
 
-verifies and installs the latest release and restarts the daemon through its service. Running sessions on the hub end as **Detached** (resume them afterwards), so update when nothing important runs, and update the hub before your PCs.
+verifies and installs the latest release and restarts the daemon through its service. Running sessions on the hub end as **Detached** (resume them afterwards), so update when nothing important runs, and update the hub before your PCs. **Update now** in the app updates only the machine whose own UI you use (your PC's app updates your PC), so update the hub over SSH, or with **Settings > About > Update now** in a browser signed in through the [SSH tunnel](#browser-and-phone-access).
 
 To update automatically, add a timer yourself; blirp does not install one. For example at 04:30 every Sunday, as the blirp user:
 
