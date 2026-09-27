@@ -27,6 +27,21 @@ so every tag needs one.
   overwritten without `--force` nor removed; `blirp update` refreshes
   unedited ones, `blirp doctor` shows their state and `blirp uninstall`
   removes them.
+- The version is easy to find: hover the blirp logo in the top bar, or look
+  under the Settings sections.
+- Update notice: when a newer release is out, the Settings button gets a dot
+  and a banner offers **Update now** (script installs) or **How to update**
+  (installers and packages), with the release notes. Dismissing it hides it
+  until the next release. Settings > About has **Check now** and shows the
+  last update's result.
+- **Update now** runs `blirp update` in the background: the daemon restarts
+  with the new version and the page reloads (a browser tab signs in again
+  with `blirp open`). If anything fails, the old version keeps running and
+  About shows why. New routes `POST /api/update/check` and
+  `POST /api/update/apply` (admin; apply only on the machine's own
+  listener).
+- `blirp update` prints the version before and after and records each
+  attempt in `logs/update.log`.
 
 ### Fixed
 

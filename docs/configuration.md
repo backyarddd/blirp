@@ -118,7 +118,7 @@ Normally managed by `blirp hub enable|disable`, `blirp pair` and **Settings > Ma
 
 | Key | Type | Default | Description |
 |---|---|---|---|
-| `check` | bool | `true` | Let the daemon ask GitHub once a day (hourly after a failure, only when **Settings > About** asks) whether a newer release exists; About then shows it with the command to run (`blirp update`). `false`: no requests. Updating is always `blirp update` ([install.md](install.md#updating)). |
+| `check` | bool | `true` | Let the daemon ask GitHub once a day (hourly after a failure; the UI asks the daemon on load and every few hours) whether a newer release exists, and **Check now** in Settings > About ask right away (at most once a minute). The UI then shows a notice with **Update now** (script installs) or a link to the release page. `false`: no requests, no notice and no Update now; `blirp update` still works ([install.md](install.md#updating)). |
 
 ## Environment variables
 

@@ -159,14 +159,25 @@ A standalone daemon only listens on `127.0.0.1`, so Windows asks nothing. Window
 ## Updating
 
 ```sh
+blirp --version           # the version you run
 blirp update --check      # exit 0: up to date, 10: an update is available
 blirp update              # install the latest release
 blirp update --version 0.3.1   # a specific release, also older ones
 ```
 
-`blirp update` downloads `SHA256SUMS.txt`, verifies its signature with the release key built into blirp, downloads the CLI archive (and the desktop app, if the install script installed it), and checks both against the sums. Only then does it stop the daemon (running sessions end as Detached and can be resumed), replace the files and start the daemon again (through the autostart service when one is installed). If replacing any file fails, the files already replaced are put back and the old version starts again. On Windows the running `blirp.exe` is renamed to `blirp.exe.old` and removed the next time blirp starts. It never downgrades unless you pass `--version`, and it only updates installs made by the install scripts; otherwise it tells you how that copy was installed.
+The web UI and the desktop app show the running version as the tooltip of the blirp logo in the top bar and under the Settings sections.
 
-**Settings > About** shows when a newer release exists, with `blirp update` for script installs, else a pointer to the release page; the daemon asks GitHub for it at most once a day. Turn that off with `[update] check = false` ([configuration.md](configuration.md#update)). The desktop app has no updater of its own.
+`blirp update` downloads `SHA256SUMS.txt`, verifies its signature with the release key built into blirp, downloads the CLI archive (and the desktop app, if the install script installed it), and checks both against the sums. Only then does it stop the daemon (running sessions end as Detached and can be resumed), replace the files and start the daemon again (through the autostart service when one is installed). If replacing any file fails, the files already replaced are put back and the old version starts again. On Windows the running `blirp.exe` is renamed to `blirp.exe.old` and removed the next time blirp starts. It never downgrades unless you pass `--version`, and it only updates installs made by the install scripts; otherwise it tells you how that copy was installed. It prints the version before and after (`Updating blirp 0.1.0 -> 0.1.1`, `Updated blirp 0.1.0 -> 0.1.1`) and records every install attempt in `logs/update.log` in the data folder.
+
+### Update from the app
+
+When a newer release exists, the Settings button in the top bar gets a dot and a banner says **blirp X.Y.Z is available** (dismiss it and it stays hidden until the next release). The daemon asks GitHub at most once a day; **Settings > About** has **Check now** to ask right away (at most once a minute).
+
+- Script installs: **Update now** (in the banner and in Settings > About) runs `blirp update` in the background. It works like the command above: the daemon stops (running sessions end and can be resumed), blirp and the desktop app are replaced, and the daemon starts again, through the autostart service when one is installed. The page reloads once blirp is back. The desktop app signs its window in again by itself; a browser tab shows **Sign in required**, so run `blirp open` to sign it in again (every daemon start issues a new sign-in token). If the update fails, the old version keeps running and Settings > About shows the error. A desktop app that was open during the update keeps running the old app until you quit and start it again (the daemon and the web UI are already new).
+- Installers and packages: **How to update** opens the release page; update the way you installed (see below).
+- Only this machine's own desktop app or browser tab can update it. A phone or another device on the LAN portal sees the notice but not the button.
+
+Turn the checks off with `[update] check = false` ([configuration.md](configuration.md#update)). The desktop app has no updater of its own; `blirp update` and **Update now** replace it.
 
 The database migrates forward automatically on the first start of a newer version.
 

@@ -182,6 +182,8 @@ blirp update [--check] [--version <X.Y.Z>]
 
 Updates an installation made by the install scripts to the latest published release, or to `--version` (the only way to go to an older release). It verifies the minisign signature of the release's `SHA256SUMS.txt` with the key built into blirp and the SHA-256 of every download, then stops the daemon, replaces `blirp` (Windows: plus `conpty.dll`, `x64\OpenConsole.exe`) and the desktop app if the script installed it, updates the install receipt and starts the daemon again if it was running (like `blirp start`, so through the autostart service when one manages it). Then the new binary refreshes blirp's unedited skills in your home folders ([skills.md](skills.md)); a failure there is reported but does not fail the update. Nothing is changed when a check fails. A `blirp` the scripts did not install (source build, package) is not replaced; the command says so.
 
+It prints the running and the new version (`Updating blirp 0.1.0 -> 0.1.1`, then `Updated blirp 0.1.0 -> 0.1.1`) and appends each install attempt, with the error when it failed, to `logs/update.log` in the data folder; Settings > About shows the last one. **Update now** in the UI runs this same command in the background (`blirp update --version <the release it showed>`). `blirp --version` prints the version of the `blirp` you run.
+
 - `--check`: only report. Prints one line; exit code `0` when up to date, `10` when an update is available.
 - `GITHUB_TOKEN` and `BLIRP_RELEASE_BASE_URL` work as for the install scripts ([install.md](install.md#private-repository-mirrors-and-testing)).
 

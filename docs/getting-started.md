@@ -80,6 +80,7 @@ This is the only thing in blirp that edits your agents' config files. What it ch
 
 - Closing the desktop window keeps the daemon and every session running; the tray icon reopens the window. **Quit blirp** in the tray menu stops the daemon and ends all sessions.
 - `blirp service install` starts the daemon when you log in (macOS LaunchAgent, systemd user unit, Windows Run key). See [install.md](install.md#start-at-login).
+- Hover the blirp logo (or run `blirp --version`) to see which version runs. When a new release is out, the Settings button gets a dot and a banner offers **Update now**, or run `blirp update`. See [install.md](install.md#updating).
 
 ## Next
 

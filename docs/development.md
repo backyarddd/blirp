@@ -112,7 +112,7 @@ The app has no updater; `blirp update` updates it. The daemon's origin gets no T
 pnpm -C web e2e
 ```
 
-Builds the SPA and `cargo build -p blirp`, starts the real daemon on a temporary `BLIRP_HOME` with a temporary git repository, and drives the UI with Playwright in the installed Microsoft Edge (no browser download). `BLIRP_E2E_CHANNEL=chrome` (or another Playwright channel) picks another browser; `BLIRP_E2E_KEEP=1` keeps the temp directory and `daemon.log` for inspection. Not part of `pnpm -C web test`; CI runs it on Linux with Playwright's Chromium (`BLIRP_E2E_CHANNEL=chromium`, after `pnpm -C web exec playwright install --with-deps chromium`).
+Builds the SPA and `cargo build -p blirp`, starts the real daemon on a temporary `BLIRP_HOME` with a temporary git repository, and drives the UI with Playwright in the installed Microsoft Edge (no browser download). `BLIRP_E2E_CHANNEL=chrome` (or another Playwright channel) picks another browser; `BLIRP_E2E_KEEP=1` keeps the temp directory and `daemon.log` for inspection. The daemon's update check asks a fake releases API on 127.0.0.1 that global setup serves (it offers version 99.0.0 without assets; `e2e/update.spec.ts` checks the notice, and nothing runs an update). Not part of `pnpm -C web test`; CI runs it on Linux with Playwright's Chromium (`BLIRP_E2E_CHANNEL=chromium`, after `pnpm -C web exec playwright install --with-deps chromium`).
 
 ### README screenshots
 
