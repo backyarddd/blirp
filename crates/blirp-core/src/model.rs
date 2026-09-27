@@ -287,6 +287,12 @@ pub struct Session {
     /// Written by the owner's ingest, like tokens.
     #[serde(default)]
     pub compacted_at: Option<i64>,
+    /// When the agent's context last became nearly full: its latest model
+    /// call used at least 90% of the context window the agent reports
+    /// (codex `token_count`); set when usage crosses that line, not again
+    /// until it drops below. Written by the owner's ingest, like tokens.
+    #[serde(default)]
+    pub context_near_full_at: Option<i64>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]

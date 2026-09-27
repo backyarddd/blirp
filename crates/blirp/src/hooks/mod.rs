@@ -268,6 +268,7 @@ pub fn handle(
                 title_updated_at: 0,
                 project_updated_at: 0,
                 compacted_at: None,
+                context_near_full_at: None,
             };
             // Ingest may have created it since the lookup: use that row.
             let (s, inserted) = store.insert_session_unless_known(&s)?;

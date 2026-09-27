@@ -99,7 +99,14 @@ title_updated_at: number, project_updated_at: number,
  * compaction summary in its transcript (§8); null when it never did.
  * Written by the owner's ingest, like tokens.
  */
-compacted_at: number | null, };
+compacted_at: number | null, 
+/**
+ * When the agent's context last became nearly full: its latest model
+ * call used at least 90% of the context window the agent reports
+ * (codex `token_count`); set when usage crosses that line, not again
+ * until it drops below. Written by the owner's ingest, like tokens.
+ */
+context_near_full_at: number | null, };
 
 export type Event = { session_id: string, seq: number, ts: number, kind: EventKind, 
 /**
@@ -455,7 +462,14 @@ title_updated_at: number, project_updated_at: number,
  * compaction summary in its transcript (§8); null when it never did.
  * Written by the owner's ingest, like tokens.
  */
-compacted_at: number | null, };
+compacted_at: number | null, 
+/**
+ * When the agent's context last became nearly full: its latest model
+ * call used at least 90% of the context window the agent reports
+ * (codex `token_count`); set when usage crosses that line, not again
+ * until it drops below. Written by the owner's ingest, like tokens.
+ */
+context_near_full_at: number | null, };
 
 export type LaunchSession = { 
 /**

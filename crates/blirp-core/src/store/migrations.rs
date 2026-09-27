@@ -5,7 +5,7 @@ use rusqlite::Connection;
 
 /// Index `i` holds the migration that moves the schema from version `i` to `i + 1`.
 pub(crate) const MIGRATIONS: &[&str] = &[
-    V1, V2, V3, V4, V5, V6, V7, V8, V9, V10, V11, V12, V13, V14, V15, V16, V17,
+    V1, V2, V3, V4, V5, V6, V7, V8, V9, V10, V11, V12, V13, V14, V15, V16, V17, V18,
 ];
 
 /// Schema of §5. Note on the FTS tables: they are external-content tables keyed
@@ -509,6 +509,12 @@ CREATE TABLE event_floors(
     session_id TEXT PRIMARY KEY,
     below_seq  INTEGER NOT NULL
 );
+"#;
+
+/// `sessions.context_near_full_at`: the agent's context crossed 90% of its
+/// window (codex reports both), for the "start a fresh session" suggestion.
+const V18: &str = r#"
+ALTER TABLE sessions ADD COLUMN context_near_full_at INTEGER NULL;
 "#;
 
 #[derive(Debug, thiserror::Error)]

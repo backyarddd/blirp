@@ -373,6 +373,7 @@ pub async fn launch(state: &SharedState, req: LaunchSession) -> ApiResult<Sessio
         title_updated_at: 0,
         project_updated_at: 0,
         compacted_at: None,
+        context_near_full_at: None,
     };
     let store = state.store.clone();
     let row = session.clone();

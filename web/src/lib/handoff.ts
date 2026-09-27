@@ -18,16 +18,31 @@ const DISMISSED_KEY = 'blirp.compactionHint.dismissed';
 /** Dismissals kept (oldest dropped first); only running sessions ever show the suggestion. */
 const DISMISSED_MAX = 200;
 
+/** Why a session's context is worth a fresh start, and since when (the latest signal). */
+export interface ContextSignal {
+  kind: 'compacted' | 'near_full';
+  at: number;
+}
+
 /**
- * Whether a session shows the "start a fresh session" suggestion: it is running and its agent
- * compacted its context (a compaction summary in the transcript, `compacted_at`) after the last
- * compaction the user dismissed the suggestion for.
+ * The latest context signal of a session: its agent compacted its context (`compacted_at`), or its
+ * context crossed 90% of the window the agent reports (`context_near_full_at`, codex).
+ */
+export function contextSignal(session: Pick<Session, 'compacted_at' | 'context_near_full_at'>): ContextSignal | null {
+  const { compacted_at: compacted, context_near_full_at: full } = session;
+  if (full !== null && (compacted === null || full > compacted)) return { kind: 'near_full', at: full };
+  return compacted === null ? null : { kind: 'compacted', at: compacted };
+}
+
+/**
+ * Whether a session shows the "start a fresh session" suggestion: it is running and has a context
+ * signal newer than the one the user dismissed the suggestion for.
  */
 export function compactionHintVisible(
-  session: Pick<Session, 'status' | 'compacted_at'>,
+  session: Pick<Session, 'status' | 'compacted_at' | 'context_near_full_at'>,
   dismissedAt: number | null,
 ): boolean {
-  const at = session.compacted_at;
+  const at = contextSignal(session)?.at ?? null;
   return isLive(session.status) && at !== null && (dismissedAt === null || at > dismissedAt);
 }
 

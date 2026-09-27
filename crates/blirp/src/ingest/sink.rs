@@ -442,6 +442,7 @@ impl<'e> StoreSink<'e> {
                 title_updated_at: 0,
                 project_updated_at: 0,
                 compacted_at: None,
+                context_near_full_at: None,
             }
         });
         if s.agent_session_id.is_none() {
@@ -476,6 +477,7 @@ impl<'e> StoreSink<'e> {
             .map(|(_, ts, ..)| ts.or(p.last_ts).unwrap_or(self.mtime_ms))
             .max();
         s.compacted_at = s.compacted_at.max(compacted);
+        s.context_near_full_at = s.context_near_full_at.max(m.context_near_full_at);
         if let Some(t) = last_ts {
             s.last_activity_at = s.last_activity_at.max(t);
         }

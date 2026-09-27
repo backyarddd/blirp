@@ -243,6 +243,8 @@ pub struct SessionMeta {
     pub cost_usd: Option<f64>,
     /// `agent_session_id` of the parent session (subagents).
     pub parent: Option<String>,
+    /// Latest time the context crossed 90% of its window (codex).
+    pub context_near_full_at: Option<i64>,
     pub transcript_path: Option<String>,
     /// The transcript is a scripted run ([`Launches::is_headless`]): the
     /// sink stores no session for it unless a blirp launch owns it.
@@ -428,6 +430,7 @@ impl SessionMeta {
         take(&mut self.tokens_out, o.tokens_out);
         take(&mut self.cost_usd, o.cost_usd);
         take(&mut self.parent, o.parent);
+        self.context_near_full_at = self.context_near_full_at.max(o.context_near_full_at);
         take(&mut self.transcript_path, o.transcript_path);
         take(&mut self.headless, o.headless);
     }

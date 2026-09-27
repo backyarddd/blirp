@@ -152,7 +152,7 @@ pub const MAX_ENTRY_BYTES: usize = 4 << 20;
 /// status, which only the machine running the session knows; what it runs
 /// and reads: resume argv, folder, worktree, transcript; and what it
 /// derives from its transcript: summary, distill position, tokens, cost,
-/// compaction time),
+/// compaction and context-full times),
 /// so it is kept from `old`. A foreign copy carries whatever version of
 /// those fields it last saw.
 fn foreign_session_write(old: Session, new: &Session) -> Session {
@@ -2292,6 +2292,7 @@ mod tests {
             title_updated_at: 0,
             project_updated_at: 0,
             compacted_at: None,
+            context_near_full_at: None,
         }
     }
 
@@ -2372,6 +2373,9 @@ mod tests {
             tokens_out: 2,
             cost_usd: 1e9,
             branch: Some("evil".into()),
+            // Read from H's transcript: H's alone.
+            compacted_at: Some(99),
+            context_near_full_at: Some(99),
             ..hs.clone()
         };
         let fine = [
@@ -2564,6 +2568,7 @@ mod tests {
             title_updated_at: 0,
             project_updated_at: 0,
             compacted_at: None,
+            context_near_full_at: None,
         };
         store.insert_session(&s).unwrap();
         store.rebind_machine("old", "new").unwrap();
@@ -3109,7 +3114,8 @@ mod tests {
                      ALTER TABLE sessions DROP COLUMN project_updated_at;
                      ALTER TABLE file_copies DROP COLUMN identity;
                      ALTER TABLE sessions DROP COLUMN compacted_at;
-                     DROP TABLE event_floors;",
+                     DROP TABLE event_floors;
+                     ALTER TABLE sessions DROP COLUMN context_near_full_at;",
                 )?;
                 Ok(tx.pragma_update(None, "user_version", 11)?)
             })
@@ -3566,7 +3572,8 @@ mod tests {
                  ALTER TABLE sessions DROP COLUMN project_updated_at;
                  ALTER TABLE file_copies DROP COLUMN identity;
                  ALTER TABLE sessions DROP COLUMN compacted_at;
-                 DROP TABLE event_floors;",
+                 DROP TABLE event_floors;
+                 ALTER TABLE sessions DROP COLUMN context_near_full_at;",
             )?;
             Ok(tx.pragma_update(None, "user_version", 13)?)
         })

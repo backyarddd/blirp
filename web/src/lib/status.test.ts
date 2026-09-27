@@ -90,6 +90,7 @@ describe('groupSessions', () => {
     title_updated_at: 0,
     project_updated_at: 0,
     compacted_at: null,
+    context_near_full_at: null,
   });
   const alpha: ProjectSummary = {
     id: 'a',

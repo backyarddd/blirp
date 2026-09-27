@@ -64,6 +64,26 @@ struct State {
     parent: Option<String>,
     #[serde(default)]
     title: Option<String>,
+    /// The latest model call used at least [`NEAR_FULL_PERCENT`] of the
+    /// context window: the next crossing is a new signal.
+    #[serde(default)]
+    near_full: bool,
+}
+
+/// Share of the context window (`token_count.info.model_context_window`)
+/// the latest call's input (`last_token_usage.input_tokens`) must reach for
+/// the "start a fresh session" suggestion.
+const NEAR_FULL_PERCENT: i64 = 90;
+
+/// `info` of an `event_msg` `token_count`: whether the latest call used at
+/// least [`NEAR_FULL_PERCENT`] of the window; `None` without both numbers.
+fn near_full(info: &Value) -> Option<bool> {
+    let used = info.pointer("/last_token_usage/input_tokens")?.as_i64()?;
+    let window = info
+        .get("model_context_window")?
+        .as_i64()
+        .filter(|w| *w > 0)?;
+    Some(used.saturating_mul(100) >= window.saturating_mul(NEAR_FULL_PERCENT))
 }
 
 /// A fork without `subagent_history_start_ordinal`: lines stamped within
@@ -505,12 +525,17 @@ impl Adapter for Codex {
                 }
                 "event_msg" => {
                     if p.get("type").and_then(Value::as_str) == Some("token_count")
-                        && let Some(t) = p
-                            .get("info")
-                            .and_then(|i| i.get("total_token_usage"))
-                            .and_then(tokens_of)
+                        && let Some(info) = p.get("info")
                     {
-                        st.usage = Some(t);
+                        if let Some(t) = info.get("total_token_usage").and_then(tokens_of) {
+                            st.usage = Some(t);
+                        }
+                        if let Some(full) = near_full(info) {
+                            if full && !st.near_full {
+                                meta.context_near_full_at = meta.context_near_full_at.max(ts);
+                            }
+                            st.near_full = full;
+                        }
                     }
                     return Ok(());
                 }

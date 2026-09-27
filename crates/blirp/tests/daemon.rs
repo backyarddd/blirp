@@ -787,6 +787,7 @@ async fn subagent_children_are_filtered_and_counted() {
         title_updated_at: 0,
         project_updated_at: 0,
         compacted_at: None,
+        context_near_full_at: None,
     };
     store
         .insert_session(&mk("top", None, SessionOrigin::External, 1))

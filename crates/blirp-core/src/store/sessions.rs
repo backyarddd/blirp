@@ -32,6 +32,7 @@ pub(super) fn session_row(r: &Row<'_>) -> rusqlite::Result<Session> {
         title_updated_at: r.get("title_updated_at")?,
         project_updated_at: r.get("project_updated_at")?,
         compacted_at: r.get("compacted_at")?,
+        context_near_full_at: r.get("context_near_full_at")?,
     })
 }
 
@@ -727,6 +728,7 @@ pub(super) mod tests {
             title_updated_at: 0,
             project_updated_at: 0,
             compacted_at: None,
+            context_near_full_at: None,
         }
     }
 

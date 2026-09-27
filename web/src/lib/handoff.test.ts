@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import type { Session } from './api/types.gen';
-import { compactionDismissedAt, compactionHintVisible, dismissCompactionHint, handoffPendingLabel } from './handoff';
+import { compactionDismissedAt, compactionHintVisible, contextSignal, dismissCompactionHint, handoffPendingLabel } from './handoff';
 
 const base: Session = {
   id: 's',
@@ -29,6 +29,7 @@ const base: Session = {
   parent_session_id: null,
   stopped_by_user: false,
   compacted_at: null,
+  context_near_full_at: null,
 };
 
 describe('handoff pending label', () => {
@@ -54,6 +55,20 @@ describe('fresh session suggestion after a compaction', () => {
     expect(compactionHintVisible(compacted, 5_000)).toBe(false);
     // A new compaction brings it back.
     expect(compactionHintVisible({ ...compacted, compacted_at: 9_000 }, 5_000)).toBe(true);
+  });
+
+  it('also shows when the context crossed 90% of its window, the latest signal counting', () => {
+    const full = { ...base, context_near_full_at: 6_000 };
+    expect(contextSignal(full)).toEqual({ kind: 'near_full', at: 6_000 });
+    expect(compactionHintVisible(full, null)).toBe(true);
+    expect(compactionHintVisible(full, 6_000)).toBe(false);
+    // Nearly full, dismissed, then compacted: a new signal.
+    const later = { ...full, compacted_at: 7_000 };
+    expect(contextSignal(later)).toEqual({ kind: 'compacted', at: 7_000 });
+    expect(compactionHintVisible(later, 6_000)).toBe(true);
+    // Compacted, dismissed; an older near-full mark does not bring it back.
+    expect(compactionHintVisible({ ...later, context_near_full_at: 5_000 }, 7_000)).toBe(false);
+    expect(contextSignal(base)).toBeNull();
   });
 
   it('remembers dismissals per session in this browser, and survives broken storage', () => {

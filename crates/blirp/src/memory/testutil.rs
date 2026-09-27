@@ -57,6 +57,7 @@ pub fn session(id: &str, project: &str, started_at: i64) -> Session {
         title_updated_at: 0,
         project_updated_at: 0,
         compacted_at: None,
+        context_near_full_at: None,
     }
 }
 

@@ -452,6 +452,7 @@ fn claude_session_launched_by_blirp_keeps_its_fields() {
         title_updated_at: 0,
         project_updated_at: 0,
         compacted_at: None,
+        context_near_full_at: None,
     };
     h.store.insert_session(&launched).unwrap();
     put_claude(&h);
@@ -694,6 +695,7 @@ fn codex_rollout_links_to_blirp_launch() {
         title_updated_at: 0,
         project_updated_at: 0,
         compacted_at: None,
+        context_near_full_at: None,
     };
     // Machine id of the engine's machine.
     let machine = h.store.get_setting("machine_id").unwrap().unwrap();
@@ -867,6 +869,40 @@ fn codex_fork_skips_the_parents_copied_history_and_links_to_it() {
         "the fork's own usage"
     );
     assert!(parent.title.is_some() && parent.parent_session_id.is_none());
+}
+
+// Codex reports each call's input and the model's context window: crossing
+// 90% of it marks the session once per crossing (staying above does not
+// move the mark; dropping below and crossing again does).
+#[test]
+fn codex_nearly_full_context_marks_the_session_once_per_crossing() {
+    let h = H::new();
+    let path = h.put(
+        &format!(".codex/sessions/2026/01/02/rollout-2026-01-02T09-00-00-{CODEX_SID}.jsonl"),
+        h.fill(&fixture("codex/rollout.jsonl")).as_bytes(),
+    );
+    h.pass();
+    assert_eq!(h.session("codex", CODEX_SID).context_near_full_at, None);
+    append(&path, fixture("codex/context.jsonl").as_bytes());
+    h.pass();
+    let s = h.session("codex", CODEX_SID);
+    // 09:21 (90.5%), not 09:22 (still above).
+    assert_eq!(s.context_near_full_at, Some(1_767_345_660_000));
+    assert_eq!((s.tokens_in, s.tokens_out), (500_000, 700));
+    let below = r#"{"timestamp":"2026-01-02T09:23:00.000Z","ordinal":33,"type":"event_msg","payload":{"type":"token_count","info":{"last_token_usage":{"input_tokens":40000},"model_context_window":200000}}}"#;
+    let again = r#"{"timestamp":"2026-01-02T09:40:00.000Z","ordinal":34,"type":"event_msg","payload":{"type":"token_count","info":{"last_token_usage":{"input_tokens":190000},"model_context_window":200000}}}"#;
+    append(&path, format!("{below}\n").as_bytes());
+    h.pass();
+    assert_eq!(
+        h.session("codex", CODEX_SID).context_near_full_at,
+        Some(1_767_345_660_000)
+    );
+    append(&path, format!("{again}\n").as_bytes());
+    h.pass();
+    assert_eq!(
+        h.session("codex", CODEX_SID).context_near_full_at,
+        Some(1_767_346_800_000)
+    );
 }
 
 // Codex subagents ingested by an earlier build: a fork holds its parent's
@@ -1961,6 +1997,7 @@ fn transcripts_of_other_machines_sessions_are_left_alone() {
         title_updated_at: 0,
         project_updated_at: 0,
         compacted_at: None,
+        context_near_full_at: None,
     };
     h.store
         .apply_remote(&blirp_core::store::Change::Session(remote.clone()))
@@ -2439,6 +2476,7 @@ fn headless_runs_blirp_launched_or_hook_created() {
         title_updated_at: 0,
         project_updated_at: 0,
         compacted_at: None,
+        context_near_full_at: None,
     };
     // A blirp launch whose transcript says headless keeps its session.
     h.store
@@ -2664,6 +2702,7 @@ fn ingested_headless_runs_are_removed_once() {
             title_updated_at: 0,
             project_updated_at: 0,
             compacted_at: None,
+            context_near_full_at: None,
         };
         h.store.insert_session(&s).unwrap();
         s
