@@ -148,7 +148,7 @@ Text fields are limited to 256 KiB.
 
 | Method and path | Description |
 |---|---|
-| `GET /api/sync/status` | `SyncStatus {role, machine_id, hub, connected, last_sync_at, pending_outbox, portal_url, portal_cert_fingerprint}` |
+| `GET /api/sync/status` | `SyncStatus {role, machine_id, hub, connected, last_sync_at, pending_outbox, portal_url, portal_cert_fingerprint, relay_url}` (`relay_url`: the relay the sync endpoint is reachable through, null when relays are off or none answered yet) |
 | `POST /api/sync/hub/enable` | admin. Become the hub (starts the portal if `portal.lan`); `SyncStatus`. 409 `paired_node`. |
 | `POST /api/sync/hub/disable` | admin. Back to standalone; `SyncStatus`. 409 `not_hub`. |
 | `POST /api/sync/invite` | admin, hub. `{invite, code, uri, expires_at}` |

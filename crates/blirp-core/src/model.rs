@@ -1113,6 +1113,10 @@ pub struct SyncStatus {
     pub portal_url: Option<String>,
     /// SHA-256 of the portal's self-signed certificate, `AA:BB:...`.
     pub portal_cert_fingerprint: Option<String>,
+    /// Relay server the sync endpoint is connected to (its home relay), so
+    /// machines behind other networks can reach it. Null when relays are
+    /// off, no endpoint runs, or no relay has answered yet.
+    pub relay_url: Option<String>,
 }
 
 /// `POST /api/sync/invite`: show `code` and `invite` (or a QR of `uri`) to

@@ -781,7 +781,13 @@ portal_url: string | null,
 /**
  * SHA-256 of the portal's self-signed certificate, `AA:BB:...`.
  */
-portal_cert_fingerprint: string | null, };
+portal_cert_fingerprint: string | null, 
+/**
+ * Relay server the sync endpoint is connected to (its home relay), so
+ * machines behind other networks can reach it. Null when relays are
+ * off, no endpoint runs, or no relay has answered yet.
+ */
+relay_url: string | null, };
 
 /**
  * `POST /api/sync/invite`: show `code` and `invite` (or a QR of `uri`) to

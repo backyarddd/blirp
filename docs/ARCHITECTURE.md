@@ -487,7 +487,7 @@ GET  /api/settings ; PATCH /api/settings  {config: Config, values: {key: json}, 
                                          `sync.role` / `sync.hub` always stay (owned by hub enable/disable, join
                                          and leave). Validated, written to config.toml
 GET  /api/sync/status                    SyncStatus {role, machine_id, hub, connected, last_sync_at, pending_outbox,
-                                         portal_url, portal_cert_fingerprint}
+                                         portal_url, portal_cert_fingerprint, relay_url}
 POST /api/sync/hub/enable | /hub/disable SyncStatus (admin); enable fails with 409 `paired_node` on a node
 POST /api/sync/invite                    SyncInvite {invite, code, uri, expires_at} (admin, hub)
 POST /api/sync/join {invite, code, allow_hub_control?}   SyncStatus (admin); invite may be a join URI, or "" to find

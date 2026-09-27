@@ -332,6 +332,7 @@ pub async fn status(state: &SharedState) -> ApiResult<SyncStatus> {
         pending_outbox,
         portal_url: portal.as_ref().map(|p| p.0.clone()),
         portal_cert_fingerprint: portal.map(|p| p.1),
+        relay_url: state.sync.service().and_then(|s| s.home_relay()),
     })
 }
 

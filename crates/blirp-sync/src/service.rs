@@ -266,6 +266,16 @@ impl SyncService {
         &self.inner.own_id
     }
 
+    /// The relay this endpoint is reachable through, if it has one yet.
+    pub fn home_relay(&self) -> Option<String> {
+        self.inner
+            .ep
+            .addr()
+            .relay_urls()
+            .next()
+            .map(ToString::to_string)
+    }
+
     pub fn is_hub(&self) -> bool {
         matches!(self.inner.role, Role::Hub)
     }
