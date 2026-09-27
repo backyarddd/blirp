@@ -48,6 +48,7 @@ export interface Toast {
 const SIDEBAR_LIMIT = 200;
 /** How often machines are asked whether they keep themselves awake for live sessions. */
 const AWAKE_POLL_MS = 30_000;
+const CLOCK_TICK_MS = 60_000;
 const MEMORY_PANEL_PREF = readPref('blirp.memoryPanel', ['open', 'closed', 'unset'], 'unset');
 
 const EVENT_TYPES: ReadonlySet<string> = new Set([
@@ -144,6 +145,9 @@ class AppState {
   #gen = 0;
   #toastId = 0;
   #awakeTimer: ReturnType<typeof setInterval> | undefined;
+  #clockTimer: ReturnType<typeof setInterval> | undefined;
+  /** Coarse clock (a tick per minute): time-based states (a silent remote session) follow it. */
+  clock = $state(Date.now());
   #awakeSoonTimer: ReturnType<typeof setTimeout> | undefined;
   /** A browser that was never asked for notification permission: offer it when the user is back. */
   #offerPermission = false;
@@ -172,6 +176,11 @@ class AppState {
     void this.refreshAwake();
     clearInterval(this.#awakeTimer);
     this.#awakeTimer = setInterval(() => void this.refreshAwake(), AWAKE_POLL_MS);
+    clearInterval(this.#clockTimer);
+    this.#clockTimer = setInterval(() => {
+      this.clock = Date.now();
+      this.sessions = [...this.sessions].sort(sessionOrder(this.liveContext()));
+    }, CLOCK_TICK_MS);
   }
 
   /** Opening the app without a session in the URL shows the one this client had open last. */
@@ -193,7 +202,7 @@ class AppState {
 
   /** Whose live statuses are current, for ordering and status chips (now). */
   liveContext(): LiveContext {
-    return { selfId: this.selfId, machines: this.machineById, now: Date.now() };
+    return { selfId: this.selfId, machines: this.machineById, now: this.clock };
   }
 
   /** Badge data for the machine a session runs on; null for this machine. */
@@ -594,6 +603,7 @@ class AppState {
 
   stopStream(): void {
     clearInterval(this.#awakeTimer);
+    clearInterval(this.#clockTimer);
     this.#stopped = true;
     this.#gen++;
     clearTimeout(this.#timer);
