@@ -311,6 +311,11 @@ pub async fn doctor_lines(config: &Config, client: Option<&Client>) -> Vec<Strin
             blirp_sync::loopback_only(),
             status.as_ref(),
         ));
+        if let Some(s) = &status {
+            for p in super::sync::release_problems(s) {
+                lines.push(format!("[warn] sync: {p}"));
+            }
+        }
     }
     lines
 }
@@ -350,6 +355,8 @@ mod tests {
             portal_url: None,
             portal_cert_fingerprint: None,
             relay_url: relay.map(str::to_string),
+            update_needed: None,
+            outdated_machines: Vec::new(),
         }
     }
 

@@ -86,6 +86,10 @@ pub enum HubMsg {
     Error {
         code: String,
         message: String,
+        /// With `unsupported_version`: the sync versions the hub speaks
+        /// (absent from older hubs, which speak only older ones).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        versions: Option<Vec<u32>>,
     },
 }
 
@@ -128,10 +132,13 @@ pub async fn serve_hub(
                      update blirp on both to the same release",
                     crate::SYNC_VERSIONS
                 ),
+                versions: Some(crate::SYNC_VERSIONS.to_vec()),
             },
         )
         .await?;
-        return Err(SyncError::Protocol("no common protocol version".into()));
+        return Err(SyncError::ReleaseMismatch {
+            peer_older: crate::sync_peer_older(&versions),
+        });
     };
     if machine.id != node_id {
         return Err(SyncError::Protocol("hello names another machine".into()));
@@ -229,6 +236,7 @@ pub async fn serve_hub(
                                           compacted log (its database lost recent changes); \
                                           resync needed: leave the hub and pair again"
                                     .into(),
+                                versions: None,
                             }
                         }
                     }
@@ -354,7 +362,7 @@ pub async fn leave(
     write_frame(&mut send, &NodeMsg::Leave).await?;
     match timed(read_frame(&mut recv, MAX_CONTROL_FRAME)).await? {
         HubMsg::Left => Ok(()),
-        HubMsg::Error { code, message } => Err(remote_err(code, message)),
+        HubMsg::Error { code, message, .. } => Err(remote_err(code, message)),
         other => Err(SyncError::Protocol(format!("unexpected {other:?}"))),
     }
 }
@@ -379,16 +387,13 @@ async fn handshake(
         HubMsg::Welcome { hub_machine_id, .. } => Err(SyncError::Protocol(format!(
             "expected hub {hub_id}, got {hub_machine_id}"
         ))),
-        // An older hub's message only names its own versions.
-        HubMsg::Error { code, .. } if code == "unsupported_version" => Err(remote_err(
-            code,
-            format!(
-                "the hub runs a blirp release with another sync protocol (this machine \
-                 speaks {:?}): update blirp on the hub and here to the same release",
-                crate::SYNC_VERSIONS
-            ),
-        )),
-        HubMsg::Error { code, message } => Err(remote_err(code, message)),
+        // A hub that sends no `versions` predates them: it speaks older ones.
+        HubMsg::Error { code, versions, .. } if code == "unsupported_version" => {
+            Err(SyncError::ReleaseMismatch {
+                peer_older: crate::sync_peer_older(&versions.unwrap_or_default()),
+            })
+        }
+        HubMsg::Error { code, message, .. } => Err(remote_err(code, message)),
         other => Err(SyncError::Protocol(format!("unexpected {other:?}"))),
     }
 }
@@ -436,7 +441,7 @@ async fn push_pending(
                     "hub acked {acked}, expected at least {last}"
                 )));
             }
-            HubMsg::Error { code, message } => return Err(remote_err(code, message)),
+            HubMsg::Error { code, message, .. } => return Err(remote_err(code, message)),
             other => return Err(SyncError::Protocol(format!("unexpected {other:?}"))),
         }
     }
@@ -455,7 +460,7 @@ async fn pull_all(
         write_frame(send, &NodeMsg::Pull { after }).await?;
         let page = match timed(read_frame(recv, MAX_FRAME)).await? {
             HubMsg::Page { page } => page,
-            HubMsg::Error { code, message } => return Err(remote_err(code, message)),
+            HubMsg::Error { code, message, .. } => return Err(remote_err(code, message)),
             other => return Err(SyncError::Protocol(format!("unexpected {other:?}"))),
         };
         if page.entries.len() > MAX_BATCH_ENTRIES {

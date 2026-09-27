@@ -154,6 +154,15 @@ str_enum!(DeviceKind {
     Browser = "browser",
 });
 
+str_enum!(
+    /// Which machine to update when the hub and this one run releases that
+    /// replicate different fields, so they refuse to sync (§10).
+    UpdateNeeded {
+        ThisMachine = "this_machine",
+        Hub = "hub",
+    }
+);
+
 str_enum!(FileKind {
     File = "file",
     Dir = "dir",
@@ -1180,6 +1189,12 @@ pub struct SyncStatus {
     /// machines behind other networks can reach it. Null when relays are
     /// off, no endpoint runs, or no relay has answered yet.
     pub relay_url: Option<String>,
+    /// Sync is refused because the hub and this machine run releases that
+    /// replicate different fields (§10): the one to update. On a hub only
+    /// `this_machine` (a paired machine runs a newer release).
+    pub update_needed: Option<UpdateNeeded>,
+    /// Hub: ids of paired machines refused for running an older release.
+    pub outdated_machines: Vec<String>,
 }
 
 /// `POST /api/sync/invite`: show `code` and `invite` (or a QR of `uri`) to
@@ -1599,7 +1614,7 @@ mod tests {
         let decls = decls!(&cfg;
             JsonValue,
             MachineRole, SessionStatus, SessionOrigin, EventKind, RecordKind, RecordStatus,
-            SuggestionTarget, SuggestionStatus, ResourceKind, DeviceKind, FileKind, SearchHitKind,
+            SuggestionTarget, SuggestionStatus, ResourceKind, DeviceKind, UpdateNeeded, FileKind, SearchHitKind,
             MemoryPart, IntegrationState, InjectMode, CloneState,
             Machine, MachineInfo, Project, ProjectPath, Session, Event, Record, Brief, WikiPage, Suggestion,
             BriefProposal, RecordProposal, WikiProposal, Resource, Device,

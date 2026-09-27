@@ -23,6 +23,12 @@ export type ResourceKind = "link" | "repo" | "pr" | "issue" | "doc" | "file";
 
 export type DeviceKind = "machine" | "browser";
 
+/**
+ * Which machine to update when the hub and this one run releases that
+ * replicate different fields, so they refuse to sync (§10).
+ */
+export type UpdateNeeded = "this_machine" | "hub";
+
 export type FileKind = "file" | "dir" | "symlink" | "other";
 
 export type SearchHitKind = "event" | "record";
@@ -865,7 +871,17 @@ portal_cert_fingerprint: string | null,
  * machines behind other networks can reach it. Null when relays are
  * off, no endpoint runs, or no relay has answered yet.
  */
-relay_url: string | null, };
+relay_url: string | null, 
+/**
+ * Sync is refused because the hub and this machine run releases that
+ * replicate different fields (§10): the one to update. On a hub only
+ * `this_machine` (a paired machine runs a newer release).
+ */
+update_needed: UpdateNeeded | null, 
+/**
+ * Hub: ids of paired machines refused for running an older release.
+ */
+outdated_machines: Array<string>, };
 
 /**
  * `POST /api/sync/invite`: show `code` and `invite` (or a QR of `uri`) to

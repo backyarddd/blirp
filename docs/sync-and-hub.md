@@ -98,7 +98,7 @@ Pairing is a password-authenticated key exchange (SPAKE2) over a QUIC connection
 
 The joining machine switches to the `node` role (`[sync] role = "node"`, `hub = "<hub id>"` in its config) and starts uploading its existing history in the background. Offline machines queue changes locally and catch up when they reconnect (retry with backoff up to 60 s).
 
-`blirp hub status` (any role) shows role, machine id, hub, whether it is connected, pending changes and, on a hub with the portal on, the portal URL and certificate fingerprint. The same is in **Settings > Machines & Sync**, with **Last sync** and **Pending changes**.
+`blirp hub status` (any role) shows role, machine id, hub, whether it is connected, pending changes and, on a hub with the portal on, the portal URL and certificate fingerprint. The same is in **Settings > Machines & Sync**, with **Last sync** and **Pending changes**. When the hub refuses to sync because a machine runs another release, both there and `blirp doctor` say which machine to update: this one, the hub, or (on the hub) the paired machines that run an older release.
 
 ## What syncs
 

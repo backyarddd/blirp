@@ -337,6 +337,21 @@ pub async fn status(state: &SharedState) -> ApiResult<SyncStatus> {
         }
         _ => 0,
     };
+    // A machine revoked since it was refused no longer needs updating here.
+    let outdated_machines = {
+        let store = state.store.clone();
+        let ids = rt.outdated.clone();
+        blocking(move || {
+            let mut out = Vec::new();
+            for id in ids {
+                if store.machine_device(&id)?.is_some() {
+                    out.push(id);
+                }
+            }
+            Ok(out)
+        })
+        .await?
+    };
     let portal = crate::portal::info(state);
     Ok(SyncStatus {
         role: config.sync.role,
@@ -348,6 +363,8 @@ pub async fn status(state: &SharedState) -> ApiResult<SyncStatus> {
         portal_url: portal.as_ref().map(|p| p.0.clone()),
         portal_cert_fingerprint: portal.map(|p| p.1),
         relay_url: state.sync.service().and_then(|s| s.home_relay()),
+        update_needed: rt.update_needed,
+        outdated_machines,
     })
 }
 

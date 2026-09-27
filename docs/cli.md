@@ -150,7 +150,7 @@ Pairs this standalone machine with a hub ([sync-and-hub.md](sync-and-hub.md#pair
 ```
 blirp hub enable    # become the hub; prints status and a first invite
 blirp hub invite    # another invite + code (10 minutes, single use)
-blirp hub status    # role, machine id, hub, connected, pending changes, portal URL + fingerprint
+blirp hub status    # role, machine id, hub, connected, pending changes, portal URL + fingerprint, which machine to update when sync is refused
 blirp hub disable   # back to standalone; paired machines stay known
 blirp hub setup [--lan]   # set up this machine as an always-on hub (servers, VPS)
 ```

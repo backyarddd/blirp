@@ -102,7 +102,7 @@ pub enum Change {
 
 impl Change {
     /// (table, op, primary key)
-    fn describe(&self) -> (&'static str, &'static str, String) {
+    pub fn describe(&self) -> (&'static str, &'static str, String) {
         match self {
             Change::Machine(m) => ("machines", "upsert", m.id.clone()),
             Change::DeleteMachine { id } => ("machines", "delete", id.clone()),

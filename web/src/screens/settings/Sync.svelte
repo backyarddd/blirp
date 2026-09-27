@@ -20,6 +20,10 @@
   const devices = new Resource(() => api.devices.list());
 
   const status = $derived(app.sync);
+
+  function machineLabel(id: string): string {
+    return (machines.data ?? []).find((m) => m.id === id)?.name ?? id;
+  }
   const role = $derived(status?.role ?? settings.config.sync.role);
 
   // `sync_updated` (pairing, revocation, connection changes) refreshes the lists in place.
@@ -304,6 +308,25 @@
           <dd>{status.pending_outbox}</dd>
         {/if}
       </dl>
+      {#if status.update_needed}
+        <p class="small warn" role="alert" data-testid="sync-update-needed">
+          {#if status.update_needed === 'hub'}
+            The hub runs an older blirp release, so it refuses to sync: update blirp on the hub to the same release.
+          {:else if status.role === 'hub'}
+            A paired machine runs a newer blirp release, so sync with it is refused: update blirp on this machine to the
+            same release.
+          {:else}
+            The hub runs a newer blirp release, so it refuses to sync: update blirp on this machine to the same release.
+          {/if}
+        </p>
+      {/if}
+      {#if status.outdated_machines.length > 0}
+        <p class="small warn" role="alert" data-testid="sync-outdated-machines">
+          {status.outdated_machines.map(machineLabel).join(', ')}
+          {status.outdated_machines.length === 1 ? 'runs' : 'run'} an older blirp release, so sync is refused: update blirp
+          there to the same release.
+        </p>
+      {/if}
       {#if status.role === 'node'}
         <div class="gap">
           <label class="check">

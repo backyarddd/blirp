@@ -9,14 +9,14 @@ use crate::{
     ALPN_FILES, ALPN_PAIR, ALPN_PROXY, ALPN_SYNC, HUB_MARKER, MDNS_SERVICE, Result, SyncError,
     blocking, repl,
 };
-use blirp_core::model::{Device, DeviceKind, Machine, MachineRole};
+use blirp_core::model::{Device, DeviceKind, Machine, MachineRole, UpdateNeeded};
 use blirp_core::store::{Change, Store};
 use iroh::endpoint::{
     Connection, Incoming, PortmapperConfig, RecvStream, SendStream, VarInt, presets,
 };
 use iroh::{Endpoint, EndpointAddr, EndpointId, RelayMode, SecretKey};
 use iroh_mdns_address_lookup::{DiscoveryEvent, MdnsAddressLookup};
-use std::collections::HashMap;
+use std::collections::{BTreeSet, HashMap};
 use std::future::Future;
 use std::net::Ipv4Addr;
 use std::pin::Pin;
@@ -80,6 +80,14 @@ pub struct RuntimeStatus {
     pub last_error: Option<String>,
     /// Hub: nodes with a live connection.
     pub peers: usize,
+    /// Sync refused for another replicated schema (§10): the machine to
+    /// update. Node: set by the last failed handshake. Hub: `this_machine`
+    /// while a paired machine with a newer release is refused.
+    pub update_needed: Option<UpdateNeeded>,
+    /// Hub: paired machines refused for running an older release.
+    pub outdated: BTreeSet<String>,
+    /// Hub: paired machines refused for running a newer release.
+    pub newer: BTreeSet<String>,
 }
 
 /// A created invite, ready to show.
@@ -340,6 +348,9 @@ impl SyncService {
             .values()
             .filter(|p| !p.conns.is_empty())
             .count();
+        if !s.newer.is_empty() {
+            s.update_needed = Some(UpdateNeeded::ThisMachine);
+        }
         s
     }
 
@@ -620,6 +631,7 @@ async fn handle_incoming(inner: &Arc<Inner>, incoming: Incoming) -> Result<()> {
             refresh_online(inner, &remote);
             (inner.on_status)();
             let kick = inner.clone();
+            let node = remote.clone();
             let result = repl::serve_hub(
                 conn.clone(),
                 inner.store.clone(),
@@ -628,13 +640,27 @@ async fn handle_incoming(inner: &Arc<Inner>, incoming: Incoming) -> Result<()> {
                 inner.head.subscribe(),
                 inner.presence_tx.subscribe(),
                 move |logged| {
-                    lock(&kick.status).last_sync_at = Some(blirp_core::now_ms());
+                    let mut st = lock(&kick.status);
+                    st.last_sync_at = Some(blirp_core::now_ms());
+                    st.outdated.remove(&node);
+                    st.newer.remove(&node);
+                    drop(st);
                     if logged {
                         kick.kick.notify_one();
                     }
                 },
             )
             .await;
+            if let Err(SyncError::ReleaseMismatch { peer_older }) = &result {
+                let st = &mut *lock(&inner.status);
+                let (add, other) = if *peer_older {
+                    (&mut st.outdated, &mut st.newer)
+                } else {
+                    (&mut st.newer, &mut st.outdated)
+                };
+                other.remove(&remote);
+                add.insert(remote.clone());
+            }
             forget_conn(inner, &remote, &conn);
             refresh_online(inner, &remote);
             if matches!(result, Ok(repl::HubSessionEnd::Left)) {
@@ -1202,6 +1228,13 @@ async fn node_loop(inner: Arc<Inner>) {
             }
             st.connected = false;
             st.last_error = Some(message);
+            st.update_needed = match &result {
+                Err(SyncError::ReleaseMismatch { peer_older: true }) => Some(UpdateNeeded::Hub),
+                Err(SyncError::ReleaseMismatch { peer_older: false }) => {
+                    Some(UpdateNeeded::ThisMachine)
+                }
+                _ => None,
+            };
         }
         // Other machines' presence came from the hub; unknown without it.
         lock(&inner.presence).clear();
@@ -1267,6 +1300,7 @@ async fn node_session(inner: &Arc<Inner>, hub: &EndpointAddr) -> Result<()> {
                 let was = st.connected;
                 st.connected = true;
                 st.last_error = None;
+                st.update_needed = None;
                 st.last_sync_at = Some(blirp_core::now_ms());
                 !was
             };
