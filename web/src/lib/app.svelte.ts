@@ -13,8 +13,23 @@ import type {
   SyncStatus,
 } from './api/types.gen';
 import { backoffDelay } from './terminal/protocol';
-import { hasTerminal, isSubagent, notifiableTransition, sessionStatusInfo, sessionTitle } from './status';
+import { hasTerminal, isSubagent, sessionTitle } from './status';
 import { readPref, writePref } from './prefs';
+import {
+  EVENT_TEXT,
+  backend,
+  notifyDecision,
+  permission,
+  permissionHint,
+  playChime,
+  readNotifyPrefs,
+  setBadge,
+  showSystem,
+  writeNotifyPrefs,
+  type NotifyPrefs,
+  type Permission,
+  type SystemResult,
+} from './notify';
 import { NONE_DENIED, denyFor, rightsFrom, type Denied } from './capabilities';
 import { nav, navigate } from './router.svelte';
 import { href } from './router';
@@ -27,6 +42,7 @@ export interface Toast {
   id: number;
   kind: 'error' | 'info';
   text: string;
+  action?: { label: string; run: () => void };
 }
 
 const SIDEBAR_LIMIT = 200;
@@ -102,7 +118,11 @@ class AppState {
   sidebarOpen = $state(false);
   // Defaults to open only where it fits beside the terminal; an explicit choice is remembered.
   memoryPanel = $state(MEMORY_PANEL_PREF === 'unset' ? window.innerWidth > 1100 : MEMORY_PANEL_PREF === 'open');
-  notify = $state(readPref('blirp.notify', ['on', 'off'], 'off') === 'on');
+  notifyPrefs: NotifyPrefs = $state(readNotifyPrefs());
+  /** Browser notification permission ('desktop' inside the desktop app); re-read on focus. */
+  notifyPermission: Permission = $state(permission());
+  /** Sessions that asked for attention since the user last looked at them (title and favicon badge). */
+  readonly unseen = new SvelteSet<string>();
 
   /** Deleted this run: views holding their own fetched session lists filter these out. */
   readonly deletedSessions = new SvelteSet<string>();
@@ -122,6 +142,9 @@ class AppState {
   #toastId = 0;
   #awakeTimer: ReturnType<typeof setInterval> | undefined;
   #awakeSoonTimer: ReturnType<typeof setTimeout> | undefined;
+  /** A browser that was never asked for notification permission: offer it when the user is back. */
+  #offerPermission = false;
+  #watchingFocus = false;
 
   async boot(): Promise<void> {
     onUnauthorized(() => {
@@ -139,6 +162,7 @@ class AppState {
       return;
     }
     this.auth = 'ok';
+    this.#watchFocus();
     this.startStream();
     await Promise.all([this.refreshProjects(), this.refreshSessions(), this.refreshAgents(), this.refreshSync()]);
     this.#restoreOpenSession();
@@ -276,12 +300,15 @@ class AppState {
       ? this.sessions.map((x) => (x.id === s.id ? s : x))
       : [s, ...this.sessions].sort(byStartedDesc);
     if (prev) this.#maybeNotify(prev, s);
+    // Answered somewhere else: it no longer waits for anyone.
+    if (s.status === 'working' || s.status === 'starting') this.#seen(s.id);
   }
 
   /** A deleted session (here or on another client) leaves every list, with its subagents. */
   removeSession(id: string): void {
     const gone = this.sessionById.get(id);
     this.deletedSessions.add(id);
+    this.#seen(id);
     this.sessions = this.sessions.filter((s) => s.id !== id && !(isSubagent(s) && s.parent_session_id === id));
     if (nav.route.name === 'sessions' && nav.route.sessionId === id) navigate(href.sessions(), { replace: true });
     // Session counts are part of the project summary; the daemon only reports the delete.
@@ -312,10 +339,10 @@ class AppState {
     this.memoryTick[projectId] = (this.memoryTick[projectId] ?? 0) + 1;
   }
 
-  toast(text: string, kind: Toast['kind'] = 'error'): void {
+  toast(text: string, kind: Toast['kind'] = 'error', action?: Toast['action']): void {
     const id = ++this.#toastId;
-    this.toasts.push({ id, kind, text });
-    setTimeout(() => this.dismissToast(id), kind === 'error' ? 8000 : 4000);
+    this.toasts.push({ id, kind, text, action });
+    setTimeout(() => this.dismissToast(id), kind === 'error' || action ? 8000 : 4000);
   }
 
   dismissToast(id: number): void {
@@ -417,36 +444,117 @@ class AppState {
     writePref('blirp.memoryPanel', open ? 'open' : 'closed');
   }
 
-  async setNotify(on: boolean): Promise<void> {
-    if (on) {
-      if (!('Notification' in window)) {
-        this.toast('This browser does not support notifications.');
-        return;
-      }
-      const perm = await Notification.requestPermission();
-      if (perm !== 'granted') {
-        this.toast('Notifications are blocked for this site. Allow them in your browser settings.');
-        return;
-      }
+  setNotifyPrefs(p: NotifyPrefs): void {
+    this.notifyPrefs = p;
+    writeNotifyPrefs(p);
+    if (!p.enabled) this.#clearSeen();
+  }
+
+  /** Ask the browser for notification permission; must run from a click. */
+  async enableBrowserNotifications(): Promise<void> {
+    writePref('blirp.notify.asked', 'yes');
+    if (!('Notification' in window)) {
+      this.toast(permissionHint('unsupported'));
+      return;
     }
-    this.notify = on;
-    writePref('blirp.notify', on ? 'on' : 'off');
+    let p: NotificationPermission;
+    try {
+      p = await Notification.requestPermission();
+    } catch (e) {
+      this.toast(`Could not ask for notification permission: ${errorMessage(e)}`);
+      return;
+    }
+    this.notifyPermission = p;
+    if (p === 'granted') this.toast('Desktop notifications are on.', 'info');
+    else this.toast(permissionHint(p));
+  }
+
+  /** Settings > Notifications' test: an OS notification now, whatever the focus. */
+  async testNotification(): Promise<SystemResult> {
+    if (this.notifyPrefs.sound) playChime();
+    return showSystem('blirp', 'Test notification: this is how blirp tells you a session needs you.', 'blirp-test', () => {});
+  }
+
+  /** The window is on screen and has focus. */
+  #focused(): boolean {
+    return document.visibilityState === 'visible' && document.hasFocus();
+  }
+
+  /** The session is on screen: its own pane, or its tile in the grid. */
+  #viewing(s: Session): boolean {
+    const r = nav.route;
+    return (r.name === 'sessions' && r.sessionId === s.id) || (r.name === 'grid' && hasTerminal(s));
   }
 
   #maybeNotify(prev: Session, next: Session): void {
-    if (!this.notify || !notifiableTransition(prev.status, next.status)) return;
-    if (document.visibilityState === 'visible' && document.hasFocus()) return;
-    if (!('Notification' in window) || Notification.permission !== 'granted') return;
-    const project = this.projectById.get(next.project_id)?.name ?? '';
-    const n = new Notification(sessionTitle(next), {
-      body: `${sessionStatusInfo(next).label}${project ? ` · ${project}` : ''}`,
-      tag: next.id,
+    if (next.stopped_by_user) return; // the user did it
+    const d = notifyDecision(this.notifyPrefs, prev.status, next.status, {
+      focused: this.#focused(),
+      viewing: this.#viewing(next),
     });
-    n.onclick = () => {
-      window.focus();
+    if (!d) return;
+    const title = sessionTitle(next);
+    const project = this.projectById.get(next.project_id)?.name;
+    const open = (): void => {
       navigate(href.sessions(next.id));
-      n.close();
+      this.markSeen();
     };
+    if (this.notifyPrefs.sound) playChime();
+    if (d.delivery === 'toast') {
+      this.toast(`${title} ${EVENT_TEXT[d.event]}${project ? ` · ${project}` : ''}`, 'info', { label: 'Open', run: open });
+      this.#offerPermissionNow();
+      return;
+    }
+    this.unseen.add(next.id);
+    setBadge(this.unseen.size);
+    const body = `${EVENT_TEXT[d.event].replace(/^./, (c) => c.toUpperCase())}${project ? ` · ${project}` : ''}`;
+    void showSystem(title, body, next.id, open).then((r) => {
+      if (!r.ok) console.warn(`blirp: notification not shown: ${r.detail}`);
+    });
+    this.#offerPermission = true;
+  }
+
+  /** Once per browser: offer OS notifications the first time one would have been shown. */
+  #offerPermissionNow(): void {
+    if (backend() !== 'browser' || Notification.permission !== 'default') return;
+    if (readPref('blirp.notify.asked', ['yes', 'no'], 'no') === 'yes') return;
+    this.#offerPermission = false;
+    writePref('blirp.notify.asked', 'yes');
+    this.toast('Get a desktop notification when a session needs you while blirp is in the background?', 'info', {
+      label: 'Enable',
+      run: () => void this.enableBrowserNotifications(),
+    });
+  }
+
+  /** The user looks at the window: sessions on screen are seen; a pending permission offer shows. */
+  markSeen(): void {
+    if (!this.#focused()) return;
+    for (const id of [...this.unseen]) {
+      const s = this.sessionById.get(id);
+      if (!s || this.#viewing(s)) this.unseen.delete(id);
+    }
+    setBadge(this.unseen.size);
+    if (this.#offerPermission) this.#offerPermissionNow();
+  }
+
+  #seen(id: string): void {
+    if (this.unseen.delete(id)) setBadge(this.unseen.size);
+  }
+
+  #clearSeen(): void {
+    this.unseen.clear();
+    setBadge(0);
+  }
+
+  #watchFocus(): void {
+    if (this.#watchingFocus) return;
+    this.#watchingFocus = true;
+    const onBack = (): void => {
+      this.notifyPermission = permission();
+      this.markSeen();
+    };
+    window.addEventListener('focus', onBack);
+    document.addEventListener('visibilitychange', onBack);
   }
 
   startStream(): void {

@@ -823,6 +823,137 @@ test('new session folder picker lists folders only, hidden ones on request', asy
   await dialog.getByRole('button', { name: 'Cancel' }).click();
 });
 
+interface NoteCall {
+  title: string;
+  body: string;
+}
+
+test('notifications: OS notification in the background, in-app toast and title badge in front', async ({ browser }) => {
+  // Its own browser with notification permission and a recording Notification stub, and a
+  // switch for whether the window counts as focused.
+  const ctx = await browser.newContext({ permissions: ['notifications'] });
+  await ctx.addInitScript(() => {
+    const w = window as unknown as { __notes: { title: string; body: string; click: () => void }[]; __focus: boolean; __csp: string[] };
+    w.__notes = [];
+    w.__focus = true;
+    w.__csp = [];
+    document.addEventListener('securitypolicyviolation', (e) => w.__csp.push(`${e.violatedDirective} ${e.blockedURI}`));
+    class FakeNotification {
+      static permission = 'granted';
+      static requestPermission(): Promise<string> {
+        return Promise.resolve('granted');
+      }
+      onclick: (() => void) | null = null;
+      constructor(title: string, opts?: { body?: string }) {
+        w.__notes.push({ title, body: opts?.body ?? '', click: () => this.onclick?.() });
+      }
+      close(): void {}
+    }
+    Object.defineProperty(window, 'Notification', { value: FakeNotification, configurable: true });
+    document.hasFocus = () => w.__focus;
+  });
+  const p = await ctx.newPage();
+  const errors: string[] = [];
+  p.on('pageerror', (e) => errors.push(e.message));
+  const notes = (): Promise<NoteCall[]> =>
+    p.evaluate(() => (window as unknown as { __notes: NoteCall[] }).__notes.map(({ title, body }) => ({ title, body })));
+  const setFocus = (on: boolean): Promise<void> =>
+    p.evaluate((f) => {
+      (window as unknown as { __focus: boolean }).__focus = f;
+      window.dispatchEvent(new Event(f ? 'focus' : 'blur'));
+    }, on);
+
+  await p.goto(`${env.url}/settings/appearance#token=${env.token}`);
+  const section = p.getByRole('region', { name: 'Notifications' });
+  await expect(section.getByRole('checkbox', { name: /needs attention/ })).toBeChecked();
+  await expect(section.getByRole('checkbox', { name: 'Play a sound' })).not.toBeChecked();
+  await section.getByRole('button', { name: 'Send test notification' }).click();
+  await expect(section.getByRole('status')).toContainText('Sent to the browser.');
+  expect((await notes())[0]?.title).toBe('blirp');
+
+  // An external Claude Code session reported by its hooks.
+  const cwd = join(env.root, 'notify-proj');
+  mkdirSync(cwd, { recursive: true });
+  const asid = randomUUID();
+  const hook = (event: string): Promise<{ session_id: string | null }> =>
+    apiCall('POST', `/api/hooks/claude/${event}`, { cwd, payload: { session_id: asid, cwd } });
+  const sid = (await hook('SessionStart')).session_id ?? '';
+  expect(sid).not.toBe('');
+
+  // In the background: an OS notification and a title count.
+  await setFocus(false);
+  await hook('Notification');
+  await expect.poll(async () => (await notes()).length).toBe(2);
+  // The body names the project once the UI has loaded it (a new project may still be on its way).
+  expect((await notes())[1]).toEqual({ title: 'Claude Code in notify-proj', body: expect.stringMatching(/^Needs your input( · notify-proj)?$/) });
+  await expect(p).toHaveTitle('(1) blirp');
+  const icon = p.locator('link[rel="icon"]').first();
+  await expect(icon).toHaveAttribute('href', /^data:image\/png/);
+
+  // Clicking it opens the session; back in front, the badge clears.
+  await setFocus(true);
+  await expect(p).toHaveTitle('(1) blirp'); // still on Settings: not seen yet
+  await p.evaluate(() => (window as unknown as { __notes: { click: () => void }[] }).__notes[1]?.click());
+  await expect(p).toHaveURL(`${env.url}/sessions/${sid}`);
+  await expect(p).toHaveTitle('blirp');
+  await expect(icon).not.toHaveAttribute('href', /^data:/);
+
+  // In front, looking at that session: nothing at all.
+  await hook('UserPromptSubmit');
+  await hook('Notification');
+  await p.waitForTimeout(1000);
+  expect(await notes()).toHaveLength(2);
+  await expect(p.getByRole('status').filter({ hasText: 'needs your input' })).toHaveCount(0);
+
+  // In front, on another page: an in-app toast with Open, no OS notification.
+  await p.getByRole('navigation', { name: 'Main' }).getByRole('link', { name: 'Projects' }).click();
+  await hook('UserPromptSubmit');
+  await hook('Notification');
+  const toast = p.getByRole('status').filter({ hasText: 'Claude Code in notify-proj needs your input' });
+  await expect(toast).toBeVisible();
+  expect(await notes()).toHaveLength(2);
+  await toast.getByRole('button', { name: 'Open' }).click();
+  await expect(p).toHaveURL(`${env.url}/sessions/${sid}`);
+
+  // Turned off: nothing, even in the background (the reload starts a fresh stub).
+  await p.goto(`${env.url}/settings/appearance`);
+  await section.getByRole('checkbox', { name: /needs attention/ }).uncheck();
+  await setFocus(false);
+  await hook('UserPromptSubmit');
+  await hook('Notification');
+  await p.waitForTimeout(1000);
+  expect(await notes()).toHaveLength(0);
+  await expect(p).toHaveTitle('blirp');
+
+  expect(await p.evaluate(() => (window as unknown as { __csp: string[] }).__csp)).toEqual([]);
+  expect(errors).toEqual([]);
+  await ctx.close();
+});
+
+test('notifications: inside the desktop app they go through its notify command', async ({ browser }) => {
+  const ctx = await browser.newContext();
+  await ctx.addInitScript(() => {
+    const w = window as unknown as { __calls: unknown[]; __TAURI_INTERNALS__: unknown };
+    w.__calls = [];
+    w.__TAURI_INTERNALS__ = {
+      invoke: (cmd: string, args: unknown) => {
+        w.__calls.push({ cmd, args });
+        return Promise.resolve({ backend: 'Windows notifications', problem: null });
+      },
+    };
+  });
+  const p = await ctx.newPage();
+  await p.goto(`${env.url}/settings/appearance#token=${env.token}`);
+  const section = p.getByRole('region', { name: 'Notifications' });
+  await expect(section).toContainText('a system notification from the desktop app');
+  await expect(section.getByRole('button', { name: 'Enable desktop notifications' })).toHaveCount(0);
+  await section.getByRole('button', { name: 'Send test notification' }).click();
+  await expect(section.getByRole('status')).toContainText('Sent to Windows notifications.');
+  const calls = await p.evaluate(() => (window as unknown as { __calls: unknown[] }).__calls);
+  expect(calls).toEqual([{ cmd: 'notify', args: { title: 'blirp', body: expect.stringContaining('Test notification') } }]);
+  await ctx.close();
+});
+
 test('no CSP violations or unexpected console errors', async () => {
   const csp = await page.evaluate(() => (window as unknown as { __csp: string[] }).__csp);
   expect(csp).toEqual([]);

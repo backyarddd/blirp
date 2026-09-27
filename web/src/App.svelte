@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { onMount } from 'svelte';
+  import { onMount, untrack } from 'svelte';
   import { app } from './lib/app.svelte';
   import { nav, navigate, startRouter } from './lib/router.svelte';
   import { href } from './lib/router';
@@ -33,6 +33,12 @@
   });
 
   const route = $derived(nav.route);
+
+  // Opening a session that asked for attention clears it from the title and favicon badge.
+  $effect(() => {
+    void nav.route;
+    untrack(() => app.markSeen());
+  });
 
   function currentProjectId(): string | null {
     if (route.name === 'project') return route.projectId;

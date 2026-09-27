@@ -7,6 +7,17 @@
   {#each app.toasts as t (t.id)}
     <div class="toast {t.kind}" role={t.kind === 'error' ? 'alert' : 'status'}>
       <span>{t.text}</span>
+      {#if t.action}
+        {@const action = t.action}
+        <button
+          type="button"
+          class="btn sm"
+          onclick={() => {
+            app.dismissToast(t.id);
+            action.run();
+          }}>{action.label}</button
+        >
+      {/if}
       <button type="button" class="icon-btn sm" aria-label="Dismiss" onclick={() => app.dismissToast(t.id)}><X size={14} /></button>
     </div>
   {/each}
