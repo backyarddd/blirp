@@ -116,6 +116,8 @@ pub struct RemoteHub {
     rate: Rate,
     parts: BlobStore,
     on_notify: NotifyHook,
+    /// The hub's file size limit from the last connection (0: none yet).
+    max_file: std::sync::atomic::AtomicU64,
 }
 
 impl RemoteHub {
@@ -133,6 +135,7 @@ impl RemoteHub {
             rate: Rate::new(upload_kbps),
             parts,
             on_notify,
+            max_file: std::sync::atomic::AtomicU64::new(0),
         }
     }
 
@@ -171,12 +174,16 @@ impl RemoteHub {
                 max_file,
                 project_modes,
                 ..
-            } => Welcome {
-                quota,
-                used,
-                max_file,
-                project_modes,
-            },
+            } => {
+                self.max_file
+                    .store(max_file, std::sync::atomic::Ordering::Relaxed);
+                Welcome {
+                    quota,
+                    used,
+                    max_file,
+                    project_modes,
+                }
+            }
             Reply::Error { code, message } => return Err(remote(&code, message)),
             other => return Err(SyncError::Protocol(format!("unexpected {other:?}"))),
         };
@@ -360,16 +367,21 @@ impl RemoteHub {
 /// Check a finished download against its hash and hand it over as a file
 /// of the caller's own; a bad one is dropped. Runs under the part's lock.
 async fn verify_part(parts: &BlobStore, hash: &str, part: PathBuf, len: u64) -> Result<PathBuf> {
-    let (p, h) = (part.clone(), hash.to_string());
-    let ok = blocking(move || {
-        Ok(blirp_core::files::scan::hash_file(&p)
-            .is_ok_and(|(got, size, _)| got == h && size == len))
+    let (p, h, store) = (part, hash.to_string(), parts.clone());
+    let taken = blocking(move || {
+        let ok = blirp_core::files::scan::hash_file(&p)
+            .is_ok_and(|(got, size, _)| got == h && size == len);
+        if !ok {
+            return Ok(None);
+        }
+        store
+            .take_part(&h)
+            .map(Some)
+            .map_err(|e| SyncError::Unavailable(e.to_string()))
     })
     .await?;
-    if ok {
-        parts
-            .take_part(hash)
-            .map_err(|e| SyncError::Unavailable(e.to_string()))
+    if let Some(own) = taken {
+        Ok(own)
     } else {
         parts.discard_part(hash);
         Err(remote(
@@ -419,6 +431,15 @@ pub enum FileHub {
 }
 
 impl FileHub {
+    /// The hub's file size limit as last heard (0: not known yet). Never
+    /// connects: safe to ask while holding locks.
+    pub fn max_file(&self) -> u64 {
+        match self {
+            Self::Remote(r) => r.max_file.load(std::sync::atomic::Ordering::Relaxed),
+            Self::Local(l) => l.hub.max_file(),
+        }
+    }
+
     pub async fn welcome(&self) -> Result<Welcome> {
         match self {
             Self::Remote(r) => r.welcome().await,

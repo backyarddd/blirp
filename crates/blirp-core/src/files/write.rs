@@ -54,6 +54,8 @@ pub struct Target<'a> {
     pub root: &'a Path,
     /// blirp's data folder (`BLIRP_HOME`).
     pub data_dir: Option<&'a Path>,
+    /// Shared retry time of the pass (None: each operation its own).
+    pub retry: Option<&'a RetryBudget>,
 }
 
 fn refused(wire: &str, why: impl Into<String>) -> WriteError {
@@ -125,11 +127,18 @@ impl Target<'_> {
         Ok(Some(cur))
     }
 
+    fn retry<T>(&self, path: &Path, f: impl FnMut() -> std::io::Result<T>) -> std::io::Result<T> {
+        match self.retry {
+            Some(b) => retry_busy_at(b, Some(path), f),
+            None => retry_busy_at(&RetryBudget::new(RETRY_BUDGET), Some(path), f),
+        }
+    }
+
     /// Whether the file at `target` is what `expect` says.
     fn matches(&self, wire: &str, target: &Path, expect: &Expect) -> Result<bool, WriteError> {
         // A file deleted while a scanner still has it open lingers as
         // "delete pending" and answers access denied for a moment.
-        let meta = match retry_busy(|| std::fs::symlink_metadata(target)) {
+        let meta = match self.retry(target, || std::fs::symlink_metadata(target)) {
             Ok(m) => Some(m),
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
             Err(e) => return Err(io(wire)(e)),
@@ -138,7 +147,7 @@ impl Target<'_> {
             (Expect::Any, _) => true,
             (Expect::Absent, m) => m.is_none(),
             (Expect::Blob(h), Some(m)) if m.is_file() => {
-                retry_busy(|| super::scan::hash_file(target))
+                self.retry(target, || super::scan::hash_file(target))
                     .map_err(io(wire))?
                     .0
                     == *h
@@ -289,7 +298,8 @@ impl Target<'_> {
                 Err(_) => {}
             }
         }
-        retry_busy(|| std::fs::rename(tmp, target)).map_err(io(wire))
+        self.retry(target, || std::fs::rename(tmp, target))
+            .map_err(io(wire))
     }
 
     /// Create or replace a symlink (unix; Windows links are not recreated).
@@ -317,7 +327,8 @@ impl Target<'_> {
             Err(refused(wire, "symlinks are not recreated on this system"));
         let result = made.and_then(|()| {
             if self.matches(wire, &target, expect)? {
-                retry_busy(|| std::fs::rename(&tmp, &target)).map_err(io(wire))
+                self.retry(&target, || std::fs::rename(&tmp, &target))
+                    .map_err(io(wire))
             } else {
                 Err(WriteError::Changed(wire.to_string()))
             }
@@ -345,7 +356,7 @@ impl Target<'_> {
         if !self.matches(wire, &target, expect)? {
             return Err(WriteError::Changed(wire.to_string()));
         }
-        match retry_busy(|| std::fs::remove_file(&target)) {
+        match self.retry(&target, || std::fs::remove_file(&target)) {
             Ok(()) => Ok(()),
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
             Err(e) => Err(io(wire)(e)),
@@ -353,32 +364,108 @@ impl Target<'_> {
     }
 }
 
+/// Time Windows retries may spend in all: one per pass (an apply, a
+/// restore), so many files denied at once cost the budget once, not each.
+#[derive(Debug)]
+pub struct RetryBudget {
+    left_ms: std::sync::atomic::AtomicU64,
+}
+
+/// What one pass may wait for files other processes hold.
+pub const RETRY_BUDGET: std::time::Duration = std::time::Duration::from_secs(5);
+
+impl RetryBudget {
+    pub fn new(total: std::time::Duration) -> Self {
+        Self {
+            left_ms: std::sync::atomic::AtomicU64::new(
+                u64::try_from(total.as_millis()).unwrap_or(u64::MAX),
+            ),
+        }
+    }
+
+    /// Start a new pass with `total`.
+    pub fn reset(&self, total: std::time::Duration) {
+        self.left_ms.store(
+            u64::try_from(total.as_millis()).unwrap_or(u64::MAX),
+            std::sync::atomic::Ordering::Relaxed,
+        );
+    }
+
+    /// Spend `ms` if that much is left.
+    fn take(&self, ms: u64) -> bool {
+        self.left_ms
+            .fetch_update(
+                std::sync::atomic::Ordering::Relaxed,
+                std::sync::atomic::Ordering::Relaxed,
+                |left| left.checked_sub(ms),
+            )
+            .is_ok()
+    }
+}
+
+/// [`retry_busy_at`] with a budget of its own.
+pub fn retry_busy<T>(f: impl FnMut() -> std::io::Result<T>) -> std::io::Result<T> {
+    retry_busy_at(&RetryBudget::new(RETRY_BUDGET), None, f)
+}
+
 /// Windows refuses to replace or delete a file another process has open
 /// without delete sharing (virus scanners and indexers open fresh files
-/// briefly, sometimes for over a second under load): retry with a growing
-/// pause, for up to about 5 seconds, before reporting it.
-pub fn retry_busy<T>(mut f: impl FnMut() -> std::io::Result<T>) -> std::io::Result<T> {
-    let mut waited = std::time::Duration::ZERO;
-    let mut pause = std::time::Duration::from_millis(20);
-    let limit = if cfg!(windows) {
-        std::time::Duration::from_secs(5)
-    } else {
-        std::time::Duration::ZERO
-    };
+/// briefly, sometimes for over a second under load), and a file just
+/// removed can linger "delete pending": retry with a growing pause while
+/// `budget` lasts. A lasting denial (`path` is read-only) is reported at
+/// once; when the budget runs out, what the path looked like is logged.
+pub fn retry_busy_at<T>(
+    budget: &RetryBudget,
+    path: Option<&Path>,
+    mut f: impl FnMut() -> std::io::Result<T>,
+) -> std::io::Result<T> {
+    let mut pause_ms = 20u64;
     loop {
-        match f() {
-            // Access denied, or ERROR_SHARING_VIOLATION / ERROR_LOCK_VIOLATION.
+        let e = match f() {
             Err(e)
-                if waited < limit
+                if cfg!(windows)
+                    // Access denied, or ERROR_SHARING_VIOLATION / ERROR_LOCK_VIOLATION.
                     && (e.kind() == std::io::ErrorKind::PermissionDenied
                         || matches!(e.raw_os_error(), Some(32 | 33))) =>
             {
-                std::thread::sleep(pause);
-                waited += pause;
-                pause = (pause * 2).min(std::time::Duration::from_millis(250));
+                e
             }
             r => return r,
+        };
+        let meta = path.map(std::fs::symlink_metadata);
+        if let Some(Ok(m)) = &meta
+            && m.permissions().readonly()
+        {
+            return Err(e);
         }
+        if !budget.take(pause_ms) {
+            tracing::warn!(
+                path = ?path,
+                os_error = ?e.raw_os_error(),
+                attributes = ?meta.as_ref().map(|m| m.as_ref().map(attributes).map_err(|e| e.raw_os_error())),
+                "a file stayed locked; giving up for this pass"
+            );
+            return Err(e);
+        }
+        std::thread::sleep(std::time::Duration::from_millis(pause_ms));
+        pause_ms = (pause_ms * 2).min(250);
+    }
+}
+
+/// File attributes for diagnostics (Windows), else the mode bits.
+fn attributes(m: &std::fs::Metadata) -> u32 {
+    #[cfg(windows)]
+    {
+        std::os::windows::fs::MetadataExt::file_attributes(m)
+    }
+    #[cfg(unix)]
+    {
+        std::os::unix::fs::PermissionsExt::mode(&m.permissions())
+    }
+    #[cfg(not(any(windows, unix)))]
+    {
+        let _ = m;
+        0
     }
 }
 
@@ -401,6 +488,7 @@ mod tests {
         Target {
             root,
             data_dir: None,
+            retry: None,
         }
     }
 
@@ -524,6 +612,7 @@ mod tests {
         let guarded = Target {
             root: &root,
             data_dir: Some(&data),
+            retry: None,
         };
         assert!(matches!(
             guarded.write("data/x", &Expect::Absent, &mut &b"x"[..], false, None),
@@ -534,6 +623,7 @@ mod tests {
         let inside = Target {
             root: &ws,
             data_dir: Some(&data),
+            retry: None,
         };
         inside
             .write("x", &Expect::Absent, &mut &b"x"[..], false, None)

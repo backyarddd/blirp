@@ -185,18 +185,19 @@ impl HubFiles {
         let reserved = self.reserved_guard();
         Ok(self
             .stored_bytes()
-            .saturating_add(self.pending_bytes(&reserved)))
+            .saturating_add(self.pending_bytes(&reserved, None)))
     }
 
     /// Disk taken or set aside by uploads: a running one counts what it
     /// reserved, a stopped one what its part holds (until it resumes or
-    /// the daily sweep drops it).
-    fn pending_bytes(&self, reserved: &HashMap<String, u64>) -> u64 {
+    /// the daily sweep drops it). `resuming`: an upload about to reserve
+    /// its full length, whose part that length already covers.
+    fn pending_bytes(&self, reserved: &HashMap<String, u64>, resuming: Option<&str>) -> u64 {
         let parts: u64 = self
             .blobs
             .parts()
             .into_iter()
-            .filter(|(h, _)| !reserved.contains_key(h))
+            .filter(|(h, _)| !reserved.contains_key(h) && Some(h.as_str()) != resuming)
             .map(|(_, n)| n)
             .sum();
         parts.saturating_add(reserved.values().sum())
@@ -266,7 +267,7 @@ impl HubFiles {
                 reserved.remove(hash);
                 let used = self
                     .stored_bytes()
-                    .saturating_add(self.pending_bytes(&reserved));
+                    .saturating_add(self.pending_bytes(&reserved, Some(hash)));
                 if used.saturating_add(len) <= quota {
                     reserved.insert(hash.to_string(), len);
                     return Ok(());
@@ -684,6 +685,24 @@ mod tests {
                 .expect("uploads deadlocked");
         }
         assert!(t.hub.usage().unwrap() <= 3_000);
+    }
+
+    #[test]
+    fn an_upload_near_the_quota_resumes() {
+        let t = setup(1_000);
+        let data = vec![7u8; 700];
+        let h = hash_bytes(&data);
+        assert_eq!(t.hub.begin_put(&h, 700).unwrap(), 0);
+        t.hub.put_chunk(&h, 0, &data[..400]).unwrap();
+        // The stream broke: the reservation ends, the part stays.
+        t.hub.release(&h);
+        assert_eq!(t.hub.usage().unwrap(), 400);
+        // Its own part counts once, inside the 700 it reserves again.
+        assert_eq!(t.hub.begin_put(&h, 700).unwrap(), 400);
+        assert_eq!(t.hub.usage().unwrap(), 700);
+        t.hub.put_chunk(&h, 400, &data[400..]).unwrap();
+        t.hub.finish_put(&h, 700).unwrap();
+        assert!(t.hub.missing(std::slice::from_ref(&h)).unwrap().is_empty());
     }
 
     #[test]

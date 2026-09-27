@@ -154,6 +154,9 @@ pub async fn start(state: &SharedState, svc: &Arc<SyncService>) {
         gate: state.files.hash_gate.clone(),
         work: Arc::default(),
         after_scan: None,
+        retry: Arc::new(blirp_core::files::write::RetryBudget::new(
+            blirp_core::files::write::RETRY_BUDGET,
+        )),
     };
     let e = Engine::start(state, env);
     *lock(&state.files.engine) = Some(e);

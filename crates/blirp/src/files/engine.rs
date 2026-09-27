@@ -268,7 +268,7 @@ impl Engine {
                 if permit.is_err() {
                     return;
                 }
-                let cfg = super::copy::scan_config(&env).await;
+                let cfg = super::copy::scan_config(&env);
                 let (store, k) = (env.store.clone(), key.clone());
                 let scanned = tokio::task::spawn_blocking(move || {
                     let root = PathBuf::from(&k);

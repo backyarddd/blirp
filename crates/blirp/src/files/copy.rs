@@ -12,7 +12,7 @@
 use super::local::{self, LocalScan};
 use blirp_core::files::path::{self as wpath, case_insensitive_fs, case_key};
 use blirp_core::files::scan::{Content, Hashed, ScanConfig, ScanState, hash_file};
-use blirp_core::files::write::{Expect, Target, WriteError};
+use blirp_core::files::write::{Expect, RETRY_BUDGET, RetryBudget, Target, WriteError};
 use blirp_core::files::{
     ChangeOp, ChangeResult, EntryContent, FileChange, IndexEntry, conflict_path,
 };
@@ -86,6 +86,9 @@ pub struct Env {
     /// Called between an upload's scan and its blob uploads (tests change
     /// files there); None in the daemon.
     pub after_scan: Option<Arc<dyn Fn() + Send + Sync>>,
+    /// Retry time for locked files, shared by the writes of one pass
+    /// (reset when a pass takes `work`).
+    pub retry: Arc<RetryBudget>,
 }
 
 /// One working copy.
@@ -141,13 +144,12 @@ fn base_of(e: &IndexEntry) -> Base {
 }
 
 /// This machine's scan settings, with files larger than the hub accepts
-/// left out as too large (they would only fail to upload).
-pub async fn scan_config(env: &Env) -> ScanConfig {
+/// (as last heard; never connects) left out as too large.
+pub fn scan_config(env: &Env) -> ScanConfig {
     let mut cfg = env.scan.clone();
-    if let Ok(w) = env.hub.welcome().await
-        && w.max_file > 0
-    {
-        cfg.max_file_bytes = cfg.max_file_bytes.min(w.max_file);
+    let hub = env.hub.max_file();
+    if hub > 0 {
+        cfg.max_file_bytes = cfg.max_file_bytes.min(hub);
     }
     cfg
 }
@@ -228,32 +230,38 @@ struct UploadPlan {
     held: Vec<String>,
 }
 
-/// Whether `path` exists under exactly this name. On case-insensitive
-/// filesystems a file or folder renamed only in case still answers to its
-/// old name; that old name is gone (a delete), not excluded, so every
-/// component is compared exactly.
+/// Whether `path` exists under exactly this name, reached through real
+/// folders. On case-insensitive filesystems a file or folder renamed only
+/// in case still answers to its old name; that old name is gone (a
+/// delete), not excluded, so every component is compared exactly. A folder
+/// along the way replaced by a symlink makes the path gone too (the scan
+/// never follows it).
 fn exists_exact(root: &Path, path: &str) -> std::io::Result<bool> {
-    match std::fs::symlink_metadata(wpath::to_local(root, path)) {
-        Ok(_) => {}
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(false),
-        Err(e) => return Err(e),
-    }
-    if !case_insensitive_fs() {
-        return Ok(true);
-    }
+    let parts: Vec<&str> = path.split('/').collect();
     let mut dir = root.to_path_buf();
-    for part in path.split('/') {
-        let mut found = false;
-        for e in std::fs::read_dir(&dir)? {
-            if e?.file_name().to_str() == Some(part) {
-                found = true;
-                break;
-            }
-        }
-        if !found {
+    for (i, part) in parts.iter().enumerate() {
+        let next = dir.join(part);
+        let meta = match std::fs::symlink_metadata(&next) {
+            Ok(m) => m,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+            Err(e) => return Err(e),
+        };
+        if i + 1 < parts.len() && !meta.is_dir() {
             return Ok(false);
         }
-        dir.push(part);
+        if case_insensitive_fs() {
+            let mut found = false;
+            for e in std::fs::read_dir(&dir)? {
+                if e?.file_name().to_str() == Some(*part) {
+                    found = true;
+                    break;
+                }
+            }
+            if !found {
+                return Ok(false);
+            }
+        }
+        dir = next;
     }
     Ok(true)
 }
@@ -379,8 +387,9 @@ pub async fn upload_with(
     deletes: Deletes,
 ) -> Result<UploadReport, CopyError> {
     let _work = env.work.lock().await;
+    env.retry.reset(RETRY_BUDGET);
     let root = copy.root();
-    let cfg = scan_config(env).await;
+    let cfg = scan_config(env);
     let ls: LocalScan = {
         let _permit = env
             .gate
@@ -500,6 +509,9 @@ pub async fn upload_with(
     let claim = copy.origin.then(|| copy.key.clone());
     // Batch by batch: its blobs, then its commit, so no blob waits long
     // between upload and the commit that uses it.
+    // Learned from the first commit when the copy had none yet, and named
+    // in every later batch of this pass.
+    let mut incarnation = copy.incarnation.clone();
     for (i, batch) in plan.chunks(MAX_CHANGES).enumerate() {
         let failed = upload_blobs(env, &root, batch).await?;
         let batch: Vec<&Planned> = batch
@@ -513,7 +525,7 @@ pub async fn upload_with(
             continue;
         }
         let changes: Vec<FileChange> = batch.iter().map(|p| p.change.clone()).collect();
-        let expected = (!copy.incarnation.is_empty()).then_some(copy.incarnation.as_str());
+        let expected = (!incarnation.is_empty()).then_some(incarnation.as_str());
         let out = match env
             .hub
             .commit(
@@ -531,7 +543,8 @@ pub async fn upload_with(
             r => r?,
         };
         report.head = Some(out.head);
-        if copy.incarnation.is_empty() {
+        if incarnation.is_empty() {
+            incarnation.clone_from(&out.incarnation);
             let (store, key, inc) = (env.store.clone(), copy.key.clone(), out.incarnation.clone());
             blocking(move || {
                 store
@@ -694,10 +707,12 @@ async fn resolve_conflict(
             hash.clone(),
             env.data_dir.clone(),
         );
+        let retry = env.retry.clone();
         let written = blocking(move || {
             let t = Target {
                 root: &r,
                 data_dir: Some(&data),
+                retry: Some(&*retry),
             };
             let mut f = std::fs::File::open(wpath::to_local(&r, &src)).map_err(local)?;
             t.write_verified(&dst, &Expect::Absent, &mut f, &h, false, None)
@@ -775,10 +790,12 @@ async fn write_entry_from(
                 e.mtime,
                 part.clone(),
             );
+            let retry = env.retry.clone();
             let res = blocking(move || {
                 let t = Target {
                     root: &r,
                     data_dir: Some(&data),
+                    retry: Some(&*retry),
                 };
                 let mut f = std::fs::File::open(&p).map_err(local)?;
                 t.write_verified(&at, &expect, &mut f, &hash, mode_x, Some(mtime))
@@ -800,10 +817,12 @@ async fn write_entry_from(
                 expect.clone(),
                 target.clone(),
             );
+            let retry = env.retry.clone();
             blocking(move || {
                 let t = Target {
                     root: &r,
                     data_dir: Some(&data),
+                    retry: Some(&*retry),
                 };
                 t.link(&at, &expect, &target).map_err(local)
             })
@@ -1132,6 +1151,7 @@ pub struct ApplyReport {
 /// hub since this copy last synced it. Only while the folder itself exists.
 pub async fn restore_missing(env: &Env, copy: &Copy) -> Result<ApplyReport, CopyError> {
     let _work = env.work.lock().await;
+    env.retry.reset(RETRY_BUDGET);
     let root = copy.root();
     if !std::fs::symlink_metadata(&root).is_ok_and(|m| m.is_dir()) {
         return Err(local("the folder is gone; nothing was restored"));
@@ -1243,6 +1263,7 @@ async fn apply_locked(
     parts: &HashMap<String, PathBuf>,
 ) -> Result<ApplyReport, CopyError> {
     let _work = env.work.lock().await;
+    env.retry.reset(RETRY_BUDGET);
     let index = root_index(env, copy).await?;
     let head = index.head;
     let (store, key, root) = (env.store.clone(), copy.key.clone(), copy.root());
@@ -1311,10 +1332,12 @@ async fn apply_locked(
             }
             Act::Delete(expect) => {
                 let (r, p, data) = (root.clone(), e.path.clone(), env.data_dir.clone());
+                let retry = env.retry.clone();
                 let res = blocking(move || {
                     Target {
                         root: &r,
                         data_dir: Some(&data),
+                        retry: Some(&*retry),
                     }
                     .remove(&p, &expect)
                     .map_err(local)
@@ -1433,10 +1456,12 @@ async fn conflict_copy(
             None => {}
         }
         let (r, nm, data) = (root.to_path_buf(), name.clone(), env.data_dir.clone());
+        let retry = env.retry.clone();
         let free = blocking(move || {
             Target {
                 root: &r,
                 data_dir: Some(&data),
+                retry: Some(&*retry),
             }
             .is(&nm, &Expect::Absent)
             .map_err(local)
@@ -1633,6 +1658,15 @@ mod tests {
         assert!(exists_exact(root, "Sub/f.txt").unwrap());
         if case_insensitive_fs() {
             assert!(!exists_exact(root, "sub/f.txt").unwrap());
+        }
+        // A folder replaced by a symlink: what was below it is gone.
+        #[cfg(unix)]
+        {
+            std::fs::create_dir_all(root.join("elsewhere")).unwrap();
+            std::fs::write(root.join("elsewhere/g.txt"), "x").unwrap();
+            std::os::unix::fs::symlink(root.join("elsewhere"), root.join("linked")).unwrap();
+            assert!(!exists_exact(root, "linked/g.txt").unwrap());
+            assert!(exists_exact(root, "linked").unwrap());
         }
     }
 

@@ -50,6 +50,9 @@ fn env(w: &World, i: usize) -> Env {
         scan: scan_cfg(w.dir.path()),
         gate: Arc::new(tokio::sync::Semaphore::new(1)),
         work: Arc::default(),
+        retry: Arc::new(blirp_core::files::write::RetryBudget::new(
+            blirp_core::files::write::RETRY_BUDGET,
+        )),
         after_scan: Some(Arc::new(move || {
             let next = pending.lock().unwrap().take();
             if let Some((p, text)) = next {
@@ -461,6 +464,7 @@ async fn run(ops: Vec<Op>) {
     // Quiet means no copy changed and the hub took nothing new in a round.
     let mut last: Vec<BTreeMap<String, String>> = Vec::new();
     let mut last_hub = BTreeMap::new();
+    let mut quiet = false;
     for _ in 0..12 {
         for i in 0..w.writers.len() {
             w.reconcile();
@@ -473,11 +477,20 @@ async fn run(ops: Vec<Op>) {
             kept_by_apply(&w, &c, &before);
             seen.extend(committed(&w, before));
         }
-        let on_hub: HashSet<String> = w.index().into_iter().map(|e| e.path).collect();
-        // Names the hub holds in more than one case (a twin and, later,
-        // conflict copies of each): a case-insensitive copy holds one.
+        let index = w.index();
+        let on_hub: HashSet<String> = index.iter().map(|e| e.path.clone()).collect();
+        let live: HashMap<String, String> = index
+            .iter()
+            .filter_map(|e| match &e.content {
+                Some(EntryContent::Blob { hash }) => Some((e.path.clone(), hash.clone())),
+                _ => None,
+            })
+            .collect();
+        // Live names the hub holds in more than one case (a twin and, later,
+        // conflict copies of each): a case-insensitive copy holds one of
+        // them, whichever it had, and holds it as the hub has it.
         let mut folded: HashMap<String, usize> = HashMap::new();
-        for p in &on_hub {
+        for p in live.keys() {
             *folded.entry(p.to_lowercase()).or_default() += 1;
         }
         let ci = blirp_core::files::path::case_insensitive_fs();
@@ -498,19 +511,30 @@ async fn run(ops: Vec<Op>) {
                     f.remove("C.txt");
                 }
                 if ci {
-                    f.retain(|p, _| folded.get(&p.to_lowercase()).is_none_or(|n| *n < 2));
+                    f.retain(|p, text| {
+                        if folded.get(&p.to_lowercase()).is_none_or(|n| *n < 2) {
+                            return true;
+                        }
+                        assert_eq!(
+                            live.get(p),
+                            Some(&hash_bytes(text.as_bytes())),
+                            "{p} differs from the hub's version of that exact name"
+                        );
+                        false
+                    });
                 }
                 f
             })
             .collect();
-        let hub: BTreeMap<String, i64> =
-            w.index().into_iter().map(|e| (e.path, e.version)).collect();
+        let hub: BTreeMap<String, i64> = index.into_iter().map(|e| (e.path, e.version)).collect();
         if now == last && hub == last_hub {
+            quiet = true;
             break;
         }
         last = now;
         last_hub = hub;
     }
+    assert!(quiet, "copies and hub kept changing");
     // Converged: every copy still syncing holds the same files.
     for other in last.iter().skip(1) {
         assert_eq!(&last[0], other, "copies did not converge");
