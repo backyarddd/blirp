@@ -58,21 +58,31 @@ async fn drain(stream: &mut axum::body::BodyDataStream, mut read: u64) {
     .await;
 }
 
+fn declared_length(headers: &HeaderMap) -> Option<u64> {
+    headers
+        .get(header::CONTENT_LENGTH)
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| v.parse::<u64>().ok())
+}
+
+/// Throw away the body of a request refused before reading it, so the
+/// client receives the answer (see [`DRAIN_MAX`]). A body the drain would
+/// give up on anyway is not read at all.
+async fn discard(headers: &HeaderMap, body: Body) {
+    if declared_length(headers).is_none_or(|n| n <= MAX_BYTES as u64 + DRAIN_MAX) {
+        drain(&mut body.into_data_stream(), 0).await;
+    }
+}
+
 /// The raw body, refused past `MAX_BYTES` (by `Content-Length` before
 /// keeping anything, else while reading).
 async fn read_body(headers: &HeaderMap, body: Body) -> ApiResult<Bytes> {
-    let declared = headers
-        .get(header::CONTENT_LENGTH)
-        .and_then(|v| v.to_str().ok())
-        .and_then(|v| v.parse::<u64>().ok());
-    let mut stream = body.into_data_stream();
-    if let Some(n) = declared.filter(|&n| n > MAX_BYTES as u64) {
-        // A body the drain would give up on anyway is not read at all.
-        if n <= MAX_BYTES as u64 + DRAIN_MAX {
-            drain(&mut stream, 0).await;
-        }
+    let declared = declared_length(headers);
+    if declared.is_some_and(|n| n > MAX_BYTES as u64) {
+        discard(headers, body).await;
         return Err(too_large());
     }
+    let mut stream = body.into_data_stream();
     // A declared length is only a hint: never reserve more than 1 MiB up front.
     let mut buf = Vec::with_capacity(declared.map_or(0, |n| n.min(1 << 20) as usize));
     while let Some(chunk) = stream.next().await {
@@ -98,7 +108,14 @@ async fn upload(
     body: Body,
 ) -> ApiResult<Response> {
     let name = crate::uploads::sanitize_name(q.name.as_deref().unwrap_or_default());
-    if let Some(m) = super::sessions::remote_machine(&s, &id).await? {
+    let remote = match super::sessions::remote_machine(&s, &id).await {
+        Ok(m) => m,
+        Err(e) => {
+            discard(&headers, body).await;
+            return Err(e);
+        }
+    };
+    if let Some(m) = remote {
         let bytes = read_body(&headers, body).await?;
         let mut url = reqwest::Url::parse("http://blirp.remote/")
             .map_err(|e| ApiError::internal("building the upload path", e))?;
@@ -125,6 +142,7 @@ async fn upload(
         )
     };
     if s.terminals.get(&id).is_none() {
+        discard(&headers, body).await;
         return Err(not_running());
     }
     let bytes = read_body(&headers, body).await?;

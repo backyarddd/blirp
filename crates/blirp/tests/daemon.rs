@@ -562,22 +562,34 @@ async fn terminal_uploads() {
         assert_eq!(err.error.code, "file_too_large");
     }
     // Over TCP, a client that sends its whole body before reading still gets
-    // the 413 (the rest of the body is drained, not reset).
-    for chunked in [false, true] {
+    // the refusal (the rest of the body is drained, not reset): too large,
+    // or for a session that is not running.
+    let over = blirp::uploads::MAX_BYTES + (1 << 20);
+    for (target, size, chunked, status, code) in [
+        (session.id.as_str(), over, false, 413, "file_too_large"),
+        (session.id.as_str(), over, true, 413, "file_too_large"),
+        (
+            "no-such-session",
+            20 << 20,
+            false,
+            404,
+            "terminal_not_found",
+        ),
+        ("no-such-session", 20 << 20, true, 404, "terminal_not_found"),
+    ] {
         use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
         let mut tcp = tokio::net::TcpStream::connect(("127.0.0.1", h.daemon.port))
             .await
             .unwrap();
-        let size = blirp::uploads::MAX_BYTES + (1 << 20);
         let length = if chunked {
             "Transfer-Encoding: chunked".to_string()
         } else {
             format!("Content-Length: {size}")
         };
         let head = format!(
-            "POST /api/sessions/{}/uploads?name=big.bin HTTP/1.1\r\nHost: 127.0.0.1:{}\r\n\
+            "POST /api/sessions/{target}/uploads?name=big.bin HTTP/1.1\r\nHost: 127.0.0.1:{}\r\n\
              Authorization: Bearer {}\r\n{length}\r\n\r\n",
-            session.id, h.daemon.port, h.token
+            h.daemon.port, h.token
         );
         tcp.write_all(head.as_bytes()).await.unwrap();
         let chunk = vec![0u8; 1 << 20];
@@ -597,7 +609,7 @@ async fn terminal_uploads() {
         }
         let mut answer = String::new();
         let mut buf = vec![0u8; 4096];
-        while !answer.contains("file_too_large") {
+        while !answer.contains(code) {
             let n = tokio::time::timeout(Duration::from_secs(20), tcp.read(&mut buf))
                 .await
                 .unwrap()
@@ -607,14 +619,9 @@ async fn terminal_uploads() {
             }
             answer.push_str(&String::from_utf8_lossy(&buf[..n]));
         }
-        assert!(
-            answer.starts_with("HTTP/1.1 413"),
-            "chunked {chunked}: {answer}"
-        );
-        assert!(
-            answer.contains("file_too_large"),
-            "chunked {chunked}: {answer}"
-        );
+        let what = format!("{target} chunked {chunked}: {answer}");
+        assert!(answer.starts_with(&format!("HTTP/1.1 {status}")), "{what}");
+        assert!(answer.contains(code), "{what}");
     }
     assert_eq!(std::fs::read_dir(&dir).unwrap().count(), 1);
 
