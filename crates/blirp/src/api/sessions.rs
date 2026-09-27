@@ -104,21 +104,10 @@ async fn launch_remote(
     principal: &crate::api::Principal,
     body: &LaunchSession,
 ) -> ApiResult<Response> {
-    let mut _handoff = None;
-    if let Some(src) = body.continue_from.clone() {
-        let store = s.store.clone();
-        let source = blocking(move || Ok(store.get_session(&src)?)).await?;
-        if let Some(source) = source.filter(|x| x.machine_id == s.machine.id) {
-            _handoff = Some(crate::memory::handoff::begin(s, &source.id)?);
-            let wait = crate::memory::handoff::REFRESH_WAIT;
-            if crate::memory::handoff::refresh_summary(s, &source, wait)
-                .await
-                .is_none()
-            {
-                crate::memory::handoff::publish(s, crate::memory::handoff::PUBLISH_WAIT).await;
-            }
-        }
-    }
+    let _handoff = match &body.continue_from {
+        Some(src) => crate::memory::handoff::before_forward(s, src).await?.0,
+        None => None,
+    };
     crate::sync::launch_remote(s, m, principal, body).await
 }
 

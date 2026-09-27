@@ -176,11 +176,41 @@ pub async fn refresh_summary(
     )
 }
 
-/// Wait (at most `wait`) until this machine's writes, the refreshed summary
-/// among them, have reached the hub: a launch forwarded to another machine
-/// renders the pack from that machine's copy of the source. A node checks
-/// its push cursor, the hub that it logged its own writes; standalone has
-/// nothing to wait for. A target other than the hub pulls them right after.
+/// A launch forwarded to another machine from `source`: when the source is
+/// this machine's (only its owner distills it), mark the handoff (409 while
+/// another is prepared), refresh its summary, answer 503 if the daemon
+/// stops meanwhile, and push a summary written just now toward the target
+/// ([`publish`]). Returns the mark, held until the forward is answered, and
+/// whether a new summary was published.
+pub async fn before_forward(
+    state: &SharedState,
+    source: &str,
+) -> ApiResult<(Option<HandoffGuard>, bool)> {
+    let (store, id) = (state.store.clone(), source.to_string());
+    let found = crate::api::blocking(move || Ok(store.get_session(&id)?)).await?;
+    let Some(src) = found.filter(|x| x.machine_id == state.machine.id) else {
+        // Not here: the target resolves it (or answers 404).
+        return Ok((None, false));
+    };
+    let guard = begin(state, &src.id)?;
+    refresh_summary(state, &src, REFRESH_WAIT).await;
+    crate::sessions::refuse_when_shutting_down(state)?;
+    let (store, id) = (state.store.clone(), src.id.clone());
+    let now = crate::api::blocking(move || Ok(store.get_session(&id)?)).await?;
+    let fresh = now.is_some_and(|n| n.distilled_through_seq > src.distilled_through_seq);
+    if fresh {
+        publish(state, PUBLISH_WAIT).await;
+    }
+    Ok((Some(guard), fresh))
+}
+
+/// Best effort: wait (at most `wait`) until this machine's writes, the
+/// refreshed summary among them, have reached the hub, since a launch
+/// forwarded to another machine renders the pack from that machine's copy
+/// of the source. A node checks its push cursor, the hub that it logged its
+/// own writes; standalone has nothing to wait for. A target other than the
+/// hub still has to pull them, which this does not wait for: if it has
+/// not, its pack carries the older summary and says so.
 pub async fn publish(state: &SharedState, wait: Duration) {
     let config = state.config();
     let peer = match config.sync.role {
@@ -427,6 +457,41 @@ mod tests {
         assert_eq!((err.status.as_u16(), err.code), (503, "shutting_down"));
         assert!(f.st.store.get_session("src").unwrap().is_some());
         assert!(f.st.terminals.get("src").is_none());
+    }
+
+    #[tokio::test]
+    async fn a_forwarded_launch_publishes_only_a_new_summary() {
+        // Nothing new to summarize: nothing to push.
+        let f = state(Summarizer::Auto, 40);
+        distilled(&f.st);
+        let (guard, fresh) = before_forward(&f.st, "src").await.unwrap();
+        assert!(guard.is_some() && !fresh);
+        assert_eq!(
+            begin(&f.st, "src").err().map(|e| e.code),
+            Some("handoff_in_progress"),
+            "marked until the forward is answered"
+        );
+        drop(guard);
+
+        // Summarized just now: pushed toward the target.
+        let f = state(Summarizer::Auto, 40);
+        worker(&f.st, "src", distilled);
+        let (_guard, fresh) = before_forward(&f.st, "src").await.unwrap();
+        assert!(fresh);
+
+        // Not refreshed (summarizer off): nothing to push.
+        let f = state(Summarizer::None, 40);
+        assert!(!before_forward(&f.st, "src").await.unwrap().1);
+
+        // Another machine's or an unknown source: left to the target.
+        let f = state(Summarizer::Auto, 40);
+        let (guard, fresh) = before_forward(&f.st, "missing").await.unwrap();
+        assert!(guard.is_none() && !fresh);
+
+        // Shutting down meanwhile: nothing is forwarded.
+        f.stop.send(true).unwrap();
+        let err = before_forward(&f.st, "src").await.err().unwrap();
+        assert_eq!((err.status.as_u16(), err.code), (503, "shutting_down"));
     }
 
     #[tokio::test]

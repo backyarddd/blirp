@@ -25,7 +25,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, PoisonError};
 use std::time::Duration;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use tokio::sync::{Notify, broadcast};
+use tokio::sync::{Notify, broadcast, watch};
 
 /// Summarizer process/HTTP timeout.
 pub const DISTILL_TIMEOUT: Duration = Duration::from_secs(180);
@@ -1251,13 +1251,18 @@ pub(crate) struct Job {
     pub(crate) priority: bool,
 }
 
-/// The job to run next: the first priority job, else the first one whose
-/// `not_before` has passed (a delayed job never holds up ready ones behind
-/// it). `Err`: none is ready, with the earliest `not_before` if any.
+/// The job to run next: a priority job once its `not_before` has passed
+/// (while it waits, nothing else starts: a run could outlast the handoff's
+/// wait, and the delay is at most [`ENDED_DELAY_MS`]); else the first job
+/// whose `not_before` has passed (a delayed job never holds up ready ones
+/// behind it). `Err`: none is ready, with the earliest start if any.
 fn pick(jobs: &VecDeque<Job>, now: i64) -> Result<usize, Option<i64>> {
+    if let Some(i) = jobs.iter().position(|j| j.priority) {
+        let at = jobs[i].not_before;
+        return if at <= now { Ok(i) } else { Err(Some(at)) };
+    }
     jobs.iter()
-        .position(|j| j.priority)
-        .or_else(|| jobs.iter().position(|j| j.not_before <= now))
+        .position(|j| j.not_before <= now)
         .ok_or_else(|| jobs.iter().map(|j| j.not_before).min())
 }
 
@@ -1394,10 +1399,12 @@ impl Distiller {
         let _ = self.done.send(session_id.to_string());
     }
 
-    /// Queue a job someone waits for (a handoff): it runs next, now, under
-    /// the automatic rules (not manual: a paused or `none` summarizer and
+    /// Queue a job someone waits for (a handoff): it runs next under the
+    /// automatic rules (not manual: a paused or `none` summarizer and
     /// subagent sessions are left alone). A queued job of the session is
-    /// moved up instead; false when one is already running.
+    /// moved up instead, keeping its start time (a session that just ended
+    /// waits out [`ENDED_DELAY_MS`] for its last lines); false when one is
+    /// already running.
     pub fn enqueue_priority(&self, session_id: &str) -> bool {
         let mut q = lock(&self.queued);
         let mut jobs = lock(&self.jobs);
@@ -1406,7 +1413,6 @@ impl Distiller {
                 return false;
             };
             job.priority = true;
-            job.not_before = 0;
         } else {
             q.insert(session_id.to_string());
             jobs.push_back(Job {
@@ -1437,6 +1443,45 @@ impl Distiller {
         true
     }
 
+    /// Run jobs one at a time with `run` until shutdown: sleeps until the
+    /// earliest start when none is ready, and a new job (maybe a priority
+    /// one) wakes it early; `Notify` keeps a wakeup sent while a job runs.
+    async fn work<F, Fut>(&self, mut shutdown: watch::Receiver<bool>, run: F)
+    where
+        F: Fn(Job) -> Fut,
+        Fut: Future<Output = ()>,
+    {
+        loop {
+            if *shutdown.borrow() {
+                break;
+            }
+            let now = blirp_core::now_ms();
+            match self.next(now) {
+                Ok(job) => {
+                    let id = job.session_id.clone();
+                    run(job).await;
+                    self.finished(&id);
+                }
+                Err(at) => {
+                    let due = async {
+                        match at {
+                            Some(t) => {
+                                let ms = (t - now).max(0).unsigned_abs();
+                                tokio::time::sleep(Duration::from_millis(ms)).await;
+                            }
+                            None => std::future::pending::<()>().await,
+                        }
+                    };
+                    tokio::select! {
+                        _ = due => {}
+                        _ = self.wake.notified() => {}
+                        _ = shutdown.changed() => break,
+                    }
+                }
+            }
+        }
+    }
+
     /// The next job to run, or how long to wait for one (None: until woken).
     pub(crate) fn next(&self, now: i64) -> Result<Job, Option<i64>> {
         let mut jobs = lock(&self.jobs);
@@ -1451,36 +1496,14 @@ impl Distiller {
             return;
         }
         let worker_state = state.clone();
-        let mut shutdown = state.shutdown.clone();
+        let shutdown = state.shutdown.clone();
         tokio::spawn(async move {
-            let d = &worker_state.distiller;
-            loop {
-                let now = blirp_core::now_ms();
-                match d.next(now) {
-                    Ok(job) => {
-                        process(&worker_state, &job).await;
-                        d.finished(&job.session_id);
-                    }
-                    // A new job (maybe a priority one) wakes the worker
-                    // early; `Notify` keeps a wakeup sent while it runs.
-                    Err(at) => {
-                        let due = async {
-                            match at {
-                                Some(t) => {
-                                    let ms = (t - now).max(0).unsigned_abs();
-                                    tokio::time::sleep(Duration::from_millis(ms)).await;
-                                }
-                                None => std::future::pending::<()>().await,
-                            }
-                        };
-                        tokio::select! {
-                            _ = due => {}
-                            _ = d.wake.notified() => {}
-                            _ = shutdown.changed() => break,
-                        }
-                    }
-                }
-            }
+            let st = &worker_state;
+            st.distiller
+                .work(shutdown, |job| async move {
+                    process(st, &job).await;
+                })
+                .await;
         });
         let mut shutdown = state.shutdown.clone();
         tokio::spawn(async move {
@@ -2671,6 +2694,63 @@ cat '{}'
         q.push_back(job("handoff", 0, true));
         assert_eq!(pick(&q, 100), Ok(2), "a priority job goes first");
         assert_eq!(pick(&q, 600), Ok(2));
+        // A delayed priority job holds the others back until it may start.
+        q[2].not_before = 300;
+        assert_eq!(pick(&q, 100), Err(Some(300)));
+        assert_eq!(pick(&q, 300), Ok(2));
+    }
+
+    #[tokio::test]
+    async fn the_worker_sleeps_until_due_wakes_on_new_jobs_and_stops_on_shutdown() {
+        let d = Arc::new(Distiller::default());
+        let (stop, shutdown) = watch::channel(false);
+        let (ran_tx, mut ran) = tokio::sync::mpsc::unbounded_channel::<(String, i64)>();
+        let worker = {
+            let d = d.clone();
+            tokio::spawn(async move {
+                d.work(shutdown, |job| {
+                    let tx = ran_tx.clone();
+                    async move {
+                        let _ = tx.send((job.session_id, blirp_core::now_ms()));
+                    }
+                })
+                .await;
+            })
+        };
+        async fn recv(
+            ran: &mut tokio::sync::mpsc::UnboundedReceiver<(String, i64)>,
+        ) -> (String, i64) {
+            tokio::time::timeout(Duration::from_secs(5), ran.recv())
+                .await
+                .expect("a job ran")
+                .expect("worker alive")
+        }
+
+        // Empty queue: the worker waits; a new job wakes it.
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        assert!(d.enqueue("a", false));
+        assert_eq!(recv(&mut ran).await.0, "a");
+
+        // A delayed job runs once due, not before.
+        let queued_at = blirp_core::now_ms();
+        assert!(d.push("late", false, queued_at + 300));
+        let (id, at) = recv(&mut ran).await;
+        assert_eq!(id, "late");
+        assert!(
+            at >= queued_at + 300,
+            "ran {} ms early",
+            queued_at + 300 - at
+        );
+
+        // Shutdown with ready jobs pending: the worker stops, they stay.
+        stop.send(true).unwrap();
+        assert!(d.enqueue("pending", false));
+        tokio::time::timeout(Duration::from_secs(5), worker)
+            .await
+            .expect("worker stopped")
+            .unwrap();
+        assert!(ran.try_recv().is_err());
+        assert!(d.is_queued("pending"));
     }
 
     #[test]
@@ -2679,7 +2759,11 @@ cat '{}'
         assert!(d.enqueue("a", false));
         assert!(d.enqueue_ended("b"));
         assert!(d.enqueue_priority("b"), "the delayed job of b is moved up");
-        let first = d.next(blirp_core::now_ms()).unwrap();
+        // It keeps the grace for an ended session's last lines, and nothing
+        // else starts meanwhile.
+        let now = blirp_core::now_ms();
+        assert!(matches!(d.next(now), Err(Some(t)) if t >= now + ENDED_DELAY_MS - 1000));
+        let first = d.next(now + ENDED_DELAY_MS + 1000).unwrap();
         assert_eq!((first.session_id.as_str(), first.priority), ("b", true));
         assert!(!first.manual, "a handoff job keeps the automatic rules");
         // b now runs: a second request waits for that run, adds nothing.

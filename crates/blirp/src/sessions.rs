@@ -260,6 +260,19 @@ fn prepare(state: &SharedState, req: &LaunchSession) -> ApiResult<Prepared> {
     })
 }
 
+/// 503 `shutting_down` once the daemon is stopping: a launch that waited
+/// (for a summary) must not start anything then.
+pub fn refuse_when_shutting_down(state: &SharedState) -> ApiResult<()> {
+    if *state.shutdown.borrow() {
+        return Err(ApiError::new(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "shutting_down",
+            "blirp is shutting down",
+        ));
+    }
+    Ok(())
+}
+
 /// POST /api/sessions
 pub async fn launch(state: &SharedState, req: LaunchSession) -> ApiResult<Session> {
     if let Some(m) = &req.machine
@@ -323,13 +336,7 @@ pub async fn launch(state: &SharedState, req: LaunchSession) -> ApiResult<Sessio
         }
         None => None,
     };
-    if *state.shutdown.borrow() {
-        return Err(ApiError::new(
-            StatusCode::SERVICE_UNAVAILABLE,
-            "shutting_down",
-            "blirp is shutting down",
-        ));
-    }
+    refuse_when_shutting_down(state)?;
     let st = state.clone();
     let req2 = req.clone();
     let prepared = crate::api::blocking(move || prepare(&st, &req2)).await?;
