@@ -241,17 +241,26 @@ pub struct SessionMeta {
 }
 
 /// How the runs recorded in one transcript were started (claude
-/// `entrypoint`, codex `session_meta.source`), kept in the adapter's cursor
-/// state. A transcript is headless, a scripted run such as `claude -p`, the
-/// Agent SDK or `codex exec`, when it records a headless run and no
-/// interactive one: resuming a scripted run interactively, or scripting an
-/// interactive session, keeps the session.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Serialize, Deserialize)]
+/// `entrypoint`, codex `session_meta.source`) and how many prompts it got,
+/// kept in the adapter's cursor state. A transcript is headless, a scripted
+/// run such as `claude -p`, the Agent SDK or `codex exec`, when it records a
+/// headless run, no interactive one and at most one prompt. Resuming a
+/// scripted run interactively, scripting an interactive session, or an
+/// Agent SDK app someone chats in (Zed, Conductor, ...: more prompts) keeps
+/// the session.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct Launches {
     #[serde(default)]
     headless: bool,
     #[serde(default)]
     interactive: bool,
+    /// Prompts seen: claude user turns (by `promptId`), codex turns
+    /// (`turn_context` lines).
+    #[serde(default)]
+    turns: u32,
+    /// `promptId` of the last counted claude turn.
+    #[serde(default)]
+    last_turn: Option<String>,
     /// The sink was told the transcript is headless during some read, so
     /// what was read then may not be stored.
     #[serde(default)]
@@ -271,22 +280,38 @@ impl Launches {
     }
 
     pub fn is_headless(&self) -> bool {
-        self.headless && !self.interactive
+        self.headless && !self.interactive && self.turns <= 1
     }
 
-    /// Record one run (`headless` or not) of session `asid` and tell the
-    /// sink right away when that changes [`Launches::is_headless`], before
-    /// the run's events can be flushed into a new session row.
-    pub fn see(&mut self, headless: bool, sink: &mut dyn EventSink, asid: &str) {
-        let was = self.is_headless();
+    /// Nothing later in the transcript can make it headless again.
+    fn settled(&self) -> bool {
+        self.interactive || self.turns > 1
+    }
+
+    /// A line records a run started headless or interactively.
+    pub(crate) fn run(&mut self, headless: bool) {
         if headless {
             self.headless = true;
         } else {
             self.interactive = true;
         }
+    }
+
+    /// A line is a prompt of turn `id` (`None`: every call is a new turn).
+    pub(crate) fn turn(&mut self, id: Option<&str>) {
+        if id.is_none() || id != self.last_turn.as_deref() {
+            self.turns = self.turns.saturating_add(1);
+            self.last_turn = id.map(str::to_string);
+        }
+    }
+
+    /// Tell the sink about session `asid` right away when the verdict is
+    /// not `before` any more (call with `false` at the start of a read), so
+    /// a scripted run's events never reach a new session row.
+    pub(crate) fn report(&mut self, before: bool, sink: &mut dyn EventSink, asid: &str) {
         let now = self.is_headless();
         self.reported |= now;
-        if now != was {
+        if now != before {
             sink.session(
                 asid,
                 SessionMeta {
@@ -325,32 +350,30 @@ impl std::error::Error for Settled {}
 
 /// Whether the whole transcript at `path` of `agent` (claude or codex; other
 /// agents never record scripted runs) is a scripted run ([`Launches`]).
-/// Stops at the first interactive run.
+/// Stops as soon as it cannot be one.
 pub(crate) fn transcript_is_headless(agent: &str, path: &Path) -> Result<bool> {
-    type LaunchOf = fn(&JsonValue) -> Option<bool>;
-    let (needle, launch_of): (&[u8], LaunchOf) = match agent {
-        "claude" => (claude::LAUNCH_NEEDLE, claude::launch_of),
-        "codex" => (codex::LAUNCH_NEEDLE, codex::launch_of),
+    type LaunchLine = fn(&JsonValue, &mut Launches);
+    let (needles, launch_line): (&[&[u8]], LaunchLine) = match agent {
+        "claude" => (&[], claude::launch_line),
+        "codex" => (codex::LAUNCH_NEEDLES, codex::launch_line),
         _ => return Ok(false),
     };
     let compressed = path.extension().is_some_and(|e| e == "zst");
     let mut lines = jsonl::Lines::open(path, &jsonl::FilePos::default(), compressed)?;
     let mut launches = Launches::default();
     let res = lines.for_each(|_, raw| {
-        if !raw.windows(needle.len()).any(|w| w == needle) {
+        if !needles.is_empty()
+            && !needles
+                .iter()
+                .any(|n| raw.windows(n.len()).any(|w| w == *n))
+        {
             return Ok(());
         }
-        match serde_json::from_slice(raw)
-            .ok()
-            .as_ref()
-            .and_then(launch_of)
-        {
-            Some(true) => launches.headless = true,
-            Some(false) => {
-                launches.interactive = true;
-                return Err(Settled.into());
-            }
-            None => {}
+        if let Ok(v) = serde_json::from_slice(raw) {
+            launch_line(&v, &mut launches);
+        }
+        if launches.settled() {
+            return Err(Settled.into());
         }
         Ok(())
     });

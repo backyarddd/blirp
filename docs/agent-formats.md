@@ -56,7 +56,7 @@ Nearly every line carries: `type`, `uuid`, `timestamp` (ISO8601),
   "version": "<text>", "userType": "external", "entrypoint": "cli"
 }
 ```
-`entrypoint` says how the process was started: `cli` (terminal UI), `claude-vscode`, `claude-desktop`, `local-agent`, ... for interactive use, `sdk-cli` for `claude -p` and `sdk-ts`/`sdk-py` for the Agent SDKs (the same value as the process's `CLAUDE_CODE_ENTRYPOINT`, which its hooks inherit). blirp skips transcripts that record an `sdk-*` entrypoint and no other.
+`entrypoint` says how the process was started: `cli` (terminal UI), `claude-vscode`, `claude-desktop`, `local-agent`, ... for interactive use, `sdk-cli` for `claude -p` and `sdk-ts`/`sdk-py` for the Agent SDKs (the same value as the process's `CLAUDE_CODE_ENTRYPOINT`, which its hooks inherit). blirp skips transcripts that record an `sdk-*` entrypoint, no other and at most one prompt (`promptId`). User lines also carry `promptId`, and newer ones `origin: {"kind": "human" | "task-notification" | ...}`, `promptSource` (`typed`, `queued`, `system`, ...) and `turnOrigin`; lines with an `origin.kind` other than `human` were written by the harness (background-task results, messages from a coordinating agent).
 ```json
 {
   "parentUuid": "<uuid>",
@@ -197,7 +197,7 @@ Example `session_meta`:
   }
 }
 ```
-`originator`/`source` seen in real rollouts: `codex-tui`/`codex_cli_rs` with `cli` (terminal UI), `Codex Desktop` with `vscode` (desktop app and IDE), `codex_exec` or `Codex Desktop` with `exec` (`codex exec`), and subagents with `source` an object `{"subagent": {"thread_spawn": {"parent_thread_id", ...}}}`. blirp skips rollouts whose `session_meta` says `exec` and none says otherwise.
+`originator`/`source` seen in real rollouts: `codex-tui`/`codex_cli_rs` with `cli` (terminal UI), `Codex Desktop` with `vscode` (desktop app and IDE), `codex_exec` or `Codex Desktop` with `exec` (`codex exec`), and subagents with `source` an object `{"subagent": {"thread_spawn": {"parent_thread_id", ...}}}`. blirp skips rollouts whose `session_meta` says `exec`, none says otherwise and that have at most one `turn_context` (a resumed session may continue in the same rollout without a new `session_meta`; a forked subagent rollout repeats its parent's `session_meta` after its own).
 Example `function_call` / `function_call_output` pair:
 ```json
 {"timestamp":"<iso8601>","ordinal":<int>,"type":"response_item",

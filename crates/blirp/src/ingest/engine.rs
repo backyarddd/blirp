@@ -385,6 +385,7 @@ impl Engine {
                 tracing::info!(
                     sessions = out.sessions.len(),
                     records = out.records,
+                    records_kept = out.records_kept,
                     projects = out.projects.len(),
                     "removed ingested scripted runs (claude -p, Agent SDK, codex exec)"
                 );

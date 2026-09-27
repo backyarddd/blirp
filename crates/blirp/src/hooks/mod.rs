@@ -49,7 +49,11 @@ pub struct HookIngress {
 }
 
 /// Claude Code sets `CLAUDE_CODE_ENTRYPOINT` for its process and hooks:
-/// `sdk-cli` for `claude -p`, `sdk-ts`/`sdk-py` for the Agent SDKs.
+/// `sdk-cli` for `claude -p`, `sdk-ts`/`sdk-py` for the Agent SDKs. A hook
+/// cannot tell a scripted run from an app someone chats in over the SDK
+/// (that needs the prompt count), so such hooks create no session and
+/// ingest decides from the transcript; once it stored the session, later
+/// hooks find and update it.
 fn is_headless_env(agent: &str, var: &dyn Fn(&str) -> Option<String>) -> bool {
     agent == "claude" && var("CLAUDE_CODE_ENTRYPOINT").is_some_and(|e| e.starts_with("sdk-"))
 }

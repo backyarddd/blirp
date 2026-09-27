@@ -65,16 +65,23 @@ fn is_rollout(p: &Path) -> bool {
     name.starts_with("rollout-") && (name.ends_with(".jsonl") || name.ends_with(".jsonl.zst"))
 }
 
-/// Whether rollout line `v` records a headless run: a `session_meta` whose
-/// `source` is `exec` (`codex exec`); the TUI says `cli`, the desktop app
-/// and IDE `vscode`, subagents an object. `None` for other lines.
-pub(crate) fn launch_of(v: &Value) -> Option<bool> {
-    (v.get("type").and_then(Value::as_str) == Some("session_meta"))
-        .then(|| v.pointer("/payload/source").and_then(Value::as_str) == Some("exec"))
+/// What rollout line `v` says about how the session runs ([`Launches`]):
+/// `session_meta.source` is `exec` for `codex exec` (the TUI says `cli`, the
+/// desktop app and IDE `vscode`, subagents an object), and every turn
+/// writes a `turn_context`. A resumed session may continue its rollout without a new
+/// `session_meta`; an exec run continued that way shows as a second turn.
+pub(crate) fn launch_line(v: &Value, l: &mut Launches) {
+    match v.get("type").and_then(Value::as_str) {
+        Some("session_meta") => {
+            l.run(v.pointer("/payload/source").and_then(Value::as_str) == Some("exec"));
+        }
+        Some("turn_context") => l.turn(None),
+        _ => {}
+    }
 }
 
-/// Bytes every line [`launch_of`] answers for contains.
-pub(crate) const LAUNCH_NEEDLE: &[u8] = b"\"session_meta\"";
+/// Every line [`launch_line`] looks at contains one of these.
+pub(crate) const LAUNCH_NEEDLES: &[&[u8]] = &[b"\"session_meta\"", b"\"turn_context\""];
 
 /// Session id from `rollout-<date>-<uuid>.jsonl`, used until `session_meta`.
 fn id_from_name(p: &Path) -> Option<String> {
@@ -158,8 +165,13 @@ impl Adapter for Codex {
         if lines.reset {
             st = State::default();
         }
-        let mut launch = Launches::resume(st.launch, st.pos.line);
+        let mut launch = Launches::resume(st.launch.take(), st.pos.line);
         let fallback = id_from_name(&src.path).unwrap_or_else(|| src.key.clone());
+        launch.report(
+            false,
+            sink,
+            &st.asid.clone().unwrap_or_else(|| fallback.clone()),
+        );
         let mut meta = SessionMeta {
             transcript_path: Some(src.path.display().to_string()),
             ..SessionMeta::default()
@@ -175,19 +187,26 @@ impl Adapter for Codex {
             };
             let ty = v.get("type").and_then(Value::as_str).unwrap_or("");
             let p = v.get("payload").unwrap_or(&Value::Null);
+            if ty == "session_meta" && st.asid.is_none() {
+                st.asid = p
+                    .get("id")
+                    .or_else(|| p.get("session_id"))
+                    .and_then(Value::as_str)
+                    .map(str::to_string);
+            }
+            let before = launch.is_headless();
+            launch_line(&v, &mut launch);
+            launch.report(
+                before,
+                sink,
+                &st.asid.clone().unwrap_or_else(|| fallback.clone()),
+            );
             let ts = v.get("timestamp").and_then(parse_ts);
             if let Some(t) = ts {
                 meta.started_at = Some(meta.started_at.map_or(t, |s| s.min(t)));
             }
             match ty {
                 "session_meta" => {
-                    if st.asid.is_none() {
-                        st.asid = p
-                            .get("id")
-                            .or_else(|| p.get("session_id"))
-                            .and_then(Value::as_str)
-                            .map(str::to_string);
-                    }
                     if let Some(c) = p.get("cwd").and_then(Value::as_str) {
                         meta.cwd = Some(c.to_string());
                     }
@@ -202,9 +221,6 @@ impl Adapter for Codex {
                         meta.git_remote = Some(u.to_string());
                     }
                     let asid = st.asid.clone().unwrap_or_else(|| fallback.clone());
-                    if let Some(headless) = launch_of(&v) {
-                        launch.see(headless, sink, &asid);
-                    }
                     super::report_cwd(sink, &asid, &meta, &mut reported);
                     return Ok(());
                 }
@@ -262,13 +278,10 @@ impl Adapter for Codex {
         meta.model = st.model.clone();
         let reread = launch.finish(&mut meta);
         sink.session(&asid, meta);
-        st.launch = Some(launch);
         if reread {
-            st = State {
-                launch: st.launch,
-                ..State::default()
-            };
+            st = State::default();
         }
+        st.launch = Some(launch);
         let mut c = Cursor::from_state(&st)?;
         c.retry = lines.partial || reread;
         Ok(c)

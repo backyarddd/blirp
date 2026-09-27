@@ -1818,10 +1818,16 @@ fn claude_print_run(h: &H) -> String {
         .replace(r#""entrypoint":"cli""#, r#""entrypoint":"sdk-cli""#)
 }
 
+/// A user line of `entrypoint` in turn `uuid` (its `promptId`), with
+/// `extra` JSON fields (e.g. an `origin`).
 fn claude_line_from(h: &H, uuid: &str, text: &str, entrypoint: &str) -> String {
+    claude_line_with(h, uuid, text, entrypoint, "")
+}
+
+fn claude_line_with(h: &H, uuid: &str, text: &str, entrypoint: &str, extra: &str) -> String {
     let l = claude_line(uuid, text, h);
     format!(
-        "{},\"entrypoint\":\"{entrypoint}\"}}\n",
+        "{},\"entrypoint\":\"{entrypoint}\",\"promptId\":\"{uuid}\"{extra}}}\n",
         l.strip_suffix('}').unwrap()
     )
 }
@@ -1848,27 +1854,124 @@ fn headless_claude_runs_make_no_session_or_project() {
     };
     assert!(none(&h));
     assert_eq!(project_count(&h), projects, "no project for a scripted run");
-    // More scripted turns (`claude -p --resume`): still nothing.
+    // A background task's notification is no prompt of the user.
     append(
         &path,
-        claude_line_from(&h, "p2", "next tick", "sdk-cli").as_bytes(),
+        claude_line_with(
+            &h,
+            "n1",
+            "<task-notification> <task-id>t1</task-id> done </task-notification>",
+            "sdk-cli",
+            r#","origin":{"kind":"task-notification"}"#,
+        )
+        .as_bytes(),
     );
     h.pass();
     assert!(none(&h));
 
-    // Resumed interactively: the whole transcript becomes a session, the
-    // part read while it looked scripted included.
+    // A second prompt (an Agent SDK app someone chats in, `-p --resume`):
+    // the whole transcript becomes a session, the part read while it
+    // looked scripted included.
     append(
         &path,
-        claude_line_from(&h, "i1", "take a look yourself", "cli").as_bytes(),
+        claude_line_from(&h, "p2", "and now the tests", "sdk-cli").as_bytes(),
     );
     h.pass();
     h.pass();
     let s = h.session("claude", CLAUDE_SID);
-    let texts: Vec<String> = h.events(&s).into_iter().map(|e| e.text).collect();
+    let ev = h.events(&s);
+    let texts: Vec<&str> = ev.iter().map(|e| e.text.as_str()).collect();
     assert_eq!(texts.len(), 11, "{texts:?}");
     assert!(texts[0].starts_with("Add a greeting helper"), "{texts:?}");
-    assert_eq!(texts.last().unwrap(), "take a look yourself");
+    assert_eq!(ev[9].kind, EventKind::System, "{texts:?}");
+    assert_eq!(
+        (ev[10].kind, ev[10].text.as_str()),
+        (EventKind::User, "and now the tests")
+    );
+}
+
+#[test]
+fn claude_scripted_run_resumed_interactively_becomes_a_session() {
+    let h = H::new();
+    let path = h.put(
+        &format!(".claude/projects/x/{CLAUDE_SID}.jsonl"),
+        claude_print_run(&h).as_bytes(),
+    );
+    h.pass();
+    append(
+        &path,
+        claude_line_from(&h, "u1", "take a look yourself", "cli").as_bytes(),
+    );
+    h.pass();
+    h.pass();
+    let s = h.session("claude", CLAUDE_SID);
+    assert_eq!(h.events(&s).len(), 10);
+}
+
+#[test]
+fn older_claude_transcripts_without_entrypoint_are_interactive() {
+    let h = H::new();
+    let old = h
+        .fill(&fixture("claude/session.jsonl"))
+        .replace(r#","entrypoint":"cli""#, "");
+    assert!(!old.contains("entrypoint"));
+    let path = h.put(
+        &format!(".claude/projects/x/{CLAUDE_SID}.jsonl"),
+        old.as_bytes(),
+    );
+    h.pass();
+    let s = h.session("claude", CLAUDE_SID);
+    // Continued with `claude -p --resume`: still the same session.
+    append(
+        &path,
+        claude_line_from(&h, "p1", "one more thing", "sdk-cli").as_bytes(),
+    );
+    h.pass();
+    let again = h.session("claude", CLAUDE_SID);
+    assert_eq!(again.id, s.id);
+    assert_eq!(h.events(&again).len(), 10);
+}
+
+#[test]
+fn claude_harness_lines_are_system_events() {
+    let h = H::new();
+    let path = put_claude(&h);
+    h.pass();
+    for (id, text, extra) in [
+        (
+            "n1",
+            "<task-notification> <task-id>t1</task-id> </task-notification>",
+            r#","origin":{"kind":"task-notification"}"#,
+        ),
+        (
+            "c1",
+            "The coordinator sent a message while you were working",
+            r#","origin":{"kind":"coordinator"},"isMeta":true"#,
+        ),
+        (
+            "n2",
+            "<task-notification> old format </task-notification>",
+            "",
+        ),
+        ("h1", "a typed prompt", r#","origin":{"kind":"human"}"#),
+    ] {
+        append(
+            &path,
+            claude_line_with(&h, id, text, "cli", extra).as_bytes(),
+        );
+    }
+    h.pass();
+    let s = h.session("claude", CLAUDE_SID);
+    let kinds: Vec<EventKind> = h.events(&s).iter().rev().take(4).map(|e| e.kind).collect();
+    assert_eq!(
+        kinds,
+        [
+            EventKind::User,
+            EventKind::System,
+            EventKind::System,
+            EventKind::System
+        ]
+    );
 }
 
 #[test]
@@ -1940,6 +2043,26 @@ fn headless_runs_blirp_launched_or_hook_created() {
         &format!(".claude/projects/x/{other}.jsonl"),
         claude_print_run(&h).replace(CLAUDE_SID, other).as_bytes(),
     );
+    // One whose hook made a project for its folder takes that project along.
+    let bot_dir = h.root.join("work").join("hookbot");
+    std::fs::create_dir_all(&bot_dir).unwrap();
+    std::fs::write(bot_dir.join("package.json"), "{}").unwrap();
+    let bot_project = h
+        .store
+        .resolve_project_with(&machine, "test-box", &bot_dir, &NonProjectDirs::default())
+        .unwrap()
+        .project;
+    let lone = "99999999-9999-4999-8999-999999999999";
+    h.store
+        .insert_session(&Session {
+            project_id: bot_project.id.clone(),
+            ..row("hooked-lone", lone, SessionOrigin::External)
+        })
+        .unwrap();
+    h.put(
+        &format!(".claude/projects/x/{lone}.jsonl"),
+        claude_print_run(&h).replace(CLAUDE_SID, lone).as_bytes(),
+    );
     // A row that already has history is never dropped by a read (only the
     // one-time cleanup, which reads the whole transcript, removes rows).
     let kept = "88888888-8888-4888-8888-888888888888";
@@ -1966,6 +2089,15 @@ fn headless_runs_blirp_launched_or_hook_created() {
     assert_eq!(s.id, "launched");
     assert_eq!(h.events(&s).len(), 9);
     assert!(h.store.get_session("hooked").unwrap().is_none());
+    assert!(h.store.get_session("hooked-lone").unwrap().is_none());
+    assert!(
+        h.store
+            .get_project(&bot_project.id)
+            .unwrap()
+            .unwrap()
+            .deleted
+    );
+    assert!(!h.store.get_project(&project.id).unwrap().unwrap().deleted);
     assert!(
         h.store
             .session_by_agent_id("claude", other)
@@ -2031,6 +2163,28 @@ fn codex_exec_runs_make_no_session() {
             .is_none()
     );
     assert_eq!(project_count(&h), projects);
+
+    // Resumed (codex writes no new `session_meta`): a second turn makes it
+    // a conversation, stored with everything read before.
+    let path = h
+        .home
+        .join(".codex/sessions/2026/01/02")
+        .join(format!("rollout-2026-01-02T09-00-00-{CODEX_SID}.jsonl"));
+    append(
+        &path,
+        format!(
+            "{}\n{}",
+            r#"{"timestamp":"2026-01-02T09:04:59.000Z","type":"turn_context","payload":{"turn_id":"t2","model":"gpt-5-codex"}}"#,
+            fixture("codex/append.jsonl")
+        )
+        .as_bytes(),
+    );
+    h.pass();
+    h.pass();
+    let s = h.session("codex", CODEX_SID);
+    let texts: Vec<String> = h.events(&s).into_iter().map(|e| e.text).collect();
+    assert!(texts[1].contains("Rename the build script"), "{texts:?}");
+    assert_eq!(texts.last().unwrap(), "Also update the README");
 }
 
 /// `fixture` with its placeholders filled for a transcript run in `dir`.
@@ -2201,9 +2355,73 @@ fn ingested_headless_runs_are_removed_once() {
         SessionOrigin::External,
         Some(&h.home.join("missing.jsonl")),
     );
+    // "gone" was distilled after a bot run's record existed: it may have
+    // reached the same record (the distiller adds no duplicate), so it stays.
+    record("r-bot3-shared", &mine.id, "bot3", "distiller", false);
+    h.store
+        .modify_session("gone", |s| {
+            s.summary = Some(json!({"summary": "s", "distilled_at": 5, "through_seq": 1}));
+        })
+        .unwrap();
+    // A `codex exec` run resumed for a second turn is a conversation.
+    let exec2 = h.put(
+        ".codex/sessions/2026/01/02/rollout-2026-01-02T09-00-00-exec2.jsonl",
+        format!(
+            "{}{}\n",
+            fixture_in("codex/rollout.jsonl", &mine_dir).replace(r#""source":"cli""#, r#""source":"exec""#),
+            r#"{"timestamp":"2026-01-02T09:04:59.000Z","type":"turn_context","payload":{"turn_id":"t2"}}"#
+        )
+        .as_bytes(),
+    );
+    row(
+        "exec2",
+        "codex",
+        &mine.id,
+        SessionOrigin::External,
+        Some(&exec2),
+    );
+    // Another machine's session is that machine's to judge.
+    h.store
+        .upsert_machine(&Machine {
+            id: "other".into(),
+            name: "laptop".into(),
+            os: "linux".into(),
+            role: MachineRole::Node,
+            last_seen: 1,
+            revoked: false,
+        })
+        .unwrap();
+    let mut foreign = row(
+        "foreign",
+        "claude",
+        &mine.id,
+        SessionOrigin::External,
+        Some(&bot3),
+    );
+    foreign.machine_id = "other".into();
+    h.store.apply(Change::Session(foreign)).unwrap();
 
     let outbox = h.outbox_len();
     h.engine.remove_headless();
+    for id in ["exec2", "foreign"] {
+        assert!(h.store.get_session(id).unwrap().is_some(), "{id} kept");
+    }
+    assert!(
+        h.store
+            .list_records(&mine.id, &blirp_core::store::RecordFilter::default())
+            .unwrap()
+            .iter()
+            .any(|r| r.id == "r-bot3-shared" && r.source_session_id.is_none())
+    );
+    assert!(
+        !h.store
+            .outbox_after(0, 1_000_000)
+            .unwrap()
+            .into_iter()
+            .skip(outbox)
+            .any(|e| e.key == "foreign"),
+        "nothing queued for another machine's session"
+    );
 
     let exists = |id: &str| h.store.get_session(id).unwrap().is_some();
     for id in ["bot1", "bot2", "bot2-sub", "exec", "bot3"] {

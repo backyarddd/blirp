@@ -106,17 +106,59 @@ fn tool_result_output(block: &Value) -> String {
     }
 }
 
-/// Whether transcript line `v` records a headless run, from its
-/// `entrypoint`: `sdk-cli` for `claude -p`, `sdk-ts`/`sdk-py` for the Agent
-/// SDKs; interactive ones are `cli`, `claude-vscode`, `claude-desktop`, ...
-/// `None` for a line without one.
-pub(crate) fn launch_of(v: &Value) -> Option<bool> {
-    let ep = v.get("entrypoint").and_then(Value::as_str)?;
-    Some(ep.starts_with("sdk-"))
+/// What conversation line `v` says about how the session runs
+/// ([`Launches`]): its `entrypoint` is `sdk-cli` for `claude -p` and
+/// `sdk-ts`/`sdk-py` for the Agent SDKs; interactive ones are `cli`,
+/// `claude-vscode`, `claude-desktop`, ...; older Claude Code wrote none (an
+/// interactive session). A prompt of the user starts a turn (`promptId`).
+pub(crate) fn launch_line(v: &Value, l: &mut Launches) {
+    let ty = v.get("type").and_then(Value::as_str);
+    if !matches!(ty, Some("user" | "assistant")) {
+        return;
+    }
+    l.run(
+        v.get("entrypoint")
+            .and_then(Value::as_str)
+            .is_some_and(|ep| ep.starts_with("sdk-")),
+    );
+    if ty == Some("user") && is_prompt(v) {
+        l.turn(v.get("promptId").and_then(Value::as_str));
+    }
 }
 
-/// Bytes every line [`launch_of`] answers for contains.
-pub(crate) const LAUNCH_NEEDLE: &[u8] = b"\"entrypoint\"";
+/// A user line the harness wrote, not the user: `isMeta`, or an `origin`
+/// other than `human` (`task-notification` for background-task results,
+/// `coordinator`, `peer`, `auto-continuation`, ...).
+fn is_harness(v: &Value) -> bool {
+    v.get("isMeta").and_then(Value::as_bool) == Some(true)
+        || v.pointer("/origin/kind")
+            .and_then(Value::as_str)
+            .is_some_and(|k| k != "human")
+}
+
+/// A user line that is a prompt: typed (or pasted) by the user, not a tool
+/// result or harness message.
+fn is_prompt(v: &Value) -> bool {
+    if is_harness(v) || v.get("isCompactSummary").and_then(Value::as_bool) == Some(true) {
+        return false;
+    }
+    match v.pointer("/message/content") {
+        Some(Value::String(s)) => !is_system_text(s),
+        Some(Value::Array(blocks)) => {
+            blocks
+                .iter()
+                .any(|b| match b.get("type").and_then(Value::as_str) {
+                    Some("text") => b
+                        .get("text")
+                        .and_then(Value::as_str)
+                        .is_some_and(|t| !is_system_text(t)),
+                    Some("image") => true,
+                    _ => false,
+                })
+        }
+        _ => false,
+    }
+}
 
 /// Plumbing a user line carries that is not something the user typed.
 fn is_system_text(s: &str) -> bool {
@@ -125,6 +167,7 @@ fn is_system_text(s: &str) -> bool {
         || t.starts_with("<local-command-stderr>")
         || t.starts_with("<local-command-caveat>")
         || t.starts_with("<system-reminder>")
+        || t.starts_with("<task-notification>")
         || t.starts_with("Caveat: The messages below")
 }
 
@@ -164,7 +207,8 @@ impl Adapter for Claude {
         if lines.reset {
             st = State::default();
         }
-        let mut launch = Launches::resume(st.launch, st.pos.line);
+        let mut launch = Launches::resume(st.launch.take(), st.pos.line);
+        launch.report(false, sink, &asid);
         let mut meta = SessionMeta {
             parent: parent.clone(),
             transcript_path: Some(src.path.display().to_string()),
@@ -182,9 +226,9 @@ impl Adapter for Claude {
                     return Ok(());
                 }
             };
-            if let Some(headless) = launch_of(&v) {
-                launch.see(headless, sink, &asid);
-            }
+            let before = launch.is_headless();
+            launch_line(&v, &mut launch);
+            launch.report(before, sink, &asid);
             let mut e = Emit::line(sink, &asid, ix);
             line(&v, &mut e, &mut st, &mut meta)?;
             super::report_cwd(sink, &asid, &meta, &mut reported);
@@ -200,13 +244,10 @@ impl Adapter for Claude {
         meta.model = st.model.clone();
         let reread = launch.finish(&mut meta);
         sink.session(&asid, meta);
-        st.launch = Some(launch);
         if reread {
-            st = State {
-                launch: st.launch,
-                ..State::default()
-            };
+            st = State::default();
         }
+        st.launch = Some(launch);
         let mut c = Cursor::from_state(&st)?;
         c.retry = lines.partial || reread;
         Ok(c)
@@ -317,7 +358,7 @@ fn user_line(v: &Value, ts: Option<i64>, e: &mut Emit<'_>, meta: &mut SessionMet
     if v.get("isCompactSummary").and_then(Value::as_bool) == Some(true) {
         return e.text(ts, EventKind::Summary, &content_text(content), None);
     }
-    if v.get("isMeta").and_then(Value::as_bool) == Some(true) {
+    if is_harness(v) {
         return e.text(ts, EventKind::System, &content_text(content), None);
     }
     let mut user_text = |e: &mut Emit<'_>, s: &str| -> Result<()> {

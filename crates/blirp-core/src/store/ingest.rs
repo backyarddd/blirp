@@ -15,6 +15,9 @@ pub struct HeadlessCleanup {
     /// Deleted sessions, ingested subagents included.
     pub sessions: Vec<String>,
     pub records: usize,
+    /// Distiller records of those sessions kept because a remaining session
+    /// was distilled after they existed (it may have reached them too).
+    pub records_kept: usize,
     /// Projects deleted because nothing else was in them.
     pub projects: Vec<String>,
 }
@@ -207,14 +210,30 @@ impl Store {
                 }
             }
             for s in &doomed {
-                let records: Vec<String> = all(
+                let records: Vec<(String, String, i64)> = all(
                     tx,
-                    "SELECT id FROM records WHERE source_session_id = ?1
+                    "SELECT id, project_id, created_at FROM records WHERE source_session_id = ?1
                        AND updated_by = ?2 AND pinned = 0",
                     params![s.id, BY_DISTILLER],
-                    |r| r.get(0),
+                    |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
                 )?;
-                for id in records {
+                for (id, project_id, created_at) in records {
+                    // The distiller adds no second record with the title of
+                    // an active one: a session that stays and was distilled
+                    // after this record existed may have found it too, so
+                    // the record is kept (its source is cleared with the
+                    // session).
+                    let later: Vec<String> = all(
+                        tx,
+                        "SELECT id FROM sessions WHERE project_id = ?1
+                           AND json_extract(summary_json, '$.distilled_at') > ?2",
+                        params![project_id, created_at],
+                        |r| r.get(0),
+                    )?;
+                    if later.iter().any(|id| !gone.contains(id.as_str())) {
+                        out.records_kept += 1;
+                        continue;
+                    }
                     apply_in(tx, &Change::DeleteRecord { id })?;
                     out.records += 1;
                 }

@@ -109,6 +109,7 @@ impl<'e> StoreSink<'e> {
         }
         let mut plans = Vec::new();
         let mut drops = Vec::new();
+        let mut scripted = Vec::new();
         let mut waiting = Vec::new();
         for (asid, p) in pending {
             if self.excluded.contains(&asid) {
@@ -141,7 +142,9 @@ impl<'e> StoreSink<'e> {
                 // A scripted run (§8) whose row a hook created before its
                 // transcript was read (a row with stored events is left to
                 // the one-time cleanup, which reads the whole transcript).
-                drops.push(s.id.clone());
+                // The project the hook resolved goes too when it was made
+                // for this row alone.
+                scripted.push(s.id.clone());
                 self.excluded.insert(asid);
                 continue;
             }
@@ -237,6 +240,15 @@ impl<'e> StoreSink<'e> {
         }
         self.pending = waiting;
 
+        if !scripted.is_empty() {
+            let gone = store.remove_headless_sessions(&eng.machine.id, &scripted)?;
+            for id in gone.sessions {
+                eng.notifier.deleted(id);
+            }
+            for p in &gone.projects {
+                eng.notifier.project(p);
+            }
+        }
         let source_key = self.source_key.clone();
         let results = store.ingest_tx(|tx| {
             for id in &drops {
