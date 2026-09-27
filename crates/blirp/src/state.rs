@@ -32,6 +32,8 @@ pub struct AppState {
     pub agents_cache: Mutex<Option<(Instant, blirp_core::claude_token::Stamp, Vec<AgentInfo>)>>,
     /// Distill queue (§9); its worker starts with the daemon.
     pub distiller: Distiller,
+    /// Handoffs being prepared, by source session (§9 Handoff pack).
+    pub handoffs: crate::memory::handoff::Handoffs,
     ingest: RwLock<Arc<dyn IngestTrigger>>,
     /// Machine sync, remote proxy and LAN portal (§10, §13).
     pub sync: crate::sync::SyncState,
@@ -71,6 +73,7 @@ impl AppState {
             stop_requested: Notify::new(),
             agents_cache: Mutex::new(None),
             distiller: Distiller::default(),
+            handoffs: Default::default(),
             ingest: RwLock::new(Arc::new(NoopIngest)),
             sync: crate::sync::SyncState::default(),
             ws_tickets: crate::api::ticket::WsTickets::default(),

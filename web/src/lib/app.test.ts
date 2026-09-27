@@ -21,6 +21,7 @@ vi.mock('./api/client', async (orig) => {
 });
 
 const { app } = await import('./app.svelte');
+const { ApiError } = await import('./api/client');
 
 const mk = (id: string, last: number): Session => ({
   id,
@@ -117,5 +118,9 @@ describe('starting a session from another one', () => {
     launch.mockRejectedValueOnce(new Error('agent not installed'));
     expect(await app.launch({ continue_from: 'src', agent: 'claude' })).toBeUndefined();
     expect(app.handoffFrom.has('src')).toBe(false);
+    // The daemon refuses a second handoff started elsewhere: explained, not an error.
+    launch.mockRejectedValueOnce(new ApiError(409, 'handoff_in_progress', 'already being started'));
+    expect(await app.launch({ continue_from: 'src', agent: 'claude' })).toBeUndefined();
+    expect(app.toasts.at(-1)).toMatchObject({ kind: 'info', text: expect.stringContaining('already being started') });
   });
 });

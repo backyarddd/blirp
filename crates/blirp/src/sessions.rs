@@ -271,6 +271,11 @@ pub async fn launch(state: &SharedState, req: LaunchSession) -> ApiResult<Sessio
         ));
     }
     let mut req = req;
+    // One handoff per source at a time (a second click, another tab).
+    let _handoff = match &req.continue_from {
+        Some(src) => Some(crate::memory::handoff::begin(state, src)?),
+        None => None,
+    };
     let source = match req.continue_from.clone() {
         Some(src) => {
             let store = state.store.clone();
@@ -308,13 +313,9 @@ pub async fn launch(state: &SharedState, req: LaunchSession) -> ApiResult<Sessio
     if agent.path.is_none() {
         return Err(agent_error(AgentError::NotInstalled(agent.display_name)));
     }
-    let st = state.clone();
-    let req2 = req.clone();
-    let prepared = crate::api::blocking(move || prepare(&st, &req2)).await?;
-    // A copy downloaded from the hub takes the hub's changes first.
-    crate::files::fast_forward(state, &prepared.cwd).await;
     // §9: the pack carries the source's summary as of now, not as of its
-    // last idle distill (bounded; never fails the launch).
+    // last idle distill (bounded; never fails the launch). Before anything
+    // is created for the new session (a worktree), since it can take a while.
     let stale = match &source {
         Some(s) => {
             crate::memory::handoff::refresh_summary(state, s, crate::memory::handoff::REFRESH_WAIT)
@@ -322,6 +323,18 @@ pub async fn launch(state: &SharedState, req: LaunchSession) -> ApiResult<Sessio
         }
         None => None,
     };
+    if *state.shutdown.borrow() {
+        return Err(ApiError::new(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "shutting_down",
+            "blirp is shutting down",
+        ));
+    }
+    let st = state.clone();
+    let req2 = req.clone();
+    let prepared = crate::api::blocking(move || prepare(&st, &req2)).await?;
+    // A copy downloaded from the hub takes the hub's changes first.
+    crate::files::fast_forward(state, &prepared.cwd).await;
 
     let now = now_ms();
     let session = Session {

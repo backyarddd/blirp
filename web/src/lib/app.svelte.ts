@@ -500,12 +500,20 @@ class AppState {
       this.handoffFrom.add(from);
     }
     try {
-      const s = await this.act(() => api.sessions.launch(req));
-      if (s) {
-        this.upsertSession(s);
-        navigate(href.sessions(s.id));
-      }
+      const s = await api.sessions.launch(req);
+      this.upsertSession(s);
+      navigate(href.sessions(s.id));
       return s;
+    } catch (e) {
+      // Another tab or device is already starting one from this session (the daemon allows one
+      // at a time per source): that one opens there, nothing failed here.
+      if (e instanceof ApiError && e.code === 'handoff_in_progress') {
+        this.toast('A new session from this session is already being started (in another tab or on another device).', 'info');
+      } else {
+        this.noteForbidden(e);
+        this.toast(errorMessage(e));
+      }
+      return undefined;
     } finally {
       if (from) this.handoffFrom.delete(from);
     }

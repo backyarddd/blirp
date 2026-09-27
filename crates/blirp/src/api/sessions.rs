@@ -76,16 +76,50 @@ async fn launch(
     Control(principal): Control,
     ApiJson(body): ApiJson<LaunchSession>,
 ) -> ApiResult<Response> {
-    if let Some(m) = body.machine.clone()
-        && m != s.machine.id
-    {
-        return crate::sync::launch_remote(&s, &m, &principal, &body).await;
+    // A launch can wait for a summary (up to 90 s with `continue_from`);
+    // run it as its own task, so a client that goes away meanwhile (a
+    // closed tab, a dropped forward) cannot stop it halfway.
+    tokio::spawn(async move {
+        if let Some(m) = body.machine.clone()
+            && m != s.machine.id
+        {
+            return launch_remote(&s, &m, &principal, &body).await;
+        }
+        let session = crate::sessions::launch(&s, body).await?;
+        Ok(axum::response::IntoResponse::into_response((
+            StatusCode::CREATED,
+            Json(session),
+        )))
+    })
+    .await
+    .map_err(|e| ApiError::internal("launch task", e))?
+}
+
+/// Forward a launch to machine `m`. A handoff from a session of this
+/// machine gets its summary refreshed here first (only this machine can
+/// distill it) and pushed toward the target, which renders the pack.
+async fn launch_remote(
+    s: &SharedState,
+    m: &str,
+    principal: &crate::api::Principal,
+    body: &LaunchSession,
+) -> ApiResult<Response> {
+    let mut _handoff = None;
+    if let Some(src) = body.continue_from.clone() {
+        let store = s.store.clone();
+        let source = blocking(move || Ok(store.get_session(&src)?)).await?;
+        if let Some(source) = source.filter(|x| x.machine_id == s.machine.id) {
+            _handoff = Some(crate::memory::handoff::begin(s, &source.id)?);
+            let wait = crate::memory::handoff::REFRESH_WAIT;
+            if crate::memory::handoff::refresh_summary(s, &source, wait)
+                .await
+                .is_none()
+            {
+                crate::memory::handoff::publish(s, crate::memory::handoff::PUBLISH_WAIT).await;
+            }
+        }
     }
-    let session = crate::sessions::launch(&s, body).await?;
-    Ok(axum::response::IntoResponse::into_response((
-        StatusCode::CREATED,
-        Json(session),
-    )))
+    crate::sync::launch_remote(s, m, principal, body).await
 }
 
 /// The machine a session runs on when that is not this one.
