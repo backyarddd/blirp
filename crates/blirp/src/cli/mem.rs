@@ -27,7 +27,7 @@ pub enum MemCommand {
         /// Only `record` or `event` hits.
         #[arg(long)]
         kind: Option<SearchHitKind>,
-        #[arg(long, default_value_t = 20)]
+        #[arg(long, default_value_t = 20, value_parser = clap::value_parser!(u32).range(1..))]
         limit: u32,
         #[arg(long)]
         json: bool,
@@ -42,7 +42,7 @@ pub enum MemCommand {
     /// Show one session: summary and transcript events.
     Show {
         session_id: String,
-        #[arg(long, default_value_t = 200)]
+        #[arg(long, default_value_t = 200, value_parser = clap::value_parser!(u32).range(1..))]
         limit: u32,
         #[arg(long)]
         json: bool,
@@ -51,7 +51,7 @@ pub enum MemCommand {
     Recent {
         #[arg(long)]
         project: Option<String>,
-        #[arg(long, default_value_t = 10)]
+        #[arg(long, default_value_t = 10, value_parser = clap::value_parser!(u32).range(1..))]
         limit: u32,
         #[arg(long)]
         json: bool,
@@ -85,6 +85,8 @@ fn open(paths: &Paths) -> anyhow::Result<Store> {
 
 fn project_of(store: &Store, paths: &Paths, arg: Option<String>) -> anyhow::Result<String> {
     if let Some(p) = arg {
+        // An unknown id is an error, not an empty answer.
+        store.live_project(&p)?;
         return Ok(p);
     }
     let cwd = std::env::current_dir()?;

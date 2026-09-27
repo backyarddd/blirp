@@ -242,6 +242,51 @@ async fn worktrees_list_and_prune() {
     assert!(o.status.success(), "{}", text(&o));
 }
 
+/// An unknown project id is an error for every command that takes one, and
+/// a limit of 0 is an invalid argument (not silently 1).
+#[test]
+fn unknown_projects_and_zero_limits_are_refused() {
+    let tmp = tempfile::tempdir().unwrap();
+    let home = tmp.path().join("blirp");
+    let user = tmp.path().join("user");
+    std::fs::create_dir_all(&user).unwrap();
+    let o = blirp(&home, &user, &["daemon", "--detach", "--port", "0"]);
+    let _stop = StopOnDrop(&home, &user);
+    assert!(o.status.success(), "{}", text(&o));
+
+    for args in [
+        &["sessions", "--project", "nope"][..],
+        &["mem", "recent", "--project", "nope"],
+        &["mem", "search", "--project", "nope", "x"],
+        &["mem", "brief", "--project", "nope"],
+    ] {
+        let o = blirp(&home, &user, args);
+        assert_eq!(o.status.code(), Some(1), "{args:?}: {}", text(&o));
+        assert!(
+            text(&o).contains("project not found"),
+            "{args:?}: {}",
+            text(&o)
+        );
+    }
+    for args in [
+        &["sessions", "--limit", "0"][..],
+        &["mem", "recent", "--limit", "0"],
+        &["mem", "search", "--limit", "0", "x"],
+        &["mem", "show", "--limit", "0", "s"],
+    ] {
+        let o = blirp(&home, &user, args);
+        assert_eq!(o.status.code(), Some(2), "{args:?}: {}", text(&o));
+    }
+    let o = blirp(&home, &user, &["sessions", "--limit", "1"]);
+    assert!(o.status.success(), "{}", text(&o));
+    let o = blirp(&home, &user, &["devices", "list"]);
+    assert!(o.status.success(), "{}", text(&o));
+    assert!(text(&o).contains("blirp hub enable"), "{}", text(&o));
+
+    let o = blirp(&home, &user, &["stop"]);
+    assert!(o.status.success(), "{}", text(&o));
+}
+
 /// `blirp agents set-token claude` with the token piped in (no terminal):
 /// stored trimmed, never echoed; refused when empty; `clear-token` removes it.
 #[test]

@@ -70,7 +70,7 @@ Opens `http://127.0.0.1:<port>/#token=...` in the default browser. The UI stores
 blirp sessions [--project <PROJECT_ID>] [--limit <N>]
 ```
 
-Recent sessions (default 20), running ones first, then by most recent activity: id, status, agent, title or folder.
+Recent sessions (default 20), running ones first, then by most recent activity: id, status, agent, title or folder. `--limit` must be at least 1 (`0` is an invalid argument, exit code 2). An unknown `--project` id is an error ("project not found", exit code 1), not an empty list.
 
 ## blirp stop
 
@@ -90,7 +90,7 @@ Checks, one line each, `[ ok ]` or `[FAIL]`: data directory writable, `config.to
 
 ## blirp mem
 
-Reads the database directly in read-only mode, so it works while the daemon is stopped (after the daemon ran once). Without `--project`, the project is the one containing the current directory; outside any project the command fails and asks for `--project <id>`.
+Reads the database directly in read-only mode, so it works while the daemon is stopped (after the daemon ran once). Without `--project`, the project is the one containing the current directory; outside any project the command fails and asks for `--project <id>`. An unknown or deleted `--project` id fails with "project not found". Every `--limit` must be at least 1 (`0` is an invalid argument, exit code 2).
 
 ```
 blirp mem search [--project <ID> | --all] [--kind record|event] [--limit <N>] [--json] <QUERY>...
@@ -174,7 +174,7 @@ blirp devices list
 blirp devices revoke <ID>
 ```
 
-On the hub: paired machines and browser devices with id, kind, state, terminal control and name. `revoke` cuts the device off immediately (connections close, reconnects refused).
+On the hub: paired machines and browser devices with id, kind, state, terminal control and name. `revoke` cuts the device off immediately (connections close, reconnects refused). The hub keeps the device list: on a paired node `list` shows none and says to run it on the hub.
 
 ## blirp service
 

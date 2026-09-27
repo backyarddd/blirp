@@ -168,7 +168,21 @@ pub async fn devices(client: &Client, action: DevicesAction) -> anyhow::Result<E
         DevicesAction::List => {
             let list: Vec<Device> = client.get("/api/devices").await?;
             if list.is_empty() {
-                println!("no devices (pair machines with `blirp hub enable` on the hub)");
+                let s: SyncStatus = client.get("/api/sync/status").await?;
+                println!(
+                    "{}",
+                    match s.role {
+                        MachineRole::Node => {
+                            "no devices here: the hub keeps them (run `blirp devices list` on the hub)"
+                        }
+                        MachineRole::Hub => {
+                            "no devices yet (pair machines with `blirp hub invite`)"
+                        }
+                        MachineRole::Standalone => {
+                            "no devices (make a machine the hub with `blirp hub enable`, then pair others with it)"
+                        }
+                    }
+                );
                 return Ok(ExitCode::SUCCESS);
             }
             println!(

@@ -65,7 +65,7 @@ enum Command {
         /// Only sessions of this project id.
         #[arg(long)]
         project: Option<String>,
-        #[arg(long, default_value_t = 20)]
+        #[arg(long, default_value_t = 20, value_parser = clap::value_parser!(u32).range(1..))]
         limit: u32,
     },
     /// Check the installation.
@@ -414,6 +414,10 @@ async fn sessions(paths: &Paths, project: Option<String>, limit: u32) -> anyhow:
     let client = Client::connect(paths).await?;
     let mut path = format!("/api/sessions?limit={limit}");
     if let Some(p) = project {
+        // An unknown id is an error (as in `blirp mem`), not "no sessions".
+        client
+            .send(reqwest::Method::GET, &format!("/api/projects/{p}"), None)
+            .await?;
         path.push_str(&format!("&project={p}"));
     }
     let page: SessionsPage = client.get(&path).await?;
