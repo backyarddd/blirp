@@ -529,3 +529,52 @@ fn urlencode(p: &Path) -> String {
         })
         .collect()
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn folderless_workspaces_sync_and_land_in_the_other_workspace() {
+    if !in_temp_home("folderless_workspaces_sync_and_land_in_the_other_workspace") {
+        return;
+    }
+    let r = rig().await;
+    // A project without folders works in B's blirp workspace.
+    let p: ProjectSummary =
+        r.b.ok(
+            Method::POST,
+            "/api/projects",
+            Some(json!({"name": "notes"})),
+        )
+        .await;
+    let pid = p.project.id.clone();
+    let ws_b = PathBuf::from(p.workspace.clone().expect("workspace"));
+    write(&ws_b.join("todo.md"), "from the workspace");
+    // Creating it on demand is what the files API does too.
+    let _: FilesPreview =
+        r.b.get(&format!("/api/projects/{pid}/files-sync/preview"))
+            .await;
+    eventually("the workspace uploaded", || async {
+        hub_files(&r.hub, &pid).await.is_some_and(|(_, n)| n == 1)
+    })
+    .await;
+    let root = hub_files(&r.hub, &pid).await.unwrap().0;
+    // C's copy goes to C's own workspace and adds no folder to the project.
+    let on_c = r.c.download(&root, "ignored").await;
+    let ws_c = r.c.daemon.state.paths.workspace_dir(&pid).unwrap();
+    assert_eq!(
+        dunce::canonicalize(&on_c).unwrap(),
+        dunce::canonicalize(&ws_c).unwrap()
+    );
+    assert_eq!(
+        std::fs::read_to_string(ws_c.join("todo.md")).unwrap(),
+        "from the workspace"
+    );
+    let p: ProjectSummary = r.c.get(&format!("/api/projects/{pid}")).await;
+    assert!(p.paths.is_empty(), "{:?}", p.paths);
+
+    // Chats buckets never sync.
+    let roots = r.hub.daemon.state.store.hub_file_roots().unwrap();
+    assert!(
+        roots.iter().all(|x| !x.project_id.starts_with("chats-")),
+        "{roots:?}"
+    );
+    r.shutdown().await;
+}

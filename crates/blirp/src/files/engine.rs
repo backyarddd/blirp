@@ -435,21 +435,36 @@ fn tracked_folders(
     let mut out = Vec::new();
     let mut live = HashSet::new();
     for s in store.list_project_summaries(&st.machine.id)? {
-        if s.is_home {
+        if s.is_home || s.project.chats {
             continue;
         }
-        for p in s.paths.iter().filter(|p| p.local) {
-            live.insert(p.path.clone());
-            let row = rows.get(&p.path);
+        // A project without folders works in this machine's workspace (§5):
+        // it syncs like a folder once it exists.
+        let workspace = (s.paths.is_empty())
+            .then(|| st.paths.workspace_dir(&s.project.id).ok())
+            .flatten()
+            .filter(|w| w.is_dir())
+            .map(|w| dunce::canonicalize(&w).unwrap_or(w).display().to_string());
+        let folders: Vec<String> = s
+            .paths
+            .iter()
+            .filter(|p| p.local)
+            .map(|p| p.path.clone())
+            .chain(workspace)
+            .collect();
+        for path in folders {
+            let p = &path;
+            live.insert(p.clone());
+            let row = rows.get(p);
             let origin = row.is_none_or(|r| r.origin);
             let root_id = row.map_or_else(
-                || blirp_core::files::root_id(&st.machine.id, &p.path),
+                || blirp_core::files::root_id(&st.machine.id, p),
                 |r| r.root_id.clone(),
             );
             let never = if row.is_some_and(|r| r.detached) {
                 Some("the hub copy was deleted; this folder no longer syncs".to_string())
             } else {
-                super::local::never_synced(store, st.paths.home(), &s.project, Path::new(&p.path))
+                super::local::never_synced(store, st.paths.home(), &s.project, Path::new(p))
             };
             let effective = modes
                 .get(&s.project.id)
@@ -458,7 +473,7 @@ fn tracked_folders(
                 .effective(global);
             if origin && effective && never.is_none() && row.is_none() {
                 store.put_file_copy(&FileCopy {
-                    path: p.path.clone(),
+                    path: p.clone(),
                     root_id: root_id.clone(),
                     origin: true,
                     seen: 0,
@@ -468,7 +483,7 @@ fn tracked_folders(
             }
             out.push(Tracked {
                 copy: Copy {
-                    key: p.path.clone(),
+                    key: p.clone(),
                     root_id,
                     origin,
                 },
@@ -556,8 +571,13 @@ async fn run(
     };
     let mut pending: BTreeSet<String> = BTreeSet::new();
     let mut full = false;
+    // Reconcile only: new folders are scanned, known ones are not.
+    let mut refresh = false;
+    // New or changed projects (a folder registered, a workspace in use):
+    // reconcile soon rather than at the next rescan.
+    let mut project_events = engine.weak.upgrade().map(|st| st.events.subscribe());
     loop {
-        if !full && pending.is_empty() {
+        if !full && !refresh && pending.is_empty() {
             tokio::select! {
                 _ = stop.changed() => break,
                 _ = rescan.tick() => full = true,
@@ -575,7 +595,15 @@ async fn run(
                         }
                     }
                 }
-                n = async { match notes.as_mut() { Some(r) => r.recv().await.ok(), None => std::future::pending().await } } => {
+                ev = async { match project_events.as_mut() { Some(r) => r.recv().await, None => std::future::pending().await } } => {
+                match ev {
+                    Ok(ServerEvent::ProjectUpdated { .. } | ServerEvent::SessionCreated { .. })
+                    | Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => refresh = true,
+                    Ok(_) => {}
+                    Err(tokio::sync::broadcast::error::RecvError::Closed) => project_events = None,
+                }
+            }
+            n = async { match notes.as_mut() { Some(r) => r.recv().await.ok(), None => std::future::pending().await } } => {
                     if n.is_some() {
                         engine.emit();
                     }
@@ -594,8 +622,12 @@ async fn run(
                 },
             }
         }
-        if full {
+        if full || refresh {
+            let before: HashSet<String> =
+                engine.tracked().into_iter().map(|t| t.copy.key).collect();
+            let scan_all = full;
             full = false;
+            refresh = false;
             engine.reconcile().await;
             let tracked = engine.tracked();
             // Watch what may upload; drop the rest.
@@ -623,7 +655,12 @@ async fn run(
                     }
                 }
             }
-            pending.extend(tracked.into_iter().map(|t| t.copy.key));
+            pending.extend(
+                tracked
+                    .into_iter()
+                    .map(|t| t.copy.key)
+                    .filter(|k| scan_all || !before.contains(k)),
+            );
             engine.emit();
         }
         while let Some(key) = pending.pop_first() {

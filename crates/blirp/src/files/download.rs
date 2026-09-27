@@ -41,16 +41,16 @@ pub enum DownloadError {
     Unavailable(String),
 }
 
-/// A folderless project's workspace (`BLIRP_HOME/workspaces/<project>`):
-/// its copy goes to the same place on this machine.
-pub fn is_workspace(origin_path: &str, project_id: &str) -> bool {
+/// Whether a root is a folderless project's workspace
+/// (`BLIRP_HOME/workspaces/<project id>` on its origin, §5). Its copy goes
+/// to this machine's workspace of the project (the root's current project:
+/// a merged project's workspace follows the merge), without a folder row.
+pub fn is_workspace(origin_path: &str) -> bool {
     let parts: Vec<&str> = origin_path
         .split(['/', '\\'])
         .filter(|p| !p.is_empty())
         .collect();
-    parts.len() >= 2
-        && parts[parts.len() - 1] == project_id
-        && parts[parts.len() - 2] == "workspaces"
+    matches!(parts.as_slice(), [.., "workspaces", id] if blirp_core::is_safe_id(id))
 }
 
 /// Folder name for a copy: the origin folder's name when it is a valid
@@ -287,7 +287,19 @@ async fn run(
             false
         }
     };
-    if !cloned {
+    let workspace = is_workspace(&root.path) && {
+        let (store, pid) = (st.store.clone(), root.project_id.clone());
+        tokio::task::spawn_blocking(move || store.project_paths(&pid).map(|p| p.is_empty()))
+            .await
+            .map_err(|e| e.to_string())?
+            .map_err(|e| e.to_string())?
+    };
+    if workspace {
+        // Owner-only, like every workspace.
+        st.paths
+            .ensure_workspace(&root.project_id)
+            .map_err(|e| format!("cannot create the workspace: {e}"))?;
+    } else if !cloned {
         std::fs::create_dir_all(dest)
             .map_err(|e| format!("cannot create {}: {e}", dest.display()))?;
     }
@@ -310,6 +322,10 @@ async fn run(
             created_at: blirp_core::now_ms(),
             detached: false,
         })?;
+        // A workspace stays folderless: the project has no folder row.
+        if workspace {
+            return Ok(());
+        }
         store
             .add_project_folder(&pid, &machine, Path::new(&k))
             .map(|_| ())
@@ -408,8 +424,9 @@ mod tests {
         assert_eq!(folder_name("/home/u/code/my-app", "x"), "my-app");
         assert_eq!(folder_name(r"C:\Users\u\My App", "My App"), "My-App");
         assert_eq!(folder_name("/", "..."), "project");
-        assert!(is_workspace("/home/u/.blirp/workspaces/p1", "p1"));
-        assert!(is_workspace(r"C:\Users\u\.blirp\workspaces\p1", "p1"));
-        assert!(!is_workspace("/home/u/workspaces/other", "p1"));
+        assert!(is_workspace("/home/u/.blirp/workspaces/p1"));
+        assert!(is_workspace(r"C:\Users\u\.blirp\workspaces\p1"));
+        assert!(!is_workspace("/home/u/workspaces/../x"));
+        assert!(!is_workspace("/home/u/code/p1"));
     }
 }

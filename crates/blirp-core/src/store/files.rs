@@ -1,4 +1,4 @@
-//! Project file sync tables of every machine (migration 10,
+//! Project file sync tables of every machine (migration 11,
 //! docs/project-files.md): its working copies of roots, the base each copy
 //! last agreed on with the hub per path, and the hash cache. None of these
 //! tables replicate; the hub's own tables are in `file_hub`.

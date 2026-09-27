@@ -17,7 +17,8 @@ Each project folder on a machine (its **origin**) uploads its working tree to th
 
 - The same git repo cloned on two machines is two folders on the hub, never merged file by file: git merges those.
 - `.git` itself is never synced (copying it while git writes corrupts it, and hooks would run on the receiver). Unpushed commits travel through your git remote; a copy made elsewhere shows them as local changes.
-- The Home project, scratch folders blirp made on its own (temp folders, tool data), anything inside blirp's data folder (except folderless-project workspaces) and folders on removable or network drives are never synced; the project's **Files on hub** tab says why.
+- A project without folders syncs its blirp workspace on each machine like a folder; a copy downloaded elsewhere goes to that machine's own workspace of the project (and the project stays without folders).
+- Chats (sessions that belong to no project), scratch folders blirp made on its own (temp folders, tool data), anything else inside blirp's data folder and folders on removable or network drives are never synced; the project's **Files on hub** tab says why.
 - Changes upload about 2 seconds after they settle, and every folder is rescanned at start and every 10 minutes. Identical content is stored once.
 - The origin folder is **upload-only**: blirp never writes into it unless you click **Bring changes here**.
 

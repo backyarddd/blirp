@@ -34,15 +34,15 @@ pub fn is_git(root: &Path) -> bool {
     std::fs::symlink_metadata(root.join(".git")).is_ok()
 }
 
-/// Buckets that hold sessions without a folder of their own: the per
-/// machine Home project. (The Chats bucket of folderless sessions is
-/// matched here too once it exists; see docs/project-files.md.)
-pub fn is_bucket(store: &Store, project_id: &str) -> bool {
-    store
-        .home_project_id()
-        .ok()
-        .flatten()
-        .is_some_and(|h| h == project_id)
+/// Buckets that hold sessions of no project: a machine's Chats project
+/// (§5), or the pre-Chats Home project it replaces.
+pub fn is_bucket(store: &Store, project: &Project) -> bool {
+    project.chats
+        || store
+            .home_project_id()
+            .ok()
+            .flatten()
+            .is_some_and(|h| h == project.id)
 }
 
 /// Why `root` of `project` is never synced, or None when it may be.
@@ -55,13 +55,17 @@ pub fn never_synced(
     project: &Project,
     root: &Path,
 ) -> Option<String> {
-    if is_bucket(store, &project.id) {
+    if is_bucket(store, project) {
         return Some("sessions without a project folder are never synced".into());
     }
     let data = path_key(&dunce::canonicalize(data_dir).unwrap_or_else(|_| data_dir.to_path_buf()));
     let key = path_key(root);
     if key.starts_with(&data) && !key.starts_with(data.join("workspaces")) {
         return Some("folders inside blirp's data folder are never synced".into());
+    }
+    if key.starts_with(data.join("workspaces")) {
+        // A project's workspace: synced like any folder.
+        return None;
     }
     if project.updated_at == project.created_at && NonProjectDirs::from_process().contains(root) {
         return Some("scratch folders (temp, tool data) are never synced".into());

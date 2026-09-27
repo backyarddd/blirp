@@ -100,7 +100,7 @@ pub fn resolve_inside(root: &Path, rel: &str, data_dir: &Path) -> ApiResult<Path
 
 /// The project root on this machine: `root` if given (must be registered), else the first one.
 /// A project without folders: its blirp workspace here (created on demand, empty).
-fn project_root(s: &SharedState, id: &str, root: Option<&str>) -> ApiResult<PathBuf> {
+pub(crate) fn project_root(s: &SharedState, id: &str, root: Option<&str>) -> ApiResult<PathBuf> {
     let project = s.store.live_project(id)?;
     let mut roots = s.store.local_roots(id, &s.machine.id)?;
     if roots.is_empty() && !project.chats && s.store.project_paths(id)?.is_empty() {

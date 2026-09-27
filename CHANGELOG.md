@@ -10,6 +10,8 @@ so every tag needs one.
 
 ## [Unreleased]
 
+## [0.1.1] - 2026-09-26
+
 ### Added
 
 - Project files on the hub ([docs/project-files.md](docs/project-files.md)):
@@ -22,18 +24,6 @@ so every tag needs one.
   Default/On/Off, Preview, Pause, first-run grace period and banner,
   `[sync] project_files` and a `[files]` config section. Portal browser
   devices need the new Files permission for project files.
-
-### Changed
-
-- LAN portal browser devices no longer read project files by default: the
-  project file browser, file contents, git diffs and project file sync need
-  the new **Files** permission (Settings > Machines & Sync > Devices; off for
-  existing and new devices), answering 403 `files_not_allowed` without it.
-
-## [0.1.1] - 2026-09-26
-
-### Added
-
 - Paste images and files into a terminal pane, or drop files onto it: they
   are saved on the machine running the session (also through the hub) and
   their paths typed into the terminal, so Claude Code and Codex attach
@@ -95,6 +85,10 @@ so every tag needs one.
 
 ### Changed
 
+- LAN portal browser devices no longer read project files by default: the
+  project file browser, file contents, git diffs and project file sync need
+  the new **Files** permission (Settings > Machines & Sync > Devices; off for
+  existing and new devices), answering 403 `files_not_allowed` without it.
 - `blirp service install` on Linux prints the `sudo loginctl enable-linger`
   hint only when linger is off, naming the user, and finds the user's
   systemd without `XDG_RUNTIME_DIR` (after `sudo -iu`) when linger is on.

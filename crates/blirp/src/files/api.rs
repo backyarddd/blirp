@@ -81,22 +81,18 @@ fn need_engine(s: &SharedState) -> ApiResult<Arc<Engine>> {
 /// The project's folder on this machine: `root` when given (it must be
 /// one), else the first.
 pub(crate) fn local_root(s: &SharedState, id: &str, root: Option<&str>) -> ApiResult<PathBuf> {
-    s.store.live_project(id)?;
-    let roots = s.store.local_roots(id, &s.machine.id)?;
+    // A project without folders has its workspace here (created on demand);
+    // the engine keys it by its canonical path. A picked `root` may name it
+    // either way.
+    let canon = |p: PathBuf| dunce::canonicalize(&p).unwrap_or(p);
     match root {
-        Some(r) => roots
-            .into_iter()
-            .find(|p| p.as_os_str() == r)
-            .ok_or_else(|| {
-                ApiError::bad_request("root is not a folder of this project on this machine")
-            }),
-        None => roots.into_iter().next().ok_or_else(|| {
-            ApiError::new(
-                StatusCode::NOT_FOUND,
-                "no_local_folder",
-                "project has no folder on this machine",
-            )
-        }),
+        Some(r) => crate::api::files::project_root(s, id, Some(r))
+            .or_else(|e| {
+                let ws = canon(crate::api::files::project_root(s, id, None)?);
+                if ws.as_os_str() == r { Ok(ws) } else { Err(e) }
+            })
+            .map(canon),
+        None => crate::api::files::project_root(s, id, None).map(canon),
     }
 }
 
@@ -572,8 +568,13 @@ fn destination(s: &SharedState, root: &RootInfo, body: &DownloadFiles) -> ApiRes
             "this machine's home folder is unknown",
         )
     })?;
-    if super::download::is_workspace(&root.path, &root.project_id) {
-        let dest = s.paths.home().join("workspaces").join(&root.project_id);
+    if super::download::is_workspace(&root.path)
+        && s.store.project_paths(&root.project_id)?.is_empty()
+    {
+        let dest = s
+            .paths
+            .workspace_dir(&root.project_id)
+            .map_err(|e| ApiError::bad_request(e.to_string()))?;
         return if empty_or_missing(&dest) {
             Ok(dest)
         } else {

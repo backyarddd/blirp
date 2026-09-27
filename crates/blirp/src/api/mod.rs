@@ -1,6 +1,6 @@
 //! HTTP/WS API (§11): router, auth, origin check, security headers, errors.
 
-mod files;
+pub(crate) mod files;
 mod integration;
 mod machines;
 mod memory;

@@ -1,4 +1,4 @@
-//! The hub's project file tables (migration 10, docs/project-files.md):
+//! The hub's project file tables (migration 11, docs/project-files.md):
 //! roots, the current entry of every path, replaced versions, blob
 //! bookkeeping and per-project modes. A commit is one transaction: each
 //! change is accepted only when the path's current version equals the
@@ -99,7 +99,8 @@ fn root_info_row(r: &Row<'_>) -> rusqlite::Result<RootInfo> {
     })
 }
 
-const ROOTS_SQL: &str = "SELECT r.root_id, coalesce(pp.project_id, r.project_id) AS project_id,
+const ROOTS_SQL: &str = "SELECT r.root_id,
+       coalesce(pp.project_id, m2.merged_into, m1.merged_into, r.project_id) AS project_id,
        r.machine_id, coalesce(m.name, '') AS machine_name, coalesce(m.revoked, 0) AS revoked,
        r.path, r.head, r.created_at, r.updated_at, r.manifest_json,
        (SELECT count(*) FROM file_entries e WHERE e.root_id = r.root_id
@@ -110,6 +111,8 @@ const ROOTS_SQL: &str = "SELECT r.root_id, coalesce(pp.project_id, r.project_id)
           AND (e.hash IS NOT NULL OR e.link IS NOT NULL) AND e.path GLOB '*.conflict-*') AS conflicts
      FROM file_roots r
      LEFT JOIN project_paths pp ON pp.machine_id = r.machine_id AND pp.path = r.path
+     LEFT JOIN projects m1 ON m1.id = r.project_id
+     LEFT JOIN projects m2 ON m2.id = m1.merged_into
      LEFT JOIN machines m ON m.id = r.machine_id";
 
 fn get_entry(c: &Connection, root: &str, path: &str) -> Result<Option<IndexEntry>> {
@@ -119,6 +122,46 @@ fn get_entry(c: &Connection, root: &str, path: &str) -> Result<Option<IndexEntry
         params![root, path],
         entry_row,
     )
+}
+
+/// The project a merged project's work now belongs to (`merged_into`,
+/// followed a few steps; the project itself when it was not merged).
+fn follow_merges(c: &Connection, project: &str) -> Result<String> {
+    let mut id = project.to_string();
+    for _ in 0..8 {
+        let next: Option<Option<String>> = one(
+            c,
+            "SELECT merged_into FROM projects WHERE id = ?1",
+            params![id],
+            |r| r.get(0),
+        )?;
+        match next.flatten() {
+            Some(n) if n != id => id = n,
+            _ => break,
+        }
+    }
+    Ok(id)
+}
+
+/// A folderless project's workspace (`.../workspaces/<project id>`, §5)
+/// claimed as a root: its (live, non-Chats) project, following merges.
+/// Workspaces have no `project_paths` row; the path names the project.
+fn workspace_project(c: &Connection, path: &str) -> Result<Option<String>> {
+    let parts: Vec<&str> = path.split(['/', '\\']).filter(|p| !p.is_empty()).collect();
+    let [.., parent, id] = parts.as_slice() else {
+        return Ok(None);
+    };
+    if *parent != "workspaces" || !crate::is_safe_id(id) {
+        return Ok(None);
+    }
+    let target = follow_merges(c, id)?;
+    let live: Option<bool> = one(
+        c,
+        "SELECT chats FROM projects WHERE id = ?1 AND deleted = 0",
+        params![target],
+        |r| r.get(0),
+    )?;
+    Ok((live == Some(false)).then_some(target))
 }
 
 fn mode_in(c: &Connection, project: &str) -> Result<FilesMode> {
@@ -488,6 +531,10 @@ impl Store {
                         params![input.machine_id, p],
                         |r| r.get(0),
                     )?;
+                    let project = match project {
+                        Some(p) => Some(p),
+                        None => workspace_project(tx, p)?,
+                    };
                     let Some(project) = project else {
                         return Ok(Err(CommitRefused::Pending));
                     };
@@ -499,14 +546,18 @@ impl Store {
                     (input.machine_id.to_string(), p.to_string(), project, 0)
                 }
             };
-            // The folder may have moved to another project (merge).
+            // The folder may have moved to another project (merge); a
+            // workspace follows its project's merge.
             let current: Option<String> = one(
                 tx,
                 "SELECT project_id FROM project_paths WHERE machine_id = ?1 AND path = ?2",
                 params![origin_machine, origin_path],
                 |r| r.get(0),
             )?;
-            let project = current.unwrap_or(stored_project);
+            let project = match current {
+                Some(p) => p,
+                None => follow_merges(tx, &stored_project)?,
+            };
             if mode_in(tx, &project)? == FilesMode::Off {
                 return Ok(Err(CommitRefused::Off));
             }
@@ -896,6 +947,48 @@ mod tests {
             h.commit("m2", false, &[del("f", 4)]).unwrap().results[0],
             ChangeResult::Ok { .. }
         ));
+    }
+
+    #[test]
+    fn workspaces_register_and_follow_merges() {
+        let h = hub();
+        let target = h.store.create_project("target", None).unwrap();
+        let ws_project = h.store.create_project("notes", None).unwrap();
+        let path = format!("/home/u/.blirp/workspaces/{}", ws_project.id);
+        let root = crate::files::root_id("origin", &path);
+        let commit = |claim: &str| {
+            h.store
+                .hub_file_commit(&CommitInput {
+                    root_id: &crate::files::root_id("origin", claim),
+                    machine_id: "origin",
+                    machine_name: "origin",
+                    claim_path: Some(claim),
+                    manifest: None,
+                    changes: &[put("n.md", 0, "a")],
+                    now: 1,
+                })
+                .unwrap()
+        };
+        assert!(commit(&path).is_ok());
+        assert_eq!(
+            h.store.hub_file_root(&root).unwrap().unwrap().project_id,
+            ws_project.id
+        );
+        // Not a workspace, a Chats bucket, or an unknown project: refused.
+        assert_eq!(
+            commit("/home/u/.blirp/workspaces/nope").unwrap_err(),
+            CommitRefused::Pending
+        );
+        assert_eq!(
+            commit("/home/u/other/x").unwrap_err(),
+            CommitRefused::Pending
+        );
+        // Merged: the root follows it.
+        h.store.merge_projects(&ws_project.id, &target.id).unwrap();
+        assert_eq!(
+            h.store.hub_file_root(&root).unwrap().unwrap().project_id,
+            target.id
+        );
     }
 
     #[test]
