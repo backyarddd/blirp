@@ -201,12 +201,11 @@
   {#if app.control}
     <button
       type="button"
-      class="icon-btn"
-      aria-label="Fork session"
-      title="Fork: new session with this session's handoff"
+      class="btn sm"
+      title="Start new session from this session: a fresh session that starts with this session's handoff"
       onclick={() => app.launch({ continue_from: session.id, agent: session.agent })}
     >
-      <GitFork size={17} />
+      <GitFork size={15} aria-hidden="true" />Start new session from this session
     </button>
   {/if}
   <button

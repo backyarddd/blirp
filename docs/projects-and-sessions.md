@@ -123,7 +123,7 @@ External sessions with a known id can be resumed too, which brings them into a b
 
 ### Continue in / fork
 
-The agent chip in the session toolbar opens **Continue in...**: start a new session with any installed agent that picks up where this one left off. **Fork** (the branch icon) is the same with the same agent. Both work on live and ended sessions.
+The agent chip in the session toolbar opens **Continue in...**: start a new session with any installed agent that picks up where this one left off. **Start new session from this session** is the same with the same agent: a fresh session that starts with this session's handoff. Both work on live and ended sessions.
 
 The new session gets a handoff pack appended to its injected memory: the source session's title, agent, date and folder, its summary, the project brief, its last 12 user/assistant turns (each up to 1 500 characters), files it touched and the open threads, capped at 12 000 characters (oldest turns are dropped first). The pack is also saved as `~/.blirp/launch/<new-session>/handoff.md`. Unless you give a prompt, the first prompt is "Continue the work described in the blirp handoff above.", or for agents without memory injection "Read the blirp handoff in <path to handoff.md> and continue the work described there." (no prompt for Shell). The new session records the source as its parent (`parent_session_id`).
 
