@@ -6,7 +6,10 @@
 //! A node leaving the hub sends `leave` -> `left`: the hub revokes it (the
 //! connection's TLS-authenticated endpoint id, never an id from the message).
 //! The hub opens one unidirectional stream on which it sends
-//! `notify {head}` whenever `hub_log` grows, so the node pulls promptly.
+//! `notify {head}` whenever `hub_log` grows, so the node pulls promptly,
+//! and (protocol 2) `presence {machines}` whenever a machine connects or
+//! disconnects and every minute while connected. Presence is runtime state:
+//! it is never logged or replicated as a change.
 //! Batches are at most [`MAX_BATCH_ENTRIES`] entries / [`MAX_BATCH_BYTES`].
 //! Every apply and its cursor move happen in one SQLite transaction
 //! (see `blirp_core::store::sync`), so a crash at any point resumes cleanly
@@ -30,6 +33,15 @@ pub const OUTBOX_POLL: Duration = Duration::from_millis(500);
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(60);
 /// Error code of a pull whose cursor went back behind the compacted log.
 pub const RESYNC_REQUIRED: &str = "resync_required";
+
+/// Whether a machine has a live sync connection to the hub, as the hub sees
+/// it. `last_seen`: connect, disconnect or the latest minute while connected.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Presence {
+    pub machine_id: String,
+    pub online: bool,
+    pub last_seen: i64,
+}
 
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
@@ -65,6 +77,10 @@ pub enum HubMsg {
     Notify {
         head: i64,
     },
+    /// Every paired machine's presence, the hub included (protocol 2).
+    Presence {
+        machines: Vec<Presence>,
+    },
     /// Answer to `leave`: the machine is revoked.
     Left,
     Error {
@@ -94,6 +110,7 @@ pub async fn serve_hub(
     own_id: String,
     node_id: String,
     mut head: watch::Receiver<i64>,
+    mut presence: watch::Receiver<Vec<Presence>>,
     on_exchange: impl Fn(bool) + Send + Sync + 'static,
 ) -> Result<HubSessionEnd> {
     let (mut send, mut recv) = conn.accept_bi().await.map_err(SyncError::connection)?;
@@ -101,12 +118,12 @@ pub async fn serve_hub(
     let NodeMsg::Hello { versions, machine } = hello else {
         return Err(SyncError::Protocol("expected hello".into()));
     };
-    let Some(version) = crate::negotiate(&versions) else {
+    let Some(version) = crate::negotiate_from(crate::SYNC_VERSIONS, &versions) else {
         write_frame(
             &mut send,
             &HubMsg::Error {
                 code: "unsupported_version".into(),
-                message: format!("hub speaks {:?}", crate::PROTOCOL_VERSIONS),
+                message: format!("hub speaks {:?}", crate::SYNC_VERSIONS),
             },
         )
         .await?;
@@ -129,13 +146,31 @@ pub async fn serve_hub(
     // Notifications on their own stream so they never interleave with replies.
     let mut notify = conn.open_uni().await.map_err(SyncError::connection)?;
     write_frame(&mut notify, &HubMsg::Notify { head: current }).await?;
+    let presence_frames = version >= 2;
     let notifier = tokio::spawn(async move {
-        while head.changed().await.is_ok() {
-            let h = *head.borrow_and_update();
-            if write_frame(&mut notify, &HubMsg::Notify { head: h })
+        if presence_frames {
+            let machines = presence.borrow_and_update().clone();
+            if write_frame(&mut notify, &HubMsg::Presence { machines })
                 .await
                 .is_err()
             {
+                return;
+            }
+        }
+        loop {
+            // Only `changed()` waits in the select: frame writes are not
+            // cancel safe.
+            let msg = tokio::select! {
+                r = head.changed() => match r {
+                    Ok(()) => HubMsg::Notify { head: *head.borrow_and_update() },
+                    Err(_) => break,
+                },
+                r = presence.changed(), if presence_frames => match r {
+                    Ok(()) => HubMsg::Presence { machines: presence.borrow_and_update().clone() },
+                    Err(_) => break,
+                },
+            };
+            if write_frame(&mut notify, &msg).await.is_err() {
                 break;
             }
         }
@@ -220,7 +255,8 @@ pub async fn serve_hub(
 
 /// Node side of a connected sync session: handshake, then push/pull until
 /// the connection fails or `shutdown` flips. `on_synced` runs after every
-/// successful exchange.
+/// successful exchange, `on_presence` for every presence frame (only from a
+/// hub speaking protocol 2).
 pub async fn run_node(
     conn: &Connection,
     store: Arc<Store>,
@@ -228,6 +264,7 @@ pub async fn run_node(
     hub_id: String,
     mut shutdown: watch::Receiver<bool>,
     on_synced: impl Fn() + Send + Sync,
+    on_presence: impl Fn(Vec<Presence>) + Send + Sync + 'static,
 ) -> Result<()> {
     let (mut send, mut recv) = handshake(conn, machine, &hub_id).await?;
 
@@ -239,10 +276,14 @@ pub async fn run_node(
         let Ok(mut uni) = uni_conn.accept_uni().await else {
             return;
         };
-        while let Ok(HubMsg::Notify { head }) =
-            read_frame::<RecvStream, HubMsg>(&mut uni, MAX_CONTROL_FRAME).await
-        {
-            head_tx.send_replace(head);
+        loop {
+            match read_frame::<RecvStream, HubMsg>(&mut uni, MAX_FRAME).await {
+                Ok(HubMsg::Notify { head }) => {
+                    head_tx.send_replace(head);
+                }
+                Ok(HubMsg::Presence { machines }) => on_presence(machines),
+                _ => break,
+            }
         }
     });
 
@@ -324,7 +365,7 @@ async fn handshake(
     write_frame(
         &mut send,
         &NodeMsg::Hello {
-            versions: crate::PROTOCOL_VERSIONS.to_vec(),
+            versions: crate::SYNC_VERSIONS.to_vec(),
             machine,
         },
     )

@@ -3,6 +3,7 @@
 
 use crate::pair::{self, InviteBook, MachineMeta, PairIds, Ticket};
 use crate::proxy::{self, ProxyOpen, ProxyPrincipal, ProxyReply, ProxyStream};
+use crate::repl::Presence;
 use crate::wire::{MAX_CONTROL_FRAME, read_frame, write_frame};
 use crate::{
     ALPN_PAIR, ALPN_PROXY, ALPN_SYNC, HUB_MARKER, MDNS_SERVICE, Result, SyncError, blocking, repl,
@@ -35,6 +36,9 @@ const PAIR_TIMEOUT: Duration = Duration::from_secs(60);
 const BACKOFF_MIN: Duration = Duration::from_secs(1);
 const BACKOFF_MAX: Duration = Duration::from_secs(60);
 const LAN_DISCOVERY: Duration = Duration::from_secs(5);
+/// Hub: how often connected machines' `last_seen` advances (and presence is
+/// sent to the nodes) while nothing connects or disconnects.
+const PRESENCE_EVERY: Duration = Duration::from_secs(60);
 /// QUIC application close codes.
 const CLOSE_OK: u32 = 0;
 const CLOSE_FORBIDDEN: u32 = 403;
@@ -109,6 +113,13 @@ struct Inner {
     peers: Mutex<HashMap<String, Peer>>,
     hub_proxy: Mutex<Option<Connection>>,
     status: Mutex<RuntimeStatus>,
+    /// Hub: every paired machine's presence (runtime only, never replicated).
+    /// Node: what the hub last reported, emptied when the connection drops.
+    presence: Mutex<HashMap<String, Presence>>,
+    /// Hub: the presence list sent to the nodes.
+    presence_tx: watch::Sender<Vec<Presence>>,
+    /// Node: when the connection to the hub was last known to be up.
+    hub_seen: Mutex<Option<i64>>,
     proxy: ProxyServe,
     on_status: StatusHook,
     shutdown: watch::Receiver<bool>,
@@ -227,6 +238,29 @@ impl SyncService {
         let (shutdown_tx, shutdown) = watch::channel(false);
         let store = opts.store.clone();
         let head = blocking(move || Ok(store.hub_head()?)).await?;
+        // Hub: every paired machine is offline until it connects.
+        let presence = if hub {
+            let store = opts.store.clone();
+            let own = opts.machine.id.clone();
+            blocking(move || {
+                Ok(store
+                    .list_machines()?
+                    .into_iter()
+                    .filter(|m| m.id != own && !m.revoked)
+                    .map(|m| {
+                        let p = Presence {
+                            machine_id: m.id.clone(),
+                            online: false,
+                            last_seen: m.last_seen,
+                        };
+                        (m.id, p)
+                    })
+                    .collect::<HashMap<_, _>>())
+            })
+            .await?
+        } else {
+            HashMap::new()
+        };
         let inner = Arc::new(Inner {
             ep,
             store: opts.store,
@@ -243,14 +277,19 @@ impl SyncService {
                 connected: hub,
                 ..Default::default()
             }),
+            presence: Mutex::new(presence),
+            presence_tx: watch::channel(Vec::new()).0,
+            hub_seen: Mutex::new(None),
             proxy: opts.proxy,
             on_status: opts.on_status,
             shutdown,
         });
         let mut tasks = vec![tokio::spawn(accept_loop(inner.clone()))];
         if hub {
+            publish_presence(&inner);
             tasks.push(tokio::spawn(hub_log_loop(inner.clone())));
             tasks.push(tokio::spawn(hub_compact_loop(inner.clone())));
+            tasks.push(tokio::spawn(hub_presence_loop(inner.clone())));
         } else {
             tasks.push(tokio::spawn(node_loop(inner.clone())));
         }
@@ -287,6 +326,38 @@ impl SyncService {
             .filter(|p| !p.conns.is_empty())
             .count();
         s
+    }
+
+    /// Which machines are connected, by machine id; a machine missing from
+    /// the map is unknown. This machine is always online. A hub knows every
+    /// paired machine. A node knows the hub (online while its connection is
+    /// up) and, when the hub reports presence (sync protocol 2) and the
+    /// connection is up, every other machine.
+    pub fn presence(&self) -> HashMap<String, Presence> {
+        let now = blirp_core::now_ms();
+        let mut out = lock(&self.inner.presence).clone();
+        if let Role::Node { hub } = &self.inner.role {
+            let hub = hub.id.to_string();
+            let connected = lock(&self.inner.status).connected;
+            let seen = *lock(&self.inner.hub_seen);
+            out.insert(
+                hub.clone(),
+                Presence {
+                    machine_id: hub,
+                    online: connected,
+                    last_seen: if connected { now } else { seen.unwrap_or(0) },
+                },
+            );
+        }
+        out.insert(
+            self.inner.own_id.clone(),
+            Presence {
+                machine_id: self.inner.own_id.clone(),
+                online: true,
+                last_seen: now,
+            },
+        );
+        out
     }
 
     /// Hub: create an invite valid for 10 minutes.
@@ -516,6 +587,7 @@ async fn handle_incoming(inner: &Arc<Inner>, incoming: Incoming) -> Result<()> {
                 .conns
                 .push(conn.clone());
             touch_device(inner, &remote);
+            set_online(inner, &remote, true);
             (inner.on_status)();
             let kick = inner.clone();
             let result = repl::serve_hub(
@@ -524,6 +596,7 @@ async fn handle_incoming(inner: &Arc<Inner>, incoming: Incoming) -> Result<()> {
                 inner.own_id.clone(),
                 remote.clone(),
                 inner.head.subscribe(),
+                inner.presence_tx.subscribe(),
                 move |logged| {
                     lock(&kick.status).last_sync_at = Some(blirp_core::now_ms());
                     if logged {
@@ -533,6 +606,12 @@ async fn handle_incoming(inner: &Arc<Inner>, incoming: Incoming) -> Result<()> {
             )
             .await;
             forget_conn(inner, &remote, &conn);
+            let still = lock(&inner.peers)
+                .get(&remote)
+                .is_some_and(|p| !p.conns.is_empty());
+            if !still {
+                set_online(inner, &remote, false);
+            }
             if matches!(result, Ok(repl::HubSessionEnd::Left)) {
                 tracing::info!(node = %remote, "machine left the hub; revoked");
                 close_peer(inner, &remote);
@@ -854,6 +933,79 @@ async fn proxy_stream(
     }
 }
 
+// ---------------------------------------------------------------- presence
+
+/// Hub: record that `id` connected or lost its last sync connection.
+fn set_online(inner: &Inner, id: &str, online: bool) {
+    let now = blirp_core::now_ms();
+    lock(&inner.presence).insert(
+        id.to_string(),
+        Presence {
+            machine_id: id.to_string(),
+            online,
+            last_seen: now,
+        },
+    );
+    publish_presence(inner);
+}
+
+/// Hub: send the current presence (this machine included) to the nodes.
+fn publish_presence(inner: &Inner) {
+    let mut list: Vec<Presence> = lock(&inner.presence).values().cloned().collect();
+    list.push(Presence {
+        machine_id: inner.own_id.clone(),
+        online: true,
+        last_seen: blirp_core::now_ms(),
+    });
+    list.sort_by(|a, b| a.machine_id.cmp(&b.machine_id));
+    inner.presence_tx.send_replace(list);
+}
+
+/// Hub: advance connected machines' `last_seen` every [`PRESENCE_EVERY`].
+async fn hub_presence_loop(inner: Arc<Inner>) {
+    let mut tick =
+        tokio::time::interval_at(tokio::time::Instant::now() + PRESENCE_EVERY, PRESENCE_EVERY);
+    tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+    let mut shutdown = inner.shutdown.clone();
+    loop {
+        tokio::select! {
+            _ = tick.tick() => {}
+            _ = shutdown.changed() => return,
+        }
+        let now = blirp_core::now_ms();
+        for p in lock(&inner.presence).values_mut().filter(|p| p.online) {
+            p.last_seen = now;
+        }
+        publish_presence(&inner);
+    }
+}
+
+/// Who is online in a presence map, comparable across reports.
+fn online_set(m: &HashMap<String, Presence>) -> Vec<(String, bool)> {
+    let mut v: Vec<_> = m
+        .values()
+        .map(|p| (p.machine_id.clone(), p.online))
+        .collect();
+    v.sort();
+    v
+}
+
+/// Node: take the hub's presence report; a change of who is online is news.
+fn take_presence(inner: &Inner, machines: Vec<Presence>) {
+    let changed = {
+        let mut p = lock(&inner.presence);
+        let before = online_set(&p);
+        *p = machines
+            .into_iter()
+            .map(|m| (m.machine_id.clone(), m))
+            .collect();
+        before != online_set(&p)
+    };
+    if changed {
+        (inner.on_status)();
+    }
+}
+
 // ---------------------------------------------------------------- hub log
 
 /// Hub: log this machine's own writes promptly and wake node notifiers.
@@ -941,9 +1093,14 @@ async fn node_loop(inner: Arc<Inner>) {
         tracing::warn!(error = %message, "hub connection lost; retrying");
         {
             let mut st = lock(&inner.status);
+            if st.connected {
+                *lock(&inner.hub_seen) = Some(blirp_core::now_ms());
+            }
             st.connected = false;
             st.last_error = Some(message);
         }
+        // Other machines' presence came from the hub; unknown without it.
+        lock(&inner.presence).clear();
         (inner.on_status)();
         if started.elapsed() > BACKOFF_MAX {
             backoff = BACKOFF_MIN;
@@ -993,6 +1150,7 @@ async fn node_session(inner: &Arc<Inner>, hub: &EndpointAddr) -> Result<()> {
         })
     };
     let hook = inner.clone();
+    let presence_hook = inner.clone();
     let result = repl::run_node(
         &sync,
         inner.store.clone(),
@@ -1013,6 +1171,7 @@ async fn node_session(inner: &Arc<Inner>, hub: &EndpointAddr) -> Result<()> {
                 (hook.on_status)();
             }
         },
+        move |machines| take_presence(&presence_hook, machines),
     )
     .await;
     proxy_task.abort();

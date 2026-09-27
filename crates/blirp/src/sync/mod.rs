@@ -86,6 +86,15 @@ impl SyncState {
     fn remote_of(&self, session: &str) -> Option<String> {
         lock(&self.remote_sessions).get(session).cloned()
     }
+
+    /// Other machines' connection state by id: `true` online, `false`
+    /// offline; unknown machines are missing (see
+    /// [`SyncService::presence`]). Empty when sync is off.
+    pub fn presence(&self, own_id: &str) -> HashMap<String, blirp_sync::repl::Presence> {
+        let mut out = self.service().map(|s| s.presence()).unwrap_or_default();
+        out.remove(own_id);
+        out
+    }
 }
 
 pub fn routes() -> Router<SharedState> {

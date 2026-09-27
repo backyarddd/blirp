@@ -166,7 +166,7 @@ To move the hub, stop the daemon, copy `~/.blirp` to the new machine, install bl
 
 ### Updating
 
-Script installs: `blirp update` (it replaces the CLI and the desktop app and starts the daemon again through the autostart service). Otherwise update blirp the way you installed it, then restart the daemon: `launchctl kickstart -k gui/$(id -u)/dev.blirp.daemon` (macOS) or `systemctl --user restart blirp` (Linux) ([install.md](install.md#updating)). The sync protocol is versioned (`blirp/sync/1`); keep hub and nodes on the same release and update the hub first.
+Script installs: `blirp update` (it replaces the CLI and the desktop app and starts the daemon again through the autostart service). Otherwise update blirp the way you installed it, then restart the daemon: `launchctl kickstart -k gui/$(id -u)/dev.blirp.daemon` (macOS) or `systemctl --user restart blirp` (Linux) ([install.md](install.md#updating)). The sync protocol is versioned (`blirp/sync/1`); keep hub and nodes on the same release and update the hub first. Which machines are online (Settings > Machines & Sync, and the Offline chip on their sessions) needs a hub on 0.1.1 or later; with an older hub nodes fall back to a 30-minute rule.
 
 ## Security checklist
 

@@ -74,24 +74,33 @@ pub struct SessionFilter {
     pub cursor: Option<String>,
     pub limit: i64,
     /// This machine: its live sessions always sort first. Another machine's
-    /// only while their activity is younger than [`REMOTE_LIVE_MS`], since a
-    /// replica cannot tell a quiet session from a machine that went away.
-    /// `None` treats every live status as current.
+    /// only while it is in `online`; never while it is in `offline` (a
+    /// replica keeps the last status it heard, which an offline machine
+    /// cannot correct); with its presence unknown, only while their activity
+    /// is younger than [`REMOTE_LIVE_MS`]. `None` treats every live status
+    /// as current.
     pub local_machine: Option<String>,
+    /// Machines connected to the hub right now.
+    pub online: Vec<String>,
+    /// Machines known not to be connected to the hub.
+    pub offline: Vec<String>,
 }
 
-/// How long another machine's live session stays pinned (and reads as
-/// live in the UI) without a replicated update.
+/// With a machine's presence unknown, how long its live session stays
+/// pinned (and reads as live in the UI) without a replicated update.
 pub const REMOTE_LIVE_MS: i64 = 30 * 60_000;
 
 /// SQL condition for "is an ingested subagent session" (§8): continue/fork
 /// sessions also carry a parent but are the user's own (origin `blirp`).
 const IS_CHILD: &str = "(origin = 'external' AND parent_session_id IS NOT NULL)";
 
-/// 1 when the session sorts as live (see [`SessionFilter::local_machine`]);
-/// `?1` is the local machine id (or NULL), `?2` the remote activity cutoff.
+/// 1 when the session sorts as live (see [`SessionFilter::local_machine`]):
+/// `?1` the local machine id (or NULL), `?2` the activity cutoff for
+/// machines of unknown presence, `?3`/`?4` JSON arrays of online/offline ids.
 const LIVE: &str = "(status IN ('starting','working','idle','waiting')
-    AND (?1 IS NULL OR machine_id = ?1 OR last_activity_at >= ?2))";
+    AND (?1 IS NULL OR machine_id = ?1
+         OR machine_id IN (SELECT value FROM json_each(?3))
+         OR (machine_id NOT IN (SELECT value FROM json_each(?4)) AND last_activity_at >= ?2)))";
 
 /// `live:last_activity_at:id` from [`Store::list_sessions`].
 fn parse_cursor(c: &str) -> Option<(i64, i64, String)> {
@@ -322,6 +331,12 @@ impl Store {
         let mut args: Vec<Value> = vec![
             f.local_machine.clone().map_or(Value::Null, Value::from),
             (crate::now_ms() - REMOTE_LIVE_MS).into(),
+            serde_json::to_string(&f.online)
+                .map_err(|e| StoreError::Invalid(e.to_string()))?
+                .into(),
+            serde_json::to_string(&f.offline)
+                .map_err(|e| StoreError::Invalid(e.to_string()))?
+                .into(),
         ];
         let mut bind = |v: Value| {
             args.push(v);
@@ -715,6 +730,43 @@ pub(super) mod tests {
                 "limit {limit}"
             );
         }
+        // Known presence wins over the activity rule: "mac" offline unpins
+        // even its fresh session; "mac" online pins its old "working" one.
+        let order = |online: &[&str], offline: &[&str]| {
+            all_pages(SessionFilter {
+                local_machine: Some("pc".into()),
+                online: online.iter().map(|s| s.to_string()).collect(),
+                offline: offline.iter().map(|s| s.to_string()).collect(),
+                limit: 2,
+                ..Default::default()
+            })
+        };
+        assert_eq!(
+            order(&[], &["mac"]),
+            [
+                "old-live",
+                "mac-fresh",
+                "long-running",
+                "new-ended",
+                "tie-b",
+                "tie-a",
+                "working",
+                "oldest",
+            ]
+        );
+        assert_eq!(
+            order(&["mac"], &[]),
+            [
+                "mac-fresh",
+                "working",
+                "old-live",
+                "long-running",
+                "new-ended",
+                "tie-b",
+                "tie-a",
+                "oldest",
+            ]
+        );
         // Search also matches the branch.
         store
             .modify_session("tie-a", |s| s.branch = Some("feature/zebra".into()))

@@ -83,8 +83,10 @@ so every tag needs one.
 - The Sessions list is ordered by most recent activity, with running
   sessions on top, instead of by start time, so a long session that is
   working now is not buried under newer finished ones. Another machine's
-  running session stops being pinned, and reads "No update", after 30
-  minutes without a replicated update. `GET /api/sessions`
+  running session stays on top only while that machine is online; while
+  it is offline its chip reads "Offline". The hub now reports which
+  machines are connected (`online` in `GET /api/machines`, also shown in
+  Settings > Machines & Sync). `GET /api/sessions`
   (and `blirp sessions`) use the same order; cursors from 0.1.0 are
   rejected with 400.
 - The Sessions sidebar no longer stops silently at the newest 200 sessions:

@@ -997,3 +997,132 @@ async fn lan_discovery_follows_settings_live() {
     assert!(sync_status(&h).await.connected);
     h.daemon.shutdown().await.unwrap();
 }
+
+/// `online` of `id` in `n`'s `/api/machines` (null: unknown).
+async fn online_on(n: &Node, id: &str) -> Option<bool> {
+    let machines: Vec<blirp_core::model::MachineInfo> = n.get("/api/machines").await;
+    machines
+        .into_iter()
+        .find(|m| m.machine.id == id)
+        .and_then(|m| m.online)
+}
+
+// Presence is runtime state from the hub's live connections: a node that
+// disconnects shows offline on the hub and, through the hub, on the other
+// nodes; its live sessions stop being pinned there. A node that loses the
+// hub knows the hub is offline and no longer knows the others.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn presence_follows_connections() {
+    use blirp_core::model::{SessionOrigin, SessionStatus, SessionsPage};
+    let tmp = tempfile::tempdir().unwrap();
+    let a = Node::start(&tmp.path().join("a"), "hub-a", None).await;
+    let b = Node::start(&tmp.path().join("b"), "node-b", None).await;
+    let c = Node::start(&tmp.path().join("c"), "node-c", None).await;
+    pair(&a, &b).await;
+    let inv: SyncInvite = a.ok(Method::POST, "/api/sync/invite", None).await;
+    let _: SyncStatus = c
+        .ok(
+            Method::POST,
+            "/api/sync/join",
+            Some(json!({"invite": inv.invite, "code": inv.code})),
+        )
+        .await;
+    let (a_id, b_id, c_id) = (a.id(), b.id(), c.id());
+    eventually("hub sees both nodes online", || async {
+        online_on(&a, &b_id).await == Some(true) && online_on(&a, &c_id).await == Some(true)
+    })
+    .await;
+    eventually("B sees C online through the hub", || async {
+        online_on(&b, &c_id).await == Some(true)
+    })
+    .await;
+    assert_eq!(online_on(&b, &a_id).await, Some(true));
+    assert_eq!(online_on(&b, &b_id).await, Some(true));
+
+    // On B: C's session still reports "working" but has been quiet for
+    // hours; B's own session ended a minute ago.
+    let now = blirp_core::now_ms();
+    let store = &b.daemon.state.store;
+    std::fs::create_dir_all(tmp.path().join("work-b")).unwrap();
+    let project = store
+        .register_project(&b_id, &tmp.path().join("work-b"), None)
+        .unwrap();
+    let mk = |id: &str, machine: &str, status: SessionStatus, at: i64| Session {
+        id: id.into(),
+        project_id: project.id.clone(),
+        machine_id: machine.into(),
+        agent: "claude".into(),
+        agent_session_id: None,
+        origin: SessionOrigin::External,
+        cwd: "/w".into(),
+        title: None,
+        status,
+        branch: None,
+        worktree: None,
+        transcript_path: None,
+        started_at: at,
+        ended_at: None,
+        last_activity_at: at,
+        exit_code: None,
+        summary: None,
+        distilled_through_seq: 0,
+        tokens_in: 0,
+        tokens_out: 0,
+        cost_usd: 0.0,
+        parent_session_id: None,
+        stopped_by_user: false,
+    };
+    store
+        .insert_session(&mk("on-c", &c_id, SessionStatus::Working, now - 7_200_000))
+        .unwrap();
+    store
+        .insert_session(&mk("on-b", &b_id, SessionStatus::Completed, now - 60_000))
+        .unwrap();
+    let order = || async {
+        let page: SessionsPage = b.get("/api/sessions").await;
+        page.items
+            .into_iter()
+            .map(|s| s.id)
+            .filter(|id| id.starts_with("on-"))
+            .collect::<Vec<_>>()
+    };
+    // C is online: its quiet session is still running, so it is pinned.
+    assert_eq!(order().await, ["on-c", "on-b"]);
+
+    let seen_before = {
+        let machines: Vec<blirp_core::model::MachineInfo> = b.get("/api/machines").await;
+        machines
+            .iter()
+            .find(|m| m.machine.id == c_id)
+            .unwrap()
+            .machine
+            .last_seen
+    };
+    c.daemon.shutdown().await.unwrap();
+    eventually("hub sees C offline", || async {
+        online_on(&a, &c_id).await == Some(false)
+    })
+    .await;
+    eventually("B sees C offline", || async {
+        online_on(&b, &c_id).await == Some(false)
+    })
+    .await;
+    assert_eq!(online_on(&a, &b_id).await, Some(true));
+    let machines: Vec<blirp_core::model::MachineInfo> = b.get("/api/machines").await;
+    let c_row = machines.iter().find(|m| m.machine.id == c_id).unwrap();
+    assert!(
+        c_row.machine.last_seen >= seen_before,
+        "disconnect time is its last seen"
+    );
+    // Offline: its last reported status can no longer be trusted.
+    assert_eq!(order().await, ["on-b", "on-c"]);
+
+    // B loses the hub: the hub is offline, C unknown.
+    a.daemon.shutdown().await.unwrap();
+    eventually("B sees the hub offline", || async {
+        online_on(&b, &a_id).await == Some(false)
+    })
+    .await;
+    assert_eq!(online_on(&b, &c_id).await, None);
+    b.daemon.shutdown().await.unwrap();
+}

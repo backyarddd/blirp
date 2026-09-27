@@ -48,6 +48,11 @@ async fn list(
     ApiQuery(q): ApiQuery<ListQuery>,
 ) -> ApiResult<Json<SessionsPage>> {
     let store = s.store.clone();
+    let (online, offline): (Vec<_>, Vec<_>) = s
+        .sync
+        .presence(&s.machine.id)
+        .into_values()
+        .partition(|p| p.online);
     let f = SessionFilter {
         project_id: q.project,
         status: q.status,
@@ -59,6 +64,8 @@ async fn list(
         cursor: q.cursor,
         limit: q.limit.unwrap_or(50),
         local_machine: Some(s.machine.id.clone()),
+        online: online.into_iter().map(|p| p.machine_id).collect(),
+        offline: offline.into_iter().map(|p| p.machine_id).collect(),
     };
     Ok(Json(blocking(move || Ok(store.list_sessions(&f)?)).await?))
 }

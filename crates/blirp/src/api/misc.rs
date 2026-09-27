@@ -10,7 +10,7 @@ use axum::http::StatusCode;
 use axum::response::Response;
 use axum::routing::{get, post};
 use blirp_core::model::{
-    AgentInfo, DistillStatus, Health, Machine, SearchHitKind, SearchResults, ServerEvent,
+    AgentInfo, DistillStatus, Health, MachineInfo, SearchHitKind, SearchResults, ServerEvent,
     SettingsPatch, SettingsView, SummarizerPick,
 };
 use serde::Deserialize;
@@ -57,9 +57,28 @@ pub(super) async fn health(State(s): State<SharedState>, principal: Principal) -
     })
 }
 
-async fn machines(State(s): State<SharedState>) -> ApiResult<Json<Vec<Machine>>> {
+/// Replicated machine rows with this machine's view of their presence.
+async fn machines(State(s): State<SharedState>) -> ApiResult<Json<Vec<MachineInfo>>> {
     let store = s.store.clone();
-    Ok(Json(blocking(move || Ok(store.list_machines()?)).await?))
+    let rows = blocking(move || Ok(store.list_machines()?)).await?;
+    let presence = s.sync.presence(&s.machine.id);
+    let now = blirp_core::now_ms();
+    Ok(Json(
+        rows.into_iter()
+            .map(|mut machine| {
+                let online = if machine.id == s.machine.id {
+                    machine.last_seen = now;
+                    Some(true)
+                } else {
+                    presence.get(&machine.id).map(|p| {
+                        machine.last_seen = machine.last_seen.max(p.last_seen);
+                        p.online
+                    })
+                };
+                MachineInfo { machine, online }
+            })
+            .collect(),
+    ))
 }
 
 #[derive(Deserialize)]

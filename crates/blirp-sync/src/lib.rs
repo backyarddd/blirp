@@ -27,6 +27,11 @@ pub const ALPN_PROXY: &[u8] = b"blirp/proxy/1";
 /// picks the highest common one or answers `unsupported_version`.
 pub const PROTOCOL_VERSIONS: &[u32] = &[1];
 
+/// Versions of the replication protocol (`blirp/sync/1`). 2 adds the hub's
+/// `presence` frames on the notification stream; a version 1 peer never
+/// receives them.
+pub const SYNC_VERSIONS: &[u32] = &[1, 2];
+
 /// mDNS service name blirp endpoints advertise on the local network.
 pub const MDNS_SERVICE: &str = "blirp";
 /// mDNS user data marking an endpoint as a blirp hub.
@@ -45,11 +50,12 @@ pub fn loopback_only() -> bool {
 
 /// Highest protocol version both sides support.
 pub fn negotiate(theirs: &[u32]) -> Option<u32> {
-    PROTOCOL_VERSIONS
-        .iter()
-        .rev()
-        .find(|v| theirs.contains(v))
-        .copied()
+    negotiate_from(PROTOCOL_VERSIONS, theirs)
+}
+
+/// Highest of `ours` that `theirs` also lists.
+pub fn negotiate_from(ours: &[u32], theirs: &[u32]) -> Option<u32> {
+    ours.iter().rev().find(|v| theirs.contains(v)).copied()
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -91,4 +97,19 @@ pub(crate) async fn blocking<T: Send + 'static>(
     tokio::task::spawn_blocking(f)
         .await
         .map_err(|e| SyncError::Unavailable(format!("background task failed: {e}")))?
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn sync_version_falls_back_for_older_peers() {
+        // A 0.1.0 peer only speaks 1 (no presence frames); both new speak 2.
+        assert_eq!(super::negotiate_from(super::SYNC_VERSIONS, &[1]), Some(1));
+        assert_eq!(
+            super::negotiate_from(super::SYNC_VERSIONS, &[1, 2]),
+            Some(2)
+        );
+        assert_eq!(super::negotiate_from(&[1], &[1, 2]), Some(1));
+        assert_eq!(super::negotiate_from(super::SYNC_VERSIONS, &[9]), None);
+    }
 }

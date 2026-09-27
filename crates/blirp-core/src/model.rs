@@ -195,6 +195,19 @@ pub struct Machine {
     pub revoked: bool,
 }
 
+/// `GET /api/machines`: the replicated row plus runtime presence. `online`:
+/// the machine has a live sync connection to the hub (as the hub reports
+/// it), always true for this machine, null when unknown (standalone, not
+/// connected to the hub, or a hub that does not report presence). With
+/// presence known, `last_seen` is its connect, disconnect or latest minute
+/// online (never replicated).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
+pub struct MachineInfo {
+    #[serde(flatten)]
+    pub machine: Machine,
+    pub online: Option<bool>,
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
 pub struct Project {
     pub id: String,
@@ -1295,7 +1308,7 @@ mod tests {
             MachineRole, SessionStatus, SessionOrigin, EventKind, RecordKind, RecordStatus,
             SuggestionTarget, SuggestionStatus, ResourceKind, DeviceKind, FileKind, SearchHitKind,
             MemoryPart, IntegrationState, InjectMode, CloneState,
-            Machine, Project, ProjectPath, Session, Event, Record, Brief, WikiPage, Suggestion,
+            Machine, MachineInfo, Project, ProjectPath, Session, Event, Record, Brief, WikiPage, Suggestion,
             BriefProposal, RecordProposal, WikiProposal, Resource, Device,
             ErrorBody, ErrorDetail, Health, UpdateStatus, UpdateOutcome, ProjectPathInfo, ProjectSummary, CreateProject,
             PatchProject, MergeProject, ProjectMemory, PutBrief, RevertBrief, CreateRecord,

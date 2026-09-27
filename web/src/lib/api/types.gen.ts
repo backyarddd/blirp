@@ -37,6 +37,16 @@ export type CloneState = "running" | "done" | "failed";
 
 export type Machine = { id: string, name: string, os: string, role: MachineRole, last_seen: number, revoked: boolean, };
 
+/**
+ * `GET /api/machines`: the replicated row plus runtime presence. `online`:
+ * the machine has a live sync connection to the hub (as the hub reports
+ * it), always true for this machine, null when unknown (standalone, not
+ * connected to the hub, or a hub that does not report presence). With
+ * presence known, `last_seen` is its connect, disconnect or latest minute
+ * online (never replicated).
+ */
+export type MachineInfo = { online: boolean | null, id: string, name: string, os: string, role: MachineRole, last_seen: number, revoked: boolean, };
+
 export type Project = { id: string, name: string, created_at: number, updated_at: number, deleted: boolean, };
 
 export type ProjectPath = { project_id: string, machine_id: string, path: string, 
