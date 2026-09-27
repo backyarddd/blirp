@@ -28,6 +28,9 @@ pub enum CommitRefused {
     UnknownRoot,
     #[error("{0}")]
     BadRoot(String),
+    /// The origin's folder has not replicated to the hub yet.
+    #[error("the hub does not know this folder yet")]
+    Pending,
     #[error("file sync is off for this project")]
     Off,
 }
@@ -37,6 +40,7 @@ impl CommitRefused {
         match self {
             Self::UnknownRoot => "unknown_root",
             Self::BadRoot(_) => "bad_root",
+            Self::Pending => "root_pending",
             Self::Off => "files_off",
         }
     }
@@ -475,9 +479,7 @@ impl Store {
                         |r| r.get(0),
                     )?;
                     let Some(project) = project else {
-                        return Ok(Err(CommitRefused::BadRoot(
-                            "the hub does not know this folder yet".into(),
-                        )));
+                        return Ok(Err(CommitRefused::Pending));
                     };
                     tx.execute(
                         "INSERT INTO file_roots(root_id, machine_id, path, project_id, head, created_at, updated_at)
@@ -538,6 +540,18 @@ impl Store {
                 params![input.root_id, head, project, input.now, manifest],
             )?;
             Ok(Ok(CommitOutcome { results, head }))
+        })
+    }
+
+    /// Content hashes in a root's history (replaced versions still kept).
+    pub fn hub_history_hashes(&self, root_id: &str) -> Result<Vec<String>> {
+        self.read(|c| {
+            all(
+                c,
+                "SELECT DISTINCT hash FROM file_history WHERE root_id = ?1 AND hash IS NOT NULL",
+                params![root_id],
+                |r| r.get(0),
+            )
         })
     }
 

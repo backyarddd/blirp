@@ -946,7 +946,7 @@ export type PatchDevice = { can_control_terminals: boolean, };
 /**
  * Frames pushed on `/api/events/ws`.
  */
-export type ServerEvent = { "type": "session_created", session: Session, } | { "type": "session_updated", session: Session, } | { "type": "session_deleted", session_id: string, } | { "type": "project_updated", project_id: string, } | { "type": "memory_updated", project_id: string, part: MemoryPart, } | { "type": "sync_updated", status: SyncStatus, } | { "type": "resync" };
+export type ServerEvent = { "type": "session_created", session: Session, } | { "type": "session_updated", session: Session, } | { "type": "session_deleted", session_id: string, } | { "type": "project_updated", project_id: string, } | { "type": "memory_updated", project_id: string, part: MemoryPart, } | { "type": "sync_updated", status: SyncStatus, } | { "type": "files_updated" } | { "type": "resync" };
 
 /**
  * Text frames sent by the server on `/api/terminals/:id/ws` (§6). Raw
@@ -1024,6 +1024,180 @@ reincluded_secrets: Array<string>, };
  */
 export type Reason = "ignored" | "secret" | "too_large" | "unsupported";
 
+/**
+ * Per-project file sync setting, stored on the hub (`file_projects`).
+ */
+export type FilesMode = "default" | "on" | "off";
+
+/**
+ * A root on the hub with its totals.
+ */
+export type RootInfo = { root_id: string, project_id: string, 
+/**
+ * Origin machine and folder.
+ */
+machine_id: string, machine_name: string, 
+/**
+ * The origin machine was revoked: nothing uploads to this root anymore.
+ */
+origin_revoked: boolean, path: string, 
+/**
+ * Newest version (the root's sequence).
+ */
+head: number, files: number, bytes: number, 
+/**
+ * Live conflict copies (`*.conflict-*`).
+ */
+conflicts: number, created_at: number, updated_at: number, manifest: GitManifest | null, };
+
+/**
+ * Git facts of a root, read with plain git commands on its origin and
+ * sent with every commit batch. A copy elsewhere clones `remote` and
+ * checks out `head_sha` (else `branch`) before the hub's files are written
+ * on top.
+ */
+export type GitManifest = { 
+/**
+ * Remote URL without credentials.
+ */
+remote: string | null, branch: string | null, head_sha: string | null, upstream_sha: string | null, };
+
+/**
+ * What the file engine is doing with one folder here: `waiting` for
+ * the first-run grace period or the hub, `off` when the project's file
+ * sync is off, `paused` by "Pause file sync", `never_synced` for
+ * folders that never sync (see the message).
+ */
+export type CopyState = "waiting" | "scanning" | "idle" | "uploading" | "paused" | "off" | "too_large" | "busy" | "error" | "never_synced";
+
+/**
+ * This machine's working copy of a root: its own folder (the origin,
+ * upload-only in v1) or a copy downloaded from the hub.
+ */
+export type LocalFiles = { path: string, origin: boolean, state: CopyState, 
+/**
+ * Why it is in that state (error, never-synced reason).
+ */
+message: string | null, last_upload_at: number | null, files: number, bytes: number, 
+/**
+ * Changes not on the hub yet.
+ */
+pending: number, excluded: Array<ExcludedGroup>, reincluded_secrets: Array<string>, };
+
+/**
+ * One folder of a project that syncs (or could sync) through the hub.
+ */
+export type FilesRoot = { root_id: string, 
+/**
+ * Origin machine and folder.
+ */
+machine_id: string, machine_name: string, path: string, origin_revoked: boolean, 
+/**
+ * The hub's copy; null until the first upload.
+ */
+hub: RootInfo | null, 
+/**
+ * This machine's copy; null when it has none.
+ */
+local: LocalFiles | null, };
+
+/**
+ * `GET /api/projects/:id/files-sync`.
+ */
+export type ProjectFiles = { 
+/**
+ * File sync can run here (hub or node role; the hub speaks it).
+ */
+available: boolean, mode: FilesMode, 
+/**
+ * This machine's `[sync] project_files`.
+ */
+global: boolean, 
+/**
+ * Uploads run for this project's folders here.
+ */
+effective: boolean, 
+/**
+ * "Pause file sync" is on here.
+ */
+paused: boolean, hub_error: string | null, roots: Array<FilesRoot>, };
+
+/**
+ * `PUT /api/projects/:id/files-sync`.
+ */
+export type SetFilesMode = { mode: FilesMode, };
+
+/**
+ * `GET /api/files/status`: the first-run banner and the pause switch.
+ */
+export type FilesOverview = { available: boolean, enabled: boolean, paused: boolean, 
+/**
+ * Uploads start then (first run after upgrade or pairing); null when
+ * they already run.
+ */
+grace_until: number | null, hub_name: string | null, 
+/**
+ * Folders that will upload, and their size (known once scanned).
+ */
+folders: number, bytes: number, hub_error: string | null, };
+
+/**
+ * `POST /api/files/pause`.
+ */
+export type PauseFiles = { paused: boolean, };
+
+export type IncomingAction = "update" | "new" | "delete" | "conflict" | "skip";
+
+/**
+ * A hub version this machine's copy has not taken.
+ */
+export type IncomingFile = { path: string, action: IncomingAction, by_machine_name: string, at: number, };
+
+/**
+ * `GET /api/projects/:id/files-sync/incoming?root=`.
+ */
+export type FilesIncoming = { root: string, files: Array<IncomingFile>, };
+
+/**
+ * `POST /api/projects/:id/files-sync/apply` ("Update from hub" on a copy,
+ * "Bring changes here" on the origin folder).
+ */
+export type ApplyFiles = { root: string, };
+
+export type AppliedFiles = { written: number, deleted: number, 
+/**
+ * Local conflict copies made next to local changes.
+ */
+conflicts: Array<string>, 
+/**
+ * Paths not held here, with why.
+ */
+skipped: Array<string>, failed: Array<string>, };
+
+/**
+ * `POST /api/machines/:id/files/download`: a copy of a root on that
+ * machine (clone + overlay for git roots, plain files otherwise).
+ */
+export type DownloadFiles = { root_id: string, 
+/**
+ * Folder to create it in (inside home); default `~/blirp`.
+ */
+parent?: string, 
+/**
+ * Folder name; default the origin folder's name.
+ */
+name?: string, };
+
+/**
+ * A download started with `POST /api/machines/:id/files/download`; poll
+ * `GET /api/machines/:id/files/download/:job` until it is not `running`.
+ */
+export type DownloadJob = { id: string, machine_id: string, root_id: string, dest: string, state: CloneState, progress: string | null, error: string | null, 
+/**
+ * E.g. that unpushed commits appear as local changes.
+ */
+note: string | null, started_at: number, finished_at: number | null, };
+
 export type Summarizer = "auto" | "claude" | "codex" | "ollama" | "none";
 
 export type BriefMode = "auto" | "review";
@@ -1060,7 +1234,12 @@ allow_hub_control: boolean,
  * and `blirp pair <code>` without an invite). Off: pairing needs the
  * invite, and peers connect through relays or the addresses they know.
  */
-lan_discovery: boolean, };
+lan_discovery: boolean, 
+/**
+ * Upload project folders to the hub (hub and node roles; each project
+ * can override it with On or Off, see docs/project-files.md).
+ */
+project_files: boolean, };
 
 export type PortalConfig = { lan: boolean, lan_port: number, };
 

@@ -179,6 +179,9 @@ pub struct SyncConfig {
     /// and `blirp pair <code>` without an invite). Off: pairing needs the
     /// invite, and peers connect through relays or the addresses they know.
     pub lan_discovery: bool,
+    /// Upload project folders to the hub (hub and node roles; each project
+    /// can override it with On or Off, see docs/project-files.md).
+    pub project_files: bool,
 }
 
 impl Default for SyncConfig {
@@ -189,6 +192,7 @@ impl Default for SyncConfig {
             relay: "default".into(),
             allow_hub_control: false,
             lan_discovery: true,
+            project_files: true,
         }
     }
 }

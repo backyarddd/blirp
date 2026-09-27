@@ -1,0 +1,9 @@
+# Seeds for failure cases proptest has generated in the past. It is
+# automatically read and these particular cases re-run before any
+# novel cases are generated.
+#
+# It is recommended to check this file in to source control so that
+# everyone who runs the test benefits from these saved cases.
+cc 52ce93dce7618bca302fe77bb57f2f2a8c380017e00cd293ef0e763806270e66 # shrinks to ops = [Write { w: 0, f: 0 }]
+cc f91e54488278287f69f62d971ab79101ef43f0c3002d2fb4db5839ea5c9b1321 # shrinks to ops = [Upload { w: 2 }, Apply { w: 2 }, Upload { w: 1 }, Write { w: 2, f: 1 }, Apply { w: 2 }, Write { w: 1, f: 0 }, Delete { w: 0, f: 2 }, Upload { w: 1 }, Upload { w: 2 }, LoseBases { w: 2 }, LoseBases { w: 2 }, Write { w: 0, f: 1 }, Upload { w: 0 }, Upload { w: 1 }, Apply { w: 0 }, Apply { w: 1 }, Write { w: 0, f: 1 }, Upload { w: 0 }, Delete { w: 2, f: 0 }, Write { w: 2, f: 2 }, Write { w: 1, f: 0 }]
+cc 7ae9d2274c9698c3b0c5ffa396df5c1b68f3de6ac85a8457e3da70b31ca773c9 # shrinks to ops = [Write { w: 2, f: 2 }, Upload { w: 2 }, Write { w: 0, f: 2 }, Delete { w: 2, f: 2 }, Upload { w: 0 }, Upload { w: 2 }]

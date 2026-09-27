@@ -1290,6 +1290,180 @@ pub struct FilesPreview {
     pub reincluded_secrets: Vec<String>,
 }
 
+str_enum!(
+    /// What the file engine is doing with one folder here: `waiting` for
+    /// the first-run grace period or the hub, `off` when the project's file
+    /// sync is off, `paused` by "Pause file sync", `never_synced` for
+    /// folders that never sync (see the message).
+    CopyState {
+        Waiting = "waiting",
+        Scanning = "scanning",
+        Idle = "idle",
+        Uploading = "uploading",
+        Paused = "paused",
+        Off = "off",
+        TooLarge = "too_large",
+        Busy = "busy",
+        Error = "error",
+        NeverSynced = "never_synced",
+    }
+);
+
+/// This machine's working copy of a root: its own folder (the origin,
+/// upload-only in v1) or a copy downloaded from the hub.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
+pub struct LocalFiles {
+    pub path: String,
+    pub origin: bool,
+    pub state: CopyState,
+    /// Why it is in that state (error, never-synced reason).
+    pub message: Option<String>,
+    pub last_upload_at: Option<i64>,
+    pub files: i64,
+    pub bytes: i64,
+    /// Changes not on the hub yet.
+    pub pending: i64,
+    pub excluded: Vec<ExcludedGroup>,
+    pub reincluded_secrets: Vec<String>,
+}
+
+/// One folder of a project that syncs (or could sync) through the hub.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
+pub struct FilesRoot {
+    pub root_id: String,
+    /// Origin machine and folder.
+    pub machine_id: String,
+    pub machine_name: String,
+    pub path: String,
+    pub origin_revoked: bool,
+    /// The hub's copy; null until the first upload.
+    pub hub: Option<crate::files::RootInfo>,
+    /// This machine's copy; null when it has none.
+    pub local: Option<LocalFiles>,
+}
+
+/// `GET /api/projects/:id/files-sync`.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
+pub struct ProjectFiles {
+    /// File sync can run here (hub or node role; the hub speaks it).
+    pub available: bool,
+    pub mode: crate::files::FilesMode,
+    /// This machine's `[sync] project_files`.
+    pub global: bool,
+    /// Uploads run for this project's folders here.
+    pub effective: bool,
+    /// "Pause file sync" is on here.
+    pub paused: bool,
+    pub hub_error: Option<String>,
+    pub roots: Vec<FilesRoot>,
+}
+
+/// `PUT /api/projects/:id/files-sync`.
+#[derive(Debug, Clone, Serialize, Deserialize, TS)]
+#[serde(deny_unknown_fields)]
+pub struct SetFilesMode {
+    pub mode: crate::files::FilesMode,
+}
+
+/// `GET /api/files/status`: the first-run banner and the pause switch.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
+pub struct FilesOverview {
+    pub available: bool,
+    pub enabled: bool,
+    pub paused: bool,
+    /// Uploads start then (first run after upgrade or pairing); null when
+    /// they already run.
+    pub grace_until: Option<i64>,
+    pub hub_name: Option<String>,
+    /// Folders that will upload, and their size (known once scanned).
+    pub folders: i64,
+    pub bytes: i64,
+    pub hub_error: Option<String>,
+}
+
+/// `POST /api/files/pause`.
+#[derive(Debug, Clone, Serialize, Deserialize, TS)]
+#[serde(deny_unknown_fields)]
+pub struct PauseFiles {
+    pub paused: bool,
+}
+
+str_enum!(IncomingAction {
+    Update = "update",
+    New = "new",
+    Delete = "delete",
+    Conflict = "conflict",
+    Skip = "skip",
+});
+
+/// A hub version this machine's copy has not taken.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
+pub struct IncomingFile {
+    pub path: String,
+    pub action: IncomingAction,
+    pub by_machine_name: String,
+    pub at: i64,
+}
+
+/// `GET /api/projects/:id/files-sync/incoming?root=`.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
+pub struct FilesIncoming {
+    pub root: String,
+    pub files: Vec<IncomingFile>,
+}
+
+/// `POST /api/projects/:id/files-sync/apply` ("Update from hub" on a copy,
+/// "Bring changes here" on the origin folder).
+#[derive(Debug, Clone, Serialize, Deserialize, TS)]
+#[serde(deny_unknown_fields)]
+pub struct ApplyFiles {
+    pub root: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
+pub struct AppliedFiles {
+    pub written: i64,
+    pub deleted: i64,
+    /// Local conflict copies made next to local changes.
+    pub conflicts: Vec<String>,
+    /// Paths not held here, with why.
+    pub skipped: Vec<String>,
+    pub failed: Vec<String>,
+}
+
+/// `POST /api/machines/:id/files/download`: a copy of a root on that
+/// machine (clone + overlay for git roots, plain files otherwise).
+#[derive(Debug, Clone, Serialize, Deserialize, TS)]
+#[serde(deny_unknown_fields)]
+pub struct DownloadFiles {
+    pub root_id: String,
+    /// Folder to create it in (inside home); default `~/blirp`.
+    #[serde(default)]
+    #[ts(optional)]
+    pub parent: Option<String>,
+    /// Folder name; default the origin folder's name.
+    #[serde(default)]
+    #[ts(optional)]
+    pub name: Option<String>,
+}
+
+/// A download started with `POST /api/machines/:id/files/download`; poll
+/// `GET /api/machines/:id/files/download/:job` until it is not `running`.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
+pub struct DownloadJob {
+    pub id: String,
+    pub machine_id: String,
+    pub root_id: String,
+    pub dest: String,
+    pub state: CloneState,
+    pub progress: Option<String>,
+    pub error: Option<String>,
+    /// E.g. that unpushed commits appear as local changes.
+    pub note: Option<String>,
+    pub started_at: i64,
+    pub finished_at: Option<i64>,
+}
+
 /// `PATCH /api/devices/:id`.
 #[derive(Debug, Clone, Serialize, Deserialize, TS)]
 #[serde(deny_unknown_fields)]
@@ -1330,6 +1504,8 @@ pub enum ServerEvent {
     SyncUpdated {
         status: SyncStatus,
     },
+    /// Project file sync state changed (a root on the hub, a folder here).
+    FilesUpdated,
     /// Events were dropped because the client fell behind; refetch state.
     Resync,
 }
@@ -1403,6 +1579,9 @@ mod tests {
             ServerEvent, TerminalServerMessage, TerminalClientMessage,
             Config, DaemonConfig, MachineConfig, AgentsConfig, CustomAgent, SessionsConfig,
             FilesScanState, ExcludedGroup, FilesPreview, crate::files::rules::Reason,
+            crate::files::FilesMode, crate::files::RootInfo, crate::files::GitManifest, CopyState,
+            LocalFiles, FilesRoot, ProjectFiles, SetFilesMode, FilesOverview, PauseFiles, IncomingAction,
+            IncomingFile, FilesIncoming, ApplyFiles, AppliedFiles, DownloadFiles, DownloadJob,
             Summarizer, BriefMode, MemoryConfig, SyncConfig, PortalConfig, UpdateConfig, FilesConfig,
         );
         let body = format!(

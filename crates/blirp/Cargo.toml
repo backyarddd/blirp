@@ -68,6 +68,7 @@ windows-sys.workspace = true
 libc.workspace = true
 
 [dev-dependencies]
+proptest.workspace = true
 rmcp = { workspace = true, features = ["client"] }
 tokio-rustls.workspace = true
 

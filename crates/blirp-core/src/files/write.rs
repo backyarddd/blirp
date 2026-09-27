@@ -161,6 +161,32 @@ impl Target<'_> {
         mode_x: bool,
         mtime_ms: Option<i64>,
     ) -> Result<(), WriteError> {
+        self.write_inner(wire, expect, src, None, mode_x, mtime_ms)
+    }
+
+    /// [`Self::write`] of content that must hash to `hash` (checked before
+    /// anything is moved into place).
+    pub fn write_verified(
+        &self,
+        wire: &str,
+        expect: &Expect,
+        src: &mut dyn Read,
+        hash: &str,
+        mode_x: bool,
+        mtime_ms: Option<i64>,
+    ) -> Result<(), WriteError> {
+        self.write_inner(wire, expect, src, Some(hash), mode_x, mtime_ms)
+    }
+
+    fn write_inner(
+        &self,
+        wire: &str,
+        expect: &Expect,
+        src: &mut dyn Read,
+        verify: Option<&str>,
+        mode_x: bool,
+        mtime_ms: Option<i64>,
+    ) -> Result<(), WriteError> {
         self.check_wire(wire)?;
         let parent = self
             .parent(wire, true)?
@@ -180,8 +206,20 @@ impl Target<'_> {
                 .create_new(true)
                 .open(&tmp)
                 .map_err(io(wire))?;
-            std::io::copy(src, &mut f).map_err(io(wire))?;
+            let mut hasher = blake3::Hasher::new();
+            let mut buf = vec![0u8; 256 * 1024];
+            loop {
+                let n = src.read(&mut buf).map_err(io(wire))?;
+                if n == 0 {
+                    break;
+                }
+                hasher.update(&buf[..n]);
+                f.write_all(&buf[..n]).map_err(io(wire))?;
+            }
             f.flush().map_err(io(wire))?;
+            if verify.is_some_and(|h| hasher.finalize().to_hex().as_str() != h) {
+                return Err(refused(wire, "the content does not match its hash"));
+            }
             #[cfg(unix)]
             if mode_x {
                 use std::os::unix::fs::PermissionsExt;
@@ -363,6 +401,29 @@ mod tests {
             w.is("a/b/c.txt", &Expect::Blob(hash_bytes(b"two")))
                 .unwrap()
         );
+        // Content that does not match its hash never lands.
+        assert!(matches!(
+            w.write_verified(
+                "v.txt",
+                &Expect::Absent,
+                &mut &b"x"[..],
+                &hash_bytes(b"y"),
+                false,
+                None
+            ),
+            Err(WriteError::Refused { .. })
+        ));
+        assert!(!root.join("v.txt").exists());
+        w.write_verified(
+            "v.txt",
+            &Expect::Absent,
+            &mut &b"x"[..],
+            &hash_bytes(b"x"),
+            false,
+            None,
+        )
+        .unwrap();
+        std::fs::remove_file(root.join("v.txt")).unwrap();
         // No temp files left behind.
         let left: Vec<_> = std::fs::read_dir(root.join("a/b")).unwrap().collect();
         assert_eq!(left.len(), 1);

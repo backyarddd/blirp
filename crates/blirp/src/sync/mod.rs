@@ -191,6 +191,7 @@ pub async fn start(state: &SharedState) {
 /// Stop sync and the portal (daemon shutdown).
 pub async fn stop(state: &SharedState) {
     crate::portal::stop(state).await;
+    crate::files::stop(state).await;
     let svc = lock(&state.sync.service).take();
     if let Some(svc) = svc {
         svc.shutdown().await;
@@ -227,6 +228,7 @@ async fn start_service(state: &SharedState) -> ApiResult<()> {
             }
         }
     };
+    let files = matches!(role, Role::Hub).then(|| crate::files::hub_files(state));
     let weak = Arc::downgrade(state);
     let proxy: ProxyServe = Arc::new(move |stream, principal| {
         let weak = weak.clone();
@@ -254,19 +256,22 @@ async fn start_service(state: &SharedState) -> ApiResult<()> {
         role,
         proxy,
         on_status,
-        files: None,
+        files,
     })
     .await
     .map_err(|e| sync_error("starting sync", e))?;
-    let old = lock(&state.sync.service).replace(Arc::new(svc));
+    let svc = Arc::new(svc);
+    let old = lock(&state.sync.service).replace(svc.clone());
     if let Some(old) = old {
         old.shutdown().await;
     }
+    crate::files::start(state, &svc).await;
     emit_status(state);
     Ok(())
 }
 
 async fn stop_service(state: &SharedState) {
+    crate::files::stop(state).await;
     let svc = lock(&state.sync.service).take();
     if let Some(svc) = svc {
         svc.shutdown().await;
