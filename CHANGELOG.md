@@ -26,7 +26,11 @@ so every tag needs one.
   of their latest compaction (`compacted_at`; database migration 12).
 - Codex Desktop subagents are listed under their parent session, and a
   forked subagent no longer repeats its parent's conversation (the copy of
-  the parent's history at the start of its rollout is skipped).
+  the parent's history at the start of its rollout is skipped). A one-time
+  repair after upgrading links the subagents already in blirp to their
+  parents, removes the repeated conversation from forks on every synced
+  machine, fixes their titles, and removes memory records only a fork's
+  own summary produced.
 
 ### Changed
 

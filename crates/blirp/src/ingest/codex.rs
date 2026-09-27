@@ -195,6 +195,174 @@ fn output_text(v: &Value) -> String {
     }
 }
 
+/// A Codex subagent rollout, as [`repair_subagents`] needs it.
+#[derive(Debug, PartialEq)]
+struct Subagent {
+    id: String,
+    parent: Option<String>,
+    title: Option<String>,
+    /// A fork: lines of the parent's history it starts with, when the file
+    /// confirms them (every one of them has `ordinal` = its line index, the
+    /// second is the parent's `session_meta`). Their events have seqs below
+    /// `copied * 1024` (§8 seqs are `line_index * 1024 + n`).
+    copied: Option<u64>,
+    /// A fork whose copy could not be confirmed (left alone).
+    unconfirmed: bool,
+}
+
+/// Read the head of a rollout: `None` unless it is a subagent's.
+fn inspect_subagent(path: &Path) -> Result<Option<Subagent>> {
+    let compressed = path.extension().is_some_and(|e| e == "zst");
+    let mut lines = Lines::open(path, &FilePos::default(), compressed)?;
+    let mut st = State::default();
+    let mut found: Option<Subagent> = None;
+    let mut ok = true;
+    let mut stop = false;
+    lines.for_each(|ix, raw| {
+        if stop {
+            return Ok(());
+        }
+        let v: Value = serde_json::from_slice(raw).unwrap_or(Value::Null);
+        let p = v.get("payload").unwrap_or(&Value::Null);
+        if ix == 0 {
+            let id = p
+                .get("id")
+                .or_else(|| p.get("session_id"))
+                .and_then(Value::as_str);
+            if v.get("type").and_then(Value::as_str) != Some("session_meta")
+                || p.get("thread_source").and_then(Value::as_str) != Some("subagent")
+                || id.is_none()
+            {
+                stop = true;
+                return Ok(());
+            }
+            st.own_meta(p, None);
+            found = Some(Subagent {
+                id: id.unwrap_or_default().to_string(),
+                parent: st.parent.clone(),
+                title: st.title.clone(),
+                copied: None,
+                unconfirmed: false,
+            });
+            stop = st.fork_start.is_none_or(|n| n <= 1);
+            return Ok(());
+        }
+        let start = st.fork_start.unwrap_or(0);
+        let ordinal = v.get("ordinal").and_then(Value::as_i64);
+        ok &= ordinal == i64::try_from(ix).ok();
+        if ix == 1 {
+            let own = found.as_ref().map(|f| f.id.as_str());
+            let meta_id = p.get("id").and_then(Value::as_str);
+            ok &= v.get("type").and_then(Value::as_str) == Some("session_meta")
+                && meta_id.is_some()
+                && meta_id != own;
+        }
+        stop = i64::try_from(ix + 1).unwrap_or(i64::MAX) >= start;
+        Ok(())
+    })?;
+    if let Some(f) = found.as_mut()
+        && let Some(start) = st.fork_start
+    {
+        // A file shorter than its copy is not confirmed either.
+        let complete = stop && lines.pos().line >= u64::try_from(start).unwrap_or(u64::MAX);
+        if ok && complete {
+            f.copied = u64::try_from(start).ok();
+        } else {
+            f.unconfirmed = true;
+        }
+    }
+    Ok(found)
+}
+
+/// Counts of [`repair_subagents`].
+#[derive(Debug, Default, Clone, PartialEq)]
+pub struct SubagentRepair {
+    /// Subagent rollouts of sessions on this machine.
+    pub subagents: usize,
+    /// Of those, cursors reset (re-read to link the parent).
+    pub relinked: usize,
+    /// Forks whose copied history was dropped, and the events dropped.
+    pub forks_truncated: usize,
+    pub events_dropped: i64,
+    /// Forks left alone: the file did not confirm the copy.
+    pub forks_unconfirmed: usize,
+    /// Fork titles taken from the parent's copied first prompt, replaced.
+    pub titles_fixed: usize,
+    /// Distiller records of forks removed (nothing else relied on them).
+    pub records_removed: usize,
+}
+
+/// One-time cleanup of Codex subagent sessions ingested before blirp knew
+/// them (§8): their cursors are reset so the next pass links them to their
+/// parent (`parent_session_id`, replicated with the row); a fork's copy of
+/// its parent's history is dropped everywhere with a replicated
+/// [`blirp_core::store::Change::TruncateEvents`] (only for this machine's
+/// sessions, and only when the file confirms the copy line by line); a
+/// fork's title taken from the parent's copied first prompt becomes its
+/// subagent title; and records the distiller made from a fork alone are
+/// removed (see [`Store::distiller_records_only_of`]).
+pub fn repair_subagents(
+    store: &Store,
+    machine_id: &str,
+    codex_home: &Path,
+) -> Result<SubagentRepair> {
+    use blirp_core::store::Change;
+    let mut out = SubagentRepair::default();
+    let mut forks = Vec::new();
+    let codex = Codex {
+        home: codex_home.to_path_buf(),
+    };
+    for src in codex.scan(store)? {
+        let Some(sub) = inspect_subagent(&src.path)? else {
+            continue;
+        };
+        let Some(s) = store.session_by_agent_id("codex", &sub.id)? else {
+            continue;
+        };
+        if s.machine_id != machine_id {
+            continue;
+        }
+        out.subagents += 1;
+        if s.parent_session_id.is_none() && store.delete_cursor("codex", &src.key)? {
+            out.relinked += 1;
+        }
+        if sub.unconfirmed {
+            out.forks_unconfirmed += 1;
+            tracing::warn!(path = %src.path.display(), "codex fork: copied history not confirmed; left as is");
+        }
+        let Some(copied) = sub.copied else { continue };
+        forks.push(s.id.clone());
+        let below = i64::try_from(copied)
+            .unwrap_or(i64::MAX)
+            .saturating_mul(1024);
+        let n = store.count_events_below(&s.id, below)?;
+        if n > 0 {
+            store.apply(Change::TruncateEvents {
+                session_id: s.id.clone(),
+                below_seq: below,
+            })?;
+            out.forks_truncated += 1;
+            out.events_dropped += n;
+        }
+        let parent = match &sub.parent {
+            Some(p) => store.session_by_agent_id("codex", p)?,
+            None => None,
+        };
+        if let (Some(title), Some(parent)) = (&sub.title, parent)
+            && s.title.is_some()
+            && s.title == parent.title
+        {
+            store.modify_session(&s.id, |x| x.title = Some(title.clone()))?;
+            out.titles_fixed += 1;
+        }
+    }
+    for id in store.distiller_records_only_of(&forks)? {
+        store.delete_record(&id)?;
+        out.records_removed += 1;
+    }
+    Ok(out)
+}
+
 impl Adapter for Codex {
     fn id(&self) -> &'static str {
         "codex"

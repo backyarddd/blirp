@@ -421,6 +421,44 @@ impl Engine {
         }
     }
 
+    /// One-time repair of Codex subagent sessions ingested before blirp
+    /// knew them ([`super::codex::repair_subagents`]).
+    pub fn repair_codex_subagents(&self) {
+        const KEY: &str = "ingest.repair.codex_subagents";
+        match self.store.get_setting(KEY) {
+            Ok(None) => {}
+            Ok(Some(_)) => return,
+            Err(e) => {
+                tracing::warn!(error = %e, "reading ingest repair state failed");
+                return;
+            }
+        }
+        let home = self
+            .env
+            .var_path("CODEX_HOME")
+            .unwrap_or_else(|| self.env.home.join(".codex"));
+        let res =
+            super::codex::repair_subagents(&self.store, &self.machine.id, &home).and_then(|n| {
+                self.store.set_setting(KEY, &json!(blirp_core::now_ms()))?;
+                Ok(n)
+            });
+        match res {
+            Ok(n) => tracing::info!(
+                subagents = n.subagents,
+                relinked = n.relinked,
+                forks_truncated = n.forks_truncated,
+                events_dropped = n.events_dropped,
+                forks_unconfirmed = n.forks_unconfirmed,
+                titles_fixed = n.titles_fixed,
+                records_removed = n.records_removed,
+                "repaired codex subagent sessions"
+            ),
+            Err(e) => {
+                tracing::warn!(error = %e, "codex subagent repair failed; retried next start")
+            }
+        }
+    }
+
     /// One-time cleanup after upgrading to the Chats rules (§5): projects
     /// earlier ingest created for folders that are no actual project
     /// (temp, tool, system or Codex chat folders, folders without git or a

@@ -869,6 +869,138 @@ fn codex_fork_skips_the_parents_copied_history_and_links_to_it() {
     assert!(parent.title.is_some() && parent.parent_session_id.is_none());
 }
 
+// Codex subagents ingested by an earlier build: a fork holds its parent's
+// copied history, no parent link, the parent's title, and records the
+// distiller made from it. The one-time repair drops the copy (a replicated
+// truncation), links the parent on the next read, fixes the title and
+// removes records only that fork's distill produced; it runs once.
+#[test]
+fn codex_subagent_repair_cleans_up_what_earlier_builds_ingested() {
+    use blirp_core::model::{Record, RecordKind, RecordStatus};
+    use blirp_core::store::Change;
+    let h = H::new();
+    let fork = "0198a1b2-c3d4-7e5f-8a9b-0c1d2e3f4f0f";
+    h.put(
+        &format!(".codex/sessions/2026/01/02/rollout-2026-01-02T09-00-00-{CODEX_SID}.jsonl"),
+        h.fill(&fixture("codex/rollout.jsonl")).as_bytes(),
+    );
+    h.put(
+        &format!(".codex/sessions/2026/01/02/rollout-2026-01-02T10-00-00-{fork}.jsonl"),
+        h.fill(&fixture("codex/fork.jsonl")).as_bytes(),
+    );
+    h.pass();
+    let parent = h.session("codex", CODEX_SID);
+    let s = h.session("codex", fork);
+    // What the earlier build stored: the copied turns (lines 3 and 4), the
+    // parent's first prompt as title, no link.
+    for (seq, kind, text) in [
+        (3 * 1024, EventKind::User, "Rename the build script"),
+        (
+            4 * 1024,
+            EventKind::Assistant,
+            "Renamed and updated build.sh.",
+        ),
+    ] {
+        h.store
+            .apply(Change::Event(Event {
+                session_id: s.id.clone(),
+                seq,
+                ts: 1,
+                kind,
+                text: text.into(),
+                meta: None,
+            }))
+            .unwrap();
+    }
+    h.store
+        .modify_session(&s.id, |x| {
+            x.title.clone_from(&parent.title);
+            x.parent_session_id = None;
+        })
+        .unwrap();
+    h.store
+        .modify_session(&parent.id, |x| {
+            x.summary = Some(json!({"summary": "parent", "distilled_at": 150}));
+        })
+        .unwrap();
+    let record = |id: &str, created: i64, pinned: bool, by: &str| Record {
+        id: id.into(),
+        project_id: s.project_id.clone(),
+        kind: RecordKind::Decision,
+        title: id.into(),
+        body: String::new(),
+        status: RecordStatus::Active,
+        pinned,
+        source_session_id: Some(s.id.clone()),
+        created_at: created,
+        updated_at: created,
+        updated_by: by.into(),
+    };
+    for r in [
+        record("seen-by-parent", 100, false, "distiller"),
+        record("fork-only", 200, false, "distiller"),
+        record("pinned", 200, true, "distiller"),
+        record("edited", 200, false, "user"),
+    ] {
+        h.store.apply(Change::Record(r)).unwrap();
+    }
+    let outbox = h.outbox_len();
+
+    h.engine.repair_codex_subagents();
+    let s = h.session("codex", fork);
+    let texts: Vec<String> = h.events(&s).into_iter().map(|e| e.text).collect();
+    assert_eq!(
+        texts,
+        [
+            "Checking the scripts as the subagent.",
+            "The subagent renamed build.sh."
+        ]
+    );
+    assert_eq!(s.title.as_deref(), Some("subagent (Feynman): rename_check"));
+    let left: Vec<String> = h
+        .store
+        .list_records(&s.project_id, &Default::default())
+        .unwrap()
+        .into_iter()
+        .map(|r| r.id)
+        .collect();
+    let mut left = left;
+    left.sort();
+    assert_eq!(left, ["edited", "pinned", "seen-by-parent"]);
+    let queued: Vec<String> = h
+        .store
+        .outbox_after(0, 1_000_000)
+        .unwrap()
+        .into_iter()
+        .skip(outbox)
+        .map(|e| format!("{}/{}", e.entity, e.op))
+        .collect();
+    assert!(
+        queued.contains(&"event_floors/upsert".to_string()),
+        "{queued:?}"
+    );
+    assert!(queued.contains(&"records/delete".to_string()), "{queued:?}");
+
+    // The next pass re-reads the fork and links it; the copy stays out.
+    h.pass();
+    let s = h.session("codex", fork);
+    assert_eq!(s.parent_session_id.as_deref(), Some(parent.id.as_str()));
+    assert_eq!(h.events(&s).len(), 2);
+
+    // Once only.
+    h.store
+        .apply(Change::Record(record("later", 300, false, "distiller")))
+        .unwrap();
+    h.engine.repair_codex_subagents();
+    assert!(
+        h.store
+            .list_records(&s.project_id, &Default::default())
+            .unwrap()
+            .iter()
+            .any(|r| r.id == "later")
+    );
+}
+
 // Forks of codex versions that do not write `subagent_history_start_ordinal`
 // are recognized by the parent's `session_meta` in second place; the copy is
 // stamped at the fork's start.
