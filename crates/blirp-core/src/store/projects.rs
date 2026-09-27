@@ -150,13 +150,38 @@ fn canonical_or_same(p: &Path) -> PathBuf {
     dunce::canonicalize(p).unwrap_or_else(|_| p.to_path_buf())
 }
 
-/// A recorded folder in one spelling: no `\\?\` prefix, no trailing or
-/// doubled separators, `.` and `..` resolved lexically, `/` as `\` on
-/// Windows, and its deepest existing ancestor canonicalized. For folders
-/// that no longer exist (existing ones are canonicalized): a gone
-/// `/tmp/run` on macOS is `/private/tmp/run`, like the (canonical) roots
-/// and registered folders it is matched against.
+/// A recorded folder in the spelling [`canonical_dir`] gives existing ones:
+/// [`lexical`], then its deepest existing ancestor canonicalized and the
+/// rest kept. For folders that no longer exist: a gone `/tmp/run` on macOS
+/// is `/private/tmp/run`, like the (canonical) roots and registered folders
+/// it is matched against.
 fn normalize(p: &Path) -> PathBuf {
+    let out = lexical(p);
+    for base in out.ancestors() {
+        match dunce::canonicalize(base) {
+            Ok(canon) => {
+                return match out.strip_prefix(base) {
+                    Ok(rest) if !rest.as_os_str().is_empty() => canon.join(rest),
+                    _ => canon,
+                };
+            }
+            Err(e)
+                if matches!(
+                    e.kind(),
+                    std::io::ErrorKind::NotFound | std::io::ErrorKind::NotADirectory
+                ) => {}
+            // Anything else (e.g. an offline network share) fails the same
+            // way further up, slowly; keep the lexical spelling.
+            Err(_) => break,
+        }
+    }
+    out
+}
+
+/// `p` without a `\\?\` prefix (`dunce` keeps `\\?\UNC\`), trailing or
+/// doubled separators, with `.` and `..` resolved lexically and `/` as `\`
+/// on Windows.
+fn lexical(p: &Path) -> PathBuf {
     use std::path::Component;
     let mut out = PathBuf::new();
     for c in dunce::simplified(p).components() {
@@ -167,14 +192,6 @@ fn normalize(p: &Path) -> PathBuf {
                 out.pop();
             }
             c => out.push(c),
-        }
-    }
-    for base in out.ancestors() {
-        if let Ok(canon) = dunce::canonicalize(base) {
-            return match out.strip_prefix(base) {
-                Ok(rest) if !rest.as_os_str().is_empty() => canon.join(rest),
-                _ => canon,
-            };
         }
     }
     out
@@ -495,10 +512,15 @@ impl Store {
                 cwd.display()
             )));
         }
+        let spelled = lexical(cwd);
         let cwd = &normalize(cwd);
         self.write(|tx| {
             let paths = live_local_paths(tx, machine_id)?;
-            if let Some(pp) = longest_prefix(&paths, cwd) {
+            // Rows recorded before gone folders were canonicalized (0.1.0)
+            // hold the lexical spelling (`/tmp/x` on macOS, a mapped drive).
+            if let Some(pp) =
+                longest_prefix(&paths, cwd).or_else(|| longest_prefix(&paths, &spelled))
+            {
                 return Ok(ResolvedProject {
                     project: live_project_in(tx, &pp.project_id)?,
                     root: PathBuf::from(&pp.path),
@@ -964,6 +986,30 @@ mod tests {
             assert!(!r.created);
         }
         assert_eq!(store.list_project_summaries("m").unwrap().len(), 1);
+    }
+
+    /// A gone folder recorded by 0.1.0 in its lexical spelling (through a
+    /// symlink, like `/tmp` on macOS) still resolves to its project.
+    #[cfg(unix)]
+    #[test]
+    fn gone_folders_recorded_in_lexical_spelling_keep_their_project() {
+        let (_d, store, root, dirs) = auto_env();
+        std::os::unix::fs::symlink(root.join("home"), root.join("link")).unwrap();
+        let old = root.join("link/old-project");
+        let p = store
+            .write(|tx| {
+                let p = new_project(tx, "old-project", false)?;
+                attach_path(tx, &p.id, "m", &old, None)?;
+                Ok(p)
+            })
+            .unwrap();
+        for cwd in [old.clone(), old.join("sub")] {
+            let r = store
+                .resolve_project_lenient("m", "box", &cwd, None, &dirs)
+                .unwrap();
+            assert_eq!(r.project.id, p.id, "{}", cwd.display());
+            assert!(!r.created);
+        }
     }
 
     fn external(id: &str, project: &str, machine: &str) -> Session {
