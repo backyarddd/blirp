@@ -465,7 +465,7 @@ async fn apply(
         // period): taking the hub's changes never uploads behind them.
         if tracked.syncs()
             && e.gate().is_ok()
-            && let Err(err) = copy::upload(&e.env, &copy).await
+            && let Err(err) = e.upload(&copy).await
         {
             // Still take the hub's changes; the upload retries on its own.
             tracing::warn!(error = %err, "uploading before taking the hub's changes failed");

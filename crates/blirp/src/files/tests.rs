@@ -935,6 +935,31 @@ async fn a_file_over_the_hubs_limit_does_not_hold_up_its_folder() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_returned_folder_holds_even_a_single_delete() {
+    let w = world(0).await;
+    let (e0, c0) = w.writer(0).unwrap();
+    std::fs::remove_file(Path::new(&c0.key).join("a.txt")).unwrap();
+    // One of two files: no mass delete, but a folder that was just missing
+    // holds it all the same.
+    let r = copy::upload_with(&e0, &c0, copy::Deletes::HoldAll)
+        .await
+        .unwrap();
+    assert_eq!(r.held_deletes, ["a.txt"]);
+    assert!(
+        w.index()
+            .iter()
+            .any(|e| e.path == "a.txt" && e.content.is_some())
+    );
+    let r = copy::upload(&e0, &c0).await.unwrap();
+    assert!(r.held_deletes.is_empty());
+    assert!(
+        w.index()
+            .iter()
+            .any(|e| e.path == "a.txt" && e.content.is_none())
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn an_empty_file_syncs_with_the_rest_of_its_folder() {
     let w = world(1).await;
     let (e0, c0) = w.writer(0).unwrap();

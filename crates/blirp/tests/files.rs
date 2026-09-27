@@ -695,3 +695,81 @@ async fn empty_files_upload_and_missing_folders_wait_for_their_return() {
         n.daemon.shutdown().await.unwrap();
     }
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_deleted_workspace_made_again_empty_takes_its_files_back() {
+    if !in_temp_home("a_deleted_workspace_made_again_empty_takes_its_files_back") {
+        return;
+    }
+    let tmp = tempfile::tempdir().unwrap();
+    let hub = Node::start(&tmp.path().join("a"), "hub-a").await;
+    let b = Node::start(&tmp.path().join("b"), "node-b").await;
+    pair(&hub, &b).await;
+    for n in [&hub, &b] {
+        n.start_now().await;
+    }
+    // One file: under the plain mass-delete guard's minimum.
+    let p: ProjectSummary = b
+        .ok(
+            Method::POST,
+            "/api/projects",
+            Some(json!({"name": "notes"})),
+        )
+        .await;
+    let pid = p.project.id.clone();
+    let ws = PathBuf::from(p.workspace.clone().expect("workspace"));
+    write(&ws.join("todo.md"), "keep me");
+    let _: FilesPreview = b
+        .get(&format!("/api/projects/{pid}/files-sync/preview"))
+        .await;
+    eventually("the workspace uploaded", || async {
+        hub_files(&hub, &pid).await.is_some_and(|(_, n)| n == 1)
+    })
+    .await;
+    let head = || {
+        let roots = hub.daemon.state.store.hub_file_roots().unwrap();
+        roots.iter().find(|r| r.project_id == pid).unwrap().head
+    };
+    let head_before = head();
+
+    // Gone, then made again empty on demand: by the files API (preview,
+    // Bring changes here) and by a session starting in the project.
+    std::fs::remove_dir_all(&ws).unwrap();
+    let _: FilesPreview = b
+        .get(&format!("/api/projects/{pid}/files-sync/preview"))
+        .await;
+    let r = b
+        .req(
+            Method::POST,
+            &format!("/api/projects/{pid}/files-sync/apply"),
+            Some(json!({ "root": ws })),
+        )
+        .await;
+    let status = r.status();
+    assert!(status.is_success(), "{status} {}", r.text().await.unwrap());
+    let r = b
+        .req(
+            Method::POST,
+            "/api/sessions",
+            Some(json!({"project_id": pid, "agent": "shell", "cols": 80, "rows": 24})),
+        )
+        .await;
+    let status = r.status();
+    assert!(status.is_success(), "{status} {}", r.text().await.unwrap());
+
+    // The workspace takes its file back; no delete reaches the hub.
+    read_eventually(&ws.join("todo.md"), "keep me").await;
+    eventually("the workspace is in sync again", || async {
+        let f = b.files(&pid).await;
+        f.roots
+            .into_iter()
+            .find_map(|r| r.local)
+            .is_some_and(|l| l.state.as_str() == "idle")
+    })
+    .await;
+    assert_eq!(head(), head_before, "a delete was committed");
+    assert_eq!(hub_files(&hub, &pid).await.map(|(_, n)| n), Some(1));
+    for n in [b, hub] {
+        n.daemon.shutdown().await.unwrap();
+    }
+}

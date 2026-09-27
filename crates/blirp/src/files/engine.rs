@@ -89,6 +89,16 @@ pub struct Engine {
     /// Paths each folder's last pass held by the mass-delete guard: what
     /// "Delete on hub too" confirms (nothing more).
     held: Mutex<HashMap<String, Vec<String>>>,
+    /// Folders seen missing since their last pass that held nothing: what
+    /// is there now may be an empty folder made in their place, so no
+    /// delete of theirs is committed without a confirmation, and a
+    /// workspace takes its files back from the hub first.
+    returned: Mutex<HashSet<String>>,
+    /// Each folder's identity at its last settled pass ([`folder_identity`]).
+    identity: Mutex<HashMap<String, (u64, u64)>>,
+    /// The upload error last logged per folder (logged again only when it
+    /// changes, or after a pass that worked).
+    logged: Mutex<HashMap<String, String>>,
 }
 
 impl std::fmt::Debug for Engine {
@@ -113,6 +123,9 @@ impl Engine {
             stop,
             task: Mutex::default(),
             held: Mutex::default(),
+            returned: Mutex::default(),
+            logged: Mutex::default(),
+            identity: Mutex::default(),
         });
         let task = tokio::spawn(run(engine.clone(), rx, stop_rx));
         *lock(&engine.task) = Some(task);
@@ -207,6 +220,50 @@ impl Engine {
         }
     }
 
+    /// Upload `copy` with the delete guard it needs now. A folder that was
+    /// missing holds any delete until confirmed; a workspace (blirp's own
+    /// folder, made again empty on demand) first takes back from the hub
+    /// the files it synced and lost.
+    pub(crate) async fn upload(&self, copy: &Copy) -> Result<copy::UploadReport, CopyError> {
+        let (ws, key) = (self.env.data_dir.join("workspaces"), copy.key.clone());
+        let (id, workspace) = tokio::task::spawn_blocking(move || {
+            let ws = blirp_core::paths::path_key(&canonical_folder(&ws));
+            let workspace = blirp_core::paths::path_key(Path::new(&key)).starts_with(ws);
+            (folder_identity(Path::new(&key)), workspace)
+        })
+        .await
+        .unwrap_or((None, false));
+        // Removed and made again since the last pass (another folder now
+        // under the same name), even when no reconcile saw it missing.
+        let known = lock(&self.identity).get(&copy.key).copied();
+        if id.is_some() && known.is_some() && id != known {
+            lock(&self.returned).insert(copy.key.clone());
+        }
+        let returned = lock(&self.returned).contains(&copy.key);
+        let r = if returned {
+            if workspace {
+                let r = copy::restore_missing(&self.env, copy).await?;
+                if r.written > 0 {
+                    tracing::info!(path = %copy.key, files = r.written, "restored a workspace from the hub");
+                }
+                if !r.failed.is_empty() {
+                    tracing::warn!(path = %copy.key, files = r.failed.len(), "restoring a workspace from the hub failed");
+                }
+            }
+            copy::upload_with(&self.env, copy, copy::Deletes::HoldAll).await?
+        } else {
+            copy::upload(&self.env, copy).await?
+        };
+        // A pass that held nothing settles the folder as it is now.
+        if r.held_deletes.is_empty() && r.state == Some(ScanState::Ok) {
+            lock(&self.returned).remove(&copy.key);
+            if let Some(id) = id {
+                lock(&self.identity).insert(copy.key.clone(), id);
+            }
+        }
+        Ok(r)
+    }
+
     /// The paths the last pass over `key` held (mass-delete guard).
     pub fn held_deletes(&self, key: &str) -> Vec<String> {
         lock(&self.held).get(key).cloned().unwrap_or_default()
@@ -243,6 +300,8 @@ impl Engine {
             Ok(Ok(t)) => {
                 let mut cur = lock(&self.tracked);
                 log_missing(&cur, &t);
+                lock(&self.returned)
+                    .extend(t.iter().filter(|t| t.missing).map(|t| t.copy.key.clone()));
                 *cur = t;
             }
             Ok(Err(e)) => tracing::warn!(error = %e, "listing folders for file sync failed"),
@@ -337,11 +396,12 @@ impl Engine {
         }
         self.set_status(&key, |s| s.state = CopyState::Uploading);
         self.emit();
-        let result = copy::upload(&self.env, &t.copy).await;
+        let result = self.upload(&t.copy).await;
         match result {
             Ok(r) => {
                 let now = blirp_core::now_ms();
                 let held = r.held_deletes.len();
+                lock(&self.logged).remove(&key);
                 if held > 0 {
                     lock(&self.held).insert(key.clone(), r.held_deletes.clone());
                 } else {
@@ -456,8 +516,13 @@ impl Engine {
                 (CopyState::Missing, Some(MISSING.into()))
             }
             _ => {
-                tracing::warn!(path = %key, code = e.code(), error = %e, "project file upload failed");
-                (CopyState::Error, Some(e.to_string()))
+                let message = e.to_string();
+                // Logged when it starts or changes, not on every pass.
+                let prev = lock(&self.logged).insert(key.clone(), message.clone());
+                if prev.as_deref() != Some(message.as_str()) {
+                    tracing::warn!(path = %key, code = e.code(), error = %e, "project file upload failed");
+                }
+                (CopyState::Error, Some(message))
             }
         };
         self.set_status(key, |s| {
@@ -481,23 +546,96 @@ impl Engine {
 pub(crate) fn folder_missing(p: &Path) -> bool {
     match std::fs::metadata(p) {
         Ok(m) => !m.is_dir(),
-        Err(e) => matches!(
-            e.kind(),
-            std::io::ErrorKind::NotFound | std::io::ErrorKind::NotADirectory
-        ),
+        Err(e) => {
+            matches!(
+                e.kind(),
+                std::io::ErrorKind::NotFound | std::io::ErrorKind::NotADirectory
+            ) || e.raw_os_error().is_some_and(gone_volume)
+        }
     }
 }
 
-/// `p` canonicalized; when it does not exist, its canonical parent joined
-/// with its name (the spelling it had while it existed).
+/// Identity of the folder at `p` (device and inode; volume serial and
+/// file index on Windows): a folder removed and made again under the same
+/// name has another. None when it cannot be read.
+fn folder_identity(p: &Path) -> Option<(u64, u64)> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        let m = std::fs::metadata(p).ok()?;
+        Some((m.dev(), m.ino()))
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::OpenOptionsExt;
+        use std::os::windows::io::AsRawHandle;
+        use windows_sys::Win32::Storage::FileSystem::{
+            BY_HANDLE_FILE_INFORMATION, FILE_FLAG_BACKUP_SEMANTICS, GetFileInformationByHandle,
+        };
+        // No access rights needed, and std shares read, write and delete:
+        // holding it never keeps anyone from changing the folder.
+        let f = std::fs::OpenOptions::new()
+            .access_mode(0)
+            .custom_flags(FILE_FLAG_BACKUP_SEMANTICS)
+            .open(p)
+            .ok()?;
+        #[allow(unsafe_code)]
+        // SAFETY: the handle is open for the whole call and `info` is a
+        // plain out-parameter struct of the size the call expects.
+        let info = unsafe {
+            let mut info: BY_HANDLE_FILE_INFORMATION = std::mem::zeroed();
+            (GetFileInformationByHandle(f.as_raw_handle(), &mut info) != 0).then_some(info)
+        }?;
+        Some((
+            u64::from(info.dwVolumeSerialNumber),
+            (u64::from(info.nFileIndexHigh) << 32) | u64::from(info.nFileIndexLow),
+        ))
+    }
+    #[cfg(not(any(unix, windows)))]
+    {
+        let _ = p;
+        None
+    }
+}
+
+/// OS errors meaning the folder's drive or share is not there (an
+/// unplugged or unmounted drive, a share that went away).
+fn gone_volume(code: i32) -> bool {
+    #[cfg(windows)]
+    {
+        // ERROR_PATH_NOT_FOUND, ERROR_INVALID_DRIVE, ERROR_NOT_READY,
+        // ERROR_BAD_NETPATH, ERROR_NETNAME_DELETED, ERROR_BAD_NET_NAME.
+        matches!(code, 3 | 15 | 21 | 53 | 64 | 67)
+    }
+    #[cfg(unix)]
+    {
+        matches!(code, libc::ENODEV | libc::ENXIO | libc::ESTALE)
+    }
+    #[cfg(not(any(windows, unix)))]
+    {
+        let _ = code;
+        false
+    }
+}
+
+/// `p` canonicalized; when it does not exist, its nearest existing
+/// ancestor canonicalized and the rest joined on (the spelling it had
+/// while it existed, through symlinked or short-named parents).
 fn canonical_folder(p: &Path) -> PathBuf {
-    dunce::canonicalize(p)
-        .ok()
-        .or_else(|| {
-            let parent = dunce::canonicalize(p.parent()?).ok()?;
-            Some(parent.join(p.file_name()?))
-        })
-        .unwrap_or_else(|| p.to_path_buf())
+    let mut rest = Vec::new();
+    let mut cur = p;
+    loop {
+        if let Ok(c) = dunce::canonicalize(cur) {
+            return rest.iter().rev().fold(c, |acc, n| acc.join(n));
+        }
+        match (cur.parent(), cur.file_name()) {
+            (Some(parent), Some(name)) => {
+                rest.push(name.to_os_string());
+                cur = parent;
+            }
+            _ => return p.to_path_buf(),
+        }
+    }
 }
 
 async fn root_missing(key: &str) -> bool {
@@ -742,6 +880,16 @@ fn relevant(p: &Path) -> bool {
     })
 }
 
+/// Drop partial downloads a stopped transfer left behind.
+async fn sweep_downloads(hub: &blirp_sync::files::FileHub) {
+    let h = hub.clone();
+    match tokio::task::spawn_blocking(move || h.sweep_downloads()).await {
+        Ok(0) => {}
+        Ok(n) => tracing::info!(files = n, "removed old partial downloads"),
+        Err(e) => tracing::warn!(error = %e, "removing old partial downloads failed"),
+    }
+}
+
 async fn run(
     engine: Arc<Engine>,
     mut rx: mpsc::UnboundedReceiver<Kick>,
@@ -751,7 +899,7 @@ async fn run(
     let mut watched: HashSet<PathBuf> = HashSet::new();
     let mut rescan = tokio::time::interval(RESCAN);
     rescan.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
-    let hub_gc = matches!(engine.env.hub, blirp_sync::files::FileHub::Local(_));
+    sweep_downloads(&engine.env.hub).await;
     let mut gc = tokio::time::interval_at(tokio::time::Instant::now() + GC_FIRST, GC_EVERY);
     let mut notes = match &engine.env.hub {
         blirp_sync::files::FileHub::Local(l) => Some(l.hub.subscribe()),
@@ -788,7 +936,8 @@ async fn run(
             tokio::select! {
                 _ = stop.changed() => break,
                 _ = rescan.tick() => full = true,
-                _ = gc.tick(), if hub_gc => {
+                _ = gc.tick() => {
+                    sweep_downloads(&engine.env.hub).await;
                     if let blirp_sync::files::FileHub::Local(l) = &engine.env.hub {
                         let h = l.hub.clone();
                         match tokio::task::spawn_blocking(move || h.gc(blirp_core::now_ms())).await {
@@ -974,6 +1123,9 @@ mod tests {
             stop: watch::channel(false).0,
             task: Mutex::default(),
             held: Mutex::default(),
+            returned: Mutex::default(),
+            logged: Mutex::default(),
+            identity: Mutex::default(),
         };
         let tracked = |p: &Path| Tracked {
             copy: Copy {
@@ -1006,6 +1158,43 @@ mod tests {
             .await;
         assert_eq!(state(&here).state, CopyState::Error);
         assert!(rx.try_recv().is_err());
+    }
+
+    #[test]
+    fn folder_keys_and_identities_survive_a_missing_folder() {
+        let dir = tempfile::tempdir().unwrap();
+        let base = dunce::canonicalize(dir.path()).unwrap();
+        // Several levels gone: the nearest existing ancestor decides the
+        // spelling (a short-named or symlinked temp folder included).
+        assert_eq!(
+            canonical_folder(&dir.path().join("a").join("b")),
+            base.join("a").join("b")
+        );
+        #[cfg(unix)]
+        {
+            let real = dir.path().join("real");
+            std::fs::create_dir(&real).unwrap();
+            let link = dir.path().join("link");
+            std::os::unix::fs::symlink(&real, &link).unwrap();
+            assert_eq!(
+                canonical_folder(&link.join("gone").join("x")),
+                base.join("real").join("gone").join("x")
+            );
+        }
+        // Made again under the same name: another folder.
+        let f = dir.path().join("f");
+        std::fs::create_dir(&f).unwrap();
+        let first = folder_identity(&f).unwrap();
+        assert_eq!(folder_identity(&f), Some(first));
+        std::fs::remove_dir(&f).unwrap();
+        assert_eq!(folder_identity(&f), None);
+        std::fs::create_dir(&f).unwrap();
+        assert_ne!(folder_identity(&f).unwrap(), first);
+        // Drives and shares that are not there count as missing.
+        #[cfg(windows)]
+        assert!(gone_volume(21) && gone_volume(67) && !gone_volume(5));
+        #[cfg(unix)]
+        assert!(gone_volume(libc::ESTALE) && !gone_volume(libc::EACCES));
     }
 
     #[test]

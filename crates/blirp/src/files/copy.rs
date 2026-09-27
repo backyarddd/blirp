@@ -193,6 +193,9 @@ pub fn mass_delete(deletes: usize, synced: usize) -> bool {
 pub enum Deletes {
     /// Hold them (the default).
     Guard,
+    /// Hold any delete, however few: the folder was just missing, and what
+    /// came back may be an empty folder made in its place.
+    HoldAll,
     /// The user confirmed deleting these paths (what the folder showed);
     /// other deletes wait for the next pass.
     Confirm(HashSet<String>),
@@ -490,7 +493,12 @@ pub async fn upload_with(
         .values()
         .filter(|b| b.content.is_some() && !b.skipped)
         .count();
-    if deletes == Deletes::Guard && mass_delete(doomed.len(), synced) {
+    let hold = match deletes {
+        Deletes::Guard => mass_delete(doomed.len(), synced),
+        Deletes::HoldAll => !doomed.is_empty(),
+        Deletes::Confirm(_) => false,
+    };
+    if hold {
         tracing::warn!(
             files = doomed.len(),
             synced,
