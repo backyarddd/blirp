@@ -186,6 +186,10 @@ The LAN portal uses a self-signed certificate, so every browser warns once per d
 
 The portal does not start although it is enabled: it runs only on a hub, and a changed `portal.lan` setting applies after a daemon restart. `POST /api/devices/browser-invite` answers `portal_disabled` while it is not running.
 
+## Notifications do not show
+
+Use **Settings > Appearance > Notifications > Send test notification**; it says which service got the notification or why the browser refused. See [Notifications](projects-and-sessions.md#notifications) for the Windows, macOS and Linux settings that can hide them. The in-app signals (toast, `(n) blirp` in the title, the dot on the tab icon) work without any OS permission.
+
 ## Linux desktop
 
 - No **Keeping <machine> awake** in the top bar while sessions run, and `blirp logs` shows

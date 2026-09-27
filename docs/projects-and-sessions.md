@@ -55,7 +55,20 @@ Paste a screenshot or a copied file into a terminal pane (Ctrl+V or Ctrl+Shift+V
 
 A session you stop with **Stop** (UI or `blirp stop <id>`) is recorded as Completed with `stopped_by_user` set, whatever exit code the agent returns, and its chip reads **Stopped**, so a deliberate stop is distinguishable from the agent finishing on its own. Stop kills the whole process tree (Windows job object; process group SIGHUP then SIGKILL after 3 s on macOS/Linux). Only sessions blirp launched can be stopped from blirp; external sessions belong to the terminal that started them.
 
-Browser notifications (Settings > Appearance) fire when a session becomes Waiting, Completed or Failed while blirp is in the background.
+### Notifications
+
+blirp tells you when a session becomes **Waiting** (needs input), **Completed** or **Failed** and you are not looking at it. Nothing fires for the session on screen in a focused window, or for a session you stopped yourself. Choose the events, a sound (off by default) or turn it all off under **Settings > Appearance > Notifications**; the choice is saved per browser (or per desktop app).
+
+- **Window in front, another page or session on screen:** a toast in blirp with **Open**.
+- **Window in the background or minimized:** a system notification, a count in the window title (`(2) blirp`) and a dot on the tab icon until you look at those sessions.
+  - **Desktop app:** a native notification (Windows notifications, macOS Notification Center, the Linux notification daemon over D-Bus), and the taskbar button flashes (the dock icon bounces on macOS). Clicking the notification does not open the session; the flashing window does.
+  - **Browser** (`blirp open`, the LAN portal): the browser's own notifications. Allow them with **Enable desktop notifications** in Settings, or with the **Enable** offer blirp shows the first time one would have fired. Browsers only allow them on `https://` pages and on `localhost`/`127.0.0.1`. Clicking one opens the session.
+
+**Send test notification** shows what happened: which service got it, or why the browser refused (never asked, blocked, unsupported). When it says sent but nothing appears, the OS is holding it back:
+
+- **Windows:** Settings > System > Notifications: notifications on, **blirp** (desktop app) or your browser allowed, and Do not disturb / Focus off (or blirp added to its priority list). The desktop app registers itself as a notification sender for your user on start; `blirp uninstall` removes that registration.
+- **macOS:** System Settings > Notifications > blirp (or your browser): Allow notifications, and Focus off.
+- **Linux:** a notification daemon must run (GNOME, KDE and most desktops have one; bare window managers need e.g. `dunst` or `mako`).
 
 ### Worktrees
 

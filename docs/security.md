@@ -89,7 +89,7 @@ Injected memory is derived from earlier transcripts, which can contain text from
 
 ## Desktop app
 
-The window loads only its bundled loading page and the local daemon UI. The daemon origin gets no Tauri IPC capabilities; only the bundled page may call its three commands (startup state, retry, open logs). Navigation to other origins and `window.open` go to your default browser. The app has no updater of its own: `blirp update` replaces it, after verifying the release signature with the key built into `blirp`.
+The window loads only its bundled loading page and the local daemon UI. The daemon origin (`http://127.0.0.1:<port>`) may call exactly one command, `notify` (show an OS notification, flash the taskbar button), which also checks the caller is the daemon origin the window signed in to; only the bundled page may call the three startup commands (startup state, retry, open logs). Navigation to other origins and `window.open` go to your default browser. The app has no updater of its own: `blirp update` replaces it, after verifying the release signature with the key built into `blirp`.
 
 ## Hardening checklist
 
