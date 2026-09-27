@@ -578,6 +578,34 @@ async fn terminal_uploads() {
     );
     wait_status(&h, &session.id, SessionStatus::Completed).await;
     wait_no_terminal(&h, &session.id).await;
+    // Attaching after the process ended gets its exit and a normal close,
+    // not a 404 the client would keep retrying.
+    let mut ws = h.ws(&session.id).await;
+    assert!(matches!(
+        next_text(&mut ws).await,
+        TerminalServerMessage::Exit {
+            status: SessionStatus::Completed,
+            exit_code: None
+        }
+    ));
+    match tokio::time::timeout(Duration::from_secs(20), ws.next()).await {
+        Ok(Some(Ok(Message::Close(Some(f))))) => assert_eq!(u16::from(f.code), 1000),
+        other => panic!("expected a close frame, got {other:?}"),
+    }
+    let mut req = format!(
+        "ws://127.0.0.1:{}/api/terminals/no-such-session/ws",
+        h.daemon.port
+    )
+    .into_client_request()
+    .unwrap();
+    req.headers_mut().insert(
+        "Authorization",
+        format!("Bearer {}", h.token).parse().unwrap(),
+    );
+    match tokio_tungstenite::connect_async(req).await {
+        Err(tokio_tungstenite::tungstenite::Error::Http(r)) => assert_eq!(r.status(), 404),
+        other => panic!("unknown session must be refused: {:?}", other.map(|_| ())),
+    }
     let r = upload(&h, &session.id, "late.png", png).await;
     assert_eq!(r.status(), 404);
 

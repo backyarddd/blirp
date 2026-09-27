@@ -79,6 +79,9 @@ so every tag needs one.
   title (and taskbar button) and, in a browser, a dot on the tab icon. Settings > Appearance > Notifications picks the
   events (needs input, finished, failed), an optional sound, and has
   **Send test notification**.
+- A terminal pane opened just as its session ended shows that it exited
+  instead of flashing "Reconnecting" and retrying: attaching to an ended
+  session now sends its exit instead of a 404.
 
 ## [0.1.0] - 2026-09-26
 

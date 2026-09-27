@@ -37,6 +37,26 @@ pub async fn attach(
                 crate::sync::relay_terminal(socket, remote, principal.control, shutdown)
             }));
         }
+        // The process ended between the client seeing it live and attaching
+        // (the exit is recorded before the terminal leaves the registry):
+        // report the exit like a live terminal would, so the client shows it
+        // instead of retrying a 404.
+        let store = s.store.clone();
+        let sid = id.clone();
+        let ended = super::blocking(move || Ok(store.get_session(&sid)?))
+            .await?
+            .filter(|sess| !sess.status.is_live());
+        if let Some(sess) = ended {
+            let exit = text(&TerminalServerMessage::Exit {
+                status: sess.status,
+                exit_code: sess.exit_code,
+            });
+            return Ok(ws.on_upgrade(move |mut socket| async move {
+                if send(&mut socket, exit).await {
+                    super::close_ws(&mut socket, Some(super::WS_DONE)).await;
+                }
+            }));
+        }
         return Err(ApiError::new(
             StatusCode::NOT_FOUND,
             "terminal_not_found",

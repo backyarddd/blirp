@@ -7,7 +7,8 @@
 //
 // Close codes: 1000 after `exit`, 1001 on daemon shutdown or when this client's access changed
 // (reconnect), 1011 when a relayed terminal's machine is unreachable; a refused upgrade
-// (404 `terminal_not_found`, 401) surfaces as 1006. The `exit` frame says the process ended.
+// (404 `terminal_not_found`, 401) surfaces as 1006. The `exit` frame says the process ended (also
+// sent, then 1000, when attaching to a session whose process already ended).
 import type { SessionStatus, TerminalClientMessage, TerminalServerMessage } from '../api/types.gen';
 
 export type ServerFrame =

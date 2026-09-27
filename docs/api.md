@@ -166,7 +166,7 @@ Text fields are limited to 256 KiB.
 
 ### Terminal: `GET /api/terminals/:id/ws`
 
-Attach to a live terminal (`:id` is the session id). Browsers authenticate the upgrade with `?ticket=` (see [Listeners and authentication](#listeners-and-authentication)). 404 `terminal_not_found` when the session has no live process; use the session's events instead. Sessions on another machine are relayed through the hub. Several clients may attach.
+Attach to a live terminal (`:id` is the session id). Browsers authenticate the upgrade with `?ticket=` (see [Listeners and authentication](#listeners-and-authentication)). A session of this machine whose process has ended gets one `exit` frame (its stored status and exit code) and a normal close; 404 `terminal_not_found` when the session is unknown or still starting without a terminal. Use the session's events for an ended session's history. Sessions on another machine are relayed through the hub. Several clients may attach.
 
 Server to client:
 
