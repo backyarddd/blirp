@@ -55,10 +55,8 @@
     if (m.matches(':popover-open')) m.hidePopover();
     returnTo = from;
     m.style.right = 'auto';
-    // Floor, not round: where contextmenu fires on mousedown (Linux, macOS) the pointer must still be
-    // inside the menu at mouseup, or light dismiss closes it at once (a click at y=126.5 rounded to 127).
-    m.style.left = `${Math.floor(x)}px`;
-    m.style.top = `${Math.floor(y)}px`;
+    m.style.left = `${Math.round(x)}px`;
+    m.style.top = `${Math.round(y)}px`;
     m.showPopover();
     clamp(m);
   }

@@ -39,11 +39,32 @@ export function isMenuKey(e: Pick<KeyboardEvent, 'key' | 'shiftKey' | 'ctrlKey' 
 
 export function contextmenu(node: HTMLElement, options: ContextMenuOptions): ActionReturn<ContextMenuOptions> {
   let opts = options;
+  /** A menu waiting for the mouse button's release. */
+  let pending: AbortController | null = null;
 
-  const open = (x: number, y: number): boolean => {
+  /** Opens now, or with `afterRelease` once the pressed mouse button is up. */
+  const open = (x: number, y: number, afterRelease = false): boolean => {
     const items = opts.items();
-    if (items.length === 0 || opener === null) return false;
-    opener(items, opts.label, x, y, node);
+    const show = opener;
+    if (items.length === 0 || show === null) return false;
+    if (!afterRelease) {
+      show(items, opts.label, x, y, node);
+      return true;
+    }
+    pending?.abort();
+    const done = new AbortController();
+    pending = done;
+    const listen = { capture: true, signal: done.signal };
+    window.addEventListener(
+      'pointerup',
+      () => {
+        done.abort();
+        show(items, opts.label, x, y, node);
+      },
+      listen,
+    );
+    // A release the page never sees (window switched while held) must not open it on a later click.
+    for (const cancel of ['pointercancel', 'pointerdown', 'blur']) window.addEventListener(cancel, () => done.abort(), listen);
     return true;
   };
 
@@ -54,8 +75,11 @@ export function contextmenu(node: HTMLElement, options: ContextMenuOptions): Act
     const fromKeyboard = e.clientX === 0 && e.clientY === 0;
     const x = fromKeyboard ? r.left + 12 : e.clientX;
     const y = fromKeyboard ? r.top + Math.min(r.height, 28) : e.clientY;
+    // Where this fires on press (Linux, macOS), a menu shown now is light dismissed by the release:
+    // Chromium hides popovers on a pointerup outside them, and the pointer sits on the menu's
+    // rounded corner. Windows fires it after the release (no buttons down).
     // The innermost item's menu wins (a session card inside a group).
-    if (open(x, y)) e.preventDefault();
+    if (open(x, y, e.buttons !== 0)) e.preventDefault();
   };
 
   const onKeyDown = (e: KeyboardEvent): void => {
@@ -80,6 +104,7 @@ export function contextmenu(node: HTMLElement, options: ContextMenuOptions): Act
       opts = next;
     },
     destroy() {
+      pending?.abort();
       node.removeEventListener('contextmenu', onContextMenu);
       node.removeEventListener('keydown', onKeyDown);
     },
