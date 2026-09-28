@@ -82,6 +82,14 @@ dbg_macro = "warn"
 todo = "warn"
 print_stdout = "allow"
 
+# Line tables keep file and line numbers in backtraces and panics at a
+# fraction of the size of full debug info; dependencies carry none.
+[profile.dev]
+debug = "line-tables-only"
+
+[profile.dev.package."*"]
+debug = false
+
 [profile.release]
 lto = "thin"
 codegen-units = 1

@@ -49,6 +49,8 @@ cargo build --release -p blirp              # target/release/blirp, UI embedded
 
 Without `web/dist` the binary still builds and serves a page explaining how to build the UI.
 
+Dev and test builds carry line tables only (`[profile.dev]` in `Cargo.toml`), and dependencies no debug info: backtraces keep file and line numbers and `target/` stays a fraction of the size. For stepping through blirp's own code in a debugger, build with `CARGO_PROFILE_DEV_DEBUG=true`.
+
 The checks CI runs on Windows, macOS and Linux:
 
 ```sh
