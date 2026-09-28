@@ -58,6 +58,10 @@ struct State {
     /// A fork without that field: when it started (see [`FORK_COPY_MS`]).
     #[serde(default)]
     fork_at: Option<i64>,
+    /// Such a fork's first turn of its own was read: nothing after it is
+    /// the parent's copy.
+    #[serde(default)]
+    own_turn: bool,
     /// A subagent's parent (`parent_thread_id`) and title, kept for later
     /// reads: the parent may be ingested after the subagent.
     #[serde(default)]
@@ -96,7 +100,9 @@ impl State {
     fn copied(&self, ordinal: i64, ts: Option<i64>) -> bool {
         match (self.fork_start, self.fork_at) {
             (Some(start), _) => ordinal < start,
-            (None, Some(at)) => ts.is_none_or(|t| t - at < FORK_COPY_MS),
+            // Only lines stamped within the copy's time, before the fork's
+            // own first turn; a line without a time is kept.
+            (None, Some(at)) => !self.own_turn && ts.is_some_and(|t| t - at < FORK_COPY_MS),
             (None, None) => false,
         }
     }
@@ -570,6 +576,7 @@ impl Adapter for Codex {
                     return Ok(());
                 }
                 "turn_context" => {
+                    st.own_turn = true;
                     // session_meta's cwd (where the session started) wins.
                     if meta.cwd.is_none()
                         && let Some(c) = p.get("cwd").and_then(Value::as_str)
@@ -732,6 +739,21 @@ fn response_item(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A fork without a start ordinal: its copy is told by time, only
+    /// before its own first turn, and a line without a time is kept.
+    #[test]
+    fn a_forks_copy_by_time_ends_at_its_own_first_turn() {
+        let mut st = State {
+            fork_at: Some(10_000),
+            ..State::default()
+        };
+        assert!(st.copied(5, Some(10_500)));
+        assert!(!st.copied(5, None), "no time: kept");
+        assert!(!st.copied(5, Some(11_000)));
+        st.own_turn = true;
+        assert!(!st.copied(5, Some(10_500)), "after its own turn");
+    }
 
     #[test]
     fn injected_context_is_not_a_prompt() {
