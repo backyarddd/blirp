@@ -581,11 +581,16 @@ pub(crate) fn folder_missing(p: &Path) -> bool {
     }
 }
 
-/// Identity of the folder at `p` (device and inode; volume serial and
-/// file index on Windows): a folder removed and made again under the same
-/// name has another. None when it cannot be read.
+/// Identity of the folder at `p` (device and inode, and on unix its birth
+/// time where the file system keeps one; volume serial and file index on
+/// Windows): a folder removed and made again under the same name has
+/// another. ext4 hands a freed inode out again at once, so on unix only the
+/// birth time tells such a folder apart. None when it cannot be read.
 fn folder_identity(p: &Path) -> Option<String> {
-    folder_id_parts(p).map(|(dev, ino)| format!("{dev}:{ino}"))
+    folder_id_parts(p).map(|(dev, ino, born)| match born {
+        Some(born) => format!("{dev}:{ino}:{born}"),
+        None => format!("{dev}:{ino}"),
+    })
 }
 
 /// Whether the folder read `before` a pass is still the one there `after`
@@ -598,24 +603,38 @@ fn same_folder_during_pass(before: Option<&str>, after: Option<&str>) -> bool {
     }
 }
 
-/// Whether identity `now` (`<device>:<inode>`) is another folder than
-/// `known`: the same device with another inode. A device number alone can
-/// change across a reboot or remount (btrfs subvolumes, NFS, LVM, macOS
-/// external drives), so a changed device says nothing: the folder is not
-/// held and its identity is recorded again at the next settled pass.
+/// Whether identity `now` (`<device>:<inode>[:<birth ns>]`) is another
+/// folder than `known`: the same device with another inode, or another
+/// birth time when both have one (an identity stored before birth times
+/// were has none). A device number alone can change across a reboot or
+/// remount (btrfs subvolumes, NFS, LVM, macOS external drives), so a
+/// changed device says nothing: the folder is not held and its identity is
+/// recorded again at the next settled pass.
 fn replaced_folder(known: &str, now: &str) -> bool {
-    match (known.split_once(':'), now.split_once(':')) {
-        (Some((dev, ino)), Some((dev_now, ino_now))) => dev == dev_now && ino != ino_now,
+    fn parts(id: &str) -> Option<(&str, &str, Option<&str>)> {
+        let mut p = id.splitn(3, ':');
+        Some((p.next()?, p.next()?, p.next()))
+    }
+    match (parts(known), parts(now)) {
+        (Some((dev, ino, born)), Some((dev_now, ino_now, born_now))) => {
+            dev == dev_now && (ino != ino_now || born.zip(born_now).is_some_and(|(b, n)| b != n))
+        }
         _ => false,
     }
 }
 
-fn folder_id_parts(p: &Path) -> Option<(u64, u64)> {
+/// Device, inode and birth time (ns since the epoch, where kept) of `p`.
+fn folder_id_parts(p: &Path) -> Option<(u64, u64, Option<u128>)> {
     #[cfg(unix)]
     {
         use std::os::unix::fs::MetadataExt;
         let m = std::fs::metadata(p).ok()?;
-        Some((m.dev(), m.ino()))
+        let born = m
+            .created()
+            .ok()
+            .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+            .map(|d| d.as_nanos());
+        Some((m.dev(), m.ino(), born))
     }
     #[cfg(windows)]
     {
@@ -638,9 +657,13 @@ fn folder_id_parts(p: &Path) -> Option<(u64, u64)> {
             let mut info: BY_HANDLE_FILE_INFORMATION = std::mem::zeroed();
             (GetFileInformationByHandle(f.as_raw_handle(), &mut info) != 0).then_some(info)
         }?;
+        // NTFS file indexes carry a reuse sequence number: no birth time
+        // needed (and tunneling would give a folder made again within 15 s
+        // its predecessor's).
         Some((
             u64::from(info.dwVolumeSerialNumber),
             (u64::from(info.nFileIndexHigh) << 32) | u64::from(info.nFileIndexLow),
+            None,
         ))
     }
     #[cfg(not(any(unix, windows)))]
@@ -1252,22 +1275,38 @@ mod tests {
                 base.join("real").join("gone").join("x")
             );
         }
-        // Made again under the same name: another folder.
+        // Made again under the same name: another folder. The old one is
+        // moved aside, not removed, so the new one cannot get its inode
+        // (ext4 reuses a freed one at once, and a folder removed and made
+        // again within one clock tick has the same birth time too).
         let f = dir.path().join("f");
         std::fs::create_dir(&f).unwrap();
         let first = folder_identity(&f).unwrap();
         assert_eq!(folder_identity(&f), Some(first.clone()));
-        std::fs::remove_dir(&f).unwrap();
+        std::fs::rename(&f, dir.path().join("f-old")).unwrap();
         assert_eq!(folder_identity(&f), None);
         std::fs::create_dir(&f).unwrap();
         let again = folder_identity(&f).unwrap();
         assert!(replaced_folder(&first, &again), "{first} -> {again}");
-        // Only another inode on the same device is another folder: a device
-        // number that changed across a remount alone holds nothing.
+        #[cfg(any(target_os = "linux", target_os = "macos"))]
+        assert_eq!(again.split(':').count(), 3, "no birth time in {again}");
+        // Removed and made again a moment later: another folder too, even
+        // with its inode reused (the birth time differs).
+        std::fs::remove_dir(&f).unwrap();
+        std::thread::sleep(Duration::from_millis(50));
+        std::fs::create_dir(&f).unwrap();
+        let third = folder_identity(&f).unwrap();
+        assert!(replaced_folder(&again, &third), "{again} -> {third}");
+        // Only another inode, or another birth time, on the same device is
+        // another folder: a device number that changed across a remount
+        // alone holds nothing, nor does a birth time missing on one side.
         assert!(!replaced_folder(&first, &first));
         assert!(!replaced_folder("7:100", "9:100"));
         assert!(!replaced_folder("7:100", "9:200"));
         assert!(replaced_folder("7:100", "7:200"));
+        assert!(replaced_folder("7:100:5", "7:100:6"));
+        assert!(!replaced_folder("7:100:5", "9:100:6"));
+        assert!(!replaced_folder("7:100", "7:100:6"));
         assert!(!replaced_folder("garbage", "7:200"));
         // Replaced while a pass ran (its identity was read before the work
         // lock): that pass does not settle it.
