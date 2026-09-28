@@ -95,6 +95,7 @@ const sessionOps = (): SessionOps => ({
   removeWorktree: vi.fn(),
   remove: vi.fn(),
   stopAndRemove: vi.fn(),
+  exportTranscript: vi.fn(),
 });
 
 const projectOps = (): ProjectOps => ({
@@ -111,6 +112,7 @@ const projectOps = (): ProjectOps => ({
   remove: vi.fn(),
   removeFolder: vi.fn(),
   restore: vi.fn(),
+  exportMemory: vi.fn(),
 });
 
 const labels = (items: MenuItem[]): string[] => actionsOf(items).map((a) => a.label);
@@ -132,6 +134,8 @@ describe('session actions', () => {
       'Copy session id',
       'Copy resume command',
       'Copy folder path',
+      'Export transcript as Markdown',
+      'Export transcript as JSON',
       'Remove worktree…',
       'Delete…',
     ]);
@@ -160,6 +164,8 @@ describe('session actions', () => {
       'Copy session id',
       'Copy resume command',
       'Copy folder path',
+      'Export transcript as Markdown',
+      'Export transcript as JSON',
     ]);
   });
 
@@ -240,7 +246,18 @@ describe('project actions', () => {
       'Archive',
       'Copy folder path',
       'Copy project id',
+      'Export memory as Markdown',
+      'Export memory as JSON',
     ]);
+  });
+
+  it('exports a transcript or a memory in the format picked', () => {
+    const so = sessionOps();
+    item(sessionActions(session(), env(), so), 'Export transcript as JSON')?.onselect();
+    expect(so.exportTranscript).toHaveBeenCalledWith(expect.objectContaining({ id: 's1' }), 'json');
+    const po = projectOps();
+    item(projectActions(project(), env(), po), 'Export memory as Markdown')?.onselect();
+    expect(po.exportMemory).toHaveBeenCalledWith(expect.objectContaining({ id: 'p' }), 'markdown');
   });
 
   it('never renames, archives, merges or deletes Chats', () => {

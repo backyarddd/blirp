@@ -7,6 +7,17 @@ import type { OpenTarget, PatchRecord, ProjectSummary, Record as MemoryRecord, R
 import { app } from './app.svelte';
 import { remoteRefusal } from './capabilities';
 import { dialogs } from './dialogs.svelte';
+import {
+  EVENTS_PAGE,
+  allEvents,
+  download,
+  exportName,
+  memoryJson,
+  memoryMarkdown,
+  transcriptJson,
+  transcriptMarkdown,
+  type ExportFormat,
+} from './export';
 import { bulkSummary, type ActionEnv, type BulkFailure, type ProjectOps, type RecordOps, type SessionOps } from './actions';
 import { projectKey, sessionKey, type MarkKind } from './marks';
 import { navigate, nav } from './router.svelte';
@@ -355,6 +366,24 @@ export async function removeWorktreeNow(s: Session, force: boolean): Promise<voi
   }
 }
 
+/** Save a session's whole transcript (every event, read page by page) as a file. */
+async function exportTranscript(s: Session, format: ExportFormat): Promise<void> {
+  try {
+    const events = await allEvents((after) => api.sessions.events(s.id, after, EVENTS_PAGE));
+    const name = sessionTitle(s);
+    if (format === 'json') {
+      download(exportName(name, 'json'), transcriptJson(s, events), 'application/json');
+    } else {
+      const project = app.projectById.get(s.project_id);
+      download(exportName(name, 'md'), transcriptMarkdown(s, events, project && !project.chats ? project.name : null), 'text/markdown');
+    }
+    app.toast(`Exported ${events.length} ${events.length === 1 ? 'event' : 'events'} of ${quoted(s)}`, 'info');
+  } catch (e) {
+    app.noteForbidden(e);
+    app.toast(`Could not export the transcript: ${errorMessage(e)}`);
+  }
+}
+
 export const sessionOps: SessionOps = {
   rename: (s) => {
     dialogs.renaming = { kind: 'session', session: s };
@@ -378,6 +407,7 @@ export const sessionOps: SessionOps = {
   removeWorktree: (s) => void removeWorktree(s),
   remove: (s) => void removeSession(s),
   stopAndRemove: (s) => void stopAndRemoveSession(s),
+  exportTranscript: (s, format) => void exportTranscript(s, format),
 };
 
 export async function renameProject(p: ProjectSummary, name: string, undoable = true): Promise<boolean> {
@@ -490,6 +520,20 @@ async function removeFolder(p: ProjectSummary, path: string): Promise<void> {
   if (out) app.upsertProject(out);
 }
 
+/** Save a project's brief and active records (what agents are given) as a file. */
+async function exportMemory(p: ProjectSummary, format: ExportFormat): Promise<void> {
+  try {
+    const m = await api.projects.memory(p.id);
+    const brief = m.brief ?? null;
+    if (format === 'json') download(exportName(`${p.name} memory`, 'json'), memoryJson(p, brief, m.records), 'application/json');
+    else download(exportName(`${p.name} memory`, 'md'), memoryMarkdown(p, brief, m.records, Date.now()), 'text/markdown');
+    app.toast(`Exported the memory of "${p.name}"`, 'info');
+  } catch (e) {
+    app.noteForbidden(e);
+    app.toast(`Could not export the memory: ${errorMessage(e)}`);
+  }
+}
+
 export const projectOps: ProjectOps = {
   newSession: (p) => app.openNewSession(p.chats ? null : p.id),
   rename: (p) => {
@@ -510,6 +554,7 @@ export const projectOps: ProjectOps = {
   remove: (p) => void deleteProject(p),
   removeFolder: (p, path) => void removeFolder(p, path),
   restore: (p) => void restoreProject(p),
+  exportMemory: (p, format) => void exportMemory(p, format),
 };
 
 // ---------------------------------------------------------------- memory records

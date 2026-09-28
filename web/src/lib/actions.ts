@@ -24,7 +24,9 @@ import GitMerge from '@lucide/svelte/icons/git-merge';
 import MessagesSquare from '@lucide/svelte/icons/messages-square';
 import RotateCcw from '@lucide/svelte/icons/rotate-ccw';
 import Check from '@lucide/svelte/icons/check';
+import Download from '@lucide/svelte/icons/download';
 import type { AgentInfo, OpenTarget, ProjectSummary, Record as MemoryRecord, RecordStatus, Session } from './api/types.gen';
+import type { ExportFormat } from './export';
 import { SEPARATOR, tidy, type MenuItem } from './menu';
 import { projectKey, sessionKey } from './marks';
 import { canResume, isLive, isSubagent } from './status';
@@ -61,6 +63,7 @@ export interface SessionOps {
   removeWorktree(s: Session): void;
   remove(s: Session): void;
   stopAndRemove(s: Session): void;
+  exportTranscript(s: Session, format: ExportFormat): void;
 }
 
 export interface ProjectOps {
@@ -77,6 +80,7 @@ export interface ProjectOps {
   remove(p: ProjectSummary): void;
   removeFolder(p: ProjectSummary, path: string): void;
   restore(p: ProjectSummary): void;
+  exportMemory(p: ProjectSummary, format: ExportFormat): void;
 }
 
 export interface RecordOps {
@@ -143,6 +147,9 @@ export function sessionActions(s: Session, env: ActionEnv, ops: SessionOps): Men
   if (resume !== null) items.push({ label: 'Copy resume command', icon: Copy, onselect: () => ops.copy(resume, 'Resume command') });
   items.push({ label: 'Copy folder path', icon: Copy, onselect: () => ops.copy(s.cwd, 'Folder path') });
   items.push(SEPARATOR);
+  items.push({ label: 'Export transcript as Markdown', icon: Download, onselect: () => ops.exportTranscript(s, 'markdown') });
+  items.push({ label: 'Export transcript as JSON', icon: Download, onselect: () => ops.exportTranscript(s, 'json') });
+  items.push(SEPARATOR);
   // The worktree lives on the session's machine; the daemon refuses others.
   add(env.control && local && !live && s.worktree !== null, { label: 'Remove worktree…', icon: FolderX, onselect: () => ops.removeWorktree(s) });
   // Running sessions are refused (409 `session_live`): stop first, which a blirp session can do here.
@@ -183,6 +190,10 @@ export function projectActions(p: ProjectSummary, env: ActionEnv, ops: ProjectOp
   items.push(SEPARATOR);
   if (path !== null && !p.chats) items.push({ label: 'Copy folder path', icon: Copy, onselect: () => ops.copy(path, 'Folder path') });
   add(!p.chats, { label: 'Copy project id', icon: Copy, onselect: () => ops.copy(p.id, 'Project id') });
+  items.push(SEPARATOR);
+  // Chats has no project memory.
+  add(!p.chats, { label: 'Export memory as Markdown', icon: Download, onselect: () => ops.exportMemory(p, 'markdown') });
+  add(!p.chats, { label: 'Export memory as JSON', icon: Download, onselect: () => ops.exportMemory(p, 'json') });
   items.push(SEPARATOR);
   add(env.admin && !p.chats, { label: 'Merge into…', icon: GitMerge, onselect: () => ops.merge(p) });
   add(env.control && !p.chats && env.chatCandidate(p.id), { label: 'Move to Chats…', icon: MessagesSquare, onselect: () => ops.toChats(p) });

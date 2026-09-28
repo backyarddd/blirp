@@ -1,7 +1,8 @@
 // Session and project actions: context menus (never over a terminal), F2 rename, archive, bulk
 // move with a partial failure, and a project's round trip through the Trash. Runs against the same
 // daemon as the other specs, in its own folders and projects. Tests share one page and run in order.
-import { mkdirSync } from 'node:fs';
+import { randomUUID } from 'node:crypto';
+import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { expect, test, type Locator, type Page } from '@playwright/test';
 import { e2eEnv } from './env';
@@ -449,4 +450,79 @@ test('wiki: rename a slug, delete a page with Undo, restore it from Deleted page
   await expect(deleted.getByRole('button', { name: 'Restore Runbook' })).toHaveCount(0);
   const live = await apiCall<{ slug: string }[]>('GET', `/api/projects/${p.id}/wiki`);
   expect(live.map((w) => w.slug)).toEqual(['runbook']);
+});
+
+test('export: a transcript as Markdown and JSON, a project memory as JSON', async () => {
+  const p = await project('Export project');
+  const folder = p.paths[0]?.path;
+  if (!folder) throw new Error('the project has no folder');
+  // A Claude Code transcript in the project's folder, as ingest finds it.
+  const sid = randomUUID();
+  const start = Date.now() - 30 * 60_000;
+  const turn = (uuid: string, parent: string | null, at: number, role: 'user' | 'assistant', text: string): string =>
+    JSON.stringify({
+      parentUuid: parent,
+      isSidechain: false,
+      type: role,
+      message:
+        role === 'user'
+          ? { role, content: text }
+          : {
+              model: 'claude-haiku-4-5',
+              id: `msg_${uuid}`,
+              type: 'message',
+              role,
+              content: [{ type: 'text', text }],
+              usage: { input_tokens: 1, cache_creation_input_tokens: 0, cache_read_input_tokens: 0, output_tokens: 1 },
+            },
+      uuid,
+      timestamp: new Date(start + at).toISOString(),
+      cwd: folder,
+      sessionId: sid,
+      version: '2.0.0',
+      userType: 'external',
+      entrypoint: 'cli',
+    });
+  const dir = join(env.userHome, '.claude', 'projects', 'e2e-export');
+  mkdirSync(dir, { recursive: true });
+  writeFileSync(join(dir, `${sid}.jsonl`), `${turn('u1', null, 1000, 'user', 'Export me please')}\n${turn('a1', 'u1', 2000, 'assistant', 'Here is the ```code``` answer.')}\n`);
+  const find = async (): Promise<SessionRow | undefined> =>
+    (await apiCall<{ items: (SessionRow & { agent_session_id: string | null })[] }>('GET', `/api/sessions?project=${p.id}&limit=50`)).items.find(
+      (x) => x.agent_session_id === sid,
+    );
+  await expect.poll(find, { timeout: 30_000 }).toBeTruthy();
+  const s = await find();
+  if (!s) throw new Error('the ingested session disappeared');
+  await apiCall('PATCH', `/api/sessions/${s.id}`, { title: 'Export session' });
+
+  await page.goto(`${env.url}/sessions/${s.id}`);
+  const saved = async (label: string): Promise<{ name: string; text: string }> => {
+    await card(s.id).click({ button: 'right' });
+    const [dl] = await Promise.all([page.waitForEvent('download'), openMenu().getByRole('menuitem', { name: label }).click()]);
+    const path = await dl.path();
+    return { name: dl.suggestedFilename(), text: readFileSync(path, 'utf8') };
+  };
+  const md = await saved('Export transcript as Markdown');
+  expect(md.name).toBe('export-session.md');
+  expect(md.text).toContain('# Export session\n');
+  expect(md.text).toContain('- Agent: Claude Code\n');
+  expect(md.text).toContain('- Project: Export project\n');
+  expect(md.text).toContain(`- Folder: ${folder}\n`);
+  expect(md.text).toMatch(/## User \([0-9T:.-]+Z\)\n\nExport me please\n/);
+  expect(md.text).toContain('Here is the ```code``` answer.');
+  const json = await saved('Export transcript as JSON');
+  expect(json.name).toBe('export-session.json');
+  const parsed = JSON.parse(json.text) as { session: { id: string }; events: { text: string }[] };
+  expect(parsed.session.id).toBe(s.id);
+  expect(parsed.events.map((e) => e.text)).toEqual(['Export me please', 'Here is the ```code``` answer.']);
+
+  await apiCall('POST', `/api/projects/${p.id}/records`, { kind: 'decision', title: 'Export decision', body: 'Kept.' });
+  await page.goto(`${env.url}/projects/${p.id}`);
+  await page.getByRole('button', { name: 'Project actions' }).click();
+  const [dl] = await Promise.all([page.waitForEvent('download'), page.getByRole('menuitem', { name: 'Export memory as JSON' }).click()]);
+  expect(dl.suggestedFilename()).toBe('export-project-memory.json');
+  const memory = JSON.parse(readFileSync(await dl.path(), 'utf8')) as { project: { id: string; name: string }; brief: null; records: { title: string }[] };
+  expect(Object.keys(memory)).toEqual(['project', 'brief', 'records']);
+  expect(memory.project).toMatchObject({ id: p.id, name: 'Export project' });
+  expect(memory.records.map((r) => r.title)).toEqual(['Export decision']);
 });

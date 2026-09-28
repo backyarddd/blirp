@@ -1,8 +1,16 @@
 // Typed views of the free-form JSON the daemon stores for memory: `Session.summary`
 // (distill output, §9) and `Suggestion.proposal`. Both arrive as parsed JSON of unknown
 // shape, so read them defensively: a malformed field degrades to empty, never a crash.
-import type { DistillFailure, JsonValue, SessionSummary, Suggestion, SummarizerPick, SummaryItem } from './api/types.gen';
+import type { DistillFailure, JsonValue, RecordKind, SessionSummary, Suggestion, SummarizerPick, SummaryItem } from './api/types.gen';
 import { agentLabel } from './status';
+
+export const KIND_LABEL: Record<RecordKind, string> = {
+  decision: 'Decision',
+  plan: 'Plan',
+  note: 'Note',
+  open_thread: 'Open thread',
+  gotcha: 'Gotcha',
+};
 
 type JsonObject = { [key in string]: JsonValue };
 

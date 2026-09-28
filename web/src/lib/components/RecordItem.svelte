@@ -1,13 +1,5 @@
 <script lang="ts" module>
-  import type { RecordKind } from '../api/types.gen';
-
-  export const KIND_LABEL: Record<RecordKind, string> = {
-    decision: 'Decision',
-    plan: 'Plan',
-    note: 'Note',
-    open_thread: 'Open thread',
-    gotcha: 'Gotcha',
-  };
+  export { KIND_LABEL } from '../memory';
 </script>
 
 <script lang="ts">
@@ -25,6 +17,7 @@
   import { recordActions } from '../actions';
   import { contextmenu } from '../contextmenu';
   import { recordOps, setRecordsPinned, setRecordsStatus } from '../manage';
+  import { KIND_LABEL } from '../memory';
   import { formatRelative } from '../time';
   import { href } from '../router';
   import Markdown from './Markdown.svelte';
