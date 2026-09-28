@@ -197,7 +197,7 @@ Attach to a live terminal (`:id` is the session id). Browsers authenticate the u
 Server to client:
 
 - **Text** frames, JSON:
-  - `{"type":"snapshot","cols":N,"rows":N,"data":"..."}`: reset your terminal and write `data`. It starts with `ESC c`, replays the scrollback (up to 10 000 lines, the newest 16 MiB of it), redraws the screen and restores modes, cursor and title. Sent first, and again whenever the client fell behind. Relayed snapshots can be large; accept text frames up to 64 MiB.
+  - `{"type":"snapshot","cols":N,"rows":N,"data":"...","windows_pty":{"build_number":N,"bundled_conpty":bool}}`: reset your terminal and write `data`. It starts with `ESC c`, replays the scrollback (up to 10 000 lines, the newest 16 MiB of it), redraws the screen (the normal one, then the alternate one when a program shows it) and restores every mode (input and keyboard modes including kitty keyboard flags, mouse and focus reporting, scroll region, cursor style), cursor and title. `windows_pty` is present when the terminal runs on Windows (ConPTY): set xterm.js `windowsPty` from it. Sent first, and again whenever the client fell behind. Relayed snapshots can be large; accept text frames up to 64 MiB.
   - `{"type":"resize","cols":N,"rows":N}`: another client resized the terminal (last resize wins).
   - `{"type":"exit","status":"completed","exit_code":0}`: the process ended; the socket closes.
 - **Binary** frames: raw PTY output bytes. A frame can end in the middle of a UTF-8 sequence; feed bytes to the terminal, do not decode per frame.

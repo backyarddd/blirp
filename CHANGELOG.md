@@ -10,6 +10,44 @@ so every tag needs one.
 
 ## [Unreleased]
 
+### Added
+
+- Terminal panes follow VS Code's integrated terminal: xterm.js 6.1 with the
+  kitty keyboard protocol, so Claude Code and Codex get Shift+Enter (new
+  line), Ctrl+Enter and other keys a classic terminal cannot tell apart; find
+  in the terminal (Ctrl+F / Cmd+F); programs can set the clipboard (OSC 52)
+  and print links (OSC 8); Settings > Appearance > Terminal sets font size,
+  line height, letter spacing, cursor style and blinking, and Option as Meta
+  on macOS.
+- Sessions get `TERM_PROGRAM=blirp`, and on macOS and Linux a UTF-8 `LANG`
+  when the daemon has none.
+
+### Changed
+
+- A focused terminal keeps every key except a short list of blirp shortcuts
+  (docs/projects-and-sessions.md#terminal-keys). Ctrl+Shift+Left/Right select
+  words in the shell again; switch sessions from a terminal with
+  Ctrl+PageUp/PageDown. As in VS Code, Ctrl+Shift+C copies only with a
+  selection (otherwise the program gets it), on Windows plain Ctrl+C copies
+  selected text, and right click on Windows copies or pastes.
+
+### Fixed
+
+- Switching sessions, reloading or opening a session in another window no
+  longer resets the modes the program set: kitty keyboard flags, focus
+  reporting and win32-input-mode (which ConPTY requests only once, at start),
+  cursor style, scroll region, origin and wraparound modes, keypad mode and
+  character sets now come back with the screen, and so does the shell screen
+  behind a full-screen program.
+- A terminal pane no longer stays at the size another pane gave the PTY (grid
+  view, a first attach at 80x24) while the PTY takes the pane's size: the pane
+  fits itself again after the snapshot.
+- On Windows the pane wraps, reflows and resizes the way ConPTY repaints
+  (xterm.js `windowsPty`, as VS Code sets it).
+- Environment variables of the terminal the daemon was started from
+  (`WT_SESSION`, VS Code's shell integration, `TMUX`, ...) no longer leak into
+  sessions.
+
 ## [0.2.1] - 2026-09-27
 
 Update the hub and every paired machine to 0.2.1: the sync protocol changed, and machines on different releases refuse to sync (Settings > Machines & Sync names the machine to update).

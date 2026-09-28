@@ -56,9 +56,30 @@ The project page has tabs: Overview (brief, open threads, recent sessions, a pro
 
 A session is one run of an agent (or shell, or custom command) in a folder. blirp-launched sessions run in a pseudo-terminal owned by the daemon: closing the window or the tab (Ctrl/Cmd+W) does not stop them, and several browsers or windows can attach to the same terminal at once (the last resize wins).
 
+### Terminal keys
+
+A focused terminal pane behaves like VS Code's integrated terminal: every key goes to the program, encoded the way xterm and Windows Terminal send it (arrows, Home/End, function keys, Alt and Ctrl chords, Ctrl+arrow word jumps, Ctrl+Shift+arrow word selection). Programs that ask for the kitty keyboard protocol, as Claude Code and Codex do, get keys a classic terminal cannot tell apart, such as Shift+Enter (new line) and Ctrl+Enter. Terminal modes the program switched on (these keyboard flags, application cursor keys, bracketed paste, mouse and focus reporting, cursor style, scroll region) are kept when you switch sessions, reload, or open the session in another window.
+
+Only these keys are taken by blirp while a terminal has focus:
+
+| Key (Windows, Linux) | macOS | Does |
+|---|---|---|
+| Ctrl+Shift+K | Cmd+K | command palette |
+| Ctrl+Shift+T | Cmd+T | new session |
+| Ctrl+Shift+G | Cmd+G | grid view |
+| Ctrl+Shift+W | Cmd+W | close the tab (the session keeps running) |
+| Ctrl+PageUp / Ctrl+PageDown | Cmd+Left / Cmd+Right | previous / next session |
+| Ctrl+F | Cmd+F | find in the terminal (Enter: older match, Shift+Enter: newer, Escape: back to the terminal) |
+| Ctrl+Shift+C, and Ctrl+C on Windows, with text selected | Cmd+C with text selected | copy (Windows: Ctrl+C also clears the selection) |
+| Ctrl+Shift+V, and Ctrl+V on Windows; Shift+Insert on Linux | Cmd+V | paste |
+
+Without a selection, Ctrl+C and Ctrl+Shift+C go to the program (interrupt). Right click on Windows copies the selection, or pastes when nothing is selected (Shift+right click opens the menu); on macOS it selects the word under the pointer. Outside a terminal the plain chords work too (Ctrl+K, Ctrl+T, Ctrl+G, Ctrl+W, Ctrl+Left/Right). The keys follow the computer your browser or desktop app runs on, not the session's machine.
+
+Settings > Appearance > Terminal sets the font size, line height, letter spacing, cursor style and blinking, and on macOS whether Option acts as Meta (on by default, so Option+Enter and Option+letter reach the program as Alt chords; off, Option types special characters).
+
 ### Pasting images and files
 
-Paste a screenshot or a copied file into a terminal pane (Ctrl+V or Ctrl+Shift+V on Windows, Ctrl+Shift+V on Linux, Cmd+V on macOS, or the context menu's Paste), or drag files from your desktop onto the pane. blirp uploads each file to the machine that runs the session (also a cloud or other paired machine) and types its path into the terminal, the way a native terminal types a dropped file's path:
+Paste a screenshot or a copied file into a terminal pane (Ctrl+V or Ctrl+Shift+V on Windows, Ctrl+Shift+V on Linux, Cmd+V on macOS, or the context menu's Paste on macOS and Linux; right click on Windows pastes text only), or drag files from your desktop onto the pane. blirp uploads each file to the machine that runs the session (also a cloud or other paired machine) and types its path into the terminal, the way a native terminal types a dropped file's path:
 
 - Claude Code and Codex attach an image whose path is pasted like this, as they do for a file dropped onto a native terminal. For other files, and other agents, the path is there to use in your prompt ("read this log: <path>").
 - Files are saved as `~/.blirp/uploads/<session>/<time>-<name>` (name reduced to letters, digits, `.`, `-`, `_`) on that machine, readable only by your user. They are deleted when you delete the session and after 7 days, and are never synced.
