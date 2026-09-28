@@ -10,6 +10,10 @@ so every tag needs one.
 
 ## [Unreleased]
 
+## [0.2.1] - 2026-09-27
+
+Update the hub and every paired machine to 0.2.1: the sync protocol changed, and machines on different releases refuse to sync (Settings > Machines & Sync names the machine to update).
+
 ### Added
 
 - Continue in / Start new session from this session summarizes the source
@@ -317,6 +321,7 @@ done before it.
   all-or-nothing) and `blirp uninstall`; classic NSIS, MSI, DMG, deb, rpm
   and AppImage packages.
 
-[Unreleased]: https://github.com/backyarddd/blirp/compare/v0.2.0...HEAD
+[Unreleased]: https://github.com/backyarddd/blirp/compare/v0.2.1...HEAD
+[0.2.1]: https://github.com/backyarddd/blirp/compare/v0.2.0...v0.2.1
 [0.2.0]: https://github.com/backyarddd/blirp/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/backyarddd/blirp/releases/tag/v0.1.0
