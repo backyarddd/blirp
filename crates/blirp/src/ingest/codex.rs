@@ -321,11 +321,16 @@ pub struct SubagentRepair {
 /// fork's title taken from the parent's copied first prompt becomes its
 /// subagent title; and records the distiller made from a fork alone are
 /// removed (see [`Store::distiller_records_only_of`]).
+///
+/// A rollout that cannot be read is skipped (logged), so one bad file never
+/// holds up the rest. None: `stop` said to stop before the end (the repair
+/// runs again next time; every step is idempotent).
 pub fn repair_subagents(
     store: &Store,
     machine_id: &str,
     codex_home: &Path,
-) -> Result<SubagentRepair> {
+    stop: &dyn Fn() -> bool,
+) -> Result<Option<SubagentRepair>> {
     use blirp_core::store::Change;
     let mut out = SubagentRepair::default();
     let mut forks = Vec::new();
@@ -333,8 +338,16 @@ pub fn repair_subagents(
         home: codex_home.to_path_buf(),
     };
     for src in codex.scan(store)? {
-        let Some(sub) = inspect_subagent(&src.path)? else {
-            continue;
+        if stop() {
+            return Ok(None);
+        }
+        let sub = match inspect_subagent(&src.path) {
+            Ok(Some(sub)) => sub,
+            Ok(None) => continue,
+            Err(e) => {
+                tracing::warn!(path = %src.path.display(), error = %e, "codex subagent repair: rollout not readable; skipped");
+                continue;
+            }
         };
         let Some(s) = store.session_by_agent_id("codex", &sub.id)? else {
             continue;
@@ -380,7 +393,7 @@ pub fn repair_subagents(
         store.delete_record(&id)?;
         out.records_removed += 1;
     }
-    Ok(out)
+    Ok(Some(out))
 }
 
 impl Codex {

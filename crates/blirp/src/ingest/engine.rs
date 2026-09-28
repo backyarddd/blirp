@@ -490,13 +490,17 @@ impl Engine {
             .env
             .var_path("CODEX_HOME")
             .unwrap_or_else(|| self.env.home.join(".codex"));
-        let res =
-            super::codex::repair_subagents(&self.store, &self.machine.id, &home).and_then(|n| {
-                self.store.set_setting(KEY, &json!(blirp_core::now_ms()))?;
+        let stop = || self.stopping();
+        let res = super::codex::repair_subagents(&self.store, &self.machine.id, &home, &stop)
+            .and_then(|n| {
+                if n.is_some() {
+                    self.store.set_setting(KEY, &json!(blirp_core::now_ms()))?;
+                }
                 Ok(n)
             });
         match res {
-            Ok(n) => {
+            Ok(None) => {}
+            Ok(Some(n)) => {
                 tracing::info!(
                     subagents = n.subagents,
                     relinked = n.relinked,

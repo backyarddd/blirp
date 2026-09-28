@@ -980,6 +980,25 @@ fn codex_subagent_repair_cleans_up_what_earlier_builds_ingested() {
     ] {
         h.store.apply(Change::Record(r)).unwrap();
     }
+    // A rollout that cannot be read holds up nothing.
+    let bad = h.put(
+        ".codex/sessions/2026/01/02/rollout-2026-01-02T08-00-00-0198a1b2-c3d4-7e5f-8a9b-0c1d2e3f4bad.jsonl",
+        b"{}\n",
+    );
+    #[cfg(windows)]
+    let _held = {
+        use std::os::windows::fs::OpenOptionsExt;
+        std::fs::OpenOptions::new()
+            .read(true)
+            .share_mode(0)
+            .open(&bad)
+            .unwrap()
+    };
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&bad, std::fs::Permissions::from_mode(0)).unwrap();
+    }
     let outbox = h.outbox_len();
 
     // Upgraded from that build: the repair has not run (every pass ran it
@@ -1048,6 +1067,9 @@ fn codex_subagent_repair_cleans_up_what_earlier_builds_ingested() {
     assert!(queued.contains(&"records/delete".to_string()), "{queued:?}");
 
     // The next pass re-reads the fork and links it; the copy stays out.
+    #[cfg(windows)]
+    drop(_held);
+    std::fs::remove_file(&bad).unwrap();
     h.pass();
     let s = h.session("codex", fork);
     assert_eq!(s.parent_session_id.as_deref(), Some(parent.id.as_str()));
