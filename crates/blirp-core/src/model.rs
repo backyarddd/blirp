@@ -568,6 +568,15 @@ pub struct CreateProject {
     pub brief: Option<String>,
 }
 
+/// `POST /api/projects/:id/folders`: register an existing folder on this
+/// machine (its git top level inside a repository) with the project.
+#[derive(Debug, Clone, Serialize, Deserialize, TS)]
+#[serde(deny_unknown_fields)]
+pub struct AddProjectFolder {
+    /// Absolute path on this machine.
+    pub path: String,
+}
+
 /// `POST /api/projects/:id/folders/remove`: unregister one of this
 /// machine's folders. The project stays, also without any folder.
 #[derive(Debug, Clone, Serialize, Deserialize, TS)]
@@ -934,6 +943,16 @@ pub struct OpenSession {
     pub target: OpenTarget,
 }
 
+/// `POST /api/projects/:id/open`: show one of the project's folders on this
+/// machine.
+#[derive(Debug, Clone, Serialize, Deserialize, TS)]
+#[serde(deny_unknown_fields)]
+pub struct OpenProject {
+    pub target: OpenTarget,
+    /// One of the project's folders on this machine, or its blirp workspace.
+    pub path: String,
+}
+
 /// `POST /api/sessions/:id/uploads`: a file pasted or dropped into the
 /// session's terminal, saved on the machine that runs the session.
 #[derive(Debug, Clone, Serialize, Deserialize, TS)]
@@ -991,6 +1010,12 @@ pub struct AgentInfo {
     pub version: Option<String>,
     /// Resume by the agent's own session id is supported.
     pub can_resume: bool,
+    /// What a user types to resume one of its sessions, followed by the
+    /// agent's session id (`["claude", "--resume"]`); null without id-based
+    /// resume.
+    // Default: older daemons do not send it.
+    #[serde(default)]
+    pub resume_command: Option<Vec<String>>,
     pub integration: AgentIntegration,
     /// Whether the agent is logged in for this machine's daemon, where that
     /// can be checked without a model call (claude: `claude auth status`);
@@ -1010,12 +1035,6 @@ pub struct AgentInfo {
 /// `~/.claude/.credentials.json`, which a daemon started by launchd on a
 /// locked Mac or over SSH cannot use.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
-    /// What a user types to resume one of its sessions, followed by the
-    /// agent's session id (`["claude", "--resume"]`); null without id-based
-    /// resume.
-    // Default: older daemons do not send it.
-    #[serde(default)]
-    pub resume_command: Option<Vec<String>>,
 pub struct AgentToken {
     /// A token is stored in `BLIRP_HOME/secrets/claude_oauth_token`
     /// (`blirp agents set-token claude`).
@@ -1666,10 +1685,10 @@ mod tests {
             Machine, MachineInfo, Project, ProjectPath, Session, Event, Record, Brief, WikiPage, Suggestion,
             BriefProposal, RecordProposal, WikiProposal, Resource, Device,
             ErrorBody, ErrorDetail, Health, UpdateStatus, UpdateOutcome, ProjectPathInfo, ProjectSummary, CreateProject,
-            PatchProject, MergeProject, RemoveProjectFolder, MoveSession, ProjectMemory, PutBrief, RevertBrief, CreateRecord,
+            PatchProject, MergeProject, AddProjectFolder, RemoveProjectFolder, MoveSession, ProjectMemory, PutBrief, RevertBrief, CreateRecord,
             PatchRecord, CreateWikiPage, PutWikiPage, CreateResource, PatchResource,
             GitStatusEntry, GitStatus, GitDiff, FileEntry, DirListing, FileContent, SessionsPage, SessionDetail,
-            LaunchSession, PatchSession, RemoveWorktree, OpenTarget, OpenSession, UploadedFile, EventsPage, SearchHit, SearchResults, AgentInfo,
+            LaunchSession, PatchSession, RemoveWorktree, OpenTarget, OpenSession, OpenProject, UploadedFile, EventsPage, SearchHit, SearchResults, AgentInfo,
             AgentIntegration, AgentAuth, AgentToken, SetAgentToken, MachineDirs, MachineDir, CloneRepo, CloneJob, Injection, SummaryItem, DistillFailure, SessionSummary,
             SettingsView, SettingsPatch, Capabilities, DistillStatus, DistillPause, SummarizerPick, SummarizerFallback, SyncStatus, SyncInvite, JoinHub, JoinPreviewRequest, JoinPreview, LeftHub, WsTicketRequest, WsTicket, BrowserInvite, PatchDevice,
             ServerEvent, WindowsPty, TerminalServerMessage, TerminalClientMessage,

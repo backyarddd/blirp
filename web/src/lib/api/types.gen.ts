@@ -316,6 +316,16 @@ export type MergeProject = {
 into: string, };
 
 /**
+ * `POST /api/projects/:id/folders`: register an existing folder on this
+ * machine (its git top level inside a repository) with the project.
+ */
+export type AddProjectFolder = { 
+/**
+ * Absolute path on this machine.
+ */
+path: string, };
+
+/**
  * `POST /api/projects/:id/folders/remove`: unregister one of this
  * machine's folders. The project stays, also without any folder.
  */
@@ -535,6 +545,16 @@ force?: boolean, };
 export type OpenTarget = "folder" | "editor";
 
 export type OpenSession = { target: OpenTarget, };
+
+/**
+ * `POST /api/projects/:id/open`: show one of the project's folders on this
+ * machine.
+ */
+export type OpenProject = { target: OpenTarget, 
+/**
+ * One of the project's folders on this machine, or its blirp workspace.
+ */
+path: string, };
 
 /**
  * `POST /api/sessions/:id/uploads`: a file pasted or dropped into the

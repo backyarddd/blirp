@@ -468,6 +468,17 @@ impl Store {
 
     /// All live projects with paths, git flag and session stats, most recently active first.
     pub fn list_project_summaries(&self, machine_id: &str) -> Result<Vec<ProjectSummary>> {
+        self.project_summaries(machine_id, false)
+    }
+
+    /// Projects in the Trash (deleted by the user, not merged away), most
+    /// recently deleted first. They have no folders: a delete drops them on
+    /// every machine.
+    pub fn list_trashed_projects(&self, machine_id: &str) -> Result<Vec<ProjectSummary>> {
+        self.project_summaries(machine_id, true)
+    }
+
+    fn project_summaries(&self, machine_id: &str, trash: bool) -> Result<Vec<ProjectSummary>> {
         let home = self.home_project_id()?;
         let (rows, paths) = self.read(|c| {
             let rows = all(
@@ -477,9 +488,11 @@ impl Store {
                    (SELECT COUNT(*) FROM sessions s WHERE s.project_id = p.id
                       AND s.status IN ('starting','working','idle','waiting')) AS live_count,
                    (SELECT MAX(s.last_activity_at) FROM sessions s WHERE s.project_id = p.id) AS last_activity
-                 FROM projects p WHERE p.deleted = 0
-                 ORDER BY COALESCE(last_activity, p.updated_at) DESC",
-                [],
+                 FROM projects p
+                 WHERE p.deleted = ?1 AND (?1 = 0 OR (p.merged_into IS NULL AND p.chats = 0))
+                 ORDER BY CASE WHEN ?1 THEN p.updated_at
+                               ELSE COALESCE(last_activity, p.updated_at) END DESC",
+                params![trash],
                 |r| {
                     Ok((
                         project_row(r)?,
@@ -1050,6 +1063,10 @@ impl Store {
         let name = check_name(name)?;
         self.write(|tx| {
             let mut p = live_project_in(tx, id)?;
+            if p.chats {
+                // Every client shows a machine's bucket as "Chats" (§5).
+                return Err(StoreError::Invalid("Chats cannot be renamed".into()));
+            }
             p.name = name.to_string();
             p.updated_at = crate::now_ms();
             apply_in(tx, &Change::Project(p.clone()))?;
@@ -1057,19 +1074,80 @@ impl Store {
         })
     }
 
-    /// Soft-delete a project. Its folders are unregistered on every machine:
-    /// each one drops them when it applies the delete (see `write_row`).
-    /// Sessions and memory stay in the database.
-    pub fn delete_project(&self, id: &str) -> Result<()> {
+    /// Soft-delete a project (move it to the Trash). Its folders are
+    /// unregistered on every machine: each one drops them when it applies
+    /// the delete (see `write_row`). `machine_id`'s own folders are kept in
+    /// a local setting so [`Self::restore_project`] can register them
+    /// again; other machines' folders do not come back. Sessions and memory
+    /// stay in the database; session lists leave the sessions out while the
+    /// project is deleted.
+    pub fn delete_project(&self, id: &str, machine_id: &str) -> Result<()> {
         self.write(|tx| {
             let mut p = live_project_in(tx, id)?;
             if p.chats {
                 return Err(StoreError::Invalid("Chats cannot be deleted".into()));
             }
+            let mine = all(
+                tx,
+                "SELECT * FROM project_paths WHERE project_id = ?1 AND machine_id = ?2
+                 ORDER BY path",
+                params![id, machine_id],
+                path_row,
+            )?;
+            tx.execute(
+                "INSERT INTO settings(key, value_json) VALUES (?1, ?2)
+                 ON CONFLICT(key) DO UPDATE SET value_json = excluded.value_json",
+                params![trashed_folders_key(id), serde_json::to_string(&mine)?],
+            )?;
             p.deleted = true;
             p.updated_at = crate::now_ms();
             apply_in(tx, &Change::Project(p))?;
             Ok(())
+        })
+    }
+
+    /// Bring a project back from the Trash: a newer version of the row with
+    /// `deleted` cleared, replicated like any edit. The folders `machine_id`
+    /// had when the project was deleted here are registered again, except
+    /// one that is gone or overlaps a folder of another project here (a
+    /// session started there meanwhile made one). A project merged into
+    /// another one is not in the Trash.
+    pub fn restore_project(&self, id: &str, machine_id: &str) -> Result<Project> {
+        self.write(|tx| {
+            let mut p = get_project_in(tx, id)?
+                .filter(|p| p.deleted && p.merged_into.is_none() && !p.chats)
+                .ok_or(StoreError::NotFound("project in the Trash"))?;
+            p.deleted = false;
+            p.updated_at = crate::now_ms();
+            apply_in(tx, &Change::Project(p))?;
+            let key = trashed_folders_key(id);
+            let saved: Vec<ProjectPath> = one(
+                tx,
+                "SELECT value_json FROM settings WHERE key = ?1",
+                params![key],
+                |r| r.get::<_, String>(0),
+            )?
+            .map(|raw| serde_json::from_str(&raw))
+            .transpose()?
+            .unwrap_or_default();
+            for pp in saved {
+                let path = PathBuf::from(&pp.path);
+                if !path.is_dir() {
+                    continue;
+                }
+                let taken = live_local_paths(tx, machine_id)?;
+                let key = crate::paths::path_key(&path);
+                let overlaps = taken.iter().any(|t| {
+                    let other = crate::paths::path_key(Path::new(&t.path));
+                    key.starts_with(&other) || other.starts_with(&key)
+                });
+                if !overlaps {
+                    attach_path(tx, id, machine_id, &path, pp.git_remote)?;
+                }
+            }
+            tx.execute("DELETE FROM settings WHERE key = ?1", params![key])?;
+            // As stored: the version stamp may have moved past `now`.
+            live_project_in(tx, id)
         })
     }
 
@@ -1380,6 +1458,12 @@ fn merge_in(tx: &Transaction<'_>, from: &str, into: &str, retire: bool) -> Resul
     dst.updated_at = now;
     apply_in(tx, &Change::Project(dst.clone()))?;
     Ok(dst)
+}
+
+/// Local setting (never replicated) with this machine's folders of a
+/// project in the Trash, for [`Store::restore_project`].
+fn trashed_folders_key(id: &str) -> String {
+    format!("projects.trash.{id}.folders")
 }
 
 fn chats_name(machine_name: &str) -> String {
@@ -1912,7 +1996,7 @@ mod tests {
             Err(StoreError::Conflict(_))
         ));
         // Sessions already there stay writable.
-        store.delete_project(&real.id).unwrap();
+        store.delete_project(&real.id, "m").unwrap();
         let mut s5 = store.get_session("s5").unwrap().unwrap();
         s5.title = Some("still writable".into());
         store.apply(Change::Session(s5)).unwrap();
@@ -1949,7 +2033,7 @@ mod tests {
             Err(StoreError::Invalid(_))
         ));
         assert!(matches!(
-            store.delete_project(&home),
+            store.delete_project(&home, "m"),
             Err(StoreError::Invalid(_))
         ));
     }
@@ -2166,9 +2250,105 @@ mod tests {
             .unwrap();
         assert_eq!(r.project.id, pb.id);
 
-        store.delete_project(&pb.id).unwrap();
+        store.delete_project(&pb.id, "m").unwrap();
         assert!(store.project_paths(&pb.id).unwrap().is_empty());
         assert!(store.list_project_summaries("m").unwrap().is_empty());
+    }
+
+    #[test]
+    fn trash_hides_sessions_and_restore_brings_back_this_machines_folders() {
+        use crate::store::SessionFilter;
+        let (dir, store) = temp_store();
+        let a = dir.path().join("a");
+        let gone = dir.path().join("gone");
+        std::fs::create_dir(&a).unwrap();
+        std::fs::create_dir(&gone).unwrap();
+        let p = store.register_project("m", &a, Some("Proj")).unwrap();
+        store.add_project_folder(&p.id, "m", &gone).unwrap();
+        // Another machine's folder of the project.
+        store
+            .apply(Change::ProjectPath(ProjectPath {
+                project_id: p.id.clone(),
+                machine_id: "m2".into(),
+                path: "/elsewhere".into(),
+                git_remote: None,
+            }))
+            .unwrap();
+        store.insert_session(&external("s1", &p.id, "m")).unwrap();
+        let listed = |store: &Store| -> Vec<String> {
+            let f = SessionFilter {
+                limit: 50,
+                ..SessionFilter::default()
+            };
+            store
+                .list_sessions(&f)
+                .unwrap()
+                .items
+                .into_iter()
+                .map(|s| s.id)
+                .collect()
+        };
+        assert_eq!(listed(&store), ["s1"]);
+
+        store.delete_project(&p.id, "m").unwrap();
+        assert!(store.project_paths(&p.id).unwrap().is_empty());
+        assert!(listed(&store).is_empty());
+        let trash = store.list_trashed_projects("m").unwrap();
+        assert_eq!(trash.len(), 1);
+        assert_eq!(trash[0].project.id, p.id);
+        assert_eq!(trash[0].session_count, 1);
+        assert!(store.list_project_summaries("m").unwrap().is_empty());
+        // Not live, so not renamed, deleted again or merged.
+        assert!(matches!(
+            store.rename_project(&p.id, "x"),
+            Err(StoreError::NotFound(_))
+        ));
+
+        std::fs::remove_dir(&gone).unwrap();
+        let before = store.get_project(&p.id).unwrap().unwrap().updated_at;
+        let restored = store.restore_project(&p.id, "m").unwrap();
+        assert!(!restored.deleted && restored.updated_at > before);
+        assert_eq!(listed(&store), ["s1"]);
+        assert!(store.list_trashed_projects("m").unwrap().is_empty());
+        // This machine's folder that still exists is back; the gone one and
+        // the other machine's are not.
+        let paths: Vec<String> = store
+            .project_paths(&p.id)
+            .unwrap()
+            .into_iter()
+            .map(|pp| pp.path)
+            .collect();
+        assert_eq!(paths, [dunce::canonicalize(&a).unwrap().to_string_lossy()]);
+        // Only a project in the Trash can be restored.
+        assert!(matches!(
+            store.restore_project(&p.id, "m"),
+            Err(StoreError::NotFound(_))
+        ));
+
+        // A folder another project took meanwhile stays there.
+        store.delete_project(&p.id, "m").unwrap();
+        let taker = store.register_project("m", &a, Some("Taker")).unwrap();
+        store.restore_project(&p.id, "m").unwrap();
+        assert!(store.project_paths(&p.id).unwrap().is_empty());
+        assert_eq!(store.project_paths(&taker.id).unwrap().len(), 1);
+
+        // Merged projects are gone for good, not in the Trash.
+        store.merge_projects(&p.id, &taker.id).unwrap();
+        assert!(store.list_trashed_projects("m").unwrap().is_empty());
+        assert!(matches!(
+            store.restore_project(&p.id, "m"),
+            Err(StoreError::NotFound(_))
+        ));
+    }
+
+    #[test]
+    fn chats_cannot_be_renamed() {
+        let (_dir, store) = temp_store();
+        let chats = store.write(|tx| chats_bucket(tx, "m", "box")).unwrap().id;
+        assert!(matches!(
+            store.rename_project(&chats, "Mine"),
+            Err(StoreError::Invalid(_))
+        ));
     }
 
     /// Changes `from` queued since `after`, applied on `to` as replication
@@ -2294,7 +2474,7 @@ mod tests {
                 .is_empty()
         );
         // A removed project's workspace is Chats.
-        store.delete_project(&p.id).unwrap();
+        store.delete_project(&p.id, "m").unwrap();
         let r = store.resolve_project_with("m", "box", &ws, &dirs).unwrap();
         assert!(r.is_home && r.project.chats);
     }

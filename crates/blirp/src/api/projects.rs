@@ -1,17 +1,18 @@
-//! Projects: list, create (with or without a folder), rename, delete,
-//! merge, folder removal, memory view.
+//! Projects: list, create (with or without a folder), rename, delete (to
+//! the Trash) and restore, merge, folders, memory view.
 
-use super::{ApiError, ApiJson, ApiPath, ApiResult, Control, blocking};
+use super::{Admin, ApiError, ApiJson, ApiPath, ApiQuery, ApiResult, Control, blocking};
 use crate::state::SharedState;
 use axum::extract::State;
 use axum::http::StatusCode;
 use axum::routing::{get, post};
 use axum::{Json, Router};
 use blirp_core::model::{
-    CreateProject, MergeProject, PatchProject, ProjectMemory, ProjectSummary, RecordStatus,
-    RemoveProjectFolder, ServerEvent,
+    AddProjectFolder, CreateProject, MergeProject, PatchProject, ProjectMemory, ProjectSummary,
+    RecordStatus, RemoveProjectFolder, ServerEvent,
 };
 use blirp_core::store::RecordFilter;
+use serde::Deserialize;
 
 pub fn routes() -> Router<SharedState> {
     Router::new()
@@ -21,6 +22,8 @@ pub fn routes() -> Router<SharedState> {
             get(get_one).patch(rename).delete(remove),
         )
         .route("/api/projects/{id}/merge", post(merge))
+        .route("/api/projects/{id}/restore", post(restore))
+        .route("/api/projects/{id}/folders", post(add_folder))
         .route("/api/projects/{id}/folders/remove", post(remove_folder))
         .route("/api/projects/chat-candidates", get(chat_candidates))
         .route(
@@ -51,13 +54,26 @@ fn summary(s: &SharedState, id: &str) -> ApiResult<ProjectSummary> {
     ))
 }
 
-async fn list(State(s): State<SharedState>) -> ApiResult<Json<Vec<ProjectSummary>>> {
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ListQuery {
+    /// The Trash: projects deleted by the user (not merged away).
+    deleted: Option<bool>,
+}
+
+async fn list(
+    State(s): State<SharedState>,
+    ApiQuery(q): ApiQuery<ListQuery>,
+) -> ApiResult<Json<Vec<ProjectSummary>>> {
     let st = s.clone();
     Ok(Json(
         blocking(move || {
-            Ok(st
-                .store
-                .list_project_summaries(&st.machine.id)?
+            let projects = if q.deleted.unwrap_or(false) {
+                st.store.list_trashed_projects(&st.machine.id)?
+            } else {
+                st.store.list_project_summaries(&st.machine.id)?
+            };
+            Ok(projects
                 .into_iter()
                 .map(|p| with_workspace(&st, p))
                 .collect())
@@ -144,21 +160,42 @@ async fn rename(
     Ok(Json(summary))
 }
 
+/// Move a project to the Trash (admin: it unregisters its folders on every
+/// machine and hides its sessions until it is restored).
 async fn remove(
     State(s): State<SharedState>,
-    _: Control,
+    _: Admin,
     ApiPath(id): ApiPath<String>,
 ) -> ApiResult<StatusCode> {
-    let store = s.store.clone();
+    let (store, machine) = (s.store.clone(), s.machine.id.clone());
     let pid = id.clone();
-    blocking(move || Ok(store.delete_project(&pid)?)).await?;
+    blocking(move || Ok(store.delete_project(&pid, &machine)?)).await?;
     s.emit(ServerEvent::ProjectUpdated { project_id: id });
     Ok(StatusCode::NO_CONTENT)
 }
 
+/// Bring a project back from the Trash, with this machine's folders it had
+/// when it was deleted here.
+async fn restore(
+    State(s): State<SharedState>,
+    _: Admin,
+    ApiPath(id): ApiPath<String>,
+) -> ApiResult<Json<ProjectSummary>> {
+    let st = s.clone();
+    let summary = blocking(move || {
+        st.store.restore_project(&id, &st.machine.id)?;
+        summary(&st, &id)
+    })
+    .await?;
+    s.emit(ServerEvent::ProjectUpdated {
+        project_id: summary.project.id.clone(),
+    });
+    Ok(Json(summary))
+}
+
 async fn merge(
     State(s): State<SharedState>,
-    _: Control,
+    _: Admin,
     ApiPath(id): ApiPath<String>,
     ApiJson(body): ApiJson<MergeProject>,
 ) -> ApiResult<Json<ProjectSummary>> {
@@ -234,6 +271,33 @@ async fn to_chats(
     .await?;
     s.emit(ServerEvent::ProjectUpdated { project_id: id });
     Ok(StatusCode::NO_CONTENT)
+}
+
+/// Register an existing folder on this machine with the project (its git
+/// top level inside a repository). One inside another project's folder here
+/// is a conflict (409); one already inside this project's folders is left as
+/// it is.
+async fn add_folder(
+    State(s): State<SharedState>,
+    _: Control,
+    ApiPath(id): ApiPath<String>,
+    ApiJson(body): ApiJson<AddProjectFolder>,
+) -> ApiResult<Json<ProjectSummary>> {
+    // A relative folder would resolve against the daemon's own directory.
+    if !std::path::Path::new(&body.path).is_absolute() {
+        return Err(ApiError::bad_request("path must be an absolute path"));
+    }
+    let st = s.clone();
+    let summary = blocking(move || {
+        st.store
+            .add_project_folder(&id, &st.machine.id, std::path::Path::new(&body.path))?;
+        summary(&st, &id)
+    })
+    .await?;
+    s.emit(ServerEvent::ProjectUpdated {
+        project_id: summary.project.id.clone(),
+    });
+    Ok(Json(summary))
 }
 
 /// Unregister one of this machine's folders; the project stays, also with

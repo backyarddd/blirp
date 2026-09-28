@@ -1009,8 +1009,11 @@ const MUTATING_ROUTES: &[(&str, &str, Need)] = &[
     ("POST", "/api/sessions/s1/uploads", Need::Control),
     ("POST", "/api/projects", Need::Control),
     ("PATCH", "/api/projects/p1", Need::Control),
-    ("DELETE", "/api/projects/p1", Need::Control),
-    ("POST", "/api/projects/p1/merge", Need::Control),
+    ("DELETE", "/api/projects/p1", Need::Admin),
+    ("POST", "/api/projects/p1/merge", Need::Admin),
+    ("POST", "/api/projects/p1/restore", Need::Admin),
+    ("POST", "/api/projects/p1/open", Need::Admin),
+    ("POST", "/api/projects/p1/folders", Need::Control),
     ("PUT", "/api/projects/p1/brief", Need::Control),
     ("POST", "/api/projects/p1/brief/revert", Need::Control),
     ("POST", "/api/projects/p1/records", Need::Control),
@@ -1894,6 +1897,149 @@ async fn folderless_projects_start_in_their_workspace() {
         post(format!("/api/sessions/{id}/stop"), json!({})).await;
         wait_status(&h, id, SessionStatus::Completed).await;
     }
+    let Harness { daemon, _home, .. } = h;
+    daemon.shutdown().await.unwrap();
+}
+
+// Delete moves a project to the Trash with its sessions hidden; restore
+// brings both back. Folders are added only when they exist, projects are
+// opened only in their own folders, and Chats keeps its name.
+#[tokio::test]
+async fn project_trash_restore_folders_and_open() {
+    let h = Harness::start().await;
+    let work = tempfile::tempdir().unwrap();
+    let dir = work.path().join("proj");
+    let extra = work.path().join("extra");
+    std::fs::create_dir(&dir).unwrap();
+    std::fs::create_dir(&extra).unwrap();
+    let r = h
+        .send(
+            reqwest::Method::POST,
+            "/api/projects",
+            json!({"path": dir, "name": "Proj"}),
+        )
+        .await;
+    let p: ProjectSummary = r.json().await.unwrap();
+    let id = p.project.id.clone();
+    let r = h
+        .send(
+            reqwest::Method::POST,
+            "/api/sessions",
+            json!({"project_id": id, "agent": "shell"}),
+        )
+        .await;
+    assert_eq!(r.status(), 201);
+    let s: Session = r.json().await.unwrap();
+    h.send(
+        reqwest::Method::POST,
+        &format!("/api/sessions/{}/stop", s.id),
+        json!({}),
+    )
+    .await;
+    wait_status(&h, &s.id, SessionStatus::Completed).await;
+
+    // Add folder: absolute, existing folders only.
+    let add = |path: serde_json::Value| {
+        let (h, id) = (&h, id.clone());
+        async move {
+            h.send(
+                reqwest::Method::POST,
+                &format!("/api/projects/{id}/folders"),
+                json!({ "path": path }),
+            )
+            .await
+        }
+    };
+    assert_eq!(add(json!("relative")).await.status(), 400);
+    assert_eq!(add(json!(work.path().join("missing"))).await.status(), 400);
+    let r = add(json!(extra)).await;
+    assert_eq!(r.status(), 200);
+    assert_eq!(r.json::<ProjectSummary>().await.unwrap().paths.len(), 2);
+
+    // Open: only this project's folders on this machine.
+    let r = h
+        .send(
+            reqwest::Method::POST,
+            &format!("/api/projects/{id}/open"),
+            json!({"target": "folder", "path": work.path()}),
+        )
+        .await;
+    assert_eq!(r.status(), 400);
+    let r = h
+        .send(
+            reqwest::Method::POST,
+            "/api/projects/nope/open",
+            json!({"target": "folder", "path": dir}),
+        )
+        .await;
+    assert_eq!(r.status(), 404);
+
+    // To the Trash: gone from projects and session lists, listed in the Trash.
+    let r = h
+        .send(
+            reqwest::Method::DELETE,
+            &format!("/api/projects/{id}"),
+            json!({}),
+        )
+        .await;
+    assert_eq!(r.status(), 204);
+    let live: Vec<ProjectSummary> = h.get("/api/projects").await;
+    assert!(live.iter().all(|x| x.project.id != id));
+    let trash: Vec<ProjectSummary> = h.get("/api/projects?deleted=true").await;
+    assert_eq!(trash.len(), 1);
+    assert_eq!(trash[0].project.id, id);
+    let page: blirp_core::model::SessionsPage = h.get("/api/sessions").await;
+    assert!(page.items.iter().all(|x| x.id != s.id));
+    // The session itself is still there.
+    let _: blirp_core::model::SessionDetail = h.get(&format!("/api/sessions/{}", s.id)).await;
+
+    // Restore: the session is listed again and this machine's folders are back.
+    let r = h
+        .send(
+            reqwest::Method::POST,
+            &format!("/api/projects/{id}/restore"),
+            json!({}),
+        )
+        .await;
+    assert_eq!(r.status(), 200);
+    let back: ProjectSummary = r.json().await.unwrap();
+    assert!(!back.project.deleted);
+    assert_eq!(back.paths.len(), 2);
+    let page: blirp_core::model::SessionsPage = h.get("/api/sessions").await;
+    assert!(page.items.iter().any(|x| x.id == s.id));
+    let trash: Vec<ProjectSummary> = h.get("/api/projects?deleted=true").await;
+    assert!(trash.is_empty());
+    let r = h
+        .send(
+            reqwest::Method::POST,
+            &format!("/api/projects/{id}/restore"),
+            json!({}),
+        )
+        .await;
+    assert_eq!(r.status(), 404);
+
+    // Chats cannot be renamed.
+    let r = h
+        .send(
+            reqwest::Method::POST,
+            &format!("/api/sessions/{}/move", s.id),
+            json!({"project_id": null}),
+        )
+        .await;
+    let chats = r.json::<Session>().await.unwrap().project_id;
+    let r = h
+        .send(
+            reqwest::Method::PATCH,
+            &format!("/api/projects/{chats}"),
+            json!({"name": "Mine"}),
+        )
+        .await;
+    assert_eq!(r.status(), 400);
+    assert_eq!(
+        r.json::<ErrorBody>().await.unwrap().error.code,
+        "invalid_request"
+    );
+
     let Harness { daemon, _home, .. } = h;
     daemon.shutdown().await.unwrap();
 }

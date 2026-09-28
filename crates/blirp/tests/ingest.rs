@@ -2187,7 +2187,7 @@ fn subagents_of_a_parent_in_a_removed_project_still_ingest() {
                 .merge_projects(&parent.project_id, &target.id)
                 .unwrap();
         } else {
-            h.store.delete_project(&parent.project_id).unwrap();
+            h.store.delete_project(&parent.project_id, "m").unwrap();
         }
         h.put(
             &format!("{dir}/subagents/agent-a1.jsonl"),

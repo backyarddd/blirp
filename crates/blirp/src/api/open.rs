@@ -1,5 +1,6 @@
-//! `POST /api/sessions/:id/open {target}`: show a session's folder in the OS
-//! file manager or the user's editor. The program is spawned detached (no
+//! `POST /api/sessions/:id/open {target}` and `POST /api/projects/:id/open
+//! {target, path}`: show a session's or project's folder in the OS file
+//! manager or the user's editor. The program is spawned detached (no
 //! console window); the request returns once it started and did not fail
 //! right away. Terminal editors are never used: the daemon has no terminal
 //! to show them in.
@@ -11,7 +12,7 @@ use axum::Router;
 use axum::extract::State;
 use axum::http::StatusCode;
 use axum::routing::post;
-use blirp_core::model::{OpenSession, OpenTarget};
+use blirp_core::model::{OpenProject, OpenSession, OpenTarget};
 use blirp_core::process;
 use std::ffi::OsString;
 use std::path::PathBuf;
@@ -19,7 +20,39 @@ use std::process::Stdio;
 use std::time::{Duration, Instant};
 
 pub fn routes() -> Router<SharedState> {
-    Router::new().route("/api/sessions/{id}/open", post(open))
+    Router::new()
+        .route("/api/sessions/{id}/open", post(open))
+        .route("/api/projects/{id}/open", post(open_project))
+}
+
+/// Only this machine's folders of the project, or its blirp workspace:
+/// the path is never an arbitrary folder chosen by the caller.
+async fn open_project(
+    State(s): State<SharedState>,
+    _: Admin,
+    ApiPath(id): ApiPath<String>,
+    ApiJson(body): ApiJson<OpenProject>,
+) -> ApiResult<StatusCode> {
+    let st = s.clone();
+    blocking(move || {
+        let project = st.store.live_project(&id)?;
+        let wanted = blirp_core::paths::path_key(std::path::Path::new(&body.path));
+        let mut allowed = st.store.local_roots(&id, &st.machine.id)?;
+        if !project.chats
+            && let Ok(ws) = st.paths.workspace_dir(&id)
+        {
+            allowed.push(ws);
+        }
+        let dir = allowed
+            .into_iter()
+            .find(|p| blirp_core::paths::path_key(p) == wanted)
+            .ok_or_else(|| {
+                ApiError::bad_request("path is not a folder of this project on this machine")
+            })?;
+        open_dir(dir, body.target)
+    })
+    .await?;
+    Ok(StatusCode::NO_CONTENT)
 }
 
 async fn open(
@@ -39,34 +72,38 @@ async fn open(
                 "the session's folder is on another machine",
             ));
         }
-        let dir = PathBuf::from(&session.cwd);
-        if !dir.is_dir() {
-            return Err(ApiError::new(
-                StatusCode::NOT_FOUND,
-                "folder_missing",
-                format!("session folder {} no longer exists", session.cwd),
-            ));
-        }
-        let (program, mut args) = match body.target {
-            OpenTarget::Folder => file_manager(),
-            OpenTarget::Editor => editor().unwrap_or_else(file_manager),
-        };
-        args.push(dir.into_os_string());
-        // Shims (`code.cmd`) are wrapped like agent launches, with the
-        // folder among the escaped arguments.
-        let cmd = crate::agents::wrap_for_platform(std::path::Path::new(&program), args).map_err(
-            |e| {
-                ApiError::new(
-                    StatusCode::UNPROCESSABLE_ENTITY,
-                    "open_failed",
-                    e.to_string(),
-                )
-            },
-        )?;
-        spawn_detached(cmd)
+        open_dir(PathBuf::from(&session.cwd), body.target)
     })
     .await?;
     Ok(StatusCode::NO_CONTENT)
+}
+
+/// Show `dir` with the file manager or the editor (404 `folder_missing`
+/// when it no longer exists).
+fn open_dir(dir: PathBuf, target: OpenTarget) -> ApiResult<()> {
+    if !dir.is_dir() {
+        return Err(ApiError::new(
+            StatusCode::NOT_FOUND,
+            "folder_missing",
+            format!("folder {} does not exist", dir.display()),
+        ));
+    }
+    let (program, mut args) = match target {
+        OpenTarget::Folder => file_manager(),
+        OpenTarget::Editor => editor().unwrap_or_else(file_manager),
+    };
+    args.push(dir.into_os_string());
+    // Shims (`code.cmd`) are wrapped like agent launches, with the folder
+    // among the escaped arguments.
+    let cmd =
+        crate::agents::wrap_for_platform(std::path::Path::new(&program), args).map_err(|e| {
+            ApiError::new(
+                StatusCode::UNPROCESSABLE_ENTITY,
+                "open_failed",
+                e.to_string(),
+            )
+        })?;
+    spawn_detached(cmd)
 }
 
 /// The platform's "show this folder" command.
