@@ -1398,6 +1398,18 @@ pub(super) fn current_project_in(c: &Connection, id: &str) -> Result<Option<Proj
     Ok(None)
 }
 
+/// The live project a project merged away now belongs to (its merge chain
+/// followed); None for a project that was not merged away, or whose chain
+/// ends in the Trash.
+pub(super) fn merge_target_in(c: &Connection, id: &str) -> Result<Option<String>> {
+    match get_project_in(c, id)? {
+        Some(p) if p.deleted && p.merged_into.is_some() => {
+            Ok(current_project_in(c, id)?.map(|p| p.id))
+        }
+        _ => Ok(None),
+    }
+}
+
 /// See [`Store::merge_projects`]; `retire` leaves `from`'s folders (they go
 /// with the deleted project) and brief behind.
 fn merge_in(tx: &Transaction<'_>, from: &str, into: &str, retire: bool) -> Result<Project> {

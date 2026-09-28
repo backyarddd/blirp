@@ -639,6 +639,14 @@ fn write_row(tx: &Transaction<'_>, change: &Change) -> Result<usize> {
                     "DELETE FROM project_paths WHERE project_id = ?1",
                     params![p.id],
                 )?;
+                // Records that reached this machine under a project before
+                // its merge did follow it, as every machine does itself.
+                if let Some(target) = projects::merge_target_in(tx, &p.id)? {
+                    tx.execute(
+                        "UPDATE records SET project_id = ?2 WHERE project_id = ?1",
+                        params![p.id, target],
+                    )?;
+                }
             } else if n > 0 {
                 // Restored (here or elsewhere): folders saved by its delete
                 // here must never come back with a later delete's restore.
@@ -770,7 +778,15 @@ fn write_row(tx: &Transaction<'_>, change: &Change) -> Result<usize> {
             params![e.session_id, e.seq, e.ts, e.kind, e.text, json_text(&e.meta)],
         )?,
         Change::Record(r) if tombstoned(tx, "deleted_records", &r.id)? => 0,
-        Change::Record(r) => tx.execute(
+        Change::Record(r) => {
+            // A record written for a project merged away (elsewhere, before
+            // its machine applied the merge) belongs to the merge target.
+            let target = projects::merge_target_in(tx, &r.project_id)?;
+            let r = &crate::model::Record {
+                project_id: target.unwrap_or_else(|| r.project_id.clone()),
+                ..r.clone()
+            };
+            tx.execute(
             "INSERT INTO records(id, project_id, kind, title, body, status, pinned, source_session_id,
                created_at, updated_at, updated_by) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11)
              ON CONFLICT(id) DO UPDATE SET project_id=excluded.project_id, kind=excluded.kind,
@@ -787,7 +803,8 @@ fn write_row(tx: &Transaction<'_>, change: &Change) -> Result<usize> {
                 r.id, r.project_id, r.kind, r.title, r.body, r.status, r.pinned, r.source_session_id,
                 r.created_at, r.updated_at, r.updated_by
             ],
-        )?,
+        )?
+        }
         Change::DeleteRecord { id } => {
             // Tombstone first: no copy of the record may bring it back.
             tx.execute(

@@ -2019,6 +2019,40 @@ mod tests {
         }
     }
 
+    // A record written under a project that was merged away elsewhere
+    // follows the merge on every machine: on arrival after the merge, and on
+    // the merge's arrival after the record.
+    #[test]
+    fn records_follow_a_merge_made_elsewhere() {
+        use crate::model::{Record, RecordKind, RecordStatus};
+        let (_h, hub) = temp_store();
+        let (_b, b) = temp_store();
+        hub.apply(project("p1", "one")).unwrap();
+        hub.apply(project("p2", "two")).unwrap();
+        pull(&b, "B", &hub, "H");
+        hub.merge_projects("p1", "p2").unwrap();
+        let now = crate::now_ms();
+        b.create_record(Record {
+            id: "r1".into(),
+            project_id: "p1".into(),
+            kind: RecordKind::Note,
+            title: "late".into(),
+            body: String::new(),
+            status: RecordStatus::Active,
+            pinned: false,
+            source_session_id: None,
+            created_at: now,
+            updated_at: now,
+            updated_by: "user".into(),
+        })
+        .unwrap();
+        push(&b, "B", &hub, "H");
+        pull(&b, "B", &hub, "H");
+        for s in [&hub, &b] {
+            assert_eq!(s.get_record("r1").unwrap().unwrap().project_id, "p2");
+        }
+    }
+
     // Two machines give different pages the same slug while apart: every
     // machine settles the clash the same way (the greater id takes a
     // suffixed slug) instead of failing to apply one of them.
