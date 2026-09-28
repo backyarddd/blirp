@@ -845,13 +845,42 @@ async fn leaving_the_hub_pushes_and_revokes() {
     assert!(machines.iter().any(|m| m.id == b.id() && m.revoked));
     assert!(machines.iter().any(|m| m.id == a.id() && !m.revoked));
 
-    // Paired again, then the hub goes away: leaving still works and warns.
+    // The hub forgets the revoked machine: gone from both lists. Only the
+    // hub forgets, and never itself.
+    let forget = |who: &str| format!("/api/machines/{who}/forget");
+    let r = b.req(Method::POST, &forget(&a.id()), None).await;
+    assert_eq!(r.status(), 409);
+    let r = a.req(Method::POST, &forget(&a.id()), None).await;
+    assert_eq!(r.status(), 400);
+    let r = a.req(Method::POST, &forget(&b.id()), None).await;
+    assert_eq!(r.status(), 204);
+    let machines: Vec<blirp_core::model::Machine> = a.get("/api/machines").await;
+    assert!(machines.iter().all(|m| m.id != b.id()));
+    let devices: Vec<Device> = a.get("/api/devices").await;
+    assert!(
+        devices
+            .iter()
+            .all(|d| d.node_id.as_deref() != Some(b.id().as_str()))
+    );
+    let r = a.req(Method::POST, &forget(&b.id()), None).await;
+    assert_eq!(r.status(), 404);
+
+    // Paired again (also after being forgotten), then the hub goes away:
+    // leaving still works and warns.
     pair(&a, &b).await;
     let devices: Vec<Device> = a.get("/api/devices").await;
     assert!(
         devices.iter().all(|d| !d.revoked),
         "pairing again restores it"
     );
+    eventually("the machine is listed again", || async {
+        let machines: Vec<blirp_core::model::Machine> = a.get("/api/machines").await;
+        machines.iter().any(|m| m.id == b.id() && !m.revoked)
+    })
+    .await;
+    // Not revoked: not forgotten.
+    let r = a.req(Method::POST, &forget(&b.id()), None).await;
+    assert_eq!(r.status(), 409);
     a.daemon.shutdown().await.unwrap();
     let left: LeftHub = b.ok(Method::POST, "/api/sync/leave", None).await;
     let warning = left.warning.expect("warning");

@@ -992,6 +992,7 @@ const MUTATING_ROUTES: &[(&str, &str, Need)] = &[
     ("PATCH", "/api/devices/d1", Need::Admin),
     ("DELETE", "/api/devices/d1", Need::Admin),
     ("DELETE", "/api/machines/m1", Need::Admin),
+    ("POST", "/api/machines/m1/forget", Need::Admin),
     ("POST", "/api/machines/m1/clone", Need::Control),
     ("POST", "/api/agents/claude/hooks/install", Need::Admin),
     ("POST", "/api/agents/claude/hooks/uninstall", Need::Admin),

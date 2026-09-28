@@ -206,6 +206,8 @@ export const api = {
   machines: {
     list: () => request<MachineInfo[]>('GET', '/api/machines'),
     revoke: (id: string) => request<void>('DELETE', `/api/machines/${enc(id)}`),
+    /** Hub, admin: drop a revoked machine from the lists (409 `not_revoked`). */
+    forget: (id: string) => request<void>('POST', `/api/machines/${enc(id)}/forget`),
     /** Another machine's answers are relayed through the hub. */
     health: (id: string) => request<Health>('GET', `/api/machines/${enc(id)}/health`),
     agents: (id: string) => request<AgentInfo[]>('GET', `/api/machines/${enc(id)}/agents`),

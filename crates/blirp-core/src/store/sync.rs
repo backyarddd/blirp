@@ -233,7 +233,8 @@ impl From<String> for Refused {
 /// fields are replaced by the stored ones, the returned change); folders are
 /// never removed by another machine (a deleted project's folders are dropped
 /// by every machine itself). `hub` is set when a node applies a pull: the
-/// hub also writes the machine rows of the nodes it pairs and revokes.
+/// hub also writes the machine rows of the nodes it pairs and revokes, and
+/// deletes the rows of revoked machines it forgets.
 /// Records, briefs, wiki pages, resources and projects are shared by design.
 fn check_owner(
     c: &Connection,
@@ -267,6 +268,7 @@ fn check_owner(
         Change::Machine(m) if foreign(&m.id) && hub != Some(origin) => {
             invalid(format!("machine row of {}", m.id))
         }
+        Change::DeleteMachine { id } if hub == Some(origin) => Ok(Change::DeleteMachine { id }),
         Change::DeleteMachine { id } => invalid(format!("machine delete of {id}")),
         Change::ProjectPath(p) if foreign(&p.machine_id) => {
             match path_project(&p.machine_id, &p.path)? {
@@ -1458,6 +1460,47 @@ impl Store {
         })
     }
 
+    /// Hub: forget a revoked machine: its (revoked) device rows, what is
+    /// left of its pull position and parked writes, and its machine row,
+    /// deleted through the outbox so paired machines drop it too. Refused
+    /// (conflict) while the machine or one of its devices is not revoked.
+    /// Its sessions and folders stay: they are its history, written only by
+    /// it. Returns false when nothing of it is known.
+    pub fn hub_forget_machine(&self, id: &str) -> Result<bool> {
+        self.write(|tx| {
+            let machine = one(
+                tx,
+                "SELECT * FROM machines WHERE id = ?1",
+                params![id],
+                super::misc::machine_row,
+            )?;
+            let active: Option<i64> = one(
+                tx,
+                "SELECT 1 FROM devices WHERE kind = 'machine' AND node_id = ?1 AND revoked = 0",
+                params![id],
+                |r| r.get(0),
+            )?;
+            if active.is_some() || machine.as_ref().is_some_and(|m| !m.revoked) {
+                return Err(StoreError::Conflict(
+                    "the machine is not revoked; revoke it first".into(),
+                ));
+            }
+            let devices = tx.execute(
+                "DELETE FROM devices WHERE kind = 'machine' AND node_id = ?1",
+                params![id],
+            )?;
+            tx.execute("DELETE FROM hub_pulls WHERE machine_id = ?1", params![id])?;
+            tx.execute(
+                "DELETE FROM hub_parked WHERE origin_machine = ?1",
+                params![id],
+            )?;
+            if machine.is_some() {
+                super::apply_in(tx, &Change::DeleteMachine { id: id.to_string() })?;
+            }
+            Ok(devices > 0 || machine.is_some())
+        })
+    }
+
     /// Hub: drop superseded rows from `hub_log` at or below the compaction
     /// floor, in write transactions of at most `batch` rows.
     ///
@@ -1618,6 +1661,11 @@ impl Store {
                                 continue;
                             }
                         };
+                        // This machine's own row stays (it was forgotten
+                        // while revoked; pairing again writes it anew).
+                        if matches!(&change, Change::DeleteMachine { id } if *id == me) {
+                            continue;
+                        }
                         // Events are append-only, deletes of sessions and
                         // records always win (tombstones) and shared rows
                         // keep the newest version (`write_row`); only owned
@@ -3036,6 +3084,52 @@ mod tests {
             hub.get_session("s1").unwrap().unwrap().title.as_deref(),
             Some("t3")
         );
+    }
+
+    // The hub forgets a revoked machine: its device and machine rows go,
+    // and paired machines drop the machine row with the replicated delete.
+    #[test]
+    fn hub_forgets_a_revoked_machine_everywhere() {
+        let (_h, hub) = temp_store();
+        let (_b, b) = temp_store();
+        let x = |revoked: bool| {
+            Change::Machine(crate::model::Machine {
+                id: "X".into(),
+                name: "old laptop".into(),
+                os: "linux".into(),
+                role: crate::model::MachineRole::Node,
+                last_seen: if revoked { 2 } else { 1 },
+                revoked,
+            })
+        };
+        hub.apply(x(false)).unwrap();
+        machine_device(&hub, "X", false);
+        machine_device(&hub, "B", false);
+        pull(&b, "B", &hub, "H");
+        assert!(b.get_machine("X").unwrap().is_some());
+        assert!(matches!(
+            hub.hub_forget_machine("X"),
+            Err(StoreError::Conflict(_))
+        ));
+
+        machine_device(&hub, "X", true);
+        hub.apply(x(true)).unwrap();
+        assert!(hub.hub_forget_machine("X").unwrap());
+        assert!(hub.get_machine("X").unwrap().is_none());
+        assert!(
+            hub.list_devices()
+                .unwrap()
+                .iter()
+                .all(|d| d.node_id.as_deref() != Some("X"))
+        );
+        pull(&b, "B", &hub, "H");
+        assert!(b.get_machine("X").unwrap().is_none());
+        assert!(!hub.hub_forget_machine("X").unwrap());
+        // A node never deletes a machine row on its own authority.
+        hub.apply(x(false)).unwrap();
+        b.apply(Change::DeleteMachine { id: "X".into() }).unwrap();
+        push(&b, "B", &hub, "H");
+        assert!(hub.get_machine("X").unwrap().is_some());
     }
 
     // A node whose cursor went back behind the compacted log (its database

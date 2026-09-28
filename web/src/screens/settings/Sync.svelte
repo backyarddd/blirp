@@ -4,6 +4,7 @@
   import { api, errorMessage } from '../../lib/api/client';
   import type { Device, Machine, SettingsView, SyncInvite } from '../../lib/api/types.gen';
   import { app } from '../../lib/app.svelte';
+  import { dialogs } from '../../lib/dialogs.svelte';
   import { Resource } from '../../lib/resource.svelte';
   import { navigate } from '../../lib/router.svelte';
   import { href } from '../../lib/router';
@@ -246,6 +247,23 @@
     if (!confirm(`Revoke ${m.name}? It can no longer sync or be controlled.`)) return;
     const ok = await app.act(() => api.machines.revoke(m.id).then(() => true), `${m.name} revoked`);
     if (ok) void machines.reload();
+  }
+
+  async function forgetMachine(m: Machine): Promise<void> {
+    const ok = await dialogs.confirm({
+      title: 'Forget machine?',
+      body:
+        `${m.name} leaves the machine and device lists here and on every paired machine. Its sessions and folders stay, ` +
+        'shown under its id. Pairing it again adds it back.',
+      confirm: 'Forget',
+      danger: true,
+    });
+    if (!ok) return;
+    const done = await app.act(() => api.machines.forget(m.id).then(() => true), `${m.name} forgotten`);
+    if (done) {
+      void machines.reload();
+      void devices.reload();
+    }
   }
 
   async function revokeDevice(d: Device): Promise<void> {
@@ -539,6 +557,8 @@
             </div>
             {#if app.admin && role === 'hub' && !m.revoked && m.id !== status?.machine_id}
               <button type="button" class="btn sm danger" onclick={() => revokeMachine(m)}>Revoke</button>
+            {:else if app.admin && role === 'hub' && m.revoked}
+              <button type="button" class="btn sm" onclick={() => forgetMachine(m)}>Forget…</button>
             {/if}
           </li>
         {/each}

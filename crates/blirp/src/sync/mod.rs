@@ -114,6 +114,7 @@ pub fn routes() -> Router<SharedState> {
             delete(revoke_device).patch(patch_device),
         )
         .route("/api/machines/{id}", delete(revoke_machine))
+        .route("/api/machines/{id}/forget", post(forget_machine))
         .route("/api/sync/{*rest}", axum::routing::any(unknown))
         .route("/api/devices/{id}/{*rest}", axum::routing::any(unknown))
 }
@@ -695,6 +696,41 @@ async fn revoke_machine(
             ));
         }
     }
+    Ok(StatusCode::NO_CONTENT)
+}
+
+/// `POST /api/machines/:id/forget`: on the hub, remove a revoked machine
+/// from the machine and device lists (paired machines drop its row too).
+/// Its sessions and folders stay; pairing it again adds it back.
+async fn forget_machine(
+    State(s): State<SharedState>,
+    ApiPath(id): ApiPath<String>,
+    _: Admin,
+) -> ApiResult<StatusCode> {
+    let _guard = s.sync.transition.lock().await;
+    if id == s.machine.id {
+        return Err(ApiError::bad_request("a machine cannot forget itself"));
+    }
+    if s.config().sync.role != MachineRole::Hub {
+        return Err(ApiError::conflict(
+            "not_hub",
+            "only the hub can forget other machines",
+        ));
+    }
+    let store = s.store.clone();
+    let mid = id.clone();
+    let known = blocking(move || {
+        store.hub_forget_machine(&mid).map_err(|e| match e {
+            blirp_core::store::StoreError::Conflict(m) => ApiError::conflict("not_revoked", m),
+            other => other.into(),
+        })
+    })
+    .await?;
+    if !known {
+        return Err(ApiError::not_found("machine"));
+    }
+    tracing::info!(machine = %id, "forgot a revoked machine");
+    emit_status(&s);
     Ok(StatusCode::NO_CONTENT)
 }
 
