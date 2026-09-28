@@ -2,13 +2,16 @@
   import Plus from '@lucide/svelte/icons/plus';
   import Pencil from '@lucide/svelte/icons/pencil';
   import Trash from '@lucide/svelte/icons/trash-2';
+  import RotateCcw from '@lucide/svelte/icons/rotate-ccw';
   import { api, errorMessage } from '../../lib/api/client';
   import type { ProjectSummary, WikiPage } from '../../lib/api/types.gen';
   import { app } from '../../lib/app.svelte';
+  import { dialogs } from '../../lib/dialogs.svelte';
   import { Resource } from '../../lib/resource.svelte';
   import { navigate } from '../../lib/router.svelte';
   import { href } from '../../lib/router';
   import { slugify } from '../../lib/markdown';
+  import { NOT_UNDONE } from '../../lib/manage';
   import { formatRelative } from '../../lib/time';
   import Loadable from '../../lib/components/Loadable.svelte';
   import Markdown from '../../lib/components/Markdown.svelte';
@@ -17,9 +20,13 @@
   const pid = $derived(project.id);
 
   const pages = new Resource(() => api.projects.wiki(pid));
+  // Deleted pages are read while their list is open.
+  const deleted = new Resource(() => api.projects.deletedWiki(pid));
+  let showDeleted = $state(false);
   $effect(() => {
     void app.memoryTick[pid];
     void pages.reload();
+    if (showDeleted) void deleted.reload();
   });
 
   const sorted = $derived([...(pages.data ?? [])].sort((a, b) => a.title.localeCompare(b.title)));
@@ -69,10 +76,14 @@
     saving = true;
     formError = null;
     try {
-      const saved =
-        mode === 'edit' && current
-          ? await api.projects.updateWiki(pid, current.slug, { title: input.title, body_md: input.body_md })
-          : await api.projects.createWiki(pid, input);
+      let saved: WikiPage;
+      if (mode === 'edit' && current) {
+        // A new slug first: a clash (409) leaves the page as it was.
+        const slugNow = input.slug === current.slug ? current.slug : (await api.projects.renameWiki(pid, current.slug, input.slug)).slug;
+        saved = await api.projects.updateWiki(pid, slugNow, { title: input.title, body_md: input.body_md });
+      } else {
+        saved = await api.projects.createWiki(pid, input);
+      }
       const rest = (pages.data ?? []).filter((p) => p.id !== saved.id);
       pages.data = [...rest, saved];
       mode = 'view';
@@ -85,15 +96,47 @@
   }
 
   async function remove(p: WikiPage): Promise<void> {
-    if (!confirm(`Delete the wiki page "${p.title}"?`)) return;
+    const sure = await dialogs.confirm({
+      title: 'Delete wiki page?',
+      body: `"${p.title}" is deleted on every synced machine and no longer given to agents. Restore it from Deleted pages to bring it back.`,
+      confirm: 'Delete',
+      danger: true,
+    });
+    if (!sure) return;
     const ok = await app.act(async () => {
       await api.projects.deleteWiki(pid, p.slug);
       return true;
     });
-    if (ok) {
-      pages.data = (pages.data ?? []).filter((x) => x.id !== p.id);
-      navigate(href.project(pid, 'wiki'));
+    if (!ok) return;
+    pages.data = (pages.data ?? []).filter((x) => x.id !== p.id);
+    if (showDeleted) void deleted.reload();
+    navigate(href.project(pid, 'wiki'));
+    app.toast(`Deleted "${p.title}"`, 'info', { label: 'Undo', run: () => void restore(p, false) });
+  }
+
+  async function restore(p: WikiPage, undoable = true): Promise<void> {
+    const back = await app.act(() => api.projects.restoreWiki(pid, p.slug));
+    if (!back) return;
+    pages.data = [...(pages.data ?? []).filter((x) => x.id !== back.id), back];
+    deleted.data = (deleted.data ?? []).filter((x) => x.id !== back.id);
+    app.toast(`Restored "${back.title}"`, 'info', undoable ? { label: 'Undo', run: () => void undoRestore(back) } : undefined);
+  }
+
+  /** Undo of a restore: delete it again unless it was edited since. */
+  async function undoRestore(p: WikiPage): Promise<void> {
+    const now = (pages.data ?? []).find((x) => x.id === p.id);
+    if (!now || now.updated_at !== p.updated_at) {
+      app.toast(NOT_UNDONE, 'info');
+      return;
     }
+    const ok = await app.act(async () => {
+      await api.projects.deleteWiki(pid, p.slug);
+      return true;
+    });
+    if (!ok) return;
+    pages.data = (pages.data ?? []).filter((x) => x.id !== p.id);
+    if (showDeleted) void deleted.reload();
+    if (slug === p.slug) navigate(href.project(pid, 'wiki'));
   }
 </script>
 
@@ -119,6 +162,30 @@
         {/each}
       </ul>
     </Loadable>
+    <details class="deleted" bind:open={showDeleted}>
+      <summary class="small muted">Deleted pages</summary>
+      <Loadable
+        loading={deleted.loading}
+        error={deleted.error}
+        empty={(deleted.data ?? []).length === 0}
+        emptyText="No deleted pages."
+        onretry={() => deleted.load()}
+      >
+        <ul class="pages" aria-label="Deleted pages">
+          {#each deleted.data ?? [] as p (p.id)}
+            <li class="row gone">
+              <span class="ellipsis grow-name" title={p.slug}>{p.title}</span>
+              <span class="faint small">{formatRelative(p.updated_at)}</span>
+              {#if app.control}
+                <button type="button" class="icon-btn sm" aria-label="Restore {p.title}" title="Restore" onclick={() => restore(p)}
+                  ><RotateCcw size={14} /></button
+                >
+              {/if}
+            </li>
+          {/each}
+        </ul>
+      </Loadable>
+    </details>
   </aside>
 
   <section class="card content">
@@ -139,9 +206,11 @@
                 pageSlug = e.currentTarget.value;
               }}
               pattern="[a-z0-9\-]+"
-              readonly={mode === 'edit'}
               title="Lowercase letters, digits and dashes"
             />
+            {#if mode === 'edit' && current && pageSlug !== current.slug}
+              <span class="hint">Changes the page's address. Links to the old address written in text are not changed.</span>
+            {/if}
           </label>
         </div>
         <div class="pills" role="tablist" aria-label="Editor mode">
@@ -221,6 +290,23 @@
     background: var(--accent-soft);
     color: var(--accent);
     font-weight: 600;
+  }
+  .deleted {
+    margin-top: 10px;
+    border-top: 1px solid var(--border);
+    padding-top: 8px;
+  }
+  .deleted summary {
+    cursor: pointer;
+  }
+  .gone {
+    gap: 6px;
+    padding: 4px 8px;
+  }
+  .grow-name {
+    flex: 1;
+    min-width: 0;
+    color: var(--text-2);
   }
   .content {
     padding: 20px;

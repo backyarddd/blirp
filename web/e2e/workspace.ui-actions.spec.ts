@@ -417,3 +417,36 @@ test('records: archive with Undo, move from the context menu, bulk archive and m
   for (const r of [r2, r3]) await expect.poll(async () => (await get(r))?.project_id).toBe(b.id);
   await bar.getByRole('button', { name: 'Done' }).click();
 });
+
+test('wiki: rename a slug, delete a page with Undo, restore it from Deleted pages', async () => {
+  const p = await apiCall<ProjectRow>('POST', '/api/projects', { name: 'Wiki actions' });
+  await apiCall('POST', `/api/projects/${p.id}/wiki`, { slug: 'old-name', title: 'Runbook', body_md: 'Restart the thing.' });
+  await page.goto(`${env.url}/projects/${p.id}/wiki/old-name`);
+  await expect(page.getByRole('heading', { level: 2, name: 'Runbook' })).toBeVisible();
+
+  await page.getByRole('button', { name: 'Edit' }).click();
+  await page.getByLabel('Slug').fill('runbook');
+  await expect(page.getByText('Links to the old address written in text are not changed.')).toBeVisible();
+  await page.getByRole('button', { name: 'Save page' }).click();
+  await expect(page).toHaveURL(`${env.url}/projects/${p.id}/wiki/runbook`);
+  await expect(page.locator('.content .md')).toContainText('Restart the thing.');
+
+  await page.getByRole('button', { name: 'Delete' }).click();
+  await page.getByRole('dialog', { name: 'Delete wiki page?' }).getByRole('button', { name: 'Delete', exact: true }).click();
+  await expect(page).toHaveURL(`${env.url}/projects/${p.id}/wiki`);
+  await expect(page.getByRole('link', { name: 'Runbook' })).toHaveCount(0);
+  await page.locator('.toast', { hasText: 'Deleted "Runbook"' }).getByRole('button', { name: 'Undo' }).click();
+  await expect(page.getByRole('link', { name: 'Runbook' })).toBeVisible();
+
+  // Deleted again (by another client); restored from the list.
+  await apiCall('DELETE', `/api/projects/${p.id}/wiki/runbook`);
+  await expect(page.getByRole('link', { name: 'Runbook' })).toHaveCount(0);
+  await page.locator('summary', { hasText: 'Deleted pages' }).click();
+  const deleted = page.getByRole('list', { name: 'Deleted pages' });
+  await deleted.getByRole('button', { name: 'Restore Runbook' }).click();
+  await expect(page.locator('.toast', { hasText: 'Restored "Runbook"' }).last()).toBeVisible();
+  await expect(page.getByRole('link', { name: 'Runbook' })).toBeVisible();
+  await expect(deleted.getByRole('button', { name: 'Restore Runbook' })).toHaveCount(0);
+  const live = await apiCall<{ slug: string }[]>('GET', `/api/projects/${p.id}/wiki`);
+  expect(live.map((w) => w.slug)).toEqual(['runbook']);
+});

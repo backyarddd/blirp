@@ -254,6 +254,12 @@ export const api = {
     updateWiki: (id: string, slug: string, w: PutWikiPage) =>
       request<WikiPage>('PUT', `${p(id)}/wiki/${enc(slug)}`, w),
     deleteWiki: (id: string, slug: string) => request<void>('DELETE', `${p(id)}/wiki/${enc(slug)}`),
+    /** Deleted pages, most recently deleted first. */
+    deletedWiki: (id: string) => request<WikiPage[]>('GET', `${p(id)}/wiki`, undefined, { deleted: true }),
+    restoreWiki: (id: string, slug: string) => request<WikiPage>('POST', `${p(id)}/wiki/${enc(slug)}/restore`),
+    /** 409 when another page, also a deleted one, holds `to`. */
+    renameWiki: (id: string, slug: string, to: string) =>
+      request<WikiPage>('POST', `${p(id)}/wiki/${enc(slug)}/rename`, { slug: to }),
     resources: (id: string) => request<Resource[]>('GET', `${p(id)}/resources`),
     createResource: (id: string, r: CreateResource) => request<Resource>('POST', `${p(id)}/resources`, r),
     updateResource: (id: string, rid: string, r: PatchResource) =>
