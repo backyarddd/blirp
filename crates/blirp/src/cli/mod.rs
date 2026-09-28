@@ -3,6 +3,7 @@
 mod agents;
 mod install;
 mod lifecycle;
+mod manage;
 mod mem;
 mod server;
 pub mod service;
@@ -60,14 +61,23 @@ enum Command {
     },
     /// Open the UI in the browser (logged in).
     Open,
-    /// List recent sessions.
+    /// List recent sessions, or rename, move, delete or stop one.
+    #[command(args_conflicts_with_subcommands = true)]
     Sessions {
+        #[command(subcommand)]
+        action: Option<manage::SessionsAction>,
         /// Only sessions of this project id.
         #[arg(long)]
         project: Option<String>,
         #[arg(long, default_value_t = 20, value_parser = clap::value_parser!(u32).range(1..))]
         limit: u32,
+        /// Print JSON (the API's sessions page).
+        #[arg(long)]
+        json: bool,
     },
+    /// List, rename, delete (to the Trash), restore or merge projects.
+    #[command(subcommand)]
+    Projects(manage::ProjectsCommand),
     /// Check the installation.
     Doctor,
     /// Search and show project memory.
@@ -203,6 +213,20 @@ fn forget_inherited_claude_token(paths: &Paths) {
     }
 }
 
+/// Ask `question` on the terminal; without one (a script, a pipe) the
+/// command fails and names `--yes`.
+pub(crate) fn confirm(question: &str) -> anyhow::Result<bool> {
+    use std::io::{BufRead as _, IsTerminal as _, Write as _};
+    if !std::io::stdin().is_terminal() {
+        bail!("{question} Pass --yes to confirm without a prompt.");
+    }
+    print!("{question} [y/N] ");
+    std::io::stdout().flush()?;
+    let mut answer = String::new();
+    std::io::stdin().lock().read_line(&mut answer)?;
+    Ok(matches!(answer.trim(), "y" | "Y" | "yes" | "YES" | "Yes"))
+}
+
 fn report(r: anyhow::Result<ExitCode>) -> ExitCode {
     r.unwrap_or_else(|e| {
         eprintln!("error: {e:#}");
@@ -269,7 +293,17 @@ async fn run(cmd: Command, paths: Paths) -> anyhow::Result<ExitCode> {
         Command::Start => lifecycle::start(&paths).await,
         Command::Stop => lifecycle::stop(&paths).await,
         Command::Open => open(&paths).await,
-        Command::Sessions { project, limit } => sessions(&paths, project, limit).await,
+        Command::Sessions {
+            action: Some(action),
+            ..
+        } => manage::sessions(&Client::connect(&paths).await?, action).await,
+        Command::Sessions {
+            action: None,
+            project,
+            limit,
+            json,
+        } => sessions(&paths, project, limit, json).await,
+        Command::Projects(cmd) => manage::projects(&Client::connect(&paths).await?, cmd).await,
         Command::Doctor => doctor(&paths).await,
         Command::Mcp => {
             crate::mcp::serve_stdio(paths).await?;
@@ -410,7 +444,12 @@ async fn open(paths: &Paths) -> anyhow::Result<ExitCode> {
     Ok(ExitCode::SUCCESS)
 }
 
-async fn sessions(paths: &Paths, project: Option<String>, limit: u32) -> anyhow::Result<ExitCode> {
+async fn sessions(
+    paths: &Paths,
+    project: Option<String>,
+    limit: u32,
+    json: bool,
+) -> anyhow::Result<ExitCode> {
     let client = Client::connect(paths).await?;
     // Only the path and query are sent; the base just makes the URL parse.
     let mut url = reqwest::Url::parse("http://blirp.local/api/sessions")?;
@@ -430,6 +469,10 @@ async fn sessions(paths: &Paths, project: Option<String>, limit: u32) -> anyhow:
     }
     let path = format!("{}?{}", url.path(), url.query().unwrap_or_default());
     let page: SessionsPage = client.get(&path).await?;
+    if json {
+        println!("{}", serde_json::to_string_pretty(&page)?);
+        return Ok(ExitCode::SUCCESS);
+    }
     if page.items.is_empty() {
         println!("no sessions");
         return Ok(ExitCode::SUCCESS);

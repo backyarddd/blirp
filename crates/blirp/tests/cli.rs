@@ -520,3 +520,150 @@ async fn update_records_every_run() {
             .is_some_and(|e| e.contains("not installed by the blirp install script"))
     );
 }
+
+/// `blirp projects ...` and `blirp sessions <action>` through the daemon:
+/// JSON output, confirmation (a script must pass --yes), exit codes.
+#[tokio::test]
+async fn projects_and_sessions_actions() {
+    use blirp_core::model::{ProjectSummary, Session, SessionStatus};
+    let tmp = tempfile::tempdir().unwrap();
+    let home = tmp.path().join("blirp");
+    let user = tmp.path().join("user");
+    std::fs::create_dir_all(&user).unwrap();
+    let o = blirp(&home, &user, &["daemon", "--detach", "--port", "0"]);
+    let _stop = StopOnDrop(&home, &user);
+    assert!(o.status.success(), "{}", text(&o));
+    let info = blirp_core::paths::RuntimeInfo::read(&blirp_core::paths::Paths::at(&home))
+        .unwrap()
+        .unwrap();
+    blirp::install_crypto_provider();
+    let http = reqwest::Client::new();
+    let api = |method: reqwest::Method, path: &str| {
+        http.request(method, format!("{}{path}", info.base_url()))
+            .bearer_auth(&info.token)
+    };
+    let mut ids = Vec::new();
+    for name in ["Alpha", "Beta"] {
+        let p: ProjectSummary = api(reqwest::Method::POST, "/api/projects")
+            .json(&serde_json::json!({ "name": name }))
+            .send()
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        ids.push(p.project.id);
+    }
+    let (a, b) = (ids[0].as_str(), ids[1].as_str());
+    let run = |args: &[&str]| blirp(&home, &user, args);
+    let json = |args: &[&str]| -> serde_json::Value {
+        let o = run(args);
+        assert!(o.status.success(), "{args:?}: {}", text(&o));
+        serde_json::from_slice(&o.stdout).unwrap()
+    };
+
+    let list = json(&["projects", "list", "--json"]);
+    let names: Vec<&str> = list
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|p| p["name"].as_str())
+        .collect();
+    assert!(
+        names.contains(&"Alpha") && names.contains(&"Beta"),
+        "{list}"
+    );
+    let o = run(&["projects", "rename", a, "Alpha two"]);
+    assert!(
+        text(&o).contains("Renamed") && text(&o).contains("Alpha two"),
+        "{}",
+        text(&o)
+    );
+    let o = run(&["projects", "rename", "nope", "x"]);
+    assert_eq!(o.status.code(), Some(1), "{}", text(&o));
+    assert!(text(&o).contains("project not found"), "{}", text(&o));
+
+    // A session to act on.
+    let s: Session = api(reqwest::Method::POST, "/api/sessions")
+        .json(&serde_json::json!({"project_id": a, "agent": "shell"}))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let o = run(&["sessions", "rename", &s.id, "Named here"]);
+    assert!(text(&o).contains("\"Named here\""), "{}", text(&o));
+    let moved = json(&["sessions", "move", &s.id, "--project", b, "--json"]);
+    assert_eq!(moved["project_id"], b);
+    // Neither --project nor --chats: an invalid argument.
+    assert_eq!(run(&["sessions", "move", &s.id]).status.code(), Some(2));
+    // A script (no terminal) must confirm with --yes.
+    let o = run(&["sessions", "stop", &s.id]);
+    assert_eq!(o.status.code(), Some(1), "{}", text(&o));
+    assert!(text(&o).contains("--yes"), "{}", text(&o));
+    let o = run(&["sessions", "stop", &s.id, "--yes"]);
+    assert!(o.status.success(), "{}", text(&o));
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
+    loop {
+        let cur: Session = api(reqwest::Method::GET, &format!("/api/sessions/{}", s.id))
+            .send()
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        if !matches!(
+            cur.status,
+            SessionStatus::Starting
+                | SessionStatus::Working
+                | SessionStatus::Idle
+                | SessionStatus::Waiting
+        ) {
+            break;
+        }
+        assert!(std::time::Instant::now() < deadline, "session never ended");
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    }
+    // The terminal leaves the registry right after the exit is recorded.
+    let mut deleted = String::new();
+    for _ in 0..20 {
+        let o = run(&["sessions", "delete", &s.id, "--yes"]);
+        deleted = text(&o);
+        if o.status.success() {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+    }
+    assert!(deleted.contains(&format!("Deleted {}", s.id)), "{deleted}");
+    let r = api(reqwest::Method::GET, &format!("/api/sessions/{}", s.id))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(r.status(), 404);
+
+    // Trash round trip, then a merge.
+    assert_eq!(run(&["projects", "delete", a]).status.code(), Some(1));
+    let o = run(&["projects", "delete", a, "--yes"]);
+    assert!(text(&o).contains("to the Trash"), "{}", text(&o));
+    let trash = json(&["projects", "trash", "--json"]);
+    assert_eq!(trash[0]["id"], a, "{trash}");
+    let o = run(&["projects", "restore", a]);
+    assert!(text(&o).contains("Restored \"Alpha two\""), "{}", text(&o));
+    let o = run(&["projects", "merge", a, "--into", b, "--yes"]);
+    assert!(
+        text(&o).contains("Merged \"Alpha two\" into \"Beta\""),
+        "{}",
+        text(&o)
+    );
+    let list = json(&["projects", "list", "--json"]);
+    assert!(
+        list.as_array().unwrap().iter().all(|p| p["id"] != a),
+        "{list}"
+    );
+    let o = run(&["projects", "trash"]);
+    assert!(text(&o).contains("the Trash is empty"), "{}", text(&o));
+
+    let o = run(&["stop"]);
+    assert!(o.status.success(), "{}", text(&o));
+}

@@ -262,18 +262,6 @@ fn stage_app(file: &Path, dir: &Path, name: &str) -> anyhow::Result<PathBuf> {
 
 // ---------------------------------------------------------------- uninstall
 
-fn confirm(question: &str) -> anyhow::Result<bool> {
-    use std::io::{BufRead as _, IsTerminal as _, Write as _};
-    if !std::io::stdin().is_terminal() {
-        bail!("{question} Pass --yes to confirm without a prompt.");
-    }
-    print!("{question} [y/N] ");
-    std::io::stdout().flush()?;
-    let mut answer = String::new();
-    std::io::stdin().lock().read_line(&mut answer)?;
-    Ok(matches!(answer.trim(), "y" | "Y" | "yes" | "YES" | "Yes"))
-}
-
 pub async fn uninstall(paths: &Paths, purge: bool, yes: bool) -> anyhow::Result<ExitCode> {
     let inst = install::installed()?;
     let data = paths.home().to_path_buf();
@@ -285,7 +273,7 @@ pub async fn uninstall(paths: &Paths, purge: bool, yes: bool) -> anyhow::Result<
             );
         }
         if !yes
-            && !confirm(&format!(
+            && !super::confirm(&format!(
                 "Delete {} with all blirp memory, sessions and settings?",
                 data.display()
             ))?

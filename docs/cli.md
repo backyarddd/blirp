@@ -15,7 +15,8 @@ Without a command, `blirp` does what [`blirp app`](#blirp-app) does.
 | [`start`](#blirp-start) | starts it | start the daemon (through the autostart service when installed) |
 | [`status`](#blirp-status) | - | is the daemon running |
 | [`open`](#blirp-open) | yes | open the UI in the browser, logged in |
-| [`sessions`](#blirp-sessions) | yes | list recent sessions |
+| [`sessions`](#blirp-sessions) | yes | list recent sessions; rename, move, delete or stop one |
+| [`projects`](#blirp-projects) | yes | list, rename, delete (to the Trash), restore or merge projects |
 | [`stop`](#blirp-stop) | - | stop the daemon |
 | [`logs`](#blirp-logs) | no | show the daemon log |
 | [`doctor`](#blirp-doctor) | no | check the installation |
@@ -68,10 +69,44 @@ Opens `http://127.0.0.1:<port>/#token=...` in the default browser. The UI stores
 ## blirp sessions
 
 ```
-blirp sessions [--project <PROJECT_ID>] [--limit <N>]
+blirp sessions [--project <PROJECT_ID>] [--limit <N>] [--json]
+blirp sessions rename <ID> <TITLE> [--json]
+blirp sessions move   <ID> (--project <PROJECT_ID> | --chats) [--json]
+blirp sessions delete <ID> [--yes]
+blirp sessions stop   <ID> [--yes]
 ```
 
-Recent sessions (default 20), running ones first, then by most recent activity: id, status, agent, title or folder. `--limit` must be at least 1 (`0` is an invalid argument, exit code 2). An unknown `--project` id is an error ("project not found", exit code 1), not an empty list.
+Without an action: recent sessions (default 20), running ones first, then by most recent activity: id, status, agent, title or folder. `--limit` must be at least 1 (`0` is an invalid argument, exit code 2). An unknown `--project` id is an error ("project not found", exit code 1), not an empty list. `--json` prints the API's page (`{items, next_cursor}`).
+
+- `rename`: sets the title; an empty `TITLE` (`""`) goes back to the default title.
+- `move`: into another project, or into Chats with `--chats` (one of the two is required, else exit code 2). Its subagent sessions and the memory records it produced move along.
+- `delete`: an ended session, for good on every synced machine, with its subagent sessions (a running one is refused: stop it first). The agent's own transcript file is not touched.
+- `stop`: ends the agent process and everything it started; the session can be resumed later. Prints `Stopping <id>` once the daemon started the stop.
+- `delete` and `stop` ask for confirmation; `--yes` skips it. Without a terminal (a script, a pipe) they fail unless `--yes` is given. Declining changes nothing and exits 1.
+- `--json` prints the updated session as the API returns it.
+
+Sessions of another machine are forwarded to that machine, like in the UI.
+
+## blirp projects
+
+```
+blirp projects list  [--json]
+blirp projects trash [--json]
+blirp projects rename  <ID> <NAME> [--json]
+blirp projects delete  <ID> [--yes]
+blirp projects restore <ID> [--json]
+blirp projects merge   <ID> --into <ID> [--yes] [--json]
+```
+
+- `list`: live projects, most recently active first: id, session count, last activity, name and this machine's folder (or blirp workspace). `trash`: projects in the Trash, most recently deleted first.
+- `rename`: Chats keeps its name (refused).
+- `delete`: moves the project to the Trash ([projects-and-sessions.md](projects-and-sessions.md#trash)): hidden with its sessions, its folders unregistered on every synced machine. Files on disk are not touched.
+- `restore`: brings it back with its sessions and the folders it had on this machine when it was deleted here, and prints them.
+- `merge`: moves the project's folders, sessions, records, wiki pages, resources and suggestions into `--into`, then deletes it. Cannot be undone.
+- `delete` and `merge` ask for confirmation like `blirp sessions delete` (`--yes`; required without a terminal; declining exits 1).
+- `--json` prints the API's project summaries (`list`, `trash`) or the updated one.
+
+An unknown or deleted project id fails with "project not found" (exit code 1).
 
 ## blirp stop
 
@@ -238,4 +273,4 @@ MCP server over stdio for agents ([memory.md](memory.md#mcp-tools)). Uses `BLIRP
 
 ## Exit codes
 
-`0` success; `1` error (message on stderr), `blirp status` with no daemon, `blirp service status` without autostart installed, `blirp doctor` with a failed check, `blirp hooks` with a failed agent, `blirp skills` with a skipped or failed skill, `blirp uninstall` when something could not be removed; `2` invalid arguments; `10` `blirp update --check` with an update available. `blirp hook` always exits 0.
+`0` success; `1` error (message on stderr), `blirp status` with no daemon, `blirp service status` without autostart installed, `blirp doctor` with a failed check, `blirp hooks` with a failed agent, `blirp skills` with a skipped or failed skill, `blirp uninstall` when something could not be removed, a declined confirmation (`blirp uninstall --purge`, `blirp sessions delete|stop`, `blirp projects delete|merge`); `2` invalid arguments; `10` `blirp update --check` with an update available. `blirp hook` always exits 0.
