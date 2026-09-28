@@ -168,20 +168,56 @@ as_root() {
 }
 
 # The AppImage mounts itself with FUSE 2 (libfuse.so.2).
+# The ldconfig cache first, then the usual folders (no cache, or no ldconfig).
 has_fuse2() {
-  { ldconfig -p 2>/dev/null || /sbin/ldconfig -p 2>/dev/null; } | grep -F 'libfuse.so.2' >/dev/null
+  if { ldconfig -p 2>/dev/null || /sbin/ldconfig -p 2>/dev/null; } | grep -F 'libfuse.so.2' >/dev/null; then
+    return 0
+  fi
+  for _l in /lib/*-linux-gnu /usr/lib/*-linux-gnu /lib64 /usr/lib64 /lib /usr/lib; do
+    if [ -e "$_l/libfuse.so.2" ]; then return 0; fi
+  done
+  return 1
 }
 
-# Linux: install what is missing with the package manager, printing the
-# command first. Missing tools are fatal later on (the checks below); a
-# missing FUSE only keeps the desktop app from starting, so it is a warning.
-# macOS ships everything this needs. Nothing is printed when nothing is missing.
+# pkg_install PKGS CMD...: install PKGS with CMD as root, printing the command
+# first. On failure $_manual is the command to run by hand. Package managers
+# get no stdin: under `curl | sh` it is the rest of this script.
+pkg_install() {
+  _p=$1
+  shift
+  if [ $# -eq 0 ]; then
+    _manual="install $_p with your package manager"
+    return 1
+  fi
+  if [ -n "$_sudo" ] && ! has sudo; then
+    _manual="(as root) $* $_p"
+    return 1
+  fi
+  _manual="$_sudo$* $_p"
+  if [ "$1" = pacman ]; then _manual="$_manual (after pacman -Syu if a package is not found)"; fi
+  say "installing missing prerequisites: $_sudo$* $_p"
+  # shellcheck disable=SC2086 # package names
+  as_root "$@" $_p </dev/null
+}
+
+# Linux: install what is missing with the package manager. A required tool
+# that cannot be installed stops here; a missing FUSE only keeps the desktop
+# app from starting, so it is a warning, and it is left alone without a
+# display (a server that did not pass --no-app). macOS ships everything this
+# needs. Nothing is printed when nothing is missing.
 install_prereqs() {
   _need=
   for _t in tar gzip; do has "$_t" || _need="$_need $_t"; done
   has curl || has wget || _need="$_need curl"
+  _need=${_need# }
   _fuse=
-  if [ -z "$no_app" ] && ! has_fuse2; then _fuse=1; fi
+  if [ -z "$no_app" ] && ! has_fuse2; then
+    if [ -n "${DISPLAY:-}${WAYLAND_DISPLAY:-}" ]; then
+      _fuse=1
+    else
+      say "no display: not installing FUSE 2 for the desktop app (--no-app skips the app)"
+    fi
+  fi
   [ -n "$_need$_fuse" ] || return 0
   _pm=
   for _p in apt-get dnf pacman zypper; do
@@ -190,19 +226,6 @@ install_prereqs() {
       break
     fi
   done
-  _pkgs=$_need
-  if [ -n "$_fuse" ]; then
-    case $_pm in
-      apt-get)
-        # Ubuntu 24.04+ and Debian 13+ renamed it (the old name is virtual there).
-        if apt-cache show libfuse2t64 >/dev/null 2>&1; then _pkgs="$_pkgs libfuse2t64"; else _pkgs="$_pkgs libfuse2"; fi
-        ;;
-      dnf) _pkgs="$_pkgs fuse fuse-libs" ;;
-      pacman) _pkgs="$_pkgs fuse2" ;;
-      zypper) _pkgs="$_pkgs libfuse2" ;;
-    esac
-  fi
-  _pkgs=${_pkgs# }
   case $_pm in
     apt-get) set -- env DEBIAN_FRONTEND=noninteractive apt-get install -y -q ;;
     dnf) set -- dnf install -y -q ;;
@@ -212,26 +235,29 @@ install_prereqs() {
   esac
   _sudo=
   if [ "$(id -u)" != 0 ]; then _sudo="sudo "; fi
-  # shellcheck disable=SC2086 # package names
-  if [ $# -gt 0 ] && { [ -z "$_sudo" ] || has sudo; }; then
-    say "installing missing prerequisites: $_sudo$* $_pkgs"
-    if [ "$_pm" = apt-get ]; then
-      as_root env DEBIAN_FRONTEND=noninteractive apt-get update -q >/dev/null 2>&1 || true
-    fi
-    if as_root "$@" $_pkgs; then
-      return 0
-    fi
-    _manual="$_sudo$* $_pkgs"
-  elif [ $# -gt 0 ]; then
-    _manual="(as root) $* $_pkgs"
-  else
-    _manual="install$_need${_fuse:+ FUSE 2 (libfuse.so.2)} with your package manager"
+  if [ "$_pm" = apt-get ] && { [ -z "$_sudo" ] || has sudo; }; then
+    # Fresh containers have no package lists; the FUSE name below needs them.
+    say "updating the package lists: ${_sudo}apt-get update"
+    as_root env DEBIAN_FRONTEND=noninteractive apt-get update -q </dev/null >/dev/null 2>&1 || true
   fi
   if [ -n "$_need" ]; then
-    die "missing$_need and could not install it; run: $_manual"
+    pkg_install "$_need" "$@" || die "missing $_need and could not install it; run: $_manual"
   fi
-  say "warning: the desktop app needs FUSE 2 to start and it could not be installed; run: $_manual"
-  say "warning: or start the app with APPIMAGE_EXTRACT_AND_RUN=1, or use \`blirp open\` in a browser"
+  [ -n "$_fuse" ] || return 0
+  case $_pm in
+    apt-get)
+      # Ubuntu 24.04+ and Debian 13+ renamed it (the old name is virtual there).
+      if apt-cache show libfuse2t64 >/dev/null 2>&1; then _fp=libfuse2t64; else _fp=libfuse2; fi
+      ;;
+    dnf) _fp="fuse fuse-libs" ;;
+    pacman) _fp=fuse2 ;;
+    zypper) _fp=libfuse2 ;;
+    *) _fp="FUSE 2 (libfuse.so.2)" ;;
+  esac
+  if ! pkg_install "$_fp" "$@"; then
+    say "warning: the desktop app needs FUSE 2 to start and it could not be installed; run: $_manual"
+    say "warning: or start the app with APPIMAGE_EXTRACT_AND_RUN=1, or use \`blirp open\` in a browser"
+  fi
 }
 if [ "$os" = Linux ] && [ -z "$no_prereqs" ]; then install_prereqs; fi
 
@@ -406,14 +432,19 @@ get_minisign() {
     *)
       has brew || return 1
       say "installing minisign to check the release signature: brew install minisign" >&2
-      HOMEBREW_NO_AUTO_UPDATE=1 brew install minisign >&2 || return 1
+      HOMEBREW_NO_AUTO_UPDATE=1 brew install minisign </dev/null >&2 || return 1
       printf '%s\n' "$(brew --prefix)/bin/minisign"
       return 0
       ;;
   esac
   say "downloading minisign 0.12 to check the release signature (used once, not installed)" >&2
-  # Never send GITHUB_TOKEN to a third-party download.
-  (GITHUB_TOKEN= && fetch "$MINISIGN_URL/$_a" "$tmp/$_a") || return 1
+  # Not through fetch: no GITHUB_TOKEN for a third-party download, and a
+  # time limit, since the install goes on without it.
+  if [ "$downloader" = curl ]; then
+    curl -fsSL --retry 3 --connect-timeout 15 --max-time 120 -o "$tmp/$_a" "$MINISIGN_URL/$_a" || return 1
+  else
+    wget -q --timeout=15 --tries=3 -O "$tmp/$_a" "$MINISIGN_URL/$_a" || return 1
+  fi
   if [ "$(sha256 "$tmp/$_a")" != "$_s" ]; then
     say "warning: $_a does not match its pinned checksum; not using it" >&2
     return 1

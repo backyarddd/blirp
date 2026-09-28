@@ -15,7 +15,8 @@
 #   1b. prerequisites, with PATH cut down to links to the tools the script
 #      uses: BLIRP_NO_PREREQS=1 with tar missing fails without a package
 #      manager running; (Linux) a missing tar is installed through fake
-#      sudo/apt-get; (Linux, Windows) without minisign or OpenSSL,
+#      sudo/apt-get, and an install with the app and a display runs no
+#      package manager when (a fake) ldconfig lists FUSE; (Linux, Windows) without minisign or OpenSSL,
 #      BLIRP_NO_PREREQS=1 + BLIRP_REQUIRE_SIGNATURE=1 refuses without
 #      fetching anything, and without the opt-out the pinned minisign is
 #      fetched from GitHub and checks the signature (needs network);
@@ -193,17 +194,26 @@ run_install() {
   else
     _args=--no-app
     if [ "${3:-}" = --version ]; then _args="--no-app --version $v"; fi
+    # With the app (and a display, so FUSE is checked).
+    _disp=${DISPLAY:-}
+    if [ -n "$run_app" ]; then
+      _args=
+      _disp=:0
+    fi
     # shellcheck disable=SC2086 # option words
     env -u GITHUB_TOKEN -u BLIRP_INSTALL_DIR -u XDG_DATA_HOME -u BLIRP_VERSION \
       HOME="$_home" SHELL=/bin/sh BLIRP_HOME="$_home/.blirp" \
       BLIRP_RELEASE_BASE_URL="$base" BLIRP_REQUIRE_SIGNATURE=1 \
       BLIRP_NO_PREREQS="$no_prereqs" PATH="${run_path:-$work/pm-fail:$PATH}" \
+      DISPLAY="$_disp" \
       "$_shp" "$script" $_args >"$work/out.log" 2>&1
   fi
 }
-# Overrides for the next run_install: PATH, and BLIRP_NO_PREREQS.
+# Overrides for the next run_install: PATH, BLIRP_NO_PREREQS, and (unix)
+# with the desktop app and a display.
 run_path=
 no_prereqs=
+run_app=
 
 # Package managers that must not run when nothing is missing: they only log.
 mkdir -p "$work/pm-fail"
@@ -309,6 +319,15 @@ if [ "$(uname -s)" = Linux ]; then
   rm -f "$work/pm.log" "$work/min/tar"
   echo "ok: a missing tar is installed with the package manager"
   ln -s "$(command -v tar)" "$work/min/tar"
+  # With the app and a display, FUSE present (fake ldconfig): no package manager.
+  mkdir -p "$work/fuse"
+  printf '#!/bin/sh\nprintf "\\tlibfuse.so.2 (libc6,x86-64) => /lib/x86_64-linux-gnu/libfuse.so.2\\n"\n' >"$work/fuse/ldconfig"
+  chmod +x "$work/fuse/ldconfig"
+  run_path=$work/pm-fail:$work/fuse:$PATH run_app=1
+  run_install "$work/home-app" "$sh_" || fail "FUSE present: install with the app failed"
+  run_path='' run_app=''
+  no_install_of_prereqs "FUSE present"
+  echo "ok: with FUSE present an install with the app installs nothing"
 fi
 if [ "$kind" = windows ]; then
   # No Git (its OpenSSL) and no minisign on Path.

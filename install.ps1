@@ -10,7 +10,8 @@
   against its minisign signature: with minisign or an OpenSSL 3 (Git for
   Windows ships one), else with a pinned minisign fetched for the check.
   When the desktop app is installed and the Microsoft Edge WebView2 Runtime
-  is missing, it installs that too (winget, else Microsoft's bootstrapper).
+  is missing, it installs that too (Microsoft's bootstrapper, per user; else
+  winget, which may ask for admin rights).
   Running it again upgrades in place. No administrator rights are needed.
 
   Options can also be set with environment variables, which is the only way
@@ -198,7 +199,7 @@ param(
       Say 'downloading minisign 0.12 to check the release signature (used once, not installed)'
       try {
         # Straight from GitHub, never with GITHUB_TOKEN.
-        Invoke-WebRequest -Uri "https://github.com/jedisct1/minisign/releases/download/0.12/$name" -OutFile $zip -UseBasicParsing
+        Invoke-WebRequest -Uri "https://github.com/jedisct1/minisign/releases/download/0.12/$name" -OutFile $zip -UseBasicParsing -TimeoutSec 60
         $got = (Get-FileHash -LiteralPath $zip -Algorithm SHA256).Hash.ToLowerInvariant()
         if ($got -ne '37b600344e20c19314b2e82813db2bfdcc408b77b876f7727889dbd46d539479') {
           Say "warning: $name does not match its pinned checksum; not using it"
@@ -286,28 +287,35 @@ param(
       $false
     }
     function Install-WebView2 {
-      $winget = Get-Command winget.exe -CommandType Application -ErrorAction SilentlyContinue | Select-Object -First 1
-      if ($winget) {
-        Say 'installing the Microsoft Edge WebView2 Runtime for the desktop app: winget install --id Microsoft.EdgeWebView2Runtime --exact'
-        $ErrorActionPreference = 'Continue'
-        & $winget.Source install --id Microsoft.EdgeWebView2Runtime --exact --silent --accept-package-agreements --accept-source-agreements --disable-interactivity | Out-Host
-        $ErrorActionPreference = 'Stop'
-        if (Test-WebView2) { return $true }
-      }
-      # Microsoft's Evergreen bootstrapper; without admin rights it installs for this user.
+      # First Microsoft's Evergreen bootstrapper: without admin rights it
+      # installs for this user. winget's package is machine-wide (UAC).
       Say 'installing the Microsoft Edge WebView2 Runtime for the desktop app with Microsoft''s bootstrapper'
       try {
         $setup = Join-Path $tmp 'MicrosoftEdgeWebview2Setup.exe'
-        Invoke-WebRequest -Uri 'https://go.microsoft.com/fwlink/p/?LinkId=2124703' -OutFile $setup -UseBasicParsing
+        Invoke-WebRequest -Uri 'https://go.microsoft.com/fwlink/p/?LinkId=2124703' -OutFile $setup -UseBasicParsing -TimeoutSec 60
         $sig = Get-AuthenticodeSignature -LiteralPath $setup
-        if ($sig.Status -ne 'Valid' -or $sig.SignerCertificate.Subject -notmatch '(^|, )O=Microsoft Corporation(,|$)') {
+        $ms = '(^|, )O=Microsoft Corporation(,|$)'
+        if ($sig.Status -ne 'Valid' -or $sig.SignerCertificate.Subject -notmatch $ms -or $sig.SignerCertificate.Issuer -notmatch $ms) {
           Say "warning: the WebView2 bootstrapper is not validly signed by Microsoft ($($sig.Status)); not running it"
-          return $false
+        } else {
+          # Not -Wait: that waits for every child, and the updater it starts keeps running.
+          $p = Start-Process -FilePath $setup -ArgumentList '/silent', '/install' -PassThru
+          if (-not $p.WaitForExit(300000)) {
+            Say 'warning: the WebView2 bootstrapper did not finish within 5 minutes'
+          } elseif ($p.ExitCode -ne 0) {
+            Say "warning: the WebView2 bootstrapper exited with $($p.ExitCode)"
+          }
         }
-        $p = Start-Process -FilePath $setup -ArgumentList '/silent', '/install' -Wait -PassThru
-        if ($p.ExitCode -ne 0) { Say "warning: the WebView2 bootstrapper exited with $($p.ExitCode)" }
       } catch {
-        Say "warning: could not install WebView2: $($_.Exception.Message)"
+        Say "warning: could not install WebView2 with the bootstrapper: $($_.Exception.Message)"
+      }
+      if (Test-WebView2) { return $true }
+      $winget = Get-Command winget.exe -CommandType Application -ErrorAction SilentlyContinue | Select-Object -First 1
+      if ($winget) {
+        Say 'installing the Microsoft Edge WebView2 Runtime for the desktop app: winget install --id Microsoft.EdgeWebView2Runtime --exact (may ask for admin rights)'
+        $ErrorActionPreference = 'Continue'
+        & $winget.Source install --id Microsoft.EdgeWebView2Runtime --exact --silent --accept-package-agreements --accept-source-agreements --disable-interactivity | Out-Host
+        $ErrorActionPreference = 'Stop'
       }
       Test-WebView2
     }

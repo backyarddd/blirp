@@ -46,9 +46,9 @@ Update the hub and every paired machine to 0.2.1: the sync protocol changed, and
   apt-get, dnf, pacman or zypper (as root or through `sudo`, which never
   waits for a password without a terminal), printing the command first; a
   missing tool it cannot install stops the install with the command to
-  run, a missing FUSE only warns. `install.ps1` installs the WebView2
-  Runtime for the desktop app (winget, else Microsoft's signed Evergreen
-  bootstrapper). When neither minisign nor OpenSSL 3 is present, both
+  run, a missing FUSE only warns (and is left alone without a display).
+  `install.ps1` installs the WebView2 Runtime for the desktop app
+  (Microsoft's signed Evergreen bootstrapper, per user; else winget). When neither minisign nor OpenSSL 3 is present, both
   fetch minisign 0.12 (pinned SHA-256) for the signature check instead of
   skipping it; Intel Macs use `brew install minisign` when Homebrew is
   there. Nothing happens when everything is present. Turn it off with
