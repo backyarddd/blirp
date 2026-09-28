@@ -434,6 +434,22 @@ test('wiki: rename a slug, delete a page with Undo, restore it from Deleted page
   await expect(page).toHaveURL(`${env.url}/projects/${p.id}/wiki/runbook`);
   await expect(page.locator('.content .md')).toContainText('Restart the thing.');
 
+  // A rename whose text then cannot be saved is taken back.
+  await page.route(`**/api/projects/${p.id}/wiki/elsewhere`, (route) =>
+    route.request().method() === 'PUT'
+      ? route.fulfill({ status: 500, contentType: 'application/json', body: JSON.stringify({ error: { code: 'internal', message: 'disk full' } }) })
+      : route.fallback(),
+  );
+  await page.getByRole('button', { name: 'Edit' }).click();
+  await page.getByLabel('Slug').fill('elsewhere');
+  await page.getByRole('button', { name: 'Save page' }).click();
+  await expect(page.getByRole('alert')).toContainText('disk full');
+  await page.unroute(`**/api/projects/${p.id}/wiki/elsewhere`);
+  await expect
+    .poll(async () => (await apiCall<{ slug: string }[]>('GET', `/api/projects/${p.id}/wiki`)).map((w) => w.slug))
+    .toEqual(['runbook']);
+  await page.getByRole('button', { name: 'Cancel' }).click();
+
   await page.getByRole('button', { name: 'Delete' }).click();
   await page.getByRole('dialog', { name: 'Delete wiki page?' }).getByRole('button', { name: 'Delete', exact: true }).click();
   await expect(page).toHaveURL(`${env.url}/projects/${p.id}/wiki`);

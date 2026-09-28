@@ -66,6 +66,26 @@
     mode = 'edit';
   }
 
+  /**
+   * A new slug first (a clash, 409, leaves the page as it was), then the text. When the text cannot be
+   * saved the rename is taken back, so a failed save changes nothing.
+   */
+  async function saveEdit(from: string, input: { slug: string; title: string; body_md: string }): Promise<WikiPage> {
+    const renamed = input.slug !== from;
+    const slugNow = renamed ? (await api.projects.renameWiki(pid, from, input.slug)).slug : from;
+    try {
+      return await api.projects.updateWiki(pid, slugNow, { title: input.title, body_md: input.body_md });
+    } catch (e) {
+      if (!renamed) throw e;
+      try {
+        await api.projects.renameWiki(pid, slugNow, from);
+      } catch (back) {
+        throw new Error(`${errorMessage(e)}. The page kept its new address ${slugNow}: ${errorMessage(back)}`);
+      }
+      throw e;
+    }
+  }
+
   async function save(e: SubmitEvent): Promise<void> {
     e.preventDefault();
     const input = { title: title.trim(), slug: (slugTouched ? pageSlug : slugify(title)).trim(), body_md: body };
@@ -78,9 +98,7 @@
     try {
       let saved: WikiPage;
       if (mode === 'edit' && current) {
-        // A new slug first: a clash (409) leaves the page as it was.
-        const slugNow = input.slug === current.slug ? current.slug : (await api.projects.renameWiki(pid, current.slug, input.slug)).slug;
-        saved = await api.projects.updateWiki(pid, slugNow, { title: input.title, body_md: input.body_md });
+        saved = await saveEdit(current.slug, input);
       } else {
         saved = await api.projects.createWiki(pid, input);
       }
