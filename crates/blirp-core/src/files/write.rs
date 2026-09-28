@@ -455,24 +455,56 @@ pub fn restore_asides<'a>(dir: &Path, names: impl IntoIterator<Item = &'a str>) 
     let mut restored = 0;
     for aside in names.iter().filter(|n| n.starts_with(ASIDE_PREFIX)) {
         let target = &aside[ASIDE_PREFIX.len()..];
-        if target.is_empty() || names.contains(&target) {
+        if target.is_empty() {
             continue;
         }
-        let to = dir.join(target);
-        if std::fs::symlink_metadata(&to).is_ok() {
+        let (from, to) = (dir.join(aside), dir.join(target));
+        if names.contains(&target) || std::fs::symlink_metadata(&to).is_ok() {
             continue;
         }
-        match std::fs::rename(dir.join(aside), &to) {
+        match put_back(&from, &to) {
             Ok(()) => {
                 tracing::warn!(path = %to.display(), "restored a file an interrupted write had moved aside");
                 restored += 1;
             }
+            // Written meanwhile (a scan racing an apply): the new file stays.
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {}
             Err(e) => {
                 tracing::warn!(path = %to.display(), error = %e, "restoring a file moved aside failed");
             }
         }
     }
     restored
+}
+
+/// Move `aside` to `to` without ever replacing a file at `to` (a rename
+/// would, on Windows: a scan that holds no work lock may race an apply that
+/// just wrote it). A hard link fails when `to` exists; where links are not
+/// supported the content is copied into a file created only if missing.
+fn put_back(aside: &Path, to: &Path) -> std::io::Result<()> {
+    match std::fs::hard_link(aside, to) {
+        Ok(()) => {}
+        Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => return Err(e),
+        Err(_) => {
+            let mut src = std::fs::File::open(aside)?;
+            let perms = src.metadata()?.permissions();
+            let mut dst = std::fs::File::options()
+                .write(true)
+                .create_new(true)
+                .open(to)?;
+            let copied = std::io::copy(&mut src, &mut dst)
+                .and_then(|_| dst.sync_all())
+                .and_then(|()| std::fs::set_permissions(to, perms));
+            if let Err(e) = copied {
+                drop(dst);
+                let _ = std::fs::remove_file(to);
+                return Err(e);
+            }
+        }
+    }
+    // Back in place; one that cannot be removed yet is swept later.
+    discard(aside);
+    Ok(())
 }
 
 /// Time Windows retries may spend in all: one per pass (an apply, a
@@ -594,6 +626,29 @@ fn sync_dir(dir: &Path) {
 mod tests {
     use super::*;
     use crate::files::hash_bytes;
+
+    /// A scan that holds no work lock can find an aside with its target
+    /// missing while an apply is about to write the target: putting the old
+    /// file back never replaces what the apply wrote meanwhile.
+    #[test]
+    fn restoring_an_aside_never_replaces_a_file_written_meanwhile() {
+        let dir = tempfile::tempdir().unwrap();
+        let aside = dir.path().join(format!("{ASIDE_PREFIX}a.txt"));
+        let target = dir.path().join("a.txt");
+        std::fs::write(&aside, "old").unwrap();
+        // The apply's write lands between the scan's listing and its restore.
+        std::fs::write(&target, "new").unwrap();
+        let e = put_back(&aside, &target).unwrap_err();
+        assert_eq!(e.kind(), std::io::ErrorKind::AlreadyExists);
+        assert_eq!(std::fs::read_to_string(&target).unwrap(), "new");
+
+        // With the target really missing, the aside goes back and is gone.
+        std::fs::remove_file(&target).unwrap();
+        let name = format!("{ASIDE_PREFIX}a.txt");
+        assert_eq!(restore_asides(dir.path(), [name.as_str()]), 1);
+        assert_eq!(std::fs::read_to_string(&target).unwrap(), "old");
+        assert!(!aside.exists());
+    }
 
     fn t(root: &Path) -> Target<'_> {
         Target {
