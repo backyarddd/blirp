@@ -79,7 +79,7 @@ Windows 10 1809+ / 11, in PowerShell:
 irm https://raw.githubusercontent.com/backyarddd/blirp/main/install.ps1 | iex
 ```
 
-This installs the `blirp` CLI and the desktop app after checking every download against the release's `SHA256SUMS.txt`. No admin rights. Then run `blirp`. The Linux desktop app is experimental; on Linux you can also skip it (`--no-app`) and use the same UI in your browser with `blirp open`. Update with `blirp update`, remove with `blirp uninstall`.
+This installs the `blirp` CLI and the desktop app after checking every download against the release's `SHA256SUMS.txt` and its signature, plus any missing prerequisite (on Linux e.g. `tar` or the AppImage's FUSE through your package manager and `sudo`; on Windows the WebView2 Runtime); it prints each command first, and `BLIRP_NO_PREREQS=1` turns that off. blirp itself needs no admin rights. Then run `blirp`. The Linux desktop app is experimental; on Linux you can also skip it (`--no-app`) and use the same UI in your browser with `blirp open`. Update with `blirp update`, remove with `blirp uninstall`.
 
 Options (`--no-app`, `--service`, `--version X`), manual downloads, system requirements and platform details: [docs/install.md](docs/install.md). To build from source, see [Building from source](#building-from-source).
 

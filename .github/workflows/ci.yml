@@ -158,7 +158,9 @@ jobs:
 
       # install.sh (Linux, macOS) or install.ps1 (Windows) against a fake
       # release on 127.0.0.1, signed with a throwaway key, into a temp home;
-      # tampered assets must be refused. minisign makes the test key.
+      # tampered assets must be refused; missing prerequisites are installed
+      # (fakes) unless BLIRP_NO_PREREQS=1, and without a verifier the pinned
+      # minisign is fetched from GitHub. minisign makes the test key.
       - name: Install scripts
         shell: bash
         run: |

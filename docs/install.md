@@ -11,9 +11,9 @@ All data lives in `~/.blirp` (`%USERPROFILE%\.blirp` on Windows; override with `
 
 | | CLI | Desktop app |
 |---|---|---|
-| Linux | x86_64 or arm64 with glibc 2.35 or newer (the release is built on Ubuntu 22.04): Ubuntu 22.04+, Debian 12+, Fedora 36+, RHEL/Rocky/Alma 10+. Not RHEL 9 (glibc 2.34) or musl distributions such as Alpine; build from source there. | **Experimental.** The same, plus a desktop session; tested in CI only so far. The CLI plus `blirp open` in a browser gives the same UI. The AppImage needs FUSE to mount itself ([troubleshooting](troubleshooting.md#linux-desktop)); the `.deb`/`.rpm` pull in WebKitGTK 4.1 and GTK 3 as dependencies. |
+| Linux | x86_64 or arm64 with glibc 2.35 or newer (the release is built on Ubuntu 22.04): Ubuntu 22.04+, Debian 12+, Fedora 36+, RHEL/Rocky/Alma 10+. Not RHEL 9 (glibc 2.34) or musl distributions such as Alpine; build from source there. | **Experimental.** The same, plus a desktop session; tested in CI only so far. The CLI plus `blirp open` in a browser gives the same UI. The AppImage needs FUSE 2 to mount itself; `install.sh` installs it when it is missing ([prerequisites](#prerequisites), [troubleshooting](troubleshooting.md#linux-desktop)); the `.deb`/`.rpm` pull in WebKitGTK 4.1 and GTK 3 as dependencies. |
 | macOS | 11 Big Sur or newer, Apple silicon or Intel | the same |
-| Windows | 10 version 1809 or newer, or 11; x64 (on ARM64 the x64 build runs under emulation) | the same, plus the Microsoft Edge WebView2 Runtime. Windows 11 and up-to-date Windows 10 have it. The NSIS and MSI installers install it when it is missing; `install.ps1` and the portable zip do not ([troubleshooting](troubleshooting.md#windows-the-desktop-app-does-not-open-webview2)). |
+| Windows | 10 version 1809 or newer, or 11; x64 (on ARM64 the x64 build runs under emulation) | the same, plus the Microsoft Edge WebView2 Runtime. Windows 11 and up-to-date Windows 10 have it. `install.ps1` and the NSIS and MSI installers install it when it is missing; the portable zip does not ([troubleshooting](troubleshooting.md#windows-the-desktop-app-does-not-open-webview2)). |
 
 ## Install (recommended)
 
@@ -31,7 +31,7 @@ irm https://raw.githubusercontent.com/backyarddd/blirp/main/install.ps1 | iex
 
 Then run `blirp`: it starts the daemon and opens the app.
 
-The scripts download the latest published release, check every file against the release's `SHA256SUMS.txt` and that file against its minisign signature (when they can, see [below](#how-the-scripts-verify-downloads)), and install without admin rights:
+The scripts download the latest published release, check every file against the release's `SHA256SUMS.txt` and that file against its minisign signature (see [below](#how-the-scripts-verify-downloads)), install missing [prerequisites](#prerequisites), and install blirp itself without admin rights:
 
 | | CLI | Desktop app | PATH |
 |---|---|---|---|
@@ -55,6 +55,7 @@ No code-signing prompts appear: files fetched with `curl` or `irm` carry no quar
 | | `-NoModifyPath` | `BLIRP_NO_MODIFY_PATH=1` | Windows: leave the user `Path` alone |
 | | | `BLIRP_INSTALL_DIR=dir` | install the CLI (Windows: everything) into `dir` |
 | | | `BLIRP_REQUIRE_SIGNATURE=1` | refuse to install when the release signature cannot be checked |
+| `--no-prereqs` | `-NoPrereqs` | `BLIRP_NO_PREREQS=1` | install no missing [prerequisites](#prerequisites) and fetch no minisign; only check, and stop when a required tool is missing |
 
 Pass options to the piped scripts like this:
 
@@ -66,16 +67,34 @@ curl -fsSL https://raw.githubusercontent.com/backyarddd/blirp/main/install.sh | 
 $env:BLIRP_NO_APP = '1'; irm https://raw.githubusercontent.com/backyarddd/blirp/main/install.ps1 | iex
 ```
 
-`install.sh` needs `curl` (or `wget`), `tar` and `sha256sum` or `shasum`. The desktop app is installed even without a display (it is just a file); use `--no-app` on servers, or `--hub` to set up a server as your hub ([vps.md](vps.md)).
+The desktop app is installed even without a display (it is just a file); use `--no-app` on servers, or `--hub` to set up a server as your hub ([vps.md](vps.md)).
+
+### Prerequisites
+
+The scripts check what they and the desktop app need and install what is missing, printing the exact command first. When everything is there they change nothing and print nothing about it.
+
+| | Needed | Installed when missing |
+|---|---|---|
+| Linux | `tar`, `gzip`, `curl` or `wget`, `sha256sum` and core tools (`awk`, `sed`, `mktemp`) | `tar`, `gzip`, `curl` with `apt-get`, `dnf`, `pacman` or `zypper`, as root or through `sudo`. When that fails the install stops and prints the command to run |
+| Linux desktop app | FUSE 2 (`libfuse.so.2`) for the AppImage, which carries its other libraries (WebKitGTK, GTK) inside | `libfuse2` (`libfuse2t64` on Ubuntu 24.04+ and Debian 13+), `fuse fuse-libs` (dnf), `fuse2` (pacman), `libfuse2` (zypper). Not with `--no-app` or `--hub`. When that fails the CLI and app are installed anyway, with a warning and the command |
+| macOS | `curl`, `tar`, `gzip`, `shasum`, `unzip` | nothing: macOS ships them |
+| Windows | Windows PowerShell 5.1 or PowerShell 7 | nothing |
+| Windows desktop app | Microsoft Edge WebView2 Runtime | `winget install --id Microsoft.EdgeWebView2Runtime`, else Microsoft's Evergreen bootstrapper, run only when it carries a valid Microsoft Authenticode signature (without admin rights it installs for your user). When both fail the CLI and app are installed anyway, with a warning; `blirp open` works meanwhile |
+| All | something to check the release signature | a pinned minisign fetched just for the check, see [below](#how-the-scripts-verify-downloads) |
+
+`sudo` asks for your password on the terminal when it needs one (also with `curl ... | sh`); without a terminal it runs with `-n` and never waits. Package managers run with their non-interactive flags. `--no-prereqs` / `-NoPrereqs` / `BLIRP_NO_PREREQS=1` turns all of this off: the scripts then only check, as before 0.2.1. Alpine and other musl distributions cannot run the release binary ([system requirements](#system-requirements)), so `apk` is not used.
+
+Not prerequisites: `git` is optional (without it projects have no git features; `blirp doctor` says whether it is found), and agent CLIs such as `claude` or `codex` are yours to install; blirp lists the ones it finds on `PATH`.
 
 ### How the scripts verify downloads
 
 Every file is checked against the release's `SHA256SUMS.txt`. That file is signed with the blirp release key (`SHA256SUMS.txt.sig`, minisign), and the scripts check the signature with the key written into them whenever the machine can:
 
 - with `minisign`, if it is installed;
-- else with OpenSSL 1.1.1 or 3 (it needs BLAKE2b-512 and Ed25519): most Linux distributions, Homebrew's `openssl@3` on macOS (found even when it is not on `PATH`), and on Windows the OpenSSL that ships with Git for Windows. macOS's own `openssl` is LibreSSL and cannot; Windows PowerShell and .NET have no Ed25519.
+- else with OpenSSL 1.1.1 or 3 (it needs BLAKE2b-512 and Ed25519): most Linux distributions, Homebrew's `openssl@3` on macOS (found even when it is not on `PATH`), and on Windows the OpenSSL that ships with Git for Windows. macOS's own `openssl` is LibreSSL and cannot; Windows PowerShell and .NET have no Ed25519;
+- else with minisign 0.12 from its author's GitHub release, fetched into the script's temp folder, checked against a SHA-256 written into the script (the build the release workflow signs with) and deleted with the temp folder: Linux x86_64 and arm64, macOS on Apple silicon, Windows. There is no such build for Intel Macs; there the script runs `brew install minisign` when Homebrew is installed.
 
-A bad signature stops the install. When nothing can check it, the script says so and continues: the checksums then came over HTTPS from GitHub, just like the script itself, so they protect against a corrupted download but not against a compromised release. Set `BLIRP_REQUIRE_SIGNATURE=1` to refuse to install in that case. Once installed, `blirp update` always verifies the signature itself.
+A bad signature stops the install. When nothing can check it (no connection to GitHub, a temp folder that cannot run programs, an Intel Mac without Homebrew, or `--no-prereqs`), the script says so and continues: the checksums then came over HTTPS from GitHub, just like the script itself, so they protect against a corrupted download but not against a compromised release. Set `BLIRP_REQUIRE_SIGNATURE=1` to refuse to install in that case. Once installed, `blirp update` always verifies the signature itself.
 
 ### Private repository, mirrors and testing
 

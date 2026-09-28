@@ -41,6 +41,18 @@ Update the hub and every paired machine to 0.2.1: the sync protocol changed, and
 - `blirp doctor`, `blirp hub status` and Settings > Machines & Sync say
   which machine to update when hub and node run releases that cannot sync
   (`update_needed` in `GET /api/sync/status`).
+- The install scripts install missing prerequisites. `install.sh` on Linux
+  installs `tar`, `gzip`, `curl` and, for the desktop app, FUSE 2 with
+  apt-get, dnf, pacman or zypper (as root or through `sudo`, which never
+  waits for a password without a terminal), printing the command first; a
+  missing tool it cannot install stops the install with the command to
+  run, a missing FUSE only warns. `install.ps1` installs the WebView2
+  Runtime for the desktop app (winget, else Microsoft's signed Evergreen
+  bootstrapper). When neither minisign nor OpenSSL 3 is present, both
+  fetch minisign 0.12 (pinned SHA-256) for the signature check instead of
+  skipping it; Intel Macs use `brew install minisign` when Homebrew is
+  there. Nothing happens when everything is present. Turn it off with
+  `--no-prereqs`, `-NoPrereqs` or `BLIRP_NO_PREREQS=1`.
 
 ### Changed
 

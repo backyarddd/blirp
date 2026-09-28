@@ -7,13 +7,15 @@
   app into $env:BLIRP_INSTALL_DIR (default %LOCALAPPDATA%\Programs\blirp),
   adds that folder to your user Path, and creates a Start Menu shortcut.
   Every download is checked against the release's SHA256SUMS.txt, and that
-  against its minisign signature when minisign or an OpenSSL 3 (Git for
-  Windows ships one) is available. Running it again upgrades in place. No
-  administrator rights are needed.
+  against its minisign signature: with minisign or an OpenSSL 3 (Git for
+  Windows ships one), else with a pinned minisign fetched for the check.
+  When the desktop app is installed and the Microsoft Edge WebView2 Runtime
+  is missing, it installs that too (winget, else Microsoft's bootstrapper).
+  Running it again upgrades in place. No administrator rights are needed.
 
   Options can also be set with environment variables, which is the only way
   when piping into iex: BLIRP_VERSION, BLIRP_NO_APP=1, BLIRP_SERVICE=1,
-  BLIRP_NO_MODIFY_PATH=1, BLIRP_INSTALL_DIR, GITHUB_TOKEN (private repository
+  BLIRP_NO_MODIFY_PATH=1, BLIRP_NO_PREREQS=1, BLIRP_INSTALL_DIR, GITHUB_TOKEN (private repository
   or rate limits), BLIRP_RELEASE_BASE_URL (releases API of a mirror or test
   server instead of GitHub), BLIRP_REQUIRE_SIGNATURE=1 (refuse to install
   when the signature cannot be checked).
@@ -39,7 +41,9 @@ param(
   # Accepted for parity with install.sh; adding to the user Path is the default here.
   [switch]$ModifyPath,
   # Leave the user Path alone.
-  [switch]$NoModifyPath = ($env:BLIRP_NO_MODIFY_PATH -eq '1')
+  [switch]$NoModifyPath = ($env:BLIRP_NO_MODIFY_PATH -eq '1'),
+  # Install no missing prerequisites (minisign for the check, WebView2).
+  [switch]$NoPrereqs = ($env:BLIRP_NO_PREREQS -eq '1')
 )
 
 # A child scope: with `irm | iex` this runs in the caller's session, so keep
@@ -185,11 +189,42 @@ param(
       [IO.File]::WriteAllBytes($globalSig, $global)
       Invoke-Quiet $ossl ($verify + @('-in', $globalMsg, '-sigfile', $globalSig))
     }
+    # minisign's own release, pinned like in .github/workflows/release.yml
+    # (its signature by the author was checked when pinned): fetched into
+    # the temp folder and used for this check only.
+    function Get-PinnedMinisign {
+      $name = 'minisign-0.12-win64.zip'
+      $zip = Join-Path $tmp $name
+      Say 'downloading minisign 0.12 to check the release signature (used once, not installed)'
+      try {
+        # Straight from GitHub, never with GITHUB_TOKEN.
+        Invoke-WebRequest -Uri "https://github.com/jedisct1/minisign/releases/download/0.12/$name" -OutFile $zip -UseBasicParsing
+        $got = (Get-FileHash -LiteralPath $zip -Algorithm SHA256).Hash.ToLowerInvariant()
+        if ($got -ne '37b600344e20c19314b2e82813db2bfdcc408b77b876f7727889dbd46d539479') {
+          Say "warning: $name does not match its pinned checksum; not using it"
+          return $null
+        }
+        Expand-Archive -LiteralPath $zip -DestinationPath (Join-Path $tmp 'minisign') -Force
+      } catch {
+        Say "warning: could not fetch minisign: $($_.Exception.Message)"
+        return $null
+      }
+      $exe = Join-Path $tmp 'minisign\minisign-win64\x86_64\minisign.exe'
+      # Application control policies may block programs in the temp folder.
+      $runs = try { Invoke-Quiet $exe @('-v') } catch { $false }
+      if (-not $runs) {
+        Say 'warning: the downloaded minisign does not run here'
+        return $null
+      }
+      $exe
+    }
     $notSigned = "SHA256SUMS.txt of $($release.tag_name) is not signed by the blirp release key"
     $minisign = Get-Command minisign.exe -CommandType Application -ErrorAction SilentlyContinue | Select-Object -First 1
+    $minisign = if ($minisign) { $minisign.Source } else { $null }
     $ossl = if ($minisign) { $null } else { Find-OpenSsl }
+    if (-not $minisign -and -not $ossl -and -not $NoPrereqs) { $minisign = Get-PinnedMinisign }
     if ($minisign) {
-      if (-not (Invoke-Quiet $minisign.Source @('-V', '-q', '-m', $sumsFile, '-x', $sigFile, '-P', $ReleasePubkey))) { throw "$notSigned (checked with minisign); not installing" }
+      if (-not (Invoke-Quiet $minisign @('-V', '-q', '-m', $sumsFile, '-x', $sigFile, '-P', $ReleasePubkey))) { throw "$notSigned (checked with minisign); not installing" }
       Say 'release signature verified (minisign)'
     } elseif ($ossl) {
       if (-not (Test-MinisignWithOpenSsl -ossl $ossl -file $sumsFile -sig $sigFile -key $ReleasePubkey)) { throw "$notSigned (checked with $ossl); not installing" }
@@ -197,7 +232,7 @@ param(
     } elseif ($env:BLIRP_REQUIRE_SIGNATURE -and $env:BLIRP_REQUIRE_SIGNATURE -notin @('0', 'false')) {
       throw 'BLIRP_REQUIRE_SIGNATURE is set but nothing here can check a minisign signature (install minisign, or Git for Windows / OpenSSL 3)'
     } else {
-      Say 'notice: the release signature was not checked (that needs minisign, or an OpenSSL 3 such as the one in Git for Windows).'
+      Say 'notice: the release signature was not checked: no minisign or OpenSSL 3 (Git for Windows ships one) here, and fetching minisign failed or was turned off.'
       Say 'notice: the downloads are checked against SHA256SUMS.txt fetched over HTTPS from GitHub, like this script.'
       Say 'notice: `blirp update` checks the signature itself. $env:BLIRP_REQUIRE_SIGNATURE = ''1'' refuses to install without it.'
     }
@@ -237,6 +272,51 @@ param(
         $sources[$DesktopExe] = $src
       } else {
         Say "warning: release $($release.tag_name) has no desktop app ($appName.zip); installing the CLI only"
+      }
+    }
+
+    # The desktop app draws its window with the WebView2 Runtime (the CLI
+    # does not need it). Windows 11 and current Windows 10 have it.
+    function Test-WebView2 {
+      $client = 'Microsoft\EdgeUpdate\Clients\{F3017226-FE2A-4295-8BDF-00C3A9A7E4C5}'
+      foreach ($key in "HKLM:\SOFTWARE\WOW6432Node\$client", "HKCU:\Software\$client") {
+        $pv = (Get-ItemProperty -Path $key -Name pv -ErrorAction SilentlyContinue).pv
+        if ($pv -and $pv -ne '0.0.0.0') { return $true }
+      }
+      $false
+    }
+    function Install-WebView2 {
+      $winget = Get-Command winget.exe -CommandType Application -ErrorAction SilentlyContinue | Select-Object -First 1
+      if ($winget) {
+        Say 'installing the Microsoft Edge WebView2 Runtime for the desktop app: winget install --id Microsoft.EdgeWebView2Runtime --exact'
+        $ErrorActionPreference = 'Continue'
+        & $winget.Source install --id Microsoft.EdgeWebView2Runtime --exact --silent --accept-package-agreements --accept-source-agreements --disable-interactivity | Out-Host
+        $ErrorActionPreference = 'Stop'
+        if (Test-WebView2) { return $true }
+      }
+      # Microsoft's Evergreen bootstrapper; without admin rights it installs for this user.
+      Say 'installing the Microsoft Edge WebView2 Runtime for the desktop app with Microsoft''s bootstrapper'
+      try {
+        $setup = Join-Path $tmp 'MicrosoftEdgeWebview2Setup.exe'
+        Invoke-WebRequest -Uri 'https://go.microsoft.com/fwlink/p/?LinkId=2124703' -OutFile $setup -UseBasicParsing
+        $sig = Get-AuthenticodeSignature -LiteralPath $setup
+        if ($sig.Status -ne 'Valid' -or $sig.SignerCertificate.Subject -notmatch '(^|, )O=Microsoft Corporation(,|$)') {
+          Say "warning: the WebView2 bootstrapper is not validly signed by Microsoft ($($sig.Status)); not running it"
+          return $false
+        }
+        $p = Start-Process -FilePath $setup -ArgumentList '/silent', '/install' -Wait -PassThru
+        if ($p.ExitCode -ne 0) { Say "warning: the WebView2 bootstrapper exited with $($p.ExitCode)" }
+      } catch {
+        Say "warning: could not install WebView2: $($_.Exception.Message)"
+      }
+      Test-WebView2
+    }
+    if ($sources.Contains($DesktopExe) -and -not (Test-WebView2)) {
+      $installed = if ($NoPrereqs) { $false } else { Install-WebView2 }
+      if (-not $installed) {
+        Say 'warning: the desktop app needs the Microsoft Edge WebView2 Runtime, which is not installed. Install it with'
+        Say 'warning:   winget install --id Microsoft.EdgeWebView2Runtime --exact'
+        Say 'warning: or from https://developer.microsoft.com/microsoft-edge/webview2/ ; meanwhile `blirp open` uses your browser'
       }
     }
 

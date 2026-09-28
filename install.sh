@@ -8,8 +8,10 @@
 # Installs the `blirp` CLI into ${BLIRP_INSTALL_DIR:-~/.local/bin} and the
 # desktop app (macOS ~/Applications/blirp.app, Linux an AppImage in
 # ~/.local/share/blirp with a menu entry). Every download is checked against
-# the release's SHA256SUMS.txt, and that against its minisign signature when
-# minisign or OpenSSL 3 is available. Running it again upgrades in place.
+# the release's SHA256SUMS.txt, and that against its minisign signature.
+# Missing prerequisites (tar, gzip, curl; FUSE for the Linux desktop app) are
+# installed with the system package manager, and a pinned minisign is fetched
+# when nothing here can check the signature. Running it again upgrades in place.
 # Options: see usage() below or `sh install.sh --help`. Docs: docs/install.md.
 
 set -eu
@@ -41,12 +43,14 @@ Options (or the environment variable in brackets):
                                                              [BLIRP_HUB=1]
   --modify-path   add the install folder to PATH in your shell startup file
                                                              [BLIRP_MODIFY_PATH=1]
+  --no-prereqs    install no missing prerequisites (packages, minisign)
+                                                             [BLIRP_NO_PREREQS=1]
 Environment:
   BLIRP_INSTALL_DIR       where the CLI goes (default ~/.local/bin)
   GITHUB_TOKEN            token for a private repository or rate limits
   BLIRP_RELEASE_BASE_URL  releases API to use instead of GitHub (mirrors, tests)
   BLIRP_REQUIRE_SIGNATURE=1  refuse to install when the release signature
-                          cannot be checked (needs minisign or OpenSSL 3)
+                          cannot be checked
 EOF
 }
 
@@ -56,6 +60,7 @@ service=${BLIRP_SERVICE:-}
 hub=${BLIRP_HUB:-}
 modify_path=${BLIRP_MODIFY_PATH:-}
 require_signature=${BLIRP_REQUIRE_SIGNATURE:-}
+no_prereqs=${BLIRP_NO_PREREQS:-}
 while [ $# -gt 0 ]; do
   case $1 in
     --version)
@@ -71,6 +76,7 @@ while [ $# -gt 0 ]; do
     --service) service=1; shift ;;
     --hub) hub=1; shift ;;
     --modify-path) modify_path=1; shift ;;
+    --no-prereqs) no_prereqs=1; shift ;;
     -h | --help)
       usage
       exit 0
@@ -85,6 +91,7 @@ case $service in 0 | false) service= ;; esac
 case $hub in 0 | false) hub= ;; esac
 case $modify_path in 0 | false) modify_path= ;; esac
 case $require_signature in 0 | false) require_signature= ;; esac
+case $no_prereqs in 0 | false) no_prereqs= ;; esac
 
 # A server needs no desktop app. The hub runs sessions as its user, so
 # never as root: stop before downloading anything (`blirp hub setup` checks
@@ -144,7 +151,92 @@ else
   app_path=$share_dir/blirp.AppImage
 fi
 
+# ------------------------------------------------------------ prerequisites
+
+# as_root CMD...: CMD as root: directly when root, else through sudo, which
+# may ask for a password on the terminal but never waits for one without it.
+as_root() {
+  if [ "$(id -u)" = 0 ]; then
+    "$@"
+  elif ! has sudo; then
+    return 1
+  elif [ -t 0 ] || (true </dev/tty) 2>/dev/null; then
+    sudo "$@"
+  else
+    sudo -n "$@"
+  fi
+}
+
+# The AppImage mounts itself with FUSE 2 (libfuse.so.2).
+has_fuse2() {
+  { ldconfig -p 2>/dev/null || /sbin/ldconfig -p 2>/dev/null; } | grep -F 'libfuse.so.2' >/dev/null
+}
+
+# Linux: install what is missing with the package manager, printing the
+# command first. Missing tools are fatal later on (the checks below); a
+# missing FUSE only keeps the desktop app from starting, so it is a warning.
+# macOS ships everything this needs. Nothing is printed when nothing is missing.
+install_prereqs() {
+  _need=
+  for _t in tar gzip; do has "$_t" || _need="$_need $_t"; done
+  has curl || has wget || _need="$_need curl"
+  _fuse=
+  if [ -z "$no_app" ] && ! has_fuse2; then _fuse=1; fi
+  [ -n "$_need$_fuse" ] || return 0
+  _pm=
+  for _p in apt-get dnf pacman zypper; do
+    if has "$_p"; then
+      _pm=$_p
+      break
+    fi
+  done
+  _pkgs=$_need
+  if [ -n "$_fuse" ]; then
+    case $_pm in
+      apt-get)
+        # Ubuntu 24.04+ and Debian 13+ renamed it (the old name is virtual there).
+        if apt-cache show libfuse2t64 >/dev/null 2>&1; then _pkgs="$_pkgs libfuse2t64"; else _pkgs="$_pkgs libfuse2"; fi
+        ;;
+      dnf) _pkgs="$_pkgs fuse fuse-libs" ;;
+      pacman) _pkgs="$_pkgs fuse2" ;;
+      zypper) _pkgs="$_pkgs libfuse2" ;;
+    esac
+  fi
+  _pkgs=${_pkgs# }
+  case $_pm in
+    apt-get) set -- env DEBIAN_FRONTEND=noninteractive apt-get install -y -q ;;
+    dnf) set -- dnf install -y -q ;;
+    pacman) set -- pacman -S --needed --noconfirm ;;
+    zypper) set -- zypper --non-interactive install ;;
+    *) set -- ;;
+  esac
+  _sudo=
+  if [ "$(id -u)" != 0 ]; then _sudo="sudo "; fi
+  # shellcheck disable=SC2086 # package names
+  if [ $# -gt 0 ] && { [ -z "$_sudo" ] || has sudo; }; then
+    say "installing missing prerequisites: $_sudo$* $_pkgs"
+    if [ "$_pm" = apt-get ]; then
+      as_root env DEBIAN_FRONTEND=noninteractive apt-get update -q >/dev/null 2>&1 || true
+    fi
+    if as_root "$@" $_pkgs; then
+      return 0
+    fi
+    _manual="$_sudo$* $_pkgs"
+  elif [ $# -gt 0 ]; then
+    _manual="(as root) $* $_pkgs"
+  else
+    _manual="install$_need${_fuse:+ FUSE 2 (libfuse.so.2)} with your package manager"
+  fi
+  if [ -n "$_need" ]; then
+    die "missing$_need and could not install it; run: $_manual"
+  fi
+  say "warning: the desktop app needs FUSE 2 to start and it could not be installed; run: $_manual"
+  say "warning: or start the app with APPIMAGE_EXTRACT_AND_RUN=1, or use \`blirp open\` in a browser"
+}
+if [ "$os" = Linux ] && [ -z "$no_prereqs" ]; then install_prereqs; fi
+
 has tar || die "tar is required"
+has gzip || die "gzip is required"
 has mktemp || die "mktemp is required"
 if has sha256sum; then
   sha256() { sha256sum "$1" | cut -d' ' -f1; }
@@ -294,22 +386,77 @@ ossl_verify() {
     -in "$_d/global.msg" -sigfile "$_d/global" >/dev/null 2>&1
 }
 
+# minisign's own release, pinned like in .github/workflows/release.yml (its
+# signature by the author was checked when pinned): fetched into the temp
+# folder and used for this check only, when nothing here can check a
+# signature. Intel Macs get no prebuilt minisign; Homebrew's is used there.
+MINISIGN_URL=https://github.com/jedisct1/minisign/releases/download/0.12
+get_minisign() {
+  case $os-$arch in
+    Linux-*)
+      _a=minisign-0.12-linux.tar.gz
+      _s=9a599b48ba6eb7b1e80f12f36b94ceca7c00b7a5173c95c3efc88d9822957e73
+      _e=minisign-linux/$arch/minisign
+      ;;
+    Darwin-aarch64)
+      _a=minisign-0.12-macos.zip
+      _s=89000b19535765f9cffc65a65d64a820f433ef6db8020667f7570e06bf6aac63
+      _e=minisign
+      ;;
+    *)
+      has brew || return 1
+      say "installing minisign to check the release signature: brew install minisign" >&2
+      HOMEBREW_NO_AUTO_UPDATE=1 brew install minisign >&2 || return 1
+      printf '%s\n' "$(brew --prefix)/bin/minisign"
+      return 0
+      ;;
+  esac
+  say "downloading minisign 0.12 to check the release signature (used once, not installed)" >&2
+  # Never send GITHUB_TOKEN to a third-party download.
+  (GITHUB_TOKEN= && fetch "$MINISIGN_URL/$_a" "$tmp/$_a") || return 1
+  if [ "$(sha256 "$tmp/$_a")" != "$_s" ]; then
+    say "warning: $_a does not match its pinned checksum; not using it" >&2
+    return 1
+  fi
+  mkdir -p "$tmp/minisign"
+  case $_a in
+    *.zip) unzip -q -o "$tmp/$_a" "$_e" -d "$tmp/minisign" >/dev/null 2>&1 || return 1 ;;
+    *) tar -xzf "$tmp/$_a" -C "$tmp/minisign" "$_e" 2>/dev/null || return 1 ;;
+  esac
+  chmod 0755 "$tmp/minisign/$_e"
+  # A temp folder mounted noexec cannot run it.
+  "$tmp/minisign/$_e" -v >/dev/null 2>&1 || {
+    say "warning: the downloaded minisign does not run here" >&2
+    return 1
+  }
+  printf '%s\n' "$tmp/minisign/$_e"
+}
+
 # The checksums are only as trustworthy as their signature, so check it
-# with whatever can: minisign, else OpenSSL. Without either, the checksums
-# came over HTTPS from GitHub, like the script itself.
+# with whatever can: minisign, else OpenSSL, else the pinned minisign. When
+# nothing can, the checksums came over HTTPS from GitHub, like the script.
 sums=$tmp/SHA256SUMS.txt
+ms=
+ossl=
 if has minisign; then
-  minisign -V -q -m "$sums" -x "$sums.sig" -P "$RELEASE_PUBKEY" >/dev/null 2>&1 ||
+  ms=minisign
+elif ossl=$(find_openssl); then
+  :
+elif [ -z "$no_prereqs" ]; then
+  ms=$(get_minisign) || ms=
+fi
+if [ -n "$ms" ]; then
+  "$ms" -V -q -m "$sums" -x "$sums.sig" -P "$RELEASE_PUBKEY" >/dev/null 2>&1 ||
     die "SHA256SUMS.txt of $tag is not signed by the blirp release key (checked with minisign); not installing"
   say "release signature verified (minisign)"
-elif ossl=$(find_openssl); then
+elif [ -n "$ossl" ]; then
   ossl_verify "$ossl" "$sums" "$sums.sig" ||
     die "SHA256SUMS.txt of $tag is not signed by the blirp release key (checked with $ossl); not installing"
   say "release signature verified ($ossl)"
 elif [ -n "$require_signature" ]; then
   die "BLIRP_REQUIRE_SIGNATURE is set but nothing here can check a minisign signature (install minisign, or OpenSSL 3)"
 else
-  say "notice: the release signature was not checked (that needs minisign, or OpenSSL 3; macOS's LibreSSL cannot)."
+  say "notice: the release signature was not checked: no minisign or OpenSSL 3 here, and fetching minisign failed or was turned off."
   say "notice: the downloads are checked against SHA256SUMS.txt fetched over HTTPS from GitHub, like this script."
   say "notice: \`blirp update\` checks the signature itself. BLIRP_REQUIRE_SIGNATURE=1 refuses to install without it."
 fi

@@ -4,7 +4,7 @@ This walks through a first install, a first session and what memory looks like i
 
 ## 1. Install
 
-Install the desktop app or the standalone binary for your OS as described in [install.md](install.md). The desktop app is the easiest start: it bundles `blirp`, starts the daemon and opens the UI.
+Install the desktop app or the standalone binary for your OS as described in [install.md](install.md). The desktop app is the easiest start: it bundles `blirp`, starts the daemon and opens the UI. The install scripts also install what is missing for it (on Linux FUSE for the AppImage, on Windows the WebView2 Runtime; [prerequisites](install.md#prerequisites)). Git is optional, and the agent CLIs you want to use (Claude Code, Codex, ...) you install yourself; blirp finds them on `PATH`.
 
 With only the standalone binary:
 

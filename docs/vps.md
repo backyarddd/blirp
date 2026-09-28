@@ -57,6 +57,8 @@ On the other machine run:
 Code ABCD-EFGH is valid for 10 minutes and works once.
 ```
 
+The images above already have everything the script needs (`tar`, `gzip`, `curl`). On a stripped-down image it installs what is missing through `sudo`; when the blirp user has no `sudo` it stops and prints the command to run once as root, for example `apt-get install -y -q tar` ([prerequisites](install.md#prerequisites)).
+
 Running the command again is safe: it upgrades blirp in place and repeats the setup, which changes nothing that is already right and prints a new invite. As root it refuses and prints the steps of [step 1](#1-create-a-user-for-blirp).
 
 ## 3. Pair your PC

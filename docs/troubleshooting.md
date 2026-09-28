@@ -24,7 +24,7 @@ The CLI folder is not on your `PATH` yet.
 
 ### Windows: the desktop app does not open (WebView2)
 
-The desktop app draws its window with the Microsoft Edge WebView2 Runtime. Windows 11 and up-to-date Windows 10 ship it, and the NSIS/MSI installers add it when it is missing, but `install.ps1` and the portable zip do not. When `blirp-desktop.exe` exits right away or reports that WebView2 is missing, install the runtime (`winget install Microsoft.EdgeWebView2Runtime`, or the Evergreen installer from [developer.microsoft.com/microsoft-edge/webview2](https://developer.microsoft.com/microsoft-edge/webview2/)) and start blirp again. Meanwhile `blirp open` uses your browser; the CLI and daemon do not need WebView2.
+The desktop app draws its window with the Microsoft Edge WebView2 Runtime. Windows 11 and up-to-date Windows 10 ship it, and `install.ps1` and the NSIS/MSI installers add it when it is missing (`install.ps1` warns when that failed), but the portable zip does not. When `blirp-desktop.exe` exits right away or reports that WebView2 is missing, install the runtime (`winget install Microsoft.EdgeWebView2Runtime`, or the Evergreen installer from [developer.microsoft.com/microsoft-edge/webview2](https://developer.microsoft.com/microsoft-edge/webview2/)) and start blirp again. Meanwhile `blirp open` uses your browser; the CLI and daemon do not need WebView2.
 
 ### Antivirus or Defender flags blirp
 
@@ -219,7 +219,7 @@ Use **Settings > Appearance > Notifications > Send test notification**; it says 
     ```
 
   Or turn sleep off on that machine.
-- The AppImage does not start (`dlopen(): error loading libfuse.so.2`, `fusermount: not found` or `fuse: device not found`): it mounts itself with FUSE. Install it (Ubuntu 22.04: `sudo apt install libfuse2`; Ubuntu 24.04 and later: `sudo apt install libfuse2t64`; Fedora: `sudo dnf install fuse fuse-libs`; Arch: `sudo pacman -S fuse2`). Where FUSE is unavailable (containers, some minimal installs), run it with `APPIMAGE_EXTRACT_AND_RUN=1` in the environment, or use the `.deb`/`.rpm`.
+- The AppImage does not start (`dlopen(): error loading libfuse.so.2`, `fusermount: not found` or `fuse: device not found`): it mounts itself with FUSE. `install.sh` installs it when it is missing and prints the command when that failed (for example without `sudo` rights). Install it (Ubuntu 22.04: `sudo apt install libfuse2`; Ubuntu 24.04 and later: `sudo apt install libfuse2t64`; Fedora: `sudo dnf install fuse fuse-libs`; Arch: `sudo pacman -S fuse2`). Where FUSE is unavailable (containers, some minimal installs), run it with `APPIMAGE_EXTRACT_AND_RUN=1` in the environment, or use the `.deb`/`.rpm`.
 - No tray icon on GNOME: install the "AppIndicator and KStatusNotifierItem Support" extension. Without it, closing the window still keeps the daemon running; launch blirp again to get the window back.
 - The desktop AppImage runs `blirp` from a temporary mount that is gone once the app exits. Autostart (`blirp service install`) and the global agent integration (Settings > Agents, `blirp hooks install`) therefore record the installed CLI (from the install script, or `blirp` on `PATH`) and refuse with "runs from a temporary location" when there is none: install the CLI (see [install.md](install.md)) and try again. The daemon the app starts also runs from the CLI the install script put there when it is the app's version; otherwise the daemon runs from the mount, and sessions still running after the app is gone lose memory capture.
 

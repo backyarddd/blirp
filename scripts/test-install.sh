@@ -10,7 +10,15 @@
 # public key swapped in), serves the GitHub-style release JSON and assets
 # with python3 -m http.server through BLIRP_RELEASE_BASE_URL, and checks:
 #   1. a CLI-only install into a temp home verifies the signature and gives a
-#      working `blirp --version`;
+#      working `blirp --version`, and installs no prerequisite (package
+#      managers on PATH are fakes that fail the test when they run);
+#   1b. prerequisites, with PATH cut down to links to the tools the script
+#      uses: BLIRP_NO_PREREQS=1 with tar missing fails without a package
+#      manager running; (Linux) a missing tar is installed through fake
+#      sudo/apt-get; (Linux, Windows) without minisign or OpenSSL,
+#      BLIRP_NO_PREREQS=1 + BLIRP_REQUIRE_SIGNATURE=1 refuses without
+#      fetching anything, and without the opt-out the pinned minisign is
+#      fetched from GitHub and checks the signature (needs network);
 #   2. an asset that does not match SHA256SUMS.txt is refused;
 #   3. a SHA256SUMS.txt that does not match its signature is refused;
 #   4. (Linux) `install.sh --hub` twice: hub role, invite, LAN discovery off,
@@ -170,6 +178,8 @@ cp "$www/releases/latest" "$www/releases/tags/v$v"
 run_install() {
   _home=$1
   mkdir -p "$_home"
+  # The shell by absolute path: run_path may not contain it.
+  _shp=$(command -v "$2")
   if [ "$kind" = windows ]; then
     _wh=$(cygpath -w "$_home")
     _ver=
@@ -178,8 +188,8 @@ run_install() {
       USERPROFILE="$_wh" APPDATA="$_wh\\AppData\\Roaming" LOCALAPPDATA="$_wh\\AppData\\Local" \
       BLIRP_INSTALL_DIR="$_wh\\Programs\\blirp" BLIRP_HOME="$_wh\\.blirp" \
       BLIRP_RELEASE_BASE_URL="$base" BLIRP_REQUIRE_SIGNATURE=1 BLIRP_NO_APP=1 \
-      BLIRP_NO_MODIFY_PATH=1 BLIRP_VERSION="$_ver" \
-      "$2" -NoProfile -NonInteractive -ExecutionPolicy Bypass -File "$(cygpath -w "$script")" >"$work/out.log" 2>&1
+      BLIRP_NO_MODIFY_PATH=1 BLIRP_VERSION="$_ver" BLIRP_NO_PREREQS="$no_prereqs" PATH="${run_path:-$PATH}" \
+      "$_shp" -NoProfile -NonInteractive -ExecutionPolicy Bypass -File "$(cygpath -w "$script")" >"$work/out.log" 2>&1
   else
     _args=--no-app
     if [ "${3:-}" = --version ]; then _args="--no-app --version $v"; fi
@@ -187,7 +197,24 @@ run_install() {
     env -u GITHUB_TOKEN -u BLIRP_INSTALL_DIR -u XDG_DATA_HOME -u BLIRP_VERSION \
       HOME="$_home" SHELL=/bin/sh BLIRP_HOME="$_home/.blirp" \
       BLIRP_RELEASE_BASE_URL="$base" BLIRP_REQUIRE_SIGNATURE=1 \
-      "$2" "$script" $_args >"$work/out.log" 2>&1
+      BLIRP_NO_PREREQS="$no_prereqs" PATH="${run_path:-$work/pm-fail:$PATH}" \
+      "$_shp" "$script" $_args >"$work/out.log" 2>&1
+  fi
+}
+# Overrides for the next run_install: PATH, and BLIRP_NO_PREREQS.
+run_path=
+no_prereqs=
+
+# Package managers that must not run when nothing is missing: they only log.
+mkdir -p "$work/pm-fail"
+for t in apt-get dnf pacman zypper brew sudo; do
+  printf '#!/bin/sh\nprintf "%%s %%s\\n" %s "$*" >>"%s"\nexit 1\n' "$t" "$work/pm.log" >"$work/pm-fail/$t"
+  chmod +x "$work/pm-fail/$t"
+done
+no_install_of_prereqs() {
+  [ ! -e "$work/pm.log" ] || fail "$1: a package manager ran: $(cat "$work/pm.log")"
+  if grep -E 'installing missing prerequisites|downloading minisign|installing the Microsoft Edge' "$work/out.log" >/dev/null; then
+    fail "$1: prerequisites were installed although none was missing"
   fi
 }
 
@@ -230,9 +257,84 @@ for sh_ in $shells; do
     *) fail "$sh_: blirp --version printed '$out', expected version $v" ;;
   esac
   grep -E "\"version\": +\"$v\"" "$(receipt "$h")" >/dev/null || fail "$sh_: install receipt missing or wrong"
+  no_install_of_prereqs "$sh_"
   echo "ok: $sh_ installs blirp $v with a verified signature ($out)"
 done
 sh_=${shells##* }
+echo "ok: nothing is installed when every prerequisite is present"
+
+# ---------------------------------------------------------- prerequisites
+
+# min_path DIR TOOL...: DIR with links to just these tools (those that exist).
+min_path() {
+  _d=$1
+  shift
+  mkdir -p "$_d"
+  for _t in "$@"; do
+    _p=$(command -v "$_t" 2>/dev/null) || continue
+    case $_p in /*) ln -s "$_p" "$_d/$_t" ;; esac
+  done
+}
+if [ "$kind" = unix ]; then
+  # What install.sh runs, minus tar and any signature checker.
+  min_path "$work/min" sh uname id mktemp sha256sum shasum curl awk tr sed cut dd od wc \
+    cp chmod mv mkdir rm basename dirname grep cat gzip env sysctl unzip
+  min_path "$work/ossl" openssl
+  # A missing tool with the package manager turned off: a clear error, and
+  # no package manager runs.
+  run_path=$work/pm-fail:$work/min:$work/ossl no_prereqs=1
+  if run_install "$work/home-no-prereqs" "$sh_"; then fail "BLIRP_NO_PREREQS=1: installed without tar"; fi
+  run_path='' no_prereqs=''
+  grep -F 'tar is required' "$work/out.log" >/dev/null || fail "BLIRP_NO_PREREQS=1: expected 'tar is required'"
+  [ ! -e "$work/pm.log" ] || fail "BLIRP_NO_PREREQS=1: a package manager ran: $(cat "$work/pm.log")"
+  echo "ok: BLIRP_NO_PREREQS=1 installs no missing tool"
+fi
+if [ "$(uname -s)" = Linux ]; then
+  # A missing tar is installed through sudo and apt-get (fakes: sudo runs
+  # the command, apt-get logs it and links the real tar).
+  mkdir -p "$work/pm-apt"
+  # shellcheck disable=SC2016 # expanded when the fakes run
+  printf '#!/bin/sh\nprintf "sudo %%s\\n" "$*" >>"%s"\n[ "$1" != -n ] || shift\nexec "$@"\n' \
+    "$work/pm.log" >"$work/pm-apt/sudo"
+  printf '#!/bin/sh\nprintf "apt-get %%s\\n" "$*" >>"%s"\ncase " $* " in *" install "*" tar "*) "%s" -s "%s" "%s/tar" ;; esac\n' \
+    "$work/pm.log" "$(command -v ln)" "$(command -v tar)" "$work/min" >"$work/pm-apt/apt-get"
+  chmod +x "$work/pm-apt/sudo" "$work/pm-apt/apt-get"
+  run_path=$work/pm-apt:$work/min:$work/ossl
+  run_install "$work/home-prereqs" "$sh_" || fail "prerequisites: install with a missing tar failed"
+  run_path=
+  grep -F 'installing missing prerequisites:' "$work/out.log" | grep -F 'apt-get install -y -q tar' >/dev/null ||
+    fail "prerequisites: the apt-get command was not printed"
+  grep -E '^apt-get .*install -y -q tar$' "$work/pm.log" >/dev/null || fail "prerequisites: apt-get did not install tar"
+  [ -x "$(installed_bin "$work/home-prereqs")" ] || fail "prerequisites: blirp missing"
+  rm -f "$work/pm.log" "$work/min/tar"
+  echo "ok: a missing tar is installed with the package manager"
+  ln -s "$(command -v tar)" "$work/min/tar"
+fi
+if [ "$kind" = windows ]; then
+  # No Git (its OpenSSL) and no minisign on Path.
+  run_path="$(cygpath -u "$SYSTEMROOT")/System32:$(cygpath -u "$SYSTEMROOT"):$(cygpath -u "$SYSTEMROOT")/System32/WindowsPowerShell/v1.0"
+elif [ "$(uname -s)" = Linux ]; then
+  run_path=$work/pm-fail:$work/min
+else
+  # macOS: install.sh also finds Homebrew's OpenSSL off PATH.
+  run_path=
+fi
+if [ -n "$run_path" ]; then
+  # Nothing can check the signature and fetching minisign is turned off:
+  # BLIRP_REQUIRE_SIGNATURE=1 refuses, and nothing is downloaded.
+  no_prereqs=1
+  if run_install "$work/home-no-verifier" "$sh_"; then fail "no verifier: installed with BLIRP_REQUIRE_SIGNATURE=1"; fi
+  no_prereqs=
+  grep -F 'BLIRP_REQUIRE_SIGNATURE is set' "$work/out.log" >/dev/null || fail "no verifier: expected the BLIRP_REQUIRE_SIGNATURE error"
+  if grep -F 'downloading minisign' "$work/out.log" >/dev/null; then fail "no verifier: minisign fetched despite BLIRP_NO_PREREQS=1"; fi
+  echo "ok: BLIRP_NO_PREREQS=1 fetches no minisign"
+  # Otherwise the pinned minisign release is fetched from GitHub for the check.
+  run_install "$work/home-fetched-minisign" "$sh_" || fail "no verifier: install with a fetched minisign failed"
+  run_path=
+  grep -F 'downloading minisign 0.12' "$work/out.log" >/dev/null || fail "no verifier: minisign was not fetched"
+  grep -F 'release signature verified (minisign)' "$work/out.log" >/dev/null || fail "no verifier: not verified with the fetched minisign"
+  echo "ok: without minisign or OpenSSL the pinned minisign checks the signature"
+fi
 
 # ------------------------------------------------------------ hub (Linux)
 
