@@ -260,3 +260,15 @@ test('deleting a project moves it to the Trash with its sessions; Restore brings
   await page.goto(`${env.url}/sessions`);
   await expect(sidebar().getByRole('region', { name: 'Trash project' }).locator(`a[href="/sessions/${s.id}"]`)).toBeVisible();
 });
+
+test('Stop and delete stops a running session, then deletes it', async () => {
+  const p = await project('Stop delete project');
+  const s = await apiCall<SessionRow>('POST', '/api/sessions', { agent: 'shell', project_id: p.id });
+  await expect.poll(async () => (await apiCall<SessionRow>('GET', `/api/sessions/${s.id}`)).status, { timeout: 30_000 }).toBe('idle');
+  await page.goto(`${env.url}/sessions/${s.id}`);
+  await card(s.id).click({ button: 'right' });
+  await openMenu().getByRole('menuitem', { name: 'Stop and delete…' }).click();
+  await page.getByRole('dialog', { name: 'Stop and delete session?' }).getByRole('button', { name: 'Stop and delete' }).click();
+  await expect(page.locator('.toast', { hasText: 'Session stopped and deleted' })).toBeVisible({ timeout: 35_000 });
+  expect((await page.request.get(`${env.url}/api/sessions/${s.id}`, { headers: AUTH })).status()).toBe(404);
+});

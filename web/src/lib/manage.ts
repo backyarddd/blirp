@@ -259,7 +259,12 @@ async function stopAndRemoveSession(s: Session): Promise<void> {
     danger: true,
   });
   if (!ok) return;
-  if ((await onSession(s, 'stop the session', () => api.sessions.stop(s.id))) === undefined) return;
+  // stop answers 202 without a body: the result is `true` only when it did not fail.
+  const stopped = await onSession(s, 'stop the session', async () => {
+    await api.sessions.stop(s.id);
+    return true;
+  });
+  if (stopped !== true) return;
   if (!(await waitEnded(s.id))) {
     app.toast(`${quoted(s)} did not stop within ${STOP_WAIT_MS / 1000} s, so it was not deleted. Delete it once it has ended.`);
     return;
