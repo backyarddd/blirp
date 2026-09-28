@@ -10,6 +10,8 @@ so every tag needs one.
 
 ## [Unreleased]
 
+## [0.2.2] - 2026-09-28
+
 ### Added
 
 - Terminal panes follow VS Code's integrated terminal: xterm.js 6.1 with the
@@ -372,7 +374,8 @@ done before it.
   all-or-nothing) and `blirp uninstall`; classic NSIS, MSI, DMG, deb, rpm
   and AppImage packages.
 
-[Unreleased]: https://github.com/backyarddd/blirp/compare/v0.2.1...HEAD
+[Unreleased]: https://github.com/backyarddd/blirp/compare/v0.2.2...HEAD
+[0.2.2]: https://github.com/backyarddd/blirp/compare/v0.2.1...v0.2.2
 [0.2.1]: https://github.com/backyarddd/blirp/compare/v0.2.0...v0.2.1
 [0.2.0]: https://github.com/backyarddd/blirp/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/backyarddd/blirp/releases/tag/v0.1.0
