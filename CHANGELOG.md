@@ -10,6 +10,8 @@ so every tag needs one.
 
 ## [Unreleased]
 
+## [0.3.0] - 2026-09-28
+
 ### Added
 
 - Right-click menus for sessions and projects everywhere they are listed
@@ -60,6 +62,18 @@ so every tag needs one.
   dialog for uncommitted changes (`GET /api/worktrees`,
   `POST /api/worktrees/prune`).
 
+
+- Terminal panes follow VS Code's integrated terminal: xterm.js 6.1 with the
+  kitty keyboard protocol, so Claude Code and Codex get Shift+Enter (new
+  line), Ctrl+Enter and other keys a classic terminal cannot tell apart; find
+  in the terminal (Ctrl+F / Cmd+F); programs can set the clipboard (OSC 52)
+  while their pane has focus, and print links (OSC 8), which show their target
+  on hover and open on Ctrl+click (Cmd+click), as in VS Code; Settings > Appearance > Terminal sets font size,
+  line height, letter spacing, cursor style and blinking, and Option as Meta
+  on macOS.
+- Sessions get `TERM_PROGRAM=blirp`, and on macOS and Linux a UTF-8 `LANG`
+  when the daemon has none.
+
 ### Changed
 
 - Deleting and merging projects now needs this machine's own app or CLI
@@ -82,30 +96,6 @@ so every tag needs one.
   sessions of a project in the Trash are no longer distilled.
 - Paired machines apply a machine delete that comes from the hub.
 
-### Fixed
-
-- Sessions of a deleted project no longer stay in the Sessions list under an
-  "Unknown project" group whose link led nowhere.
-- The first event of an ingested transcript (usually the first prompt) was
-  missing from the session view, `blirp mem show` and the `mem_session` MCP
-  tool: event pages started after seq 0.
-
-## [0.2.2] - 2026-09-28
-
-### Added
-
-- Terminal panes follow VS Code's integrated terminal: xterm.js 6.1 with the
-  kitty keyboard protocol, so Claude Code and Codex get Shift+Enter (new
-  line), Ctrl+Enter and other keys a classic terminal cannot tell apart; find
-  in the terminal (Ctrl+F / Cmd+F); programs can set the clipboard (OSC 52)
-  while their pane has focus, and print links (OSC 8), which show their target
-  on hover and open on Ctrl+click (Cmd+click), as in VS Code; Settings > Appearance > Terminal sets font size,
-  line height, letter spacing, cursor style and blinking, and Option as Meta
-  on macOS.
-- Sessions get `TERM_PROGRAM=blirp`, and on macOS and Linux a UTF-8 `LANG`
-  when the daemon has none.
-
-### Changed
 
 - A focused terminal keeps every key except a short list of blirp shortcuts
   (docs/projects-and-sessions.md#terminal-keys). Ctrl+Shift+Left/Right select
@@ -115,6 +105,13 @@ so every tag needs one.
   selected text, and right click on Windows copies or pastes.
 
 ### Fixed
+
+- Sessions of a deleted project no longer stay in the Sessions list under an
+  "Unknown project" group whose link led nowhere.
+- The first event of an ingested transcript (usually the first prompt) was
+  missing from the session view, `blirp mem show` and the `mem_session` MCP
+  tool: event pages started after seq 0.
+
 
 - Switching sessions, reloading or opening a session in another window no
   longer resets the modes the program set: kitty keyboard flags, focus
@@ -454,8 +451,8 @@ done before it.
   all-or-nothing) and `blirp uninstall`; classic NSIS, MSI, DMG, deb, rpm
   and AppImage packages.
 
-[Unreleased]: https://github.com/backyarddd/blirp/compare/v0.2.2...HEAD
-[0.2.2]: https://github.com/backyarddd/blirp/compare/v0.2.1...v0.2.2
+[Unreleased]: https://github.com/backyarddd/blirp/compare/v0.3.0...HEAD
+[0.3.0]: https://github.com/backyarddd/blirp/compare/v0.2.1...v0.3.0
 [0.2.1]: https://github.com/backyarddd/blirp/compare/v0.2.0...v0.2.1
 [0.2.0]: https://github.com/backyarddd/blirp/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/backyarddd/blirp/releases/tag/v0.1.0
