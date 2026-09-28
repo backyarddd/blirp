@@ -46,7 +46,8 @@ fn lock<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
 }
 
 enum Kick {
-    Paths(Vec<PathBuf>),
+    /// The watcher woke copies (in the set [`start_watcher`] fills).
+    Woken,
     /// Reconcile the folder list and scan everything.
     Rescan,
     /// Reconcile the folder list; scan only folders new to it.
@@ -895,25 +896,32 @@ fn tracked_folders(
     Ok(out)
 }
 
-/// Raw events, settled in [`run`]: only the paths matter here. A debouncer
-/// that folds events (notify-debouncer-full) drops a create followed by a
-/// remove, and FSEvents reports a folder made shortly before as both
-/// created and removed when it is deleted: a watched folder deleted on
-/// macOS then went unnoticed until the next rescan.
-fn start_watcher(tx: mpsc::UnboundedSender<Kick>) -> Option<RecommendedWatcher> {
-    let res = notify::recommended_watcher(move |res: notify::Result<notify::Event>| match res {
-        // Missed events (FSEvents drops, inotify queue overflow): rescan.
-        Ok(e) if e.need_rescan() => {
-            let _ = tx.send(Kick::Rescan);
-        }
-        Ok(e) => {
-            if !e.paths.is_empty() {
-                let _ = tx.send(Kick::Paths(e.paths));
+/// Raw events, settled in [`run`]. A debouncer that folds events
+/// (notify-debouncer-full) drops a create followed by a remove, and FSEvents
+/// reports a folder made shortly before as both created and removed when it
+/// is deleted: a watched folder deleted on macOS then went unnoticed until
+/// the next rescan. Events become copy keys here, in `woken`, with one
+/// [`Kick::Woken`] while it is not drained: an event storm costs a set as
+/// large as the copies, not a queue as long as the storm.
+fn start_watcher(
+    engine: Arc<Engine>,
+    woken: Arc<Mutex<BTreeSet<String>>>,
+) -> Option<RecommendedWatcher> {
+    let res = notify::recommended_watcher(move |res: notify::Result<notify::Event>| {
+        let tx = &engine.kick;
+        match watch_event(res, |p| engine.copy_for(p)) {
+            Wake::Nothing => {}
+            Wake::Copies(keys) => {
+                let mut set = lock(&woken);
+                let was_empty = set.is_empty();
+                set.extend(keys);
+                if was_empty && !set.is_empty() {
+                    let _ = tx.send(Kick::Woken);
+                }
             }
-        }
-        Err(e) => {
-            tracing::warn!(error = %e, "project folder watcher error; rescanning");
-            let _ = tx.send(Kick::Rescan);
+            Wake::Rescan => {
+                let _ = tx.send(Kick::Rescan);
+            }
         }
     });
     match res {
@@ -921,6 +929,74 @@ fn start_watcher(tx: mpsc::UnboundedSender<Kick>) -> Option<RecommendedWatcher> 
         Err(e) => {
             tracing::warn!(error = %e, "cannot watch project folders; relying on rescans");
             None
+        }
+    }
+}
+
+/// What one watcher result wakes.
+#[derive(Debug, PartialEq)]
+enum Wake {
+    Nothing,
+    Copies(Vec<String>),
+    Rescan,
+}
+
+fn watch_event(
+    res: notify::Result<notify::Event>,
+    copy_for: impl Fn(&Path) -> Option<String>,
+) -> Wake {
+    use notify::event::{AccessKind, AccessMode, EventKind};
+    let e = match res {
+        Ok(e) => e,
+        Err(e) => {
+            tracing::warn!(error = %e, "project folder watcher error; rescanning");
+            return Wake::Rescan;
+        }
+    };
+    // Reads change nothing, and a pass itself opens every folder and file
+    // it scans (inotify reports opens): each pass would wake the next.
+    if let EventKind::Access(a) = e.kind
+        && a != AccessKind::Close(AccessMode::Write)
+    {
+        return Wake::Nothing;
+    }
+    let keys: Vec<String> = e.paths.iter().filter_map(|p| copy_for(p)).collect();
+    // Missed events (FSEvents drops, inotify queue overflow): the copies
+    // under the paths named, or everything when none is.
+    if e.need_rescan() && keys.is_empty() {
+        return Wake::Rescan;
+    }
+    if keys.is_empty() {
+        Wake::Nothing
+    } else {
+        Wake::Copies(keys)
+    }
+}
+
+/// Copies a watcher event woke, due once the first of those events is
+/// [`DEBOUNCE`] old: a burst of writes (a checkout, a save) makes one pass,
+/// and a folder written to all the time still gets its passes.
+#[derive(Debug, Default)]
+struct Settling {
+    keys: BTreeSet<String>,
+    due: Option<tokio::time::Instant>,
+}
+
+impl Settling {
+    fn add(&mut self, keys: impl IntoIterator<Item = String>, now: tokio::time::Instant) {
+        self.keys.extend(keys);
+        if !self.keys.is_empty() && self.due.is_none() {
+            self.due = Some(now + DEBOUNCE);
+        }
+    }
+
+    /// The copies due at `now`, taken.
+    fn take_due(&mut self, now: tokio::time::Instant) -> BTreeSet<String> {
+        if self.due.is_some_and(|d| now >= d) {
+            self.due = None;
+            std::mem::take(&mut self.keys)
+        } else {
+            BTreeSet::new()
         }
     }
 }
@@ -973,7 +1049,8 @@ async fn run(
     mut rx: mpsc::UnboundedReceiver<Kick>,
     mut stop: watch::Receiver<bool>,
 ) {
-    let mut watcher = start_watcher(engine.kick.clone());
+    let woken: Arc<Mutex<BTreeSet<String>>> = Arc::default();
+    let mut watcher = start_watcher(engine.clone(), woken.clone());
     let mut watched: HashSet<PathBuf> = HashSet::new();
     let mut rescan = tokio::time::interval(RESCAN);
     rescan.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
@@ -1003,11 +1080,7 @@ async fn run(
         })
     };
     let mut pending: BTreeSet<String> = BTreeSet::new();
-    // Copies a watcher event woke, queued once the first of those events is
-    // DEBOUNCE old: a burst of writes (a checkout, a save) makes one pass,
-    // and a folder written to all the time still gets its passes.
-    let mut settling: BTreeSet<String> = BTreeSet::new();
-    let mut settled_at = tokio::time::Instant::now();
+    let mut settling = Settling::default();
     let mut full = false;
     // Reconcile only: new folders are scanned, known ones are not.
     let mut refresh = false;
@@ -1019,8 +1092,8 @@ async fn run(
             tokio::select! {
                 _ = stop.changed() => break,
                 _ = rescan.tick() => full = true,
-                _ = tokio::time::sleep_until(settled_at), if !settling.is_empty() => {
-                    pending.append(&mut settling);
+                _ = async { match settling.due { Some(d) => tokio::time::sleep_until(d).await, None => std::future::pending().await } } => {
+                    pending.append(&mut settling.take_due(tokio::time::Instant::now()));
                 }
                 _ = gc.tick() => {
                     sweep_downloads(&engine.env.hub).await;
@@ -1055,15 +1128,9 @@ async fn run(
                     Some(Kick::Rescan) => full = true,
                     Some(Kick::Refresh) => refresh = true,
                     Some(Kick::Copy(key)) => { pending.insert(key); }
-                    Some(Kick::Paths(paths)) => {
-                        for p in &paths {
-                            if let Some(k) = engine.copy_for(p) {
-                                if settling.is_empty() {
-                                    settled_at = tokio::time::Instant::now() + DEBOUNCE;
-                                }
-                                settling.insert(k);
-                            }
-                        }
+                    Some(Kick::Woken) => {
+                        let keys = std::mem::take(&mut *lock(&woken));
+                        settling.add(keys, tokio::time::Instant::now());
                     }
                 },
             }
@@ -1134,18 +1201,14 @@ async fn run(
                     Kick::Copy(key) => {
                         pending.insert(key);
                     }
-                    Kick::Paths(paths) => {
-                        for p in &paths {
-                            if let Some(k) = engine.copy_for(p) {
-                                if settling.is_empty() {
-                                    settled_at = tokio::time::Instant::now() + DEBOUNCE;
-                                }
-                                settling.insert(k);
-                            }
-                        }
+                    Kick::Woken => {
+                        let keys = std::mem::take(&mut *lock(&woken));
+                        settling.add(keys, tokio::time::Instant::now());
                     }
                 }
             }
+            // Copies that settled while this one worked join the queue.
+            pending.append(&mut settling.take_due(tokio::time::Instant::now()));
             if full || refresh {
                 break;
             }
@@ -1173,6 +1236,123 @@ mod tests {
         assert_eq!(event_copy(roots(), &root.join("out/x.o")), None);
         assert_eq!(event_copy(roots(), &root.join(".git/index")), None);
         assert_eq!(event_copy(roots(), &base.join("elsewhere/a.rs")), None);
+    }
+
+    #[test]
+    fn watcher_events_wake_their_copies_and_reads_wake_nothing() {
+        use notify::event::{
+            AccessKind, AccessMode, CreateKind, EventKind, Flag, ModifyKind, RemoveKind,
+        };
+        let root = std::env::temp_dir().join("proj");
+        let copy_for = |p: &Path| p.starts_with(&root).then(|| "k".to_string());
+        let ev = |kind: EventKind, path: &Path| {
+            Ok(notify::Event::new(kind).add_path(path.to_path_buf()))
+        };
+        let file = root.join("a.txt");
+        let woke = Wake::Copies(vec!["k".into()]);
+        for kind in [
+            EventKind::Create(CreateKind::File),
+            EventKind::Modify(ModifyKind::Any),
+            EventKind::Remove(RemoveKind::Folder),
+            EventKind::Access(AccessKind::Close(AccessMode::Write)),
+        ] {
+            assert_eq!(watch_event(ev(kind, &file), copy_for), woke, "{kind:?}");
+        }
+        // A pass opens and reads what it scans: that wakes nothing.
+        for kind in [
+            EventKind::Access(AccessKind::Open(AccessMode::Any)),
+            EventKind::Access(AccessKind::Read),
+            EventKind::Access(AccessKind::Close(AccessMode::Read)),
+            EventKind::Access(AccessKind::Any),
+        ] {
+            assert_eq!(
+                watch_event(ev(kind, &file), copy_for),
+                Wake::Nothing,
+                "{kind:?}"
+            );
+        }
+        let elsewhere = std::env::temp_dir().join("other").join("x");
+        let modified = EventKind::Modify(ModifyKind::Any);
+        assert_eq!(
+            watch_event(ev(modified, &elsewhere), copy_for),
+            Wake::Nothing
+        );
+        // Missed events: the copy they name, or everything.
+        let missed = |path: &Path| {
+            Ok(notify::Event::new(EventKind::Other)
+                .add_path(path.to_path_buf())
+                .set_flag(Flag::Rescan))
+        };
+        assert_eq!(watch_event(missed(&root), copy_for), woke);
+        assert_eq!(watch_event(missed(&elsewhere), copy_for), Wake::Rescan);
+        let err = Err(notify::Error::generic("queue overflow"));
+        assert_eq!(watch_event(err, copy_for), Wake::Rescan);
+    }
+
+    #[test]
+    fn woken_copies_settle_before_a_pass() {
+        let t0 = tokio::time::Instant::now();
+        let ms = |n: u64| t0 + Duration::from_millis(n);
+        let mut s = Settling::default();
+        assert!(s.take_due(ms(10_000)).is_empty());
+        // A burst: one pass, DEBOUNCE after its first event.
+        for i in 0..50 {
+            s.add(["a".to_string(), format!("b{}", i % 2)], ms(i * 10));
+        }
+        assert!(s.take_due(ms(1_999)).is_empty());
+        let due = s.take_due(ms(2_000));
+        assert_eq!(due.len(), 3, "{due:?}");
+        assert!(s.take_due(ms(9_000)).is_empty());
+        // Written to all the time: still a pass every DEBOUNCE or so.
+        let mut passes = 0;
+        for i in 0..100u64 {
+            s.add(["a".to_string()], ms(10_000 + i * 100));
+            passes += usize::from(!s.take_due(ms(10_000 + i * 100)).is_empty());
+        }
+        assert!(passes >= 4, "{passes} passes in 10 s of writes");
+        // Nothing woken: nothing due.
+        let mut s = Settling::default();
+        s.add(Vec::<String>::new(), t0);
+        assert!(s.take_due(ms(10_000)).is_empty());
+    }
+
+    /// inotify reports opens: a pass reading an unchanged folder must not
+    /// wake the next one.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn reading_a_watched_folder_wakes_nothing() {
+        use notify::Watcher as _;
+        let dir = tempfile::tempdir().unwrap();
+        let root = dunce::canonicalize(dir.path()).unwrap();
+        std::fs::create_dir(root.join("sub")).unwrap();
+        std::fs::write(root.join("sub").join("a.txt"), "a").unwrap();
+        let (tx, rx) = std::sync::mpsc::channel();
+        let r = root.clone();
+        let mut w = notify::recommended_watcher(move |res| {
+            let _ = tx.send(watch_event(res, |p: &Path| {
+                p.starts_with(&r).then(|| "k".to_string())
+            }));
+        })
+        .unwrap();
+        w.watch(&root, RecursiveMode::Recursive).unwrap();
+        for d in [root.clone(), root.join("sub")] {
+            for e in std::fs::read_dir(&d).unwrap() {
+                let p = e.unwrap().path();
+                if p.is_file() {
+                    std::fs::read(&p).unwrap();
+                }
+            }
+        }
+        let wait = Duration::from_millis(500);
+        let woke: Vec<Wake> = std::iter::from_fn(|| rx.recv_timeout(wait).ok())
+            .filter(|w| *w != Wake::Nothing)
+            .collect();
+        assert!(woke.is_empty(), "{woke:?}");
+        // A write still wakes it.
+        std::fs::write(root.join("sub").join("a.txt"), "b").unwrap();
+        let wrote = std::iter::from_fn(|| rx.recv_timeout(Duration::from_secs(5)).ok())
+            .find(|w| *w != Wake::Nothing);
+        assert_eq!(wrote, Some(Wake::Copies(vec!["k".into()])));
     }
 
     #[tokio::test]
