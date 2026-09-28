@@ -156,7 +156,7 @@ async fn events(
             .get_session(&id)?
             .ok_or_else(|| ApiError::not_found("session"))?;
         let (items, next_after) =
-            store.events_page(&id, q.after.unwrap_or(0), q.limit.unwrap_or(200))?;
+            store.events_page(&id, q.after.unwrap_or(-1), q.limit.unwrap_or(200))?;
         Ok(EventsPage { items, next_after })
     })
     .await

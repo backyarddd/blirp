@@ -1906,6 +1906,54 @@ async fn folderless_projects_start_in_their_workspace() {
 // Delete moves a project to the Trash with its sessions hidden; restore
 // brings both back. Folders are added only when they exist, projects are
 // opened only in their own folders, and Chats keeps its name.
+// Seqs start at 0 (an ingested transcript's first line): the first page of
+// events, without `after`, includes it.
+#[tokio::test]
+async fn events_start_with_seq_zero() {
+    use blirp_core::model::{Event, EventKind, EventsPage};
+    let h = Harness::start().await;
+    let p = bare_project(&h, "Events").await;
+    let r = h
+        .send(
+            reqwest::Method::POST,
+            "/api/sessions",
+            json!({"project_id": p, "agent": "shell"}),
+        )
+        .await;
+    assert_eq!(r.status(), 201);
+    let s: Session = r.json().await.unwrap();
+    for seq in [0, 1, 1024] {
+        h.daemon
+            .state
+            .store
+            .insert_event(Event {
+                session_id: s.id.clone(),
+                seq,
+                ts: seq,
+                kind: EventKind::User,
+                text: format!("event {seq}"),
+                meta: None,
+            })
+            .unwrap();
+    }
+    let page: EventsPage = h
+        .get(&format!("/api/sessions/{}/events?limit=2", s.id))
+        .await;
+    let seqs: Vec<i64> = page.items.iter().map(|e| e.seq).collect();
+    assert_eq!((seqs, page.next_after), (vec![0, 1], Some(1)));
+    let page: EventsPage = h
+        .get(&format!("/api/sessions/{}/events?after=1", s.id))
+        .await;
+    assert_eq!(page.items.len(), 1);
+    assert_eq!(page.next_after, None);
+    h.send(
+        reqwest::Method::POST,
+        &format!("/api/sessions/{}/stop", s.id),
+        json!({}),
+    )
+    .await;
+}
+
 /// A folderless project for a test.
 async fn bare_project(h: &Harness, name: &str) -> String {
     let r = h

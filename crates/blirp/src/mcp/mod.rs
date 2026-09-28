@@ -64,7 +64,8 @@ pub struct SearchArgs {
 pub struct SessionArgs {
     /// Session id (from mem_search or mem_recent).
     pub session_id: String,
-    /// Return events after this sequence number (default 0 = from the start).
+    /// Return events after this sequence number (omit it to start from the
+    /// first event; sequence numbers start at 0).
     #[serde(default)]
     pub from_seq: Option<i64>,
     /// Maximum events, 1-200 (default 50).
@@ -279,7 +280,7 @@ impl BlirpMcp {
     )]
     async fn mem_session(&self, Parameters(a): Parameters<SessionArgs>) -> Result<String, String> {
         let limit = i64::from(a.limit.unwrap_or(50).clamp(1, 200));
-        let from = a.from_seq.unwrap_or(0).max(0);
+        let from = a.from_seq.unwrap_or(-1).max(-1);
         let sid = a.session_id.clone();
         let (session, (events, next)) = self
             .read(move |s| {

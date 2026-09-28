@@ -28,13 +28,14 @@
   let eventsLoading = $state(false);
   let eventsError: string | null = $state(null);
   /** `after` cursor for the next page; null once the last page is loaded. */
-  let nextAfter: number | null = $state(0);
+  // Seqs start at 0 and pages hold the events after `after`.
+  let nextAfter: number | null = $state(-1);
 
   $effect(() => {
     const id = sid;
     untrack(() => {
       events = [];
-      nextAfter = 0;
+      nextAfter = -1;
       void loadMore(id);
     });
   });
@@ -42,7 +43,7 @@
   async function loadMore(id: string): Promise<void> {
     eventsLoading = true;
     eventsError = null;
-    const after = nextAfter ?? 0;
+    const after = nextAfter ?? -1;
     try {
       const page = await api.sessions.events(id, after, PAGE);
       if (id !== sid) return;

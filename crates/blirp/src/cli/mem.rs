@@ -194,7 +194,8 @@ pub fn run_mem(paths: &Paths, cmd: MemCommand) -> anyhow::Result<ExitCode> {
             let s = store
                 .get_session(&session_id)?
                 .with_context(|| format!("session {session_id} not found"))?;
-            let (events, _) = store.events_page(&session_id, 0, i64::from(limit.clamp(1, 1000)))?;
+            let (events, _) =
+                store.events_page(&session_id, -1, i64::from(limit.clamp(1, 1000)))?;
             if json {
                 print_json(&json!({"session": s, "events": events}))?;
             } else {
