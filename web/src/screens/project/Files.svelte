@@ -8,6 +8,7 @@
   import type { FileEntry, ProjectSummary } from '../../lib/api/types.gen';
   import { Resource } from '../../lib/resource.svelte';
   import Loadable from '../../lib/components/Loadable.svelte';
+  import LocalCopies from './LocalCopies.svelte';
 
   let { project }: { project: ProjectSummary } = $props();
   const pid = $derived(project.id);
@@ -108,6 +109,8 @@
     {/each}
   {/if}
 {/snippet}
+
+<LocalCopies {project} />
 
 {#if roots.length > 1}
   <label class="field roots">

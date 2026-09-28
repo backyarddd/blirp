@@ -1506,6 +1506,43 @@ str_enum!(
     }
 );
 
+str_enum!(
+    /// How this machine's downloaded copy syncs: `syncing` (uploads its
+    /// edits, takes the hub's on demand), `pending` (the download has not
+    /// finished), `detached` (no longer syncs; its files stay).
+    LocalCopyMode {
+        Syncing = "syncing",
+        Pending = "pending",
+        Detached = "detached",
+    }
+);
+
+/// `GET /api/projects/:id/files-sync/copies`: a copy of another machine's
+/// folder downloaded to this machine from the hub.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
+pub struct LocalCopy {
+    pub path: String,
+    pub root_id: String,
+    pub mode: LocalCopyMode,
+    /// The folder is one of the project's folders here (its workspace
+    /// counts); false once it was removed from the project.
+    pub registered: bool,
+    /// The project's blirp workspace on this machine (a folderless project).
+    pub workspace: bool,
+    pub created_at: i64,
+    /// The folder it copies, when the hub still lists it.
+    pub origin_machine: Option<String>,
+    pub origin_path: Option<String>,
+}
+
+/// `POST /api/projects/:id/files-sync/copies/{detach,forget}`.
+#[derive(Debug, Clone, Serialize, Deserialize, TS)]
+#[serde(deny_unknown_fields)]
+pub struct LocalCopyAction {
+    /// The copy's folder, as listed.
+    pub path: String,
+}
+
 /// `POST /api/projects/:id/files-sync/held`: "Delete on hub too" or
 /// "Restore from hub" after many files disappeared from a folder.
 #[derive(Debug, Clone, Serialize, Deserialize, TS)]
@@ -1709,7 +1746,7 @@ mod tests {
             crate::files::FilesMode, crate::files::RootInfo, crate::files::GitManifest, CopyState,
             LocalFiles, FilesRoot, ProjectFiles, SetFilesMode, FilesOverview, PauseFiles, IncomingAction,
             IncomingFile, FilesIncoming, ApplyFiles, AppliedFiles, DownloadFiles, DownloadJob,
-            HeldAction, ResolveHeld,
+            HeldAction, ResolveHeld, LocalCopyMode, LocalCopy, LocalCopyAction,
             Summarizer, BriefMode, MemoryConfig, SyncConfig, PortalConfig, UpdateConfig, FilesConfig,
         );
         let body = format!(

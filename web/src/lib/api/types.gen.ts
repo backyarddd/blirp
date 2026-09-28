@@ -1350,6 +1350,41 @@ export type HeldAction = "delete" | "restore";
  */
 export type ResolveHeld = { root: string, action: HeldAction, };
 
+/**
+ * How this machine's downloaded copy syncs: `syncing` (uploads its
+ * edits, takes the hub's on demand), `pending` (the download has not
+ * finished), `detached` (no longer syncs; its files stay).
+ */
+export type LocalCopyMode = "syncing" | "pending" | "detached";
+
+/**
+ * `GET /api/projects/:id/files-sync/copies`: a copy of another machine's
+ * folder downloaded to this machine from the hub.
+ */
+export type LocalCopy = { path: string, root_id: string, mode: LocalCopyMode, 
+/**
+ * The folder is one of the project's folders here (its workspace
+ * counts); false once it was removed from the project.
+ */
+registered: boolean, 
+/**
+ * The project's blirp workspace on this machine (a folderless project).
+ */
+workspace: boolean, created_at: number, 
+/**
+ * The folder it copies, when the hub still lists it.
+ */
+origin_machine: string | null, origin_path: string | null, };
+
+/**
+ * `POST /api/projects/:id/files-sync/copies/{detach,forget}`.
+ */
+export type LocalCopyAction = { 
+/**
+ * The copy's folder, as listed.
+ */
+path: string, };
+
 export type Summarizer = "auto" | "claude" | "codex" | "ollama" | "none";
 
 export type BriefMode = "auto" | "review";

@@ -697,7 +697,7 @@ fn gone_volume(code: i32) -> bool {
 /// `p` canonicalized; when it does not exist, its nearest existing
 /// ancestor canonicalized and the rest joined on (the spelling it had
 /// while it existed, through symlinked or short-named parents).
-fn canonical_folder(p: &Path) -> PathBuf {
+pub(crate) fn canonical_folder(p: &Path) -> PathBuf {
     let mut rest = Vec::new();
     let mut cur = p;
     loop {
@@ -844,9 +844,10 @@ fn tracked_folders(
                 |r| r.root_id.clone(),
             );
             let never = match row.map(|r| r.mode) {
-                Some(CopyMode::Detached) => {
-                    Some("the hub copy was deleted; this folder no longer syncs".to_string())
-                }
+                Some(CopyMode::Detached) => Some(
+                    "this copy no longer syncs (it was detached, or its hub copy deleted)"
+                        .to_string(),
+                ),
                 Some(CopyMode::Pending) => {
                     Some("the download did not finish: Update from hub completes it".to_string())
                 }

@@ -27,6 +27,7 @@ import type {
   JoinHub,
   JoinPreview,
   LaunchSession,
+  LocalCopy,
   LeftHub,
   MachineInfo,
   MachineDirs,
@@ -303,6 +304,12 @@ export const api = {
         root_id: rootId,
         ...(parent ? { parent } : {}),
       }),
+    /** This machine's downloaded copies of the project's folders. */
+    copies: (id: string) => request<LocalCopy[]>('GET', `${p(id)}/files-sync/copies`),
+    /** Stops syncing for good; the files and the folder's place in the project stay. */
+    detachCopy: (id: string, path: string) => request<LocalCopy>('POST', `${p(id)}/files-sync/copies/detach`, { path }),
+    /** Drops blirp's tracking and the folder from the project here; nothing on disk is deleted. */
+    forgetCopy: (id: string, path: string) => request<void>('POST', `${p(id)}/files-sync/copies/forget`, { path }),
     downloadJob: (machine: string, job: string) =>
       request<DownloadJob>('GET', `/api/machines/${enc(machine)}/files/download/${enc(job)}`),
   },

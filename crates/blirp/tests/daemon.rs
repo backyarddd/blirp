@@ -1034,6 +1034,16 @@ const MUTATING_ROUTES: &[(&str, &str, Need)] = &[
     ("POST", "/api/projects/p1/files-sync/apply", Need::Control),
     ("POST", "/api/projects/p1/files-sync/held", Need::Control),
     (
+        "POST",
+        "/api/projects/p1/files-sync/copies/detach",
+        Need::Control,
+    ),
+    (
+        "POST",
+        "/api/projects/p1/files-sync/copies/forget",
+        Need::Control,
+    ),
+    (
         "DELETE",
         "/api/projects/p1/files-sync/roots/r1",
         Need::Control,
@@ -1188,6 +1198,8 @@ async fn portal_devices_get_only_their_rights() {
         ("GET", "/api/projects/p1/files-sync/preview"),
         ("GET", "/api/files/status"),
         ("POST", "/api/projects/p1/files-sync/apply"),
+        ("GET", "/api/projects/p1/files-sync/copies"),
+        ("POST", "/api/projects/p1/files-sync/copies/forget"),
         ("POST", "/api/machines/m1/files/download"),
     ] {
         for cookie in [&viewer, &no_files] {
@@ -1952,6 +1964,92 @@ async fn events_start_with_seq_zero() {
         json!({}),
     )
     .await;
+}
+
+// This machine's downloaded copies of a project: listed, detached (stops
+// syncing, stays a folder of the project) and forgotten (blirp's tracking and
+// the folder's place in the project go; the files stay on disk).
+#[tokio::test]
+async fn downloaded_copies_list_detach_and_forget() {
+    use blirp_core::model::{LocalCopy, LocalCopyMode};
+    use blirp_core::store::{CopyMode, FileCopy};
+    let h = Harness::start().await;
+    let work = tempfile::tempdir().unwrap();
+    let (own, copy) = (work.path().join("own"), work.path().join("copy"));
+    for d in [&own, &copy] {
+        std::fs::create_dir(d).unwrap();
+    }
+    std::fs::write(copy.join("keep.txt"), "mine").unwrap();
+    let r = h
+        .send(
+            reqwest::Method::POST,
+            "/api/projects",
+            json!({"path": own, "name": "Copies"}),
+        )
+        .await;
+    let p: ProjectSummary = r.json().await.unwrap();
+    let id = p.project.id;
+    let r = h
+        .send(
+            reqwest::Method::POST,
+            &format!("/api/projects/{id}/folders"),
+            json!({ "path": copy }),
+        )
+        .await;
+    assert_eq!(r.status(), 200);
+    let store = &h.daemon.state.store;
+    let canon = |p: &std::path::Path| dunce::canonicalize(p).unwrap().display().to_string();
+    for (path, origin) in [(canon(&own), true), (canon(&copy), false)] {
+        store
+            .put_file_copy(&FileCopy {
+                path,
+                root_id: format!("root-{origin}"),
+                origin,
+                seen: 0,
+                created_at: 1,
+                mode: CopyMode::OnDemand,
+                incarnation: String::new(),
+            })
+            .unwrap();
+    }
+    let base = format!("/api/projects/{id}/files-sync/copies");
+    // Only the downloaded copy, not the machine's own folder.
+    let list: Vec<LocalCopy> = h.get(&base).await;
+    assert_eq!(list.len(), 1);
+    assert_eq!(list[0].path, canon(&copy));
+    assert_eq!(list[0].mode, LocalCopyMode::Syncing);
+    assert!(list[0].registered && !list[0].workspace);
+
+    let act = |what: &str, path: String| {
+        let url = format!("{base}/{what}");
+        let h = &h;
+        async move {
+            h.send(reqwest::Method::POST, &url, json!({ "path": path }))
+                .await
+        }
+    };
+    assert_eq!(act("detach", canon(&own)).await.status(), 404);
+    let r = act("detach", canon(&copy)).await;
+    assert_eq!(r.status(), 200);
+    assert_eq!(
+        r.json::<LocalCopy>().await.unwrap().mode,
+        LocalCopyMode::Detached
+    );
+    let summary: ProjectSummary = h.get(&format!("/api/projects/{id}")).await;
+    assert_eq!(summary.paths.len(), 2);
+
+    assert_eq!(act("forget", canon(&copy)).await.status(), 204);
+    let list: Vec<LocalCopy> = h.get(&base).await;
+    assert!(list.is_empty());
+    assert!(store.file_copy(&canon(&copy)).unwrap().is_none());
+    let summary: ProjectSummary = h.get(&format!("/api/projects/{id}")).await;
+    assert_eq!(summary.paths.len(), 1);
+    // Nothing on disk was touched.
+    assert_eq!(
+        std::fs::read_to_string(copy.join("keep.txt")).unwrap(),
+        "mine"
+    );
+    assert_eq!(act("forget", canon(&copy)).await.status(), 404);
 }
 
 /// A folderless project for a test.

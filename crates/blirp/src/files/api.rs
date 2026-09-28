@@ -18,8 +18,8 @@ use axum::{Json, Router};
 use blirp_core::files::{FilesMode, RootInfo};
 use blirp_core::model::{
     AppliedFiles, ApplyFiles, CopyState, DownloadFiles, FilesIncoming, FilesOverview, FilesPreview,
-    FilesRoot, HeldAction, IncomingAction, IncomingFile, LocalFiles, MachineRole, PauseFiles,
-    ProjectFiles, ResolveHeld, SetFilesMode,
+    FilesRoot, HeldAction, IncomingAction, IncomingFile, LocalCopy, LocalCopyAction, LocalCopyMode,
+    LocalFiles, MachineRole, PauseFiles, ProjectFiles, ResolveHeld, ServerEvent, SetFilesMode,
 };
 use blirp_core::store::CopyMode;
 use serde::Deserialize;
@@ -40,6 +40,15 @@ pub fn routes() -> Router<SharedState> {
         .route(
             "/api/projects/{id}/files-sync/roots/{root}",
             delete(delete_root),
+        )
+        .route("/api/projects/{id}/files-sync/copies", get(copies))
+        .route(
+            "/api/projects/{id}/files-sync/copies/detach",
+            post(detach_copy),
+        )
+        .route(
+            "/api/projects/{id}/files-sync/copies/forget",
+            post(forget_copy),
         )
         .route("/api/machines/{id}/files/download", post(download))
         .route("/api/machines/{id}/files/download/{job}", get(download_job))
@@ -603,6 +612,137 @@ async fn delete_root(
     .await?;
     tracing::info!("hub copy of a project folder deleted");
     e.rescan();
+    Ok(StatusCode::NO_CONTENT)
+}
+
+/// This machine's downloaded copies (not its own folders) of the project:
+/// the project's folders and workspace here that are copies, and copies the
+/// hub lists under the project whose folder left it.
+fn project_copies(s: &SharedState, id: &str) -> ApiResult<Vec<LocalCopy>> {
+    s.store.live_project(id)?;
+    let folders: Vec<String> = s
+        .store
+        .project_paths(id)?
+        .into_iter()
+        .filter(|p| p.machine_id == s.machine.id)
+        .map(|p| p.path)
+        .collect();
+    let workspace = s
+        .paths
+        .workspace_dir(id)
+        .ok()
+        .map(|w| super::engine::canonical_folder(&w).display().to_string());
+    let roots = super::engine(s)
+        .map(|e| e.cached_roots())
+        .unwrap_or_default();
+    let mut out = Vec::new();
+    for c in s.store.file_copies()?.into_iter().filter(|c| !c.origin) {
+        let root = roots.iter().find(|r| r.root_id == c.root_id);
+        let is_workspace = workspace.as_deref() == Some(c.path.as_str());
+        let registered = is_workspace || folders.contains(&c.path);
+        if !registered && root.is_none_or(|r| r.project_id != id) {
+            continue;
+        }
+        out.push(LocalCopy {
+            mode: match c.mode {
+                CopyMode::OnDemand => LocalCopyMode::Syncing,
+                CopyMode::Pending => LocalCopyMode::Pending,
+                CopyMode::Detached => LocalCopyMode::Detached,
+            },
+            registered,
+            workspace: is_workspace,
+            created_at: c.created_at,
+            origin_machine: root.map(|r| r.machine_name.clone()),
+            origin_path: root.map(|r| r.path.clone()),
+            path: c.path,
+            root_id: c.root_id,
+        });
+    }
+    Ok(out)
+}
+
+fn listed_copy(s: &SharedState, id: &str, path: &str) -> ApiResult<LocalCopy> {
+    project_copies(s, id)?
+        .into_iter()
+        .find(|c| c.path == path)
+        .ok_or_else(|| ApiError::not_found("downloaded copy"))
+}
+
+/// `GET /api/projects/:id/files-sync/copies`.
+async fn copies(
+    State(s): State<SharedState>,
+    _files: FilesAccess,
+    ApiPath(id): ApiPath<String>,
+) -> ApiResult<Json<Vec<LocalCopy>>> {
+    let st = s.clone();
+    blocking(move || project_copies(&st, &id)).await.map(Json)
+}
+
+/// `POST /api/projects/:id/files-sync/copies/detach {path}`: the copy stops
+/// syncing for good (as when its hub copy is deleted). Its files and its
+/// place among the project's folders stay.
+async fn detach_copy(
+    State(s): State<SharedState>,
+    Control(_): Control,
+    _files: FilesAccess,
+    ApiPath(id): ApiPath<String>,
+    ApiJson(b): ApiJson<LocalCopyAction>,
+) -> ApiResult<Json<LocalCopy>> {
+    let st = s.clone();
+    let copy = blocking(move || {
+        let c = listed_copy(&st, &id, &b.path)?;
+        if c.mode != LocalCopyMode::Detached {
+            st.store.detach_file_copy(&c.path)?;
+        }
+        listed_copy(&st, &id, &c.path)
+    })
+    .await?;
+    if let Some(e) = super::engine(&s) {
+        e.refresh();
+    }
+    s.emit(ServerEvent::FilesUpdated);
+    Ok(Json(copy))
+}
+
+/// `POST /api/projects/:id/files-sync/copies/forget {path}`: blirp forgets
+/// the copy: its sync state, and the folder as one of the project's
+/// folders here (left registered without its state, it would upload as a
+/// new folder of its own). Nothing on disk is touched. A workspace copy
+/// cannot leave its project: detach it instead.
+async fn forget_copy(
+    State(s): State<SharedState>,
+    Control(_): Control,
+    _files: FilesAccess,
+    ApiPath(id): ApiPath<String>,
+    ApiJson(b): ApiJson<LocalCopyAction>,
+) -> ApiResult<StatusCode> {
+    let st = s.clone();
+    let pid = id.clone();
+    let unregistered = blocking(move || {
+        let c = listed_copy(&st, &pid, &b.path)?;
+        if c.workspace {
+            return Err(ApiError::conflict(
+                "workspace_copy",
+                "this copy is the project's workspace on this machine; detach it instead",
+            ));
+        }
+        // The folder first: a copy row gone while it is still registered
+        // would make it an origin of its own.
+        if c.registered {
+            st.store
+                .remove_project_folder(&pid, &st.machine.id, &c.path)?;
+        }
+        st.store.remove_file_copy(&c.path)?;
+        Ok(c.registered)
+    })
+    .await?;
+    if let Some(e) = super::engine(&s) {
+        e.refresh();
+    }
+    if unregistered {
+        s.emit(ServerEvent::ProjectUpdated { project_id: id });
+    }
+    s.emit(ServerEvent::FilesUpdated);
     Ok(StatusCode::NO_CONTENT)
 }
 
