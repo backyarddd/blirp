@@ -111,12 +111,13 @@ const TERMINAL_ENV_REMOVE: &[&str] = &[
     "ConEmuPID",
 ];
 
-/// The env a session's terminal adds: what the attached xterm.js is, like
-/// VS Code's `TERM_PROGRAM=vscode`, and (off Windows) a UTF-8 `LANG` when
-/// the daemon has none, as VS Code's `terminal.integrated.detectLocale`
-/// does, so programs read and echo non-ASCII keys (a launchd or systemd
-/// daemon starts with no locale).
-fn terminal_env(lang: Option<&str>) -> Vec<(String, String)> {
+/// The env a session's terminal adds and removes; `set` says whether the
+/// daemon has a (non-empty) variable. Adds what the attached xterm.js is,
+/// like VS Code's `TERM_PROGRAM=vscode`, and off Windows a UTF-8 `LANG` when
+/// the daemon has no locale at all (`LANG`, `LC_ALL`, `LC_CTYPE` unset; a
+/// launchd or systemd daemon starts with none), so programs read and echo
+/// non-ASCII keys; a locale the user chose, UTF-8 or not, is kept.
+fn terminal_env(set: impl Fn(&str) -> bool) -> (Vec<(String, String)>, Vec<String>) {
     let mut env = vec![
         ("TERM".to_string(), "xterm-256color".to_string()),
         ("COLORTERM".to_string(), "truecolor".to_string()),
@@ -126,14 +127,22 @@ fn terminal_env(lang: Option<&str>) -> Vec<(String, String)> {
             env!("CARGO_PKG_VERSION").to_string(),
         ),
     ];
-    let utf8 = lang.is_some_and(|l| {
-        let l = l.to_ascii_lowercase();
-        l.ends_with(".utf-8") || l.ends_with(".utf8")
-    });
-    if cfg!(unix) && !utf8 {
-        env.push(("LANG".to_string(), "en_US.UTF-8".to_string()));
+    if cfg!(unix) && !["LANG", "LC_ALL", "LC_CTYPE"].iter().any(|k| set(k)) {
+        // glibc and musl always have C.UTF-8; macOS has no C.UTF-8.
+        let lang = if cfg!(target_os = "linux") {
+            "C.UTF-8"
+        } else {
+            "en_US.UTF-8"
+        };
+        env.push(("LANG".to_string(), lang.to_string()));
     }
-    env
+    let mut remove: Vec<String> = TERMINAL_ENV_REMOVE.iter().map(|s| s.to_string()).collect();
+    // VS Code points GIT_ASKPASS at its askpass script, which fails without
+    // the VSCODE_GIT_ASKPASS_* variables removed above.
+    if set("VSCODE_GIT_ASKPASS_NODE") {
+        remove.push("GIT_ASKPASS".to_string());
+    }
+    (env, remove)
 }
 
 fn agent_error(e: AgentError) -> ApiError {
@@ -691,7 +700,9 @@ async fn start(
             integ.memory_file.display().to_string(),
         ),
     ];
-    env.extend(terminal_env(std::env::var("LANG").ok().as_deref()));
+    let (term_env, term_remove) =
+        terminal_env(|k| std::env::var_os(k).is_some_and(|v| !v.is_empty()));
+    env.extend(term_env);
     env.extend(integ.env);
     env.extend(command.env);
     env.extend(login);
@@ -702,8 +713,8 @@ async fn start(
         env,
         env_remove: ENV_REMOVE
             .iter()
-            .chain(TERMINAL_ENV_REMOVE)
             .map(|s| s.to_string())
+            .chain(term_remove)
             .collect(),
         cols: cols.unwrap_or(DEFAULT_COLS).clamp(10, 1000),
         rows: rows.unwrap_or(DEFAULT_ROWS).clamp(4, 1000),
@@ -1045,27 +1056,30 @@ mod tests {
     }
 
     #[test]
-    fn terminal_env_names_blirp_and_a_utf8_locale() {
+    fn terminal_env_names_blirp_and_sets_a_locale_only_without_one() {
         let get = |env: &[(String, String)], k: &str| {
             env.iter().find(|(n, _)| n == k).map(|(_, v)| v.clone())
         };
-        let env = super::terminal_env(None);
+        let (env, remove) = super::terminal_env(|_| false);
         assert_eq!(get(&env, "TERM").as_deref(), Some("xterm-256color"));
         assert_eq!(get(&env, "TERM_PROGRAM").as_deref(), Some("blirp"));
-        assert_eq!(
-            get(&env, "LANG").as_deref(),
-            cfg!(unix).then_some("en_US.UTF-8")
-        );
-        for kept in ["de_DE.UTF-8", "C.utf8"] {
-            assert_eq!(
-                get(&super::terminal_env(Some(kept)), "LANG"),
-                None,
-                "{kept}"
-            );
+        let want = if cfg!(target_os = "linux") {
+            Some("C.UTF-8")
+        } else if cfg!(unix) {
+            Some("en_US.UTF-8")
+        } else {
+            None
+        };
+        assert_eq!(get(&env, "LANG").as_deref(), want);
+        assert!(remove.iter().any(|k| k == "WT_SESSION"));
+        assert!(!remove.iter().any(|k| k == "GIT_ASKPASS"));
+        // Any locale variable, UTF-8 or not, is the user's choice.
+        for var in ["LANG", "LC_ALL", "LC_CTYPE"] {
+            let (env, _) = super::terminal_env(|k| k == var);
+            assert_eq!(get(&env, "LANG"), None, "{var}");
         }
-        assert_eq!(
-            get(&super::terminal_env(Some("C")), "LANG").as_deref(),
-            cfg!(unix).then_some("en_US.UTF-8")
-        );
+        // VS Code's askpass needs the variables that are removed.
+        let (_, remove) = super::terminal_env(|k| k == "VSCODE_GIT_ASKPASS_NODE");
+        assert!(remove.iter().any(|k| k == "GIT_ASKPASS"));
     }
 }
