@@ -810,7 +810,10 @@ fn write_row(tx: &Transaction<'_>, change: &Change) -> Result<usize> {
                 params![b.project_id, b.body_md, b.version, b.updated_at, b.updated_by, id, b.machine_id],
             )?
         }
-        Change::WikiPage(w) => tx.execute(
+        Change::WikiPage(w) if !memory::wiki_version_wins(tx, w)? => 0,
+        Change::WikiPage(w) => {
+            let w = memory::settle_wiki_slug(tx, w)?;
+            tx.execute(
             "INSERT INTO wiki_pages(id, project_id, slug, title, body_md, updated_at, updated_by, deleted)
              VALUES (?1,?2,?3,?4,?5,?6,?7,?8)
              ON CONFLICT(id) DO UPDATE SET project_id=excluded.project_id, slug=excluded.slug,
@@ -821,7 +824,8 @@ fn write_row(tx: &Transaction<'_>, change: &Change) -> Result<usize> {
                  > (wiki_pages.updated_at, wiki_pages.deleted, wiki_pages.updated_by, wiki_pages.title,
                     wiki_pages.body_md, wiki_pages.slug, wiki_pages.project_id)",
             params![w.id, w.project_id, w.slug, w.title, w.body_md, w.updated_at, w.updated_by, w.deleted],
-        )?,
+        )?
+        }
         Change::Resource(r) => tx.execute(
             "INSERT INTO resources(id, project_id, kind, url, title, meta_json, created_at, updated_at, deleted)
              VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9)

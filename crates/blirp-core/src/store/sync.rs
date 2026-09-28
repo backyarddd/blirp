@@ -2019,6 +2019,69 @@ mod tests {
         }
     }
 
+    // Two machines give different pages the same slug while apart: every
+    // machine settles the clash the same way (the greater id takes a
+    // suffixed slug) instead of failing to apply one of them.
+    #[test]
+    fn wiki_slug_clashes_settle_the_same_everywhere() {
+        let (_h, hub) = temp_store();
+        let (_a, a) = temp_store();
+        let (_b, b) = temp_store();
+        a.apply(project("p", "shared")).unwrap();
+        push(&a, "A", &hub, "H");
+        pull(&b, "B", &hub, "H");
+        let pa = a
+            .create_wiki_page("p", "notes", "From A", "a", "user")
+            .unwrap();
+        let pb = b
+            .create_wiki_page("p", "notes", "From B", "b", "user")
+            .unwrap();
+        push(&a, "A", &hub, "H");
+        push(&b, "B", &hub, "H");
+        pull(&a, "A", &hub, "H");
+        pull(&b, "B", &hub, "H");
+        let (keeps, loses) = if pa.id < pb.id {
+            (&pa, &pb)
+        } else {
+            (&pb, &pa)
+        };
+        for s in [&hub, &a, &b] {
+            let mut pages: Vec<(String, String)> = s
+                .list_wiki("p")
+                .unwrap()
+                .into_iter()
+                .map(|w| (w.id, w.slug))
+                .collect();
+            pages.sort();
+            let mut want = vec![
+                (keeps.id.clone(), "notes".to_string()),
+                (
+                    loses.id.clone(),
+                    super::super::memory::slug_with_id("notes", &loses.id),
+                ),
+            ];
+            want.sort();
+            assert_eq!(pages, want);
+        }
+        // An edit of the losing page from its machine keeps the suffix.
+        let origin = if loses.id == pa.id { &a } else { &b };
+        let slug = super::super::memory::slug_with_id("notes", &loses.id);
+        origin
+            .update_wiki_page("p", &slug, "Renamed", "edited", "user")
+            .unwrap();
+        push(&a, "A", &hub, "H");
+        push(&b, "B", &hub, "H");
+        pull(&a, "A", &hub, "H");
+        pull(&b, "B", &hub, "H");
+        for s in [&hub, &a, &b] {
+            assert_eq!(
+                s.get_wiki_page("p", &slug).unwrap().unwrap().title,
+                "Renamed"
+            );
+            assert_eq!(s.get_wiki_page("p", "notes").unwrap().unwrap().id, keeps.id);
+        }
+    }
+
     // A machine that leaves and pairs again queues its (stale) copy of
     // everything; newer versions written meanwhile stay newest, deleted
     // records stay deleted, and a delete it had not pushed when it left

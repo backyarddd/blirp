@@ -178,6 +178,65 @@ pub fn validate_slug(slug: &str) -> Result<()> {
     }
 }
 
+/// Whether `w` replaces the stored version of its page (or there is none):
+/// the order `write_row` keeps the newest version by.
+pub(super) fn wiki_version_wins(c: &Connection, w: &WikiPage) -> Result<bool> {
+    let newer: Option<bool> = one(
+        c,
+        "SELECT (?2, ?3, ?4, ?5, ?6, ?7, ?8) > (updated_at, deleted, updated_by, title, body_md, slug,
+                 project_id)
+         FROM wiki_pages WHERE id = ?1",
+        params![w.id, w.updated_at, w.deleted, w.updated_by, w.title, w.body_md, w.slug, w.project_id],
+        |r| r.get(0),
+    )?;
+    Ok(newer.unwrap_or(true))
+}
+
+/// `slug-<id>` (id reduced to slug characters), within the slug length.
+pub(super) fn slug_with_id(slug: &str, id: &str) -> String {
+    let id: String = id
+        .chars()
+        .filter(|c| c.is_ascii_lowercase() || c.is_ascii_digit())
+        .collect();
+    let keep = 100usize.saturating_sub(id.len() + 1).min(slug.len());
+    let base = slug[..keep].trim_end_matches('-');
+    format!("{base}-{id}")
+}
+
+/// Slugs are unique per project, but two machines can give different
+/// pages the same slug at the same time (created or renamed while apart).
+/// Every machine settles a clash the same way, whatever order the versions
+/// arrive in: the page with the greater id takes `<slug>-<id>`. A stored
+/// page that loses is changed here without a new version, as every machine
+/// does it itself; a page arriving later with the clashing slug loses the
+/// same way again.
+pub(super) fn settle_wiki_slug(tx: &Connection, w: &WikiPage) -> Result<WikiPage> {
+    let mut w = w.clone();
+    // Each round settles one clash; the suffixed slugs are unique in practice.
+    for _ in 0..4 {
+        let other: Option<String> = one(
+            tx,
+            "SELECT id FROM wiki_pages WHERE project_id = ?1 AND slug = ?2 AND id != ?3",
+            params![w.project_id, w.slug, w.id],
+            |r| r.get(0),
+        )?;
+        match other {
+            None => return Ok(w),
+            Some(other) if other > w.id => {
+                tx.execute(
+                    "UPDATE wiki_pages SET slug = ?2 WHERE id = ?1",
+                    params![other, slug_with_id(&w.slug, &other)],
+                )?;
+            }
+            Some(_) => w.slug = slug_with_id(&w.slug, &w.id),
+        }
+    }
+    Err(StoreError::Conflict(format!(
+        "wiki page slug {:?} clashes with other pages",
+        w.slug
+    )))
+}
+
 fn nonempty(field: &str, v: &str) -> Result<()> {
     if v.trim().is_empty() {
         Err(StoreError::Invalid(format!("{field} must not be empty")))
