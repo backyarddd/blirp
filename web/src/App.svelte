@@ -22,6 +22,7 @@
   import ProjectsView from './screens/ProjectsView.svelte';
   import ProjectView from './screens/ProjectView.svelte';
   import TrashView from './screens/TrashView.svelte';
+  import WorktreesView from './screens/WorktreesView.svelte';
   import SearchView from './screens/SearchView.svelte';
   import SettingsView from './screens/SettingsView.svelte';
 
@@ -117,6 +118,8 @@
         <ProjectsView />
       {:else if route.name === 'trash'}
         <TrashView />
+      {:else if route.name === 'worktrees'}
+        <WorktreesView />
       {:else if route.name === 'project'}
         <ProjectView projectId={route.projectId} tab={route.tab} sub={route.sub} />
       {:else if route.name === 'search'}

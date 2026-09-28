@@ -35,6 +35,7 @@ import type {
   PatchDevice,
   PatchRecord,
   PatchResource,
+  PrunedWorktree,
   ProjectFiles,
   ProjectMemory,
   ProjectSummary,
@@ -58,6 +59,7 @@ import type {
   UpdateStatus,
   UploadedFile,
   WikiPage,
+  WorktreeInfo,
   WsTicket,
 } from './types.gen';
 import { authToken } from './token';
@@ -314,6 +316,12 @@ export const api = {
     forgetCopy: (id: string, path: string) => request<void>('POST', `${p(id)}/files-sync/copies/forget`, { path }),
     downloadJob: (machine: string, job: string) =>
       request<DownloadJob>('GET', `/api/machines/${enc(machine)}/files/download/${enc(job)}`),
+  },
+  /** This machine's session worktrees (§7). */
+  worktrees: {
+    list: () => request<WorktreeInfo[]>('GET', '/api/worktrees'),
+    /** Control: removes the worktrees of ended sessions without changes; says why the rest stay. */
+    prune: () => request<PrunedWorktree[]>('POST', '/api/worktrees/prune'),
   },
   suggestions: {
     decide: (id: string, decision: 'accept' | 'reject' | 'dismiss') =>

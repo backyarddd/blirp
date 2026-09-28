@@ -3,6 +3,7 @@
   import { api } from '../../lib/api/client';
   import type { AgentInfo, AgentToken, Config, InjectMode, IntegrationState, SettingsView } from '../../lib/api/types.gen';
   import { app } from '../../lib/app.svelte';
+  import { href } from '../../lib/router';
   import { agentLabel } from '../../lib/status';
   import Modal from '../../lib/components/Modal.svelte';
 
@@ -254,6 +255,7 @@
     />
     <span>Start sessions in git projects in a new worktree by default</span>
   </label>
+  <p class="small"><a href={href.worktrees()}>Session worktrees on this machine</a>: see their changes, prune or remove them.</p>
 </section>
 
 <style>

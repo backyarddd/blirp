@@ -1,8 +1,9 @@
 // Session and project actions: context menus (never over a terminal), F2 rename, archive, bulk
 // move with a partial failure, and a project's round trip through the Trash. Runs against the same
 // daemon as the other specs, in its own folders and projects. Tests share one page and run in order.
+import { execFileSync } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
-import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { expect, test, type Locator, type Page } from '@playwright/test';
 import { e2eEnv } from './env';
@@ -525,4 +526,60 @@ test('export: a transcript as Markdown and JSON, a project memory as JSON', asyn
   expect(Object.keys(memory)).toEqual(['project', 'brief', 'records']);
   expect(memory.project).toMatchObject({ id: p.id, name: 'Export project' });
   expect(memory.records.map((r) => r.title)).toEqual(['Export decision']);
+});
+
+test('worktrees page: lists session worktrees with their changes; Prune and a forced Remove', async () => {
+  const repo = join(env.root, 'ui-actions', 'wt-repo');
+  mkdirSync(repo, { recursive: true });
+  const git = (...args: string[]): void => {
+    execFileSync('git', ['-c', 'user.name=t', '-c', 'user.email=t@t', '-c', 'init.defaultBranch=main', ...args], { cwd: repo, stdio: 'pipe' });
+  };
+  git('init');
+  writeFileSync(join(repo, 'a.txt'), 'a\n');
+  git('add', '.');
+  git('commit', '-m', 'init');
+  const p = await apiCall<ProjectRow>('POST', '/api/projects', { path: repo, name: 'Worktree project' });
+  const ended = async (title: string): Promise<SessionRow & { worktree: string | null }> => {
+    const s = await apiCall<SessionRow>('POST', '/api/sessions', { agent: 'shell', project_id: p.id, worktree: true });
+    await expect.poll(async () => (await apiCall<SessionRow>('GET', `/api/sessions/${s.id}`)).status, { timeout: 30_000 }).toBe('idle');
+    await apiCall('POST', `/api/sessions/${s.id}/stop`);
+    await expect
+      .poll(async () => LIVE.includes((await apiCall<SessionRow>('GET', `/api/sessions/${s.id}`)).status), { timeout: 30_000 })
+      .toBe(false);
+    return apiCall('PATCH', `/api/sessions/${s.id}`, { title });
+  };
+  const clean = await ended('Clean worktree');
+  const dirty = await ended('Dirty worktree');
+  if (!clean.worktree || !dirty.worktree) throw new Error('a session got no worktree');
+  writeFileSync(join(dirty.worktree, 'scratch.txt'), 'uncommitted\n');
+
+  await page.goto(`${env.url}/settings/agents`);
+  await page.getByRole('link', { name: 'Session worktrees on this machine' }).click();
+  await expect(page).toHaveURL(`${env.url}/worktrees`);
+  const rows = page.getByRole('list', { name: 'Worktrees' });
+  const row = (title: string): Locator => rows.locator('li', { hasText: title });
+  await expect(row('Clean worktree')).toContainText('clean');
+  await expect(row('Dirty worktree')).toContainText('1 uncommitted change');
+
+  // The terminal leaves the registry right after the exit is recorded: prune until it is removed.
+  await expect
+    .poll(
+      async () => {
+        await page.getByRole('button', { name: 'Prune' }).click();
+        return row('Clean worktree').count();
+      },
+      { timeout: 15_000 },
+    )
+    .toBe(0);
+  expect(existsSync(clean.worktree)).toBe(false);
+  await expect(row('Dirty worktree')).toBeVisible();
+
+  await row('Dirty worktree').getByRole('button', { name: 'Remove…' }).click();
+  await page.getByRole('dialog', { name: 'Remove worktree?' }).getByRole('button', { name: 'Remove worktree' }).click();
+  const force = page.getByRole('dialog', { name: 'Uncommitted changes' });
+  await expect(force).toContainText('uncommitted change');
+  expect(existsSync(dirty.worktree)).toBe(true);
+  await force.getByRole('button', { name: 'Force remove' }).click();
+  await expect(row('Dirty worktree')).toHaveCount(0);
+  await expect.poll(() => existsSync(dirty.worktree ?? '')).toBe(false);
 });

@@ -11,6 +11,7 @@ export type Route =
   | { name: 'grid' }
   | { name: 'projects' }
   | { name: 'trash' }
+  | { name: 'worktrees' }
   | { name: 'project'; projectId: string; tab: ProjectTab; sub: string | null }
   | { name: 'search'; q: string; project: string | null; kind: string | null }
   | { name: 'settings'; section: SettingsSection }
@@ -52,6 +53,9 @@ export function matchRoute(pathname: string, search = ''): Route {
     case 'trash':
       if (seg.length === 1) return { name: 'trash' };
       break;
+    case 'worktrees':
+      if (seg.length === 1) return { name: 'worktrees' };
+      break;
     case 'search':
       if (seg.length === 1)
         return { name: 'search', q: params.get('q') ?? '', project: params.get('project'), kind: params.get('kind') };
@@ -71,6 +75,7 @@ export const href = {
   grid: (): string => '/grid',
   projects: (): string => '/projects',
   trash: (): string => '/trash',
+  worktrees: (): string => '/worktrees',
   project: (id: string, tab: ProjectTab = 'overview', sub?: string): string =>
     `/projects/${e(id)}${tab === 'overview' && !sub ? '' : `/${tab}`}${sub ? `/${e(sub)}` : ''}`,
   search: (q = '', project?: string | null, kind?: string | null): string => {
