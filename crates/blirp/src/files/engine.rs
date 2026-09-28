@@ -536,6 +536,9 @@ impl Engine {
             // folder deleted): the next reconcile marks it missing and
             // logs it once.
             "local_error" if root_missing(key).await => {
+                // Whatever comes back in its place holds its deletes, even
+                // when the reconcile runs only after it is back.
+                lock(&self.returned).insert(key.clone());
                 self.refresh();
                 (CopyState::Missing, Some(MISSING.into()))
             }
@@ -1198,6 +1201,8 @@ mod tests {
             .await;
         assert_eq!(state(&gone).state, CopyState::Missing);
         assert!(matches!(rx.try_recv(), Ok(Kick::Refresh)));
+        // What comes back under its name holds its deletes.
+        assert!(lock(&engine.returned).contains(&gone.display().to_string()));
 
         // Still there: a local failure is an error.
         let here = dir.path().join("here");
@@ -1207,6 +1212,7 @@ mod tests {
             .await;
         assert_eq!(state(&here).state, CopyState::Error);
         assert!(rx.try_recv().is_err());
+        assert!(!lock(&engine.returned).contains(&here.display().to_string()));
     }
 
     #[test]
