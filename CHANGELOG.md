@@ -16,7 +16,8 @@ so every tag needs one.
   kitty keyboard protocol, so Claude Code and Codex get Shift+Enter (new
   line), Ctrl+Enter and other keys a classic terminal cannot tell apart; find
   in the terminal (Ctrl+F / Cmd+F); programs can set the clipboard (OSC 52)
-  and print links (OSC 8); Settings > Appearance > Terminal sets font size,
+  while their pane has focus, and print links (OSC 8), which show their target
+  on hover and open on Ctrl+click (Cmd+click), as in VS Code; Settings > Appearance > Terminal sets font size,
   line height, letter spacing, cursor style and blinking, and Option as Meta
   on macOS.
 - Sessions get `TERM_PROGRAM=blirp`, and on macOS and Linux a UTF-8 `LANG`

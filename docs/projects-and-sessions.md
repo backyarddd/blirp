@@ -68,12 +68,12 @@ Only these keys are taken by blirp while a terminal has focus:
 | Ctrl+Shift+T | Cmd+T | new session |
 | Ctrl+Shift+G | Cmd+G | grid view |
 | Ctrl+Shift+W | Cmd+W | close the tab (the session keeps running) |
-| Ctrl+PageUp / Ctrl+PageDown | Cmd+Left / Cmd+Right | previous / next session |
+| Ctrl+PageUp / Ctrl+PageDown | Cmd+Shift+[ / Cmd+Shift+] | previous / next session |
 | Ctrl+F | Cmd+F | find in the terminal (Enter: older match, Shift+Enter: newer, Escape: back to the terminal) |
 | Ctrl+Shift+C, and Ctrl+C on Windows, with text selected | Cmd+C with text selected | copy (Windows: Ctrl+C also clears the selection) |
 | Ctrl+Shift+V, and Ctrl+V on Windows; Shift+Insert on Linux | Cmd+V | paste |
 
-Without a selection, Ctrl+C and Ctrl+Shift+C go to the program (interrupt). Right click on Windows copies the selection, or pastes when nothing is selected (Shift+right click opens the menu); on macOS it selects the word under the pointer. Outside a terminal the plain chords work too (Ctrl+K, Ctrl+T, Ctrl+G, Ctrl+W, Ctrl+Left/Right). The keys follow the computer your browser or desktop app runs on, not the session's machine.
+Without a selection, Ctrl+C and Ctrl+Shift+C go to the program (interrupt). Right click on Windows copies the selection, or pastes when nothing is selected (Shift+right click opens the menu); on macOS it selects the word under the pointer. On macOS Cmd+A selects everything, and Cmd+Backspace, Cmd+Left and Cmd+Right delete to the line start and move to its start or end, as in VS Code. Links, including ones a program prints with a hidden target (OSC 8), show where they go on hover and open on Ctrl+click (Cmd+click on macOS). Outside a terminal the plain chords work too (Ctrl+K, Ctrl+T, Ctrl+G, Ctrl+W, Ctrl+Left/Right; Cmd+Left/Right on macOS). The keys follow the computer your browser or desktop app runs on, not the session's machine.
 
 Settings > Appearance > Terminal sets the font size, line height, letter spacing, cursor style and blinking, and on macOS whether Option acts as Meta (on by default, so Option+Enter and Option+letter reach the program as Alt chords; off, Option types special characters).
 

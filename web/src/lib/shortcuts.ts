@@ -3,7 +3,8 @@
 // Windows/Linux the plain Ctrl chords belong to the shell/TUI (Ctrl+K, Ctrl+W, Ctrl+T, Ctrl+Left are
 // all readline keys) and Ctrl+Shift+Left/Right select words (PSReadLine), so inside a terminal the
 // app shortcuts are Ctrl+Shift+letter, like Windows Terminal, and Ctrl+PageUp/PageDown switch
-// sessions, like VS Code's previous/next editor. macOS uses Cmd everywhere; Cmd never reaches the PTY.
+// sessions, like VS Code's previous/next editor. macOS uses Cmd everywhere (Cmd+Shift+[ / ] switch
+// sessions); Cmd never reaches the PTY except as VS Code's line-editing chords (macTerminalCommand).
 
 export type ShortcutAction = 'palette' | 'new' | 'grid' | 'prev' | 'next' | 'close';
 
@@ -34,12 +35,40 @@ export function matchShortcut(e: KeyLike, mac: boolean, inTerminal: boolean): Sh
   if (mac ? !e.metaKey || e.ctrlKey : !e.ctrlKey || e.metaKey) return null;
   const key = e.key.toLowerCase();
   const letter = LETTERS[key];
+  // Cmd+Shift+[ / ] (VS Code's previous/next editor on macOS); `{` `}` with Shift on US layouts.
+  const bracket = mac && e.shiftKey ? ({ '[': 'prev', '{': 'prev', ']': 'next', '}': 'next' } as const)[key] : undefined;
+  if (bracket) return bracket;
   const switcher = SWITCH[key];
-  if (!mac && inTerminal) {
+  if (inTerminal) {
+    // Cmd+Left/Right move to the line start/end in a macOS terminal (macTerminalCommand).
+    if (mac) return letter ?? (key === 'pageup' || key === 'pagedown' ? (switcher ?? null) : null);
     if (letter) return e.shiftKey ? letter : null;
     return !e.shiftKey && (key === 'pageup' || key === 'pagedown') ? (switcher ?? null) : null;
   }
   return letter ?? switcher ?? null;
+}
+
+/** What VS Code's macOS keybindings make of Cmd chords in a focused terminal. */
+export type MacTerminalCommand = { kind: 'selectAll' } | { kind: 'send'; data: string };
+
+/**
+ * Cmd+A selects all, Cmd+Backspace deletes to the line start (^U), Cmd+Left/Right move to the line
+ * start/end (^A, ^E), as VS Code's terminal does on macOS.
+ */
+export function macTerminalCommand(e: KeyLike): MacTerminalCommand | null {
+  if (!e.metaKey || e.ctrlKey || e.altKey || e.shiftKey) return null;
+  switch (e.key.toLowerCase()) {
+    case 'a':
+      return { kind: 'selectAll' };
+    case 'backspace':
+      return { kind: 'send', data: '\x15' };
+    case 'arrowleft':
+      return { kind: 'send', data: '\x01' };
+    case 'arrowright':
+      return { kind: 'send', data: '\x05' };
+    default:
+      return null;
+  }
 }
 
 /** Where the SPA runs; terminal copy/paste keys follow that platform, as in VS Code. */

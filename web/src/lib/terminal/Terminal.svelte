@@ -11,12 +11,12 @@
   import { api, errorMessage, socketUrl, terminalWsPath } from '../api/client';
   import { theme } from '../theme.svelte';
   import { isMac, isWindows } from '../prefs';
-  import { matchShortcut, terminalClipboardKey } from '../shortcuts';
+  import { macTerminalCommand, matchShortcut, terminalClipboardKey } from '../shortcuts';
   import { app } from '../app.svelte';
   import { hasTerminal, sessionStatusInfo } from '../status';
   import type { SessionStatus } from '../api/types.gen';
   import { backoffDelay, decodeServerFrame, encodeBinaryInput, encodeInput, encodeResize } from './protocol';
-  import { MAX_UPLOAD_BYTES, dropAction, pasteAction } from './paste';
+  import { MAX_UPLOAD_BYTES, dropAction, osc52WriteAllowed, pasteAction } from './paste';
   import { LIMITS, terminalSettings } from './settings.svelte';
   import TerminalFind from './TerminalFind.svelte';
 
@@ -48,6 +48,8 @@
   let exit = $state<{ status: SessionStatus; exit_code: number | null } | null>(null);
   /** The open find widget and the text it starts with. */
   let find = $state<{ initial: string } | null>(null);
+  /** The link under the pointer and where (in the pane), shown with how to open it. */
+  let linkTip = $state<{ uri: string; x: number; y: number } | null>(null);
 
   const LIGHT: ITheme = {
     background: '#ffffff',
@@ -143,6 +145,18 @@
 
   function mount(el: HTMLDivElement, id: string): () => void {
     const s = terminalSettings;
+    // Links open on Ctrl+click (Cmd+click on macOS) and show their target on hover, as in VS Code:
+    // an OSC 8 link's text need not be where it goes.
+    const openLink = (e: MouseEvent, uri: string): void => {
+      if (isMac ? e.metaKey : e.ctrlKey) window.open(uri, '_blank', 'noopener,noreferrer');
+    };
+    const hoverLink = (e: MouseEvent, uri: string): void => {
+      const box = (el.parentElement ?? el).getBoundingClientRect();
+      linkTip = { uri, x: e.clientX - box.left, y: e.clientY - box.top };
+    };
+    const leaveLink = (): void => {
+      linkTip = null;
+    };
     const t = new Terminal({
       allowProposedApi: true, // unicode11, search decorations
       fontFamily: getComputedStyle(document.documentElement).getPropertyValue('--mono').trim() || 'monospace',
@@ -168,15 +182,12 @@
       // win32-input-mode stays off, as in VS Code: it would win over kitty and ConPTY does not
       // pass kitty sequences on to programs from win32 input records.
       vtExtensions: { kittyKeyboard: true, win32InputMode: false },
-      // OSC 8 hyperlinks: web links only, opened like the ones the links addon finds.
-      linkHandler: {
-        activate: (_ev, uri) => window.open(uri, '_blank', 'noopener,noreferrer'),
-        allowNonHttpProtocols: false,
-      },
+      // OSC 8 hyperlinks: web links only, handled like the ones the links addon finds.
+      linkHandler: { activate: openLink, hover: hoverLink, leave: leaveLink, allowNonHttpProtocols: false },
     });
     const fit = new FitAddon();
     t.loadAddon(fit);
-    t.loadAddon(new WebLinksAddon((_ev, uri) => window.open(uri, '_blank', 'noopener,noreferrer')));
+    t.loadAddon(new WebLinksAddon(openLink, { hover: hoverLink, leave: leaveLink }));
     t.loadAddon(new Unicode11Addon());
     t.unicode.activeVersion = '11';
     const finder = new SearchAddon({ highlightLimit: 1000 });
@@ -187,7 +198,7 @@
       new ClipboardAddon(undefined, {
         readText: () => '',
         writeText: (selection, text) => {
-          if (selection !== '' && !selection.includes('c')) return;
+          if (!osc52WriteAllowed(selection, text, document.activeElement === t.textarea, viewOnly)) return;
           navigator.clipboard.writeText(text).catch((err: unknown) => {
             console.warn('blirp: a program could not set the clipboard (OSC 52)', err);
           });
@@ -361,9 +372,18 @@
       }
       // App shortcuts bubble to the global handler instead of reaching the PTY.
       if (matchShortcut(e, isMac, true)) return false;
-      // Cmd chords belong to the app and the browser on macOS and never reach the PTY; with the
-      // kitty keyboard protocol xterm.js would encode them (VS Code skips them the same way).
-      if (isMac && e.metaKey) return false;
+      // Cmd chords belong to the app and the browser on macOS; with the kitty keyboard protocol
+      // xterm.js would encode them (VS Code skips them the same way). Only VS Code's line-editing
+      // chords reach the PTY, as the control characters it sends for them.
+      if (isMac && e.metaKey) {
+        const cmd = macTerminalCommand(e);
+        if (cmd) {
+          e.preventDefault();
+          if (cmd.kind === 'selectAll') t.selectAll();
+          else t.input(cmd.data, true);
+        }
+        return false;
+      }
       // Alt+F4 closes the window on Windows.
       if (isWindows && e.altKey && !e.ctrlKey && e.key === 'F4') return false;
       // Shift+Tab goes to the program and must not move focus out of the pane.
@@ -491,6 +511,7 @@
       term = undefined;
       search = undefined;
       find = null;
+      linkTip = null;
       t.dispose();
     };
   }
@@ -510,6 +531,12 @@
 
 <div class="wrap" role="group" aria-label={label}>
   <div class="term" bind:this={host}></div>
+  {#if linkTip}
+    <div class="link-tip" role="tooltip" style:left="{linkTip.x}px" style:top="{linkTip.y + 18}px">
+      {linkTip.uri}
+      <span class="muted">{isMac ? 'Cmd' : 'Ctrl'}+click to open</span>
+    </div>
+  {/if}
   {#if find && search}
     <TerminalFind
       {search}
@@ -553,6 +580,24 @@
   }
   :global(:root[data-theme='dark']) .wrap {
     background: #15161a;
+  }
+  .link-tip {
+    position: absolute;
+    z-index: 7;
+    max-width: min(480px, calc(100% - 24px));
+    padding: 4px 8px;
+    border-radius: 6px;
+    background: var(--panel);
+    border: 1px solid var(--border);
+    box-shadow: var(--shadow-lg);
+    font-size: 12px;
+    color: var(--text);
+    overflow-wrap: anywhere;
+    pointer-events: none;
+  }
+  .link-tip .muted {
+    display: block;
+    color: var(--text-2);
   }
   .banner {
     position: absolute;

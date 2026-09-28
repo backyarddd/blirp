@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { matchShortcut, terminalClipboardKey } from './shortcuts';
+import { macTerminalCommand, matchShortcut, terminalClipboardKey } from './shortcuts';
 
 const k = (key: string, mods: Partial<{ ctrl: boolean; meta: boolean; shift: boolean; alt: boolean }> = {}) => ({
   key,
@@ -30,7 +30,12 @@ describe('matchShortcut', () => {
       expect(matchShortcut(k('ArrowRight', { ctrl: true, shift }), false, true)).toBeNull();
     }
     expect(matchShortcut(k('PageUp', { ctrl: true, shift: true }), false, true)).toBeNull();
-    expect(matchShortcut(k('ArrowLeft', { meta: true }), true, true)).toBe('prev');
+    // macOS: Cmd+Left/Right edit the line in a terminal; Cmd+Shift+[ / ] switch sessions.
+    expect(matchShortcut(k('ArrowLeft', { meta: true }), true, true)).toBeNull();
+    expect(matchShortcut(k('ArrowLeft', { meta: true }), true, false)).toBe('prev');
+    expect(matchShortcut(k('{', { meta: true, shift: true }), true, true)).toBe('prev');
+    expect(matchShortcut(k(']', { meta: true, shift: true }), true, true)).toBe('next');
+    expect(matchShortcut(k('k', { meta: true }), true, true)).toBe('palette');
   });
   it('ignores alt and unknown keys', () => {
     expect(matchShortcut(k('g', { ctrl: true, alt: true }), false, false)).toBeNull();
@@ -74,5 +79,20 @@ describe('terminalClipboardKey', () => {
       expect(terminalClipboardKey(k('v'), p, true)).toBeNull();
       expect(terminalClipboardKey(k('x', { ctrl: true, shift: true }), p, true)).toBeNull();
     }
+  });
+});
+
+describe('macTerminalCommand', () => {
+  it('maps Cmd chords to what VS Code sends on macOS', () => {
+    expect(macTerminalCommand(k('a', { meta: true }))).toEqual({ kind: 'selectAll' });
+    expect(macTerminalCommand(k('Backspace', { meta: true }))).toEqual({ kind: 'send', data: '\u0015' });
+    expect(macTerminalCommand(k('ArrowLeft', { meta: true }))).toEqual({ kind: 'send', data: '\u0001' });
+    expect(macTerminalCommand(k('ArrowRight', { meta: true }))).toEqual({ kind: 'send', data: '\u0005' });
+  });
+  it('ignores other chords', () => {
+    expect(macTerminalCommand(k('a'))).toBeNull();
+    expect(macTerminalCommand(k('a', { meta: true, shift: true }))).toBeNull();
+    expect(macTerminalCommand(k('ArrowLeft', { meta: true, alt: true }))).toBeNull();
+    expect(macTerminalCommand(k('x', { meta: true }))).toBeNull();
   });
 });

@@ -82,3 +82,22 @@ export function dropAction(dt: TransferLike | null): TransferAction {
   return files.length + folders > 0 ? { kind: 'upload', files, folders } : { kind: 'text' };
 }
 
+
+/** Longest text a program may put on the clipboard with OSC 52. */
+export const OSC52_MAX_CHARS = 1024 * 1024;
+
+/**
+ * Whether a program's OSC 52 clipboard write goes through: only to the clipboard selection (`c`, or
+ * the default), only while the user is typing into this pane (its terminal has focus) and may
+ * control it, and only non-empty text under 1 MB, so a background session cannot fill or clear the
+ * clipboard.
+ */
+export function osc52WriteAllowed(selection: string, text: string, focused: boolean, viewOnly: boolean): boolean {
+  return (
+    (selection === '' || selection.includes('c')) &&
+    focused &&
+    !viewOnly &&
+    text.length > 0 &&
+    text.length < OSC52_MAX_CHARS
+  );
+}

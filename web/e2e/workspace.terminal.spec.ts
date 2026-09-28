@@ -209,11 +209,12 @@ test('kitty keyboard flags reach the terminal and survive a reload and a session
 async function expectAppModes(when: string): Promise<void> {
   await expectBytes('app', () => page.keyboard.press('ArrowUp'), '1b4f41', `ArrowUp ${when}`);
   await expectBytes('app', () => page.keyboard.press('ArrowLeft'), '1b4f44', `ArrowLeft ${when}`);
-  await page.evaluate(() => navigator.clipboard.writeText('pasted text'));
+  // Pasted line breaks arrive as CR, as a terminal types Enter.
+  await page.evaluate(() => navigator.clipboard.writeText('pasted\r\ntext\nend'));
   await expectBytes(
     'app',
     () => page.keyboard.press(isWindows ? 'Control+v' : 'Control+Shift+V'),
-    `1b5b3230307e${hex('pasted text')}1b5b3230317e`,
+    `1b5b3230307e${hex('pasted\rtext\rend')}1b5b3230317e`,
     `bracketed paste ${when}`,
   );
   await expectBytes(

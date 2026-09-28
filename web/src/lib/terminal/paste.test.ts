@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { dropAction, pasteAction, type TransferLike } from './paste';
+import { OSC52_MAX_CHARS, dropAction, osc52WriteAllowed, pasteAction, type TransferLike } from './paste';
 
 const png = (name = 'image.png'): File => new File([new Uint8Array([0x89, 0x50, 0x4e, 0x47])], name, { type: 'image/png' });
 
@@ -74,5 +74,20 @@ describe('dropAction', () => {
     expect(dropAction(dt)).toEqual({ kind: 'upload', files: [f], folders: 1 });
     const onlyFolder: TransferLike = { ...dt, items: [dt.items?.[1] ?? { kind: 'string', getAsFile: () => null }] };
     expect(dropAction(onlyFolder)).toEqual({ kind: 'upload', files: [], folders: 1 });
+  });
+});
+
+describe('osc52WriteAllowed', () => {
+  it('lets a focused, controllable pane set the clipboard', () => {
+    expect(osc52WriteAllowed('c', 'hello', true, false)).toBe(true);
+    expect(osc52WriteAllowed('', 'hello', true, false)).toBe(true);
+  });
+  it('refuses unfocused or view-only panes, other selections, empty and huge text', () => {
+    expect(osc52WriteAllowed('c', 'hello', false, false)).toBe(false);
+    expect(osc52WriteAllowed('c', 'hello', true, true)).toBe(false);
+    expect(osc52WriteAllowed('p', 'hello', true, false)).toBe(false);
+    expect(osc52WriteAllowed('c', '', true, false)).toBe(false);
+    expect(osc52WriteAllowed('c', 'x'.repeat(OSC52_MAX_CHARS), true, false)).toBe(false);
+    expect(osc52WriteAllowed('c', 'x'.repeat(OSC52_MAX_CHARS - 1), true, false)).toBe(true);
   });
 });
