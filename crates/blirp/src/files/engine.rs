@@ -1468,8 +1468,11 @@ mod tests {
         std::fs::create_dir(&f).unwrap();
         let again = folder_identity(&f).unwrap();
         assert!(replaced_folder(&first, &again), "{first} -> {again}");
-        #[cfg(any(target_os = "linux", target_os = "macos"))]
-        assert_eq!(again.split(':').count(), 3, "no birth time in {again}");
+        // Where the file system keeps a birth time (not every one does).
+        #[cfg(unix)]
+        if std::fs::metadata(&f).and_then(|m| m.created()).is_ok() {
+            assert_eq!(again.split(':').count(), 3, "no birth time in {again}");
+        }
         // Removed and made again a moment later: another folder too, even
         // with its inode reused (the birth time differs).
         std::fs::remove_dir(&f).unwrap();
