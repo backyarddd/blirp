@@ -482,29 +482,20 @@ pub fn restore_asides<'a>(dir: &Path, names: impl IntoIterator<Item = &'a str>) 
     restored
 }
 
-/// Move `aside` to `to` without ever replacing a file at `to` (a rename
-/// would, on Windows: a scan that holds no work lock may race an apply that
-/// just wrote it). A hard link fails when `to` exists; where links are not
-/// supported the content is copied into a file created only if missing.
+/// Move `aside` to `to` without replacing a file at `to` (a rename would,
+/// on Windows). A hard link fails when `to` exists. Where links are not
+/// supported, a rename while `to` is still missing: atomic, so a crash never
+/// leaves a partial file, and restores run only under the copy's work lock
+/// ([`crate::files::scan::ScanConfig::restore_asides`]), so no write races it.
 fn put_back(aside: &Path, to: &Path) -> std::io::Result<()> {
     match std::fs::hard_link(aside, to) {
         Ok(()) => {}
         Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => return Err(e),
         Err(_) => {
-            let mut src = std::fs::File::open(aside)?;
-            let perms = src.metadata()?.permissions();
-            let mut dst = std::fs::File::options()
-                .write(true)
-                .create_new(true)
-                .open(to)?;
-            let copied = std::io::copy(&mut src, &mut dst)
-                .and_then(|_| dst.sync_all())
-                .and_then(|()| std::fs::set_permissions(to, perms));
-            if let Err(e) = copied {
-                drop(dst);
-                let _ = std::fs::remove_file(to);
-                return Err(e);
+            if std::fs::symlink_metadata(to).is_ok() {
+                return Err(std::io::ErrorKind::AlreadyExists.into());
             }
+            return std::fs::rename(aside, to);
         }
     }
     // Back in place; one that cannot be removed yet is swept later.
