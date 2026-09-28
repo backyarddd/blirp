@@ -255,15 +255,23 @@ fn create_wiki_in(
 ) -> Result<WikiPage> {
     validate_slug(slug)?;
     nonempty("title", title)?;
-    let existing = get_wiki_in(tx, project_id, slug)?;
-    if existing.as_ref().is_some_and(|w| !w.deleted) {
-        return Err(StoreError::Conflict(format!(
-            "wiki page {slug:?} already exists"
-        )));
+    // A deleted page keeps its slug (unique per project) so it can be
+    // restored; its row is never reused for another page.
+    match get_wiki_in(tx, project_id, slug)? {
+        Some(w) if w.deleted => {
+            return Err(StoreError::Conflict(format!(
+                "a deleted wiki page uses {slug:?}; restore it or pick another slug"
+            )));
+        }
+        Some(_) => {
+            return Err(StoreError::Conflict(format!(
+                "wiki page {slug:?} already exists"
+            )));
+        }
+        None => {}
     }
     let page = WikiPage {
-        // Re-creating a deleted slug revives its row (slug is unique per project).
-        id: existing.map_or_else(crate::new_id, |w| w.id),
+        id: crate::new_id(),
         project_id: project_id.to_string(),
         slug: slug.to_string(),
         title: title.to_string(),
@@ -863,10 +871,13 @@ mod tests {
             .unwrap();
         store.delete_wiki_page("p", "a-b", "user").unwrap();
         assert!(store.get_wiki_page("p", "a-b").unwrap().is_none());
-        let again = store
-            .create_wiki_page("p", "a-b", "T3", "", "user")
-            .unwrap();
-        assert_eq!(again.id, w.id);
+        // The deleted page keeps its slug for a restore: no new page takes it.
+        assert!(matches!(
+            store.create_wiki_page("p", "a-b", "T3", "", "user"),
+            Err(StoreError::Conflict(m)) if m.contains("restore")
+        ));
+        let back = store.restore_wiki_page("p", "a-b", "user").unwrap();
+        assert_eq!((back.id, back.title.as_str()), (w.id, "T2"));
     }
 
     #[test]

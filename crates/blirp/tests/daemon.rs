@@ -2142,6 +2142,15 @@ async fn wiki_pages_restore_and_rename() {
         .send(reqwest::Method::DELETE, &format!("{wiki}/old"), json!({}))
         .await;
     assert_eq!(r.status(), 204);
+    // A deleted page keeps its slug for a restore.
+    let r = h
+        .send(
+            reqwest::Method::POST,
+            &wiki,
+            json!({"slug": "old", "title": "New", "body_md": "x"}),
+        )
+        .await;
+    assert_eq!(r.status(), 409);
     let deleted: Vec<WikiPage> = h.get(&format!("{wiki}?deleted=true")).await;
     assert_eq!(deleted.len(), 1);
     assert_eq!(deleted[0].slug, "old");
