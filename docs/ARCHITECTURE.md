@@ -468,7 +468,10 @@ POST /api/update/apply                   admin, loopback listener only: 202, sta
                                          <latest>` detached (§17); 409 update_checks_off | not_self_update |
                                          no_update | update_in_progress
                                          (the calling client's rights)
-GET  /api/machines                       list; DELETE /api/machines/:id (revoke)
+GET  /api/machines                       list; DELETE /api/machines/:id (revoke); POST /api/machines/:id/forget
+                                         (hub, admin): drop a revoked machine's device rows and its machine row
+                                         (a replicated delete that nodes accept from the hub only; 409
+                                         `not_revoked`); its sessions and folders stay
 GET  /api/machines/:id/health | /agents  that machine's health / agents (relayed for another machine, §10)
 GET  /api/machines/:id/dirs?path=&hidden= MachineDirs (control): folder names only, inside that machine's user
                                          home (403 `path_outside_home`), symlinked folders left out, hidden ones
@@ -502,8 +505,11 @@ POST /api/projects/:id/open              {target, path}: admin; `path` must be o
                                          machine or its blirp workspace (400 otherwise, 404 `folder_missing`)
 GET  /api/projects/:id/memory            brief, records, recent sessions
 PUT  /api/projects/:id/brief             {body_md}; GET .../brief/history; POST .../brief/revert {id | version}
-CRUD /api/projects/:id/records[/:rid]
-CRUD /api/projects/:id/wiki[/:slug]
+CRUD /api/projects/:id/records[/:rid]    PATCH also takes project_id: move the record to another live project
+                                         (not Chats; the replicated row's project_id changes, no protocol change)
+CRUD /api/projects/:id/wiki[/:slug]      GET ?deleted=true lists deleted pages; POST .../:slug/restore;
+                                         POST .../:slug/rename {slug} (409 when another page, also a deleted
+                                         one, holds it; links in text are not rewritten)
 CRUD /api/projects/:id/resources[/:id]
 GET  /api/projects/:id/suggestions       POST /api/suggestions/:id/{accept|reject|dismiss}
 GET  /api/projects/:id/git               {is_git, branch, status[], ahead/behind}; 404 `not_git` when the folder is not a repo ; GET .../git/diff?path=
@@ -512,7 +518,10 @@ GET  /api/projects/:id/files?path=       directory listing (read-only) ; GET ...
                                          and everything under files-sync and /api/files)
 GET  /api/projects/:id/files-sync        ProjectFiles; PUT {mode} (control); GET .../preview?root= (local dry run),
                                          .../incoming?root=; POST .../apply {root}, .../held {root, action} (control);
-                                         DELETE .../roots/:root (§10a)
+                                         DELETE .../roots/:root (§10a); GET .../copies (this machine's downloaded
+                                         copies), POST .../copies/detach {path} (stops syncing, files and folder
+                                         stay), POST .../copies/forget {path} (drops the copy row and the folder
+                                         from the project here; never a workspace copy; nothing on disk touched)
 GET  /api/files/status                   FilesOverview; POST /api/files/start-now, /api/files/pause {paused} (control)
 POST /api/machines/:id/files/download    {root_id, parent?, name?} (control): a copy there (§10a); 202 DownloadJob;
                                          GET .../files/download/:job
@@ -526,7 +535,8 @@ GET  /api/sessions?project=&status=&agent=&machine=&q=&parent=&include_children=
                                          session's subagents (continue/fork sessions are not children)
 POST /api/sessions                       launch (§7)
 GET  /api/sessions/:id                   SessionDetail: the session incl. summary + children_count (its
-                                         subagent sessions); GET .../events?after=&limit=
+                                         subagent sessions); GET .../events?after=&limit= (after exclusive,
+                                         default -1: seqs start at 0)
 POST /api/sessions/:id/stop | /resume | /distill   (distill: 202 queued, 409 nothing_to_distill | remote_session)
 POST /api/sessions/:id/worktree/remove   {force?}: remove the ended session's git worktree (`git worktree remove` from the
                                          main work tree; the `blirp/<name>` branch is kept) and clear `worktree`. 409
@@ -534,6 +544,11 @@ POST /api/sessions/:id/worktree/remove   {force?}: remove the ended session's gi
                                          files, unless force). Only folders under BLIRP_HOME/worktrees are touched. Never
                                          done automatically; `blirp worktrees list|prune` lists them and removes those
                                          of ended sessions without changes
+GET  /api/worktrees                      this machine's session worktrees: WorktreeInfo {path, session, state
+                                         (clean|changed|missing|unknown), changes, error}, then folders under
+                                         worktrees/ without a session; POST /api/worktrees/prune (control): removes
+                                         those of ended sessions without changes, PrunedWorktree[] with the reason
+                                         each other one was kept
 PATCH /api/sessions/:id                  {title}
 POST /api/sessions/:id/move              {project_id | null}: into another project, or Chats (§5)
 POST /api/sessions/:id/uploads?name=     raw body, at most 25 MiB (control): a file pasted or dropped into the running

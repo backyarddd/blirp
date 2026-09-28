@@ -33,10 +33,32 @@ so every tag needs one.
 - Selection mode in the Sessions sidebar and a project's Sessions tab: move,
   pin, archive or delete many sessions at once, with one notice naming what
   failed.
-- Undo for rename, move, pin, archive, delete to the Trash and restore.
+- Undo for rename, move, pin, archive, delete to the Trash and restore; an
+  item changed again since (here or on another client) is left alone.
 - API: `GET /api/projects?deleted=true`, `POST /api/projects/:id/restore`,
   `POST /api/projects/:id/folders`, `POST /api/projects/:id/open`;
   `AgentInfo.resume_command`.
+- Memory records: Archive and Unarchive next to Resolve, a right-click and
+  "⋯" menu (edit, pin, resolve, archive, move to another project, delete)
+  and Select for resolving, archiving, moving or deleting many at once,
+  with Undo. `PATCH /api/projects/:id/records/:rid` takes `project_id`.
+- Wiki: deleted pages are listed under Deleted pages with Restore, and a
+  page's slug can be changed while editing it (`GET .../wiki?deleted=true`,
+  `POST .../wiki/:slug/restore`, `POST .../wiki/:slug/rename`).
+- Export a session's transcript, or a project's brief and active records,
+  as Markdown or JSON from their menus.
+- CLI: `blirp projects list|trash|rename|delete|restore|merge` and `blirp
+  sessions rename|move|delete|stop`, with `--json` and a confirmation
+  (`--yes`) for delete, merge and stop; `blirp sessions --json`.
+- Files tab: this machine's downloaded copies of the project's folders,
+  with Detach (stops syncing) and Forget (blirp stops tracking it); neither
+  deletes files (`GET/POST /api/projects/:id/files-sync/copies[/detach|/forget]`).
+- Forget a revoked machine on the hub (Settings > Machines & Sync,
+  `POST /api/machines/:id/forget`); paired machines drop it too.
+- Worktrees page (Settings > Agents > Session worktrees): this machine's
+  session worktrees with their changes, Prune, and Remove with the force
+  dialog for uncommitted changes (`GET /api/worktrees`,
+  `POST /api/worktrees/prune`).
 
 ### Changed
 
@@ -49,11 +71,24 @@ so every tag needs one.
 - The session toolbar keeps Stop/Resume, fork, the agent chip and the memory
   panel; its other actions moved into its "⋯" menu.
 - Renaming a Chats bucket is refused (400).
+- A project folder, a session's folder, a folder browsed on a machine and a
+  clone's parent folder must be on a local disk: network paths (`\\server\share`)
+  are refused before anything opens them. Creating a project in the home
+  folder, a folder containing it or a filesystem root is refused, as adding
+  such a folder already was.
+- `blirp worktrees prune` asks the daemon to prune (`POST
+  /api/worktrees/prune`); its output is unchanged.
+- The Trash lists only projects a restore brings something back for, and
+  sessions of a project in the Trash are no longer distilled.
+- Paired machines apply a machine delete that comes from the hub.
 
 ### Fixed
 
 - Sessions of a deleted project no longer stay in the Sessions list under an
   "Unknown project" group whose link led nowhere.
+- The first event of an ingested transcript (usually the first prompt) was
+  missing from the session view, `blirp mem show` and the `mem_session` MCP
+  tool: event pages started after seq 0.
 
 ## [0.2.2] - 2026-09-28
 

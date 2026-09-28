@@ -138,7 +138,7 @@ blirp mem show   [--limit <N>] [--json] <SESSION_ID>
 - `search`: full-text search (porter stemming) over records and transcript events. `--all` searches every project; `--kind` restricts to records or transcript events; `--limit` default 20 (max 200). Prints date, the record or session/seq, and a snippet.
 - `brief`: the project brief and all active records (kind, title, pinned, body).
 - `recent`: recent sessions of the project with summaries; `--limit` default 10.
-- `show`: one session's header, summary (or last distill error) and its transcript events; `--limit` default 200 events (max 1000).
+- `show`: one session's header, summary (or last distill error) and its transcript events from the first one; `--limit` default 200 events (max 1000).
 - `--json`: machine-readable output (`search`: `{"hits": [...]}`; `brief`: `{project, brief, records}`; `show`: `{session, events}`; `recent`: array of sessions).
 
 ## blirp hooks
@@ -233,7 +233,7 @@ blirp worktrees prune   # remove the worktrees of ended sessions without changes
 
 The git worktrees blirp created for sessions, under `~/.blirp/worktrees/<project>/<name>`. `list` reads the database read-only (no daemon needed) and prints, for each worktree of a session on this machine, the session id, its status, its uncommitted changes (`clean`, `<n> changed`, `missing` when the folder is gone, `unknown (<error>)` when `git status` fails) and the path; folders there that no session refers to are listed as `(no session)`. Prints "no blirp worktrees" when there are none.
 
-`prune` needs the daemon. Through it (`POST /api/sessions/:id/worktree/remove`) it removes the worktree of every ended session that has no uncommitted changes (untracked files count as changes) or whose folder is already gone; branches are kept. It keeps, with the reason, the worktrees of running sessions, with changes, or whose state is unknown, and ends with `<n> removed, <n> kept`. Folders without a session are never removed. Exit code 0 also when some were kept.
+`prune` needs the daemon. Through it (`POST /api/worktrees/prune`) it removes the worktree of every ended session that has no uncommitted changes (untracked files count as changes) or whose folder is already gone; branches are kept. It keeps, with the reason, the worktrees of running sessions, with changes, or whose state is unknown, and ends with `<n> removed, <n> kept`. Folders without a session are never removed. Exit code 0 also when some were kept. The app shows the same list at Settings > Agents > Session worktrees, with Prune and a Remove per worktree.
 
 ## blirp update
 

@@ -89,11 +89,13 @@ To cap spend: lower `memory.daily_distill_limit`, raise `memory.distill_idle_sec
 Everything below is per project, visible on the project's **Memory** tab and in the session's **Memory** panel, and editable. Chats (sessions that belong to no project, see [projects-and-sessions.md](projects-and-sessions.md#chats)) have no project memory: distilling a chat writes only its session summary, and nothing is injected into one. So memory from unrelated chats never reaches a project, and a project's memory never reaches a chat.
 
 - **Brief.** A markdown description of the project: what it is, how to build and run it, current priorities. Written by the distiller and by you. Every change is a new version; **Versions** lists them and **Revert** restores one (as a new version).
-- **Records.** Short items of kind `decision`, `open_thread`, `gotcha`, `plan` or `note`, each with title, body, status (`active`, `resolved`, `archived`) and a pinned flag. The distiller creates decisions, open threads and gotchas and resolves threads; you can create any kind and edit, pin, resolve, reopen or delete them (archiving is available through the API). Agents can add records through the `mem_record` MCP tool.
+- **Records.** Short items of kind `decision`, `open_thread`, `gotcha`, `plan` or `note`, each with title, body, status (`active`, `resolved`, `archived`) and a pinned flag. The distiller creates decisions, open threads and gotchas and resolves threads; you can create any kind and edit, pin, resolve, reopen, archive or delete them, and move one to another project (right-click a record or use its **⋯** button; **Select** acts on many at once). Resolve, archive, pin and move offer **Undo**; archived records are kept but never injected (the Records filter shows them). Deleting is permanent. Agents can add records through the `mem_record` MCP tool.
 - **Suggestions.** Changes the distiller proposes instead of applying: brief updates in review mode, and resolutions of records you edited. **Accept**, **Reject** or **Dismiss** them on the Memory tab. Suggestions are local to the machine that produced them.
-- **Wiki.** Markdown pages you write per project (the Wiki tab). Not injected and not written by the distiller.
+- **Wiki.** Markdown pages you write per project (the Wiki tab). Not injected and not written by the distiller. A deleted page stays under **Deleted pages** in the tab's side panel until you restore it. Editing a page also changes its slug (its address); links to the old address written in other text are not rewritten.
 - **Resources.** Links, repos, PRs, issues, docs and files you attach to the project (the Resources tab). Not injected.
 - **Session summaries.** Title, summary, decisions, open threads, gotchas and files per session, on the session's page.
+
+A project's menu exports its memory (brief and active records) as Markdown or JSON, and a session's menu its transcript ([projects-and-sessions.md](projects-and-sessions.md#session-actions)).
 
 ## Injection
 

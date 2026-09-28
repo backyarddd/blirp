@@ -53,13 +53,16 @@ Every project has a menu: right-click its card on the Projects page or its group
 - **Open folder**, **Open in editor** (this machine's own app or CLI only) and **Open terminal here** (a blirp Shell session in the project's folder), **Copy folder path**, **Copy project id**.
 - **Merge into…** moves folders, sessions, records, wiki pages and resources into another project. Use it to join the same non-git folder on two machines, since those cannot be matched by remote. Merging cannot be undone.
 - **Move to Chats…** for projects an earlier version made for folders that look like chats (the Projects page also offers these once).
+- **Export memory as Markdown** or **as JSON**: saves the brief and the active records (what agents are given) as a file. The JSON has the shape `blirp mem brief --json` prints.
 - **Delete…** moves the project to the Trash.
 
 Each of this machine's folders on the project page has its own **⋯** menu: open it, open a shell there, copy its path, or **Remove folder…** (unregisters it; the project stays). Merge, Delete, Restore and Open folder need this machine's own app or CLI; devices on the LAN portal do not get them.
 
 #### Trash
 
-Deleting a project moves it to the **Trash** (Projects > Trash): it is hidden together with its sessions, and its folders are unregistered on every synced machine, so a new session in one of them starts a new project. Files on disk are never touched, and its sessions and memory are kept. **Restore** (or **Undo** right after deleting) brings the project back with its sessions and with the folders it had on the machine where it was deleted, unless a folder is gone or now belongs to another project. Folders registered on other machines do not come back: add them again there with **Add folder…**. There is no permanent delete for projects.
+Deleting a project moves it to the **Trash** (Projects > Trash): it is hidden together with its sessions, and its folders are unregistered on every synced machine, so a new session in one of them starts a new project. Files on disk are never touched, and its sessions and memory are kept. **Restore** (or **Undo** right after deleting) brings the project back with its sessions and with the folders it had on the machine where it was deleted, unless a folder is gone or now belongs to another project. Folders registered on other machines do not come back: add them again there with **Add folder…**. There is no permanent delete for projects. The Trash lists what a restore brings something back for: projects deleted on this machine, and projects with sessions or memory; projects that blirp's own cleanup emptied are left out. A project merged into another one is not in the Trash, and sessions that arrive filed under it later are listed under the project it was merged into.
+
+From a terminal: `blirp projects list|trash|rename|delete|restore|merge` ([cli.md](cli.md#blirp-projects)).
 
 The project page has tabs: Overview (brief, open threads, recent sessions, a prompt box to start a session), Sessions, Memory, Wiki, Resources, Files (read-only browser, text files up to 1 MiB; the workspace for a project without folders) and Git (git projects only).
 
@@ -105,11 +108,14 @@ Right-click a session card in the sidebar, a row on a project's Sessions tab, a 
 - **Rename…** (F2 on a focused card or row; on an ended session also the pencil next to its title), **Move…**, **Pin**, **Archive**.
 - **Resume**, **Stop**, **Start new session from this session**, **Continue in…**, **Open terminal here** (a new blirp Shell session in the session's folder, on its machine), **Open folder** and **Open in editor** (sessions of this machine, from its own app or CLI).
 - **Copy session id**, **Copy resume command** (`claude --resume <id>` and the like, for agents that resume by id; run it in the session's folder) and **Copy folder path**.
+- **Export transcript as Markdown** or **as JSON**: saves the whole transcript (every prompt, reply and tool call blirp recorded) with its title, agent, project, folder and dates. The JSON is `{session, events}` like `blirp mem show --json`.
 - **Remove worktree…** and **Delete…** for ended sessions; **Stop and delete…** for a running one stops it, waits for it to end and deletes it.
 
 Deleting a session is permanent on every synced machine and removes its subagent sessions; the agent's own transcript file is never deleted, and memory records it produced stay. A session of another machine is deleted, stopped or resumed by that machine: while it is offline this fails with a message naming it. Rename, move, pin and archive show **Undo** for a few seconds.
 
 **Select** above the sidebar (or on a project's Sessions tab) switches to selection mode: tick sessions, Shift+click another to take the whole range, or select all; then move, pin, archive or delete them together. One notice sums up the result and names the sessions that failed and why (running, their machine offline).
+
+From a terminal: `blirp sessions rename|move|delete|stop` ([cli.md](cli.md#blirp-sessions)).
 
 The context menu never opens over a terminal: right-click there belongs to the terminal (copy, paste, selection). Menus work from the keyboard: the ContextMenu key or Shift+F10 on a focused item, arrows and Home/End to move, Enter to choose, Esc to close.
 
@@ -161,7 +167,7 @@ blirp tells you when a session becomes **Waiting** (needs input), **Completed** 
 
 ### Worktrees
 
-For git projects, **Run in a new git worktree** (or `[sessions] worktree_default = true`) runs `git worktree add ~/.blirp/worktrees/<project-id>/<adjective-animal-xxxx> -b blirp/<adjective-animal-xxxx>` and starts the session there, in the same subfolder you picked. The session shows its branch. blirp never removes worktrees or branches; merge the branch and clean up with `git worktree remove <path>` and `git branch -d blirp/<name>` when you are done. For non-git projects the option is hidden, and the config default is ignored.
+For git projects, **Run in a new git worktree** (or `[sessions] worktree_default = true`) runs `git worktree add ~/.blirp/worktrees/<project-id>/<adjective-animal-xxxx> -b blirp/<adjective-animal-xxxx>` and starts the session there, in the same subfolder you picked. The session shows its branch. blirp never removes worktrees or branches on its own; merge the branch and clean up when you are done. **Settings > Agents > Session worktrees** lists this machine's worktrees with their uncommitted changes: **Prune** removes those of ended sessions without changes, **Remove…** removes one (with uncommitted changes only after a second confirmation, which discards them). The `blirp/<name>` branch is kept; delete it with `git branch -d blirp/<name>`. `blirp worktrees list|prune` does the same from a terminal. For non-git projects the option is hidden, and the config default is ignored.
 
 ### Resume
 

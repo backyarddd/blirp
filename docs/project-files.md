@@ -48,6 +48,7 @@ Checked in this order, a later layer winning over an earlier one:
 - **Cloud sessions**: running on the hub, the dialog offers **Use hub copy (includes uncommitted changes)**, the same download on the hub. Edits the session makes sync back to the hub live.
 - A copy is that machine's folder of the same project. It uploads its own edits live and takes the hub's changes when a session starts in it and on **Update from hub**. A download that could not write every file does not sync until **Update from hub** completes it.
 - If a hub copy is deleted and its origin uploads it again, copies of the old one on other machines stop syncing (their files stay); download a new copy.
+- **Downloaded copies on this machine** (the project's **Files** tab, when it has any): **Detach…** stops a copy from syncing for good; its files stay and it stays a folder of the project. **Forget…** also drops blirp's tracking of it and removes the folder from the project on this machine. Neither deletes a file. A folderless project's workspace copy can only be detached.
 - On the origin, the tab shows **Hub has N newer files**; **Bring changes here** lists them and replaces only files you did not change since they last synced.
 
 ## Conflicts
