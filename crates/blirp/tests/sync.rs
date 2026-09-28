@@ -902,6 +902,37 @@ async fn settings_saved_from_a_stale_copy_keep_the_role() {
     a.daemon.shutdown().await.unwrap();
 }
 
+// A machine upgraded from 0.2.0 that becomes the hub later (not at start)
+// still gives its legacy sessions their edit times.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn becoming_the_hub_stamps_legacy_sessions() {
+    let tmp = tempfile::tempdir().unwrap();
+    let a = Node::start(&tmp.path().join("a"), "hub-a", None).await;
+    let dir = tmp.path().join("work");
+    std::fs::create_dir_all(&dir).unwrap();
+    let s: Session = a
+        .ok(
+            Method::POST,
+            "/api/sessions",
+            Some(json!({"cwd": dir, "agent": "shell"})),
+        )
+        .await;
+    let store = a.daemon.state.store.clone();
+    assert_eq!(
+        store.get_session(&s.id).unwrap().unwrap().title_updated_at,
+        0
+    );
+    // What migration 14 flags on a database with sessions.
+    store
+        .set_setting("sync.stamp_sessions", &json!(true))
+        .unwrap();
+    let _: SyncStatus = a.ok(Method::POST, "/api/sync/hub/enable", None).await;
+    let row = store.get_session(&s.id).unwrap().unwrap();
+    assert_eq!((row.title_updated_at, row.project_updated_at), (1, 1));
+    assert_eq!(store.get_setting("sync.stamp_sessions").unwrap(), None);
+    a.daemon.shutdown().await.unwrap();
+}
+
 /// Whether something accepts TCP connections on `port` (loopback).
 async fn listening(port: u16) -> bool {
     tokio::net::TcpStream::connect(("127.0.0.1", port))

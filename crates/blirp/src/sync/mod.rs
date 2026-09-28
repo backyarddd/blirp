@@ -311,6 +311,14 @@ async fn set_role(
         // Standalone queues nothing; becoming a hub or node queues what
         // exists (events in batches from the status tick).
         st.store.set_replication(role != MachineRole::Standalone)?;
+        // A machine that becomes the hub gives legacy sessions their edit
+        // times as a hub does at start (`Store::hub_stamp_legacy_sessions`).
+        if role == MachineRole::Hub {
+            let n = st.store.hub_stamp_legacy_sessions()?;
+            if n > 0 {
+                tracing::info!(sessions = n, "re-sent sessions with edit times");
+            }
+        }
         st.store.upsert_machine(&Machine {
             role,
             last_seen: blirp_core::now_ms(),
