@@ -258,6 +258,17 @@ impl Engine {
         } else {
             copy::upload(&self.env, copy).await?
         };
+        // The identity was read before the pass took the work lock: a folder
+        // replaced meanwhile is not settled under the old one, and the next
+        // pass holds its deletes.
+        let key = copy.key.clone();
+        let after = tokio::task::spawn_blocking(move || folder_identity(Path::new(&key)))
+            .await
+            .unwrap_or(None);
+        if !same_folder_during_pass(id.as_deref(), after.as_deref()) {
+            lock(&self.returned).insert(copy.key.clone());
+            return Ok(r);
+        }
         // A pass that held nothing settles the folder as it is now.
         if r.held_deletes.is_empty() && r.state == Some(ScanState::Ok) {
             lock(&self.returned).remove(&copy.key);
@@ -573,6 +584,16 @@ pub(crate) fn folder_missing(p: &Path) -> bool {
 /// name has another. None when it cannot be read.
 fn folder_identity(p: &Path) -> Option<String> {
     folder_id_parts(p).map(|(dev, ino)| format!("{dev}:{ino}"))
+}
+
+/// Whether the folder read `before` a pass is still the one there `after`
+/// it (identities as [`folder_identity`]; one that cannot be read on either
+/// side proves nothing).
+fn same_folder_during_pass(before: Option<&str>, after: Option<&str>) -> bool {
+    match (before, after) {
+        (Some(b), Some(a)) => !replaced_folder(b, a),
+        _ => true,
+    }
 }
 
 /// Whether identity `now` (`<device>:<inode>`) is another folder than
@@ -1226,6 +1247,12 @@ mod tests {
         assert!(!replaced_folder("7:100", "9:200"));
         assert!(replaced_folder("7:100", "7:200"));
         assert!(!replaced_folder("garbage", "7:200"));
+        // Replaced while a pass ran (its identity was read before the work
+        // lock): that pass does not settle it.
+        assert!(!same_folder_during_pass(Some(&first), Some(&again)));
+        assert!(same_folder_during_pass(Some(&again), Some(&again)));
+        assert!(same_folder_during_pass(None, Some(&again)));
+        assert!(same_folder_during_pass(Some(&again), None));
         // Drives and shares that are not there count as missing.
         #[cfg(windows)]
         assert!(gone_volume(21) && gone_volume(67) && !gone_volume(5));
