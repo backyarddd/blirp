@@ -3030,7 +3030,8 @@ mod tests {
                 tx.execute_batch(
                     "DROP TABLE hub_parked;
                      ALTER TABLE sessions DROP COLUMN title_updated_at;
-                     ALTER TABLE sessions DROP COLUMN project_updated_at;",
+                     ALTER TABLE sessions DROP COLUMN project_updated_at;
+                     ALTER TABLE file_copies DROP COLUMN identity;",
                 )?;
                 Ok(tx.pragma_update(None, "user_version", 11)?)
             })
@@ -3484,7 +3485,8 @@ mod tests {
             tx.execute_batch(
                 "UPDATE sessions SET title = 'aaa';
                  ALTER TABLE sessions DROP COLUMN title_updated_at;
-                 ALTER TABLE sessions DROP COLUMN project_updated_at;",
+                 ALTER TABLE sessions DROP COLUMN project_updated_at;
+                 ALTER TABLE file_copies DROP COLUMN identity;",
             )?;
             Ok(tx.pragma_update(None, "user_version", 13)?)
         })

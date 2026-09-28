@@ -94,8 +94,6 @@ pub struct Engine {
     /// delete of theirs is committed without a confirmation, and a
     /// workspace takes its files back from the hub first.
     returned: Mutex<HashSet<String>>,
-    /// Each folder's identity at its last settled pass ([`folder_identity`]).
-    identity: Mutex<HashMap<String, (u64, u64)>>,
     /// The upload error last logged per folder (logged again only when it
     /// changes, or after a pass that worked).
     logged: Mutex<HashMap<String, String>>,
@@ -125,7 +123,6 @@ impl Engine {
             held: Mutex::default(),
             returned: Mutex::default(),
             logged: Mutex::default(),
-            identity: Mutex::default(),
         });
         let task = tokio::spawn(run(engine.clone(), rx, stop_rx));
         *lock(&engine.task) = Some(task);
@@ -226,16 +223,21 @@ impl Engine {
     /// the files it synced and lost.
     pub(crate) async fn upload(&self, copy: &Copy) -> Result<copy::UploadReport, CopyError> {
         let (ws, key) = (self.env.data_dir.join("workspaces"), copy.key.clone());
-        let (id, workspace) = tokio::task::spawn_blocking(move || {
+        let store = self.env.store.clone();
+        let (id, known, workspace) = tokio::task::spawn_blocking(move || {
             let ws = blirp_core::paths::path_key(&canonical_folder(&ws));
             let workspace = blirp_core::paths::path_key(Path::new(&key)).starts_with(ws);
-            (folder_identity(Path::new(&key)), workspace)
+            let known = store.file_copy_identity(&key).unwrap_or_else(|e| {
+                tracing::warn!(error = %e, "reading a folder's identity failed");
+                None
+            });
+            (folder_identity(Path::new(&key)), known, workspace)
         })
         .await
-        .unwrap_or((None, false));
-        // Removed and made again since the last pass (another folder now
-        // under the same name), even when no reconcile saw it missing.
-        let known = lock(&self.identity).get(&copy.key).copied();
+        .unwrap_or((None, None, false));
+        // Removed and made again since its last settled pass (another
+        // folder now under the same name), even while the daemon was
+        // stopped or before any reconcile saw it missing.
         if id.is_some() && known.is_some() && id != known {
             lock(&self.returned).insert(copy.key.clone());
         }
@@ -257,8 +259,15 @@ impl Engine {
         // A pass that held nothing settles the folder as it is now.
         if r.held_deletes.is_empty() && r.state == Some(ScanState::Ok) {
             lock(&self.returned).remove(&copy.key);
-            if let Some(id) = id {
-                lock(&self.identity).insert(copy.key.clone(), id);
+            if let Some(id) = id.filter(|i| Some(i) != known.as_ref()) {
+                let (store, key) = (self.env.store.clone(), copy.key.clone());
+                match tokio::task::spawn_blocking(move || store.set_file_copy_identity(&key, &id))
+                    .await
+                {
+                    Ok(Ok(())) => {}
+                    Ok(Err(e)) => tracing::warn!(error = %e, "saving a folder's identity failed"),
+                    Err(e) => tracing::warn!(error = %e, "saving a folder's identity failed"),
+                }
             }
         }
         Ok(r)
@@ -558,7 +567,11 @@ pub(crate) fn folder_missing(p: &Path) -> bool {
 /// Identity of the folder at `p` (device and inode; volume serial and
 /// file index on Windows): a folder removed and made again under the same
 /// name has another. None when it cannot be read.
-fn folder_identity(p: &Path) -> Option<(u64, u64)> {
+fn folder_identity(p: &Path) -> Option<String> {
+    folder_id_parts(p).map(|(dev, ino)| format!("{dev}:{ino}"))
+}
+
+fn folder_id_parts(p: &Path) -> Option<(u64, u64)> {
     #[cfg(unix)]
     {
         use std::os::unix::fs::MetadataExt;
@@ -1125,7 +1138,6 @@ mod tests {
             held: Mutex::default(),
             returned: Mutex::default(),
             logged: Mutex::default(),
-            identity: Mutex::default(),
         };
         let tracked = |p: &Path| Tracked {
             copy: Copy {
@@ -1185,7 +1197,7 @@ mod tests {
         let f = dir.path().join("f");
         std::fs::create_dir(&f).unwrap();
         let first = folder_identity(&f).unwrap();
-        assert_eq!(folder_identity(&f), Some(first));
+        assert_eq!(folder_identity(&f), Some(first.clone()));
         std::fs::remove_dir(&f).unwrap();
         assert_eq!(folder_identity(&f), None);
         std::fs::create_dir(&f).unwrap();

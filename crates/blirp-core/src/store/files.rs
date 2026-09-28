@@ -6,7 +6,7 @@
 use super::{Result, Store, all, one};
 use crate::files::EntryContent;
 use crate::files::scan::Cached;
-use rusqlite::{Row, params};
+use rusqlite::{OptionalExtension, Row, params};
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
 
@@ -199,7 +199,8 @@ fn put_file_copy_in(tx: &rusqlite::Transaction<'_>, copy: &FileCopy) -> Result<(
         "INSERT INTO file_copies(path, root_id, origin, mode, seen, created_at, incarnation)
          VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
          ON CONFLICT(path) DO UPDATE SET root_id = excluded.root_id, origin = excluded.origin,
-           mode = excluded.mode, seen = excluded.seen, incarnation = excluded.incarnation",
+           mode = excluded.mode, seen = excluded.seen, incarnation = excluded.incarnation,
+           identity = NULL",
         params![
             copy.path,
             copy.root_id,
@@ -232,6 +233,30 @@ impl Store {
             tx.execute(
                 "UPDATE file_copies SET seen = ?2 WHERE path = ?1",
                 params![path, seen],
+            )?;
+            Ok(())
+        })
+    }
+
+    /// The identity a copy's folder had at its last settled pass.
+    pub fn file_copy_identity(&self, path: &str) -> Result<Option<String>> {
+        self.read(|c| {
+            Ok(c.query_row(
+                "SELECT identity FROM file_copies WHERE path = ?1",
+                params![path],
+                |r| r.get::<_, Option<String>>(0),
+            )
+            .optional()?
+            .flatten())
+        })
+    }
+
+    /// Record the identity of a copy's folder (no-op without its row).
+    pub fn set_file_copy_identity(&self, path: &str, identity: &str) -> Result<()> {
+        self.write(|tx| {
+            tx.execute(
+                "UPDATE file_copies SET identity = ?2 WHERE path = ?1",
+                params![path, identity],
             )?;
             Ok(())
         })

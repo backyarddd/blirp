@@ -58,6 +58,11 @@ impl Node {
             format!("[machine]\nname = \"{name}\"\n[sync]\nrelay = \"disabled\"\n"),
         )
         .unwrap();
+        Self::open(home).await
+    }
+
+    /// Start the daemon of `home` again, with the config it saved.
+    async fn open(home: &Path) -> Node {
         let daemon = Daemon::start(DaemonOptions {
             paths: Paths::at(home),
             port: Some(0),
@@ -727,6 +732,52 @@ async fn a_project_deleted_on_another_machine_stops_syncing_here_at_once() {
         b.daemon.state.store.file_copy(&key).unwrap().is_none()
     })
     .await;
+    for n in [b, hub] {
+        n.daemon.shutdown().await.unwrap();
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_folder_emptied_and_made_again_while_stopped_deletes_nothing() {
+    if !in_temp_home("a_folder_emptied_and_made_again_while_stopped_deletes_nothing") {
+        return;
+    }
+    let tmp = tempfile::tempdir().unwrap();
+    let hub = Node::start(&tmp.path().join("a"), "hub-a").await;
+    let b_home = tmp.path().join("b");
+    let b = Node::start(&b_home, "node-b").await;
+    pair(&hub, &b).await;
+    for n in [&hub, &b] {
+        n.start_now().await;
+    }
+    // One file: under the plain mass-delete guard's minimum.
+    let origin = tmp.path().join("work").join("proj");
+    write(&origin.join("a.txt"), "only file");
+    let project = b.project(&origin).await;
+    eventually("the folder uploaded", || async {
+        hub_files(&hub, &project).await.is_some_and(|(_, n)| n == 1)
+    })
+    .await;
+    let head = || {
+        let roots = hub.daemon.state.store.hub_file_roots().unwrap();
+        roots.iter().find(|r| r.project_id == project).unwrap().head
+    };
+    let head_before = head();
+    b.daemon.shutdown().await.unwrap();
+
+    // While the daemon is stopped: removed and made again, empty.
+    std::fs::remove_dir_all(&origin).unwrap();
+    std::fs::create_dir_all(&origin).unwrap();
+    let b = Node::open(&b_home).await;
+    eventually("the node holds the delete", || async {
+        let f = b.files(&project).await;
+        f.roots
+            .into_iter()
+            .find_map(|r| r.local)
+            .is_some_and(|l| l.state.as_str() == "held_deletes" && l.held_deletes == 1)
+    })
+    .await;
+    assert_eq!(head(), head_before, "a delete was committed");
     for n in [b, hub] {
         n.daemon.shutdown().await.unwrap();
     }

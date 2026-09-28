@@ -4,8 +4,9 @@
 use rusqlite::Connection;
 
 /// Index `i` holds the migration that moves the schema from version `i` to `i + 1`.
-pub(crate) const MIGRATIONS: &[&str] =
-    &[V1, V2, V3, V4, V5, V6, V7, V8, V9, V10, V11, V12, V13, V14];
+pub(crate) const MIGRATIONS: &[&str] = &[
+    V1, V2, V3, V4, V5, V6, V7, V8, V9, V10, V11, V12, V13, V14, V15,
+];
 
 /// Schema of §5. Note on the FTS tables: they are external-content tables keyed
 /// by the implicit rowid of `events`/`records`. blirp never runs `VACUUM`
@@ -484,6 +485,13 @@ ALTER TABLE sessions ADD COLUMN project_updated_at INTEGER NOT NULL DEFAULT 0;
 INSERT INTO settings(key, value_json)
     SELECT 'sync.stamp_sessions', 'true' WHERE EXISTS (SELECT 1 FROM sessions)
     ON CONFLICT(key) DO NOTHING;
+"#;
+
+/// The identity of a working copy's folder at its last settled pass
+/// (`<device>:<inode>`), so a folder deleted and made again while the
+/// daemon was stopped is still told apart.
+const V15: &str = r#"
+ALTER TABLE file_copies ADD COLUMN identity TEXT NULL;
 "#;
 
 #[derive(Debug, thiserror::Error)]
