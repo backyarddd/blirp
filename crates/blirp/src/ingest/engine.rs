@@ -141,6 +141,7 @@ impl Engine {
     /// Run `work`; adapters run in parallel, sources within one sequentially.
     pub fn run(&self, work: &Work) -> HashMap<&'static str, PassStats> {
         self.remove_headless();
+        self.repair_codex_subagents();
         self.retire_non_projects();
         let mut ids: Vec<usize> = work.full.iter().chain(work.paths.keys()).copied().collect();
         ids.sort_unstable();
@@ -468,8 +469,15 @@ impl Engine {
 
     /// One-time repair of Codex subagent sessions ingested before blirp
     /// knew them ([`super::codex::repair_subagents`]).
+    /// Runs at the start of an ingest pass, and on a node only once a pull
+    /// reached the hub's head (it writes replicated changes of rows the hub
+    /// may still be sending), as [`Engine::remove_headless`].
     pub fn repair_codex_subagents(&self) {
         const KEY: &str = "ingest.repair.codex_subagents";
+        let Some(role) = self.role() else { return };
+        if role == MachineRole::Node && !self.store.pulled_to_head() {
+            return;
+        }
         match self.store.get_setting(KEY) {
             Ok(None) => {}
             Ok(Some(_)) => return,
@@ -488,18 +496,20 @@ impl Engine {
                 Ok(n)
             });
         match res {
-            Ok(n) => tracing::info!(
-                subagents = n.subagents,
-                relinked = n.relinked,
-                forks_truncated = n.forks_truncated,
-                events_dropped = n.events_dropped,
-                forks_unconfirmed = n.forks_unconfirmed,
-                titles_fixed = n.titles_fixed,
-                records_removed = n.records_removed,
-                "repaired codex subagent sessions"
-            ),
+            Ok(n) => {
+                tracing::info!(
+                    subagents = n.subagents,
+                    relinked = n.relinked,
+                    forks_truncated = n.forks_truncated,
+                    events_dropped = n.events_dropped,
+                    forks_unconfirmed = n.forks_unconfirmed,
+                    titles_fixed = n.titles_fixed,
+                    records_removed = n.records_removed,
+                    "repaired codex subagent sessions"
+                );
+            }
             Err(e) => {
-                tracing::warn!(error = %e, "codex subagent repair failed; retried next start")
+                tracing::warn!(error = %e, "codex subagent repair failed; retried on the next pass")
             }
         }
     }

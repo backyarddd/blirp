@@ -982,6 +982,36 @@ fn codex_subagent_repair_cleans_up_what_earlier_builds_ingested() {
     }
     let outbox = h.outbox_len();
 
+    // Upgraded from that build: the repair has not run (every pass ran it
+    // above, before anything was stored).
+    let key = "ingest.repair.codex_subagents".to_string();
+    h.store
+        .set_settings(&std::collections::BTreeMap::from([(key.clone(), None)]))
+        .unwrap();
+    // A node waits until a pull reached the hub's head: the hub may still
+    // be sending rows the repair changes.
+    let machine_id = h.store.machine_id().unwrap().unwrap();
+    let mut m = h.store.get_machine(&machine_id).unwrap().unwrap();
+    m.role = MachineRole::Node;
+    h.store.upsert_machine(&m).unwrap();
+    h.engine.repair_codex_subagents();
+    assert_eq!(h.store.get_setting(&key).unwrap(), None);
+    assert_eq!(
+        h.events(&h.session("codex", fork)).len(),
+        4,
+        "not repaired yet"
+    );
+    h.store
+        .node_apply_pull(
+            "hub",
+            &HubPage {
+                own_seen: 0,
+                entries: Vec::new(),
+                up_to: 1,
+                more: false,
+            },
+        )
+        .unwrap();
     h.engine.repair_codex_subagents();
     let s = h.session("codex", fork);
     let texts: Vec<String> = h.events(&s).into_iter().map(|e| e.text).collect();
