@@ -699,6 +699,14 @@ fn apply_proposal(tx: &Transaction<'_>, s: &Suggestion, by: &str) -> Result<()> 
                 None => None,
             };
             let record = match existing {
+                // Moved to another project since it was proposed: the
+                // proposal was made from this project's memory, not that one's.
+                Some(r) if r.project_id != s.project_id => {
+                    return Err(StoreError::Conflict(
+                        "the record was moved to another project since; reject this suggestion"
+                            .into(),
+                    ));
+                }
                 Some(mut r) => {
                     r.kind = p.kind;
                     r.title = p.title;
@@ -728,7 +736,27 @@ fn apply_proposal(tx: &Transaction<'_>, s: &Suggestion, by: &str) -> Result<()> 
         }
         SuggestionTarget::Wiki => {
             let p: WikiProposal = parse_proposal(s)?;
-            match get_wiki_in(tx, &s.project_id, &p.slug)?.filter(|w| !w.deleted) {
+            // A proposal for a known page follows the page by id (its slug
+            // may have changed since); only one for no page creates one.
+            let page = match &s.target_id {
+                Some(id) => Some(
+                    one(
+                        tx,
+                        "SELECT * FROM wiki_pages WHERE id = ?1",
+                        params![id],
+                        wiki_row,
+                    )?
+                    .filter(|w| !w.deleted && w.project_id == s.project_id)
+                    .ok_or_else(|| {
+                        StoreError::Conflict(
+                            "the wiki page was deleted or moved since; reject this suggestion"
+                                .into(),
+                        )
+                    })?,
+                ),
+                None => get_wiki_in(tx, &s.project_id, &p.slug)?.filter(|w| !w.deleted),
+            };
+            match page {
                 Some(mut w) => {
                     nonempty("title", &p.title)?;
                     w.title = p.title;
@@ -850,6 +878,65 @@ mod tests {
                 .len(),
             0
         );
+    }
+
+    // A proposal follows its page by id across a rename and is refused for
+    // a record moved to another project since.
+    #[test]
+    fn proposals_follow_renamed_pages_and_refuse_moved_records() {
+        let (_d, store) = temp_store();
+        let page = store
+            .create_wiki_page("p", "setup", "Setup", "old", "user")
+            .unwrap();
+        store
+            .rename_wiki_page("p", "setup", "install", "user")
+            .unwrap();
+        let w = suggestion(
+            SuggestionTarget::Wiki,
+            Some(&page.id),
+            json!({"slug": "setup", "title": "Setup", "body_md": "new"}),
+        );
+        store.insert_suggestion(&w).unwrap();
+        store
+            .decide_suggestion(&w.id, SuggestionStatus::Accepted, "user")
+            .unwrap();
+        assert_eq!(store.list_wiki("p").unwrap().len(), 1);
+        assert_eq!(
+            store
+                .get_wiki_page("p", "install")
+                .unwrap()
+                .unwrap()
+                .body_md,
+            "new"
+        );
+
+        let now = crate::now_ms();
+        let rec = store
+            .create_record(Record {
+                id: "r1".into(),
+                project_id: "other".into(),
+                kind: RecordKind::Note,
+                title: "moved".into(),
+                body: String::new(),
+                status: RecordStatus::Active,
+                pinned: false,
+                source_session_id: None,
+                created_at: now,
+                updated_at: now,
+                updated_by: "user".into(),
+            })
+            .unwrap();
+        let r = suggestion(
+            SuggestionTarget::Record,
+            Some(&rec.id),
+            json!({"kind": "note", "title": "t", "body": "b"}),
+        );
+        store.insert_suggestion(&r).unwrap();
+        assert!(matches!(
+            store.decide_suggestion(&r.id, SuggestionStatus::Accepted, "user"),
+            Err(StoreError::Conflict(_))
+        ));
+        assert_eq!(store.get_record("r1").unwrap().unwrap().title, "moved");
     }
 
     #[test]
