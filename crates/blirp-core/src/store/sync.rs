@@ -165,6 +165,41 @@ fn foreign_session_write(old: Session, new: &Session) -> Session {
     }
 }
 
+/// Node: the hub did not log this machine's outbox entry `origin_seq` as a
+/// change. For a write of another machine's session, a title or project it
+/// set that is still the stored one loses its edit time (-1): the owner's
+/// next row wins again, instead of this machine keeping an edit no other
+/// machine got (the hub dropped a parked write: expired, over the cap, or
+/// its owner is no longer paired). A parked write the hub applies later
+/// comes back with its own time and wins as before.
+fn forget_refused_edit_in(tx: &Transaction<'_>, origin_seq: i64) -> Result<()> {
+    let payload: Option<String> = tx
+        .query_row(
+            "SELECT payload_json FROM outbox WHERE origin_seq = ?1 AND entity = 'sessions'",
+            params![origin_seq],
+            |r| r.get(0),
+        )
+        .optional()?;
+    let Some(Ok(Change::Session(s))) = payload.map(|p| serde_json::from_str::<Change>(&p)) else {
+        return Ok(());
+    };
+    let me = super::local_machine_in(tx)?;
+    if s.machine_id == me {
+        return Ok(());
+    }
+    tx.execute(
+        "UPDATE sessions SET title_updated_at = -1
+         WHERE id = ?1 AND machine_id <> ?4 AND title_updated_at = ?2 AND title IS ?3",
+        params![s.id, s.title_updated_at, s.title, me],
+    )?;
+    tx.execute(
+        "UPDATE sessions SET project_updated_at = -1
+         WHERE id = ?1 AND machine_id <> ?4 AND project_updated_at = ?2 AND project_id = ?3",
+        params![s.id, s.project_updated_at, s.project_id, me],
+    )?;
+    Ok(())
+}
+
 /// Why a replicated entry is not accepted (§10).
 #[derive(Debug)]
 enum Refused {
@@ -353,7 +388,14 @@ impl WireEntry {
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum PulledEntry {
     /// Written by the requesting machine itself; only its position is sent.
-    Own { hub_seq: i64, origin_seq: i64 },
+    Own {
+        hub_seq: i64,
+        origin_seq: i64,
+        /// The hub did not log it as a change (rejected, or parked and
+        /// maybe dropped later): see [`forget_refused_edit_in`].
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        refused: bool,
+    },
     Remote {
         hub_seq: i64,
         origin_machine: String,
@@ -1311,9 +1353,11 @@ impl Store {
                 let origin_seq: i64 = r.get(2)?;
                 let entry = if origin_machine == requester {
                     bytes += 16;
+                    let op: String = r.get(4)?;
                     PulledEntry::Own {
                         hub_seq,
                         origin_seq,
+                        refused: op == MARKER_OP,
                     }
                 } else {
                     let entity: String = r.get(3)?;
@@ -1536,9 +1580,16 @@ impl Store {
             )?;
             for pe in &page.entries {
                 match pe {
-                    PulledEntry::Own { hub_seq, origin_seq } => {
+                    PulledEntry::Own {
+                        hub_seq,
+                        origin_seq,
+                        refused,
+                    } => {
                         if *hub_seq > cur.last_pulled_hub_seq {
                             own_seen = own_seen.max(*origin_seq);
+                            if *refused {
+                                forget_refused_edit_in(tx, *origin_seq)?;
+                            }
                         }
                     }
                     PulledEntry::Remote {
@@ -3385,6 +3436,37 @@ mod tests {
     }
 
     const PARKED: &str = "SELECT count(*) FROM hub_parked";
+
+    // A parked rename the hub drops (expired, over the cap, owner unpaired)
+    // never reaches anyone else: its origin gives it up once it sees the
+    // marker, so the owner's rows win there again and every machine
+    // converges.
+    #[test]
+    fn a_rename_the_hub_never_logs_does_not_stick_on_its_origin() {
+        let t = three();
+        park_rename(&t);
+        pull(&t.n, "N", &t.hub, "H");
+        let s = t.n.get_session("s").unwrap().unwrap();
+        assert_eq!(
+            (s.title.as_deref(), s.title_updated_at),
+            (Some("renamed"), -1)
+        );
+        // Dropped on the hub (the 7-day expiry, here at once).
+        t.hub
+            .write(|tx| Ok(tx.execute("DELETE FROM hub_parked", [])?))
+            .unwrap();
+        push(&t.x, "X", &t.hub, "H");
+        pull(&t.n, "N", &t.hub, "H");
+        let first = |st: &Store| st.get_session("s").unwrap().unwrap().title;
+        assert_eq!(first(&t.hub).as_deref(), Some("first"));
+        assert_eq!(first(&t.n).as_deref(), Some("first"));
+        // A later rename there is stamped and replicates as usual.
+        t.n.modify_session("s", |s| s.title = Some("again".into()))
+            .unwrap();
+        assert!(t.n.get_session("s").unwrap().unwrap().title_updated_at > 0);
+        push(&t.n, "N", &t.hub, "H");
+        assert_eq!(first(&t.hub).as_deref(), Some("again"));
+    }
 
     #[test]
     fn a_revoked_machines_parked_writes_are_never_applied() {

@@ -91,7 +91,9 @@ stopped_by_user: boolean,
 /**
  * When `title` was last set, and `project_id` below. Other machines
  * may retitle or move a session, so each converges on its newest edit
- * by this time, independent of the rest of the row (§10). 0: never.
+ * by this time, independent of the rest of the row (§10). 0: never;
+ * -1: an edit made here that the hub did not log (the owner's next row
+ * wins).
  */
 title_updated_at: number, project_updated_at: number, 
 /**
@@ -454,7 +456,9 @@ stopped_by_user: boolean,
 /**
  * When `title` was last set, and `project_id` below. Other machines
  * may retitle or move a session, so each converges on its newest edit
- * by this time, independent of the rest of the row (§10). 0: never.
+ * by this time, independent of the rest of the row (§10). 0: never;
+ * -1: an edit made here that the hub did not log (the owner's next row
+ * wins).
  */
 title_updated_at: number, project_updated_at: number, 
 /**
