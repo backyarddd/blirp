@@ -1904,6 +1904,53 @@ async fn folderless_projects_start_in_their_workspace() {
 // Delete moves a project to the Trash with its sessions hidden; restore
 // brings both back. Folders are added only when they exist, projects are
 // opened only in their own folders, and Chats keeps its name.
+// A folder to register must be on a local disk (a network path would make
+// Windows connect to its server with the user's credentials) and must not be
+// the home folder or contain it.
+#[tokio::test]
+async fn project_folders_refuse_network_paths_and_the_home_folder() {
+    let h = Harness::start().await;
+    let work = tempfile::tempdir().unwrap();
+    let r = h
+        .send(
+            reqwest::Method::POST,
+            "/api/projects",
+            json!({"path": work.path(), "name": "Ok"}),
+        )
+        .await;
+    assert_eq!(r.status(), 201);
+    let p: ProjectSummary = r.json().await.unwrap();
+    let home = dunce::canonicalize(std::env::home_dir().unwrap()).unwrap();
+    let mut refused = vec![home.clone(), home.parent().unwrap().to_path_buf()];
+    if cfg!(windows) {
+        refused.extend(
+            [
+                r"\\blirp-test.invalid\share",
+                r"\\?\UNC\blirp-test.invalid\share",
+            ]
+            .map(std::path::PathBuf::from),
+        );
+    }
+    for path in refused {
+        let r = h
+            .send(
+                reqwest::Method::POST,
+                "/api/projects",
+                json!({"path": path}),
+            )
+            .await;
+        assert_eq!(r.status(), 400, "create {}", path.display());
+        let r = h
+            .send(
+                reqwest::Method::POST,
+                &format!("/api/projects/{}/folders", p.project.id),
+                json!({"path": path}),
+            )
+            .await;
+        assert_eq!(r.status(), 400, "add folder {}", path.display());
+    }
+}
+
 #[tokio::test]
 async fn project_trash_restore_folders_and_open() {
     let h = Harness::start().await;

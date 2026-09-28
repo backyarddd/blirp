@@ -47,6 +47,20 @@ fn with_workspace(s: &SharedState, mut p: ProjectSummary) -> ProjectSummary {
     p
 }
 
+/// A folder given to register: absolute (a relative one would resolve
+/// against the daemon's own directory) and on a local disk, checked before
+/// anything touches the filesystem (a network path would connect to its
+/// server).
+fn local_folder(path: &str) -> ApiResult<()> {
+    if blirp_core::paths::is_local_absolute(std::path::Path::new(path)) {
+        Ok(())
+    } else {
+        Err(ApiError::bad_request(
+            "path must be an absolute path to a folder on this machine (not a network path)",
+        ))
+    }
+}
+
 fn summary(s: &SharedState, id: &str) -> ApiResult<ProjectSummary> {
     Ok(with_workspace(
         s,
@@ -95,13 +109,8 @@ async fn create(
     _: Control,
     ApiJson(body): ApiJson<CreateProject>,
 ) -> ApiResult<(StatusCode, Json<ProjectSummary>)> {
-    // A relative folder would resolve against the daemon's own directory.
-    if body
-        .path
-        .as_deref()
-        .is_some_and(|p| !std::path::Path::new(p).is_absolute())
-    {
-        return Err(ApiError::bad_request("path must be an absolute path"));
+    if let Some(p) = &body.path {
+        local_folder(p)?;
     }
     if let Some(b) = &body.brief {
         super::memory::check_len("brief", b)?;
@@ -283,10 +292,7 @@ async fn add_folder(
     ApiPath(id): ApiPath<String>,
     ApiJson(body): ApiJson<AddProjectFolder>,
 ) -> ApiResult<Json<ProjectSummary>> {
-    // A relative folder would resolve against the daemon's own directory.
-    if !std::path::Path::new(&body.path).is_absolute() {
-        return Err(ApiError::bad_request("path must be an absolute path"));
-    }
+    local_folder(&body.path)?;
     let st = s.clone();
     let summary = blocking(move || {
         st.store

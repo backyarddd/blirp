@@ -760,6 +760,12 @@ impl Store {
         name: Option<&str>,
     ) -> Result<Project> {
         let path = canonical_dir(path)?;
+        if NonProjectDirs::launch().contains(&path) {
+            return Err(StoreError::Invalid(format!(
+                "{} cannot be a project folder (home folder or a filesystem root)",
+                path.display()
+            )));
+        }
         let remote = git::repo_info(&path).ok().flatten().and_then(|r| r.remote);
         let name = match name {
             Some(n) => check_name(n)?.to_string(),

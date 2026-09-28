@@ -119,8 +119,10 @@ pub fn destination(home: &Path, parent: Option<&str>, name: &str) -> Result<Path
     let parent = match parent.map(str::trim).filter(|p| !p.is_empty()) {
         Some(p) => {
             let p = Path::new(p);
-            if !p.is_absolute() {
-                return Err(invalid("the parent folder must be an absolute path"));
+            if !blirp_core::paths::is_local_absolute(p) {
+                return Err(invalid(
+                    "the parent folder must be an absolute path on this machine (not a network path)",
+                ));
             }
             dunce::canonicalize(p)
                 .map_err(|e| invalid(format!("the parent folder is not accessible: {e}")))?

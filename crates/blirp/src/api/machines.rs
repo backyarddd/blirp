@@ -148,8 +148,10 @@ fn list_dirs(
     let dir = match path.map(str::trim).filter(|p| !p.is_empty()) {
         None => home.clone(),
         Some(p) => {
-            if p.contains('\0') || !Path::new(p).is_absolute() {
-                return Err(ApiError::bad_request("path must be an absolute folder"));
+            if !blirp_core::paths::is_local_absolute(Path::new(p)) {
+                return Err(ApiError::bad_request(
+                    "path must be an absolute folder on this machine (not a network path)",
+                ));
             }
             dunce::canonicalize(p).map_err(|e| match e.kind() {
                 std::io::ErrorKind::NotFound => ApiError::not_found("folder"),

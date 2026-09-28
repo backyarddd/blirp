@@ -36,6 +36,25 @@ fn io(action: &'static str, path: &Path) -> impl FnOnce(std::io::Error) -> Paths
     }
 }
 
+/// An absolute path on a local disk. On Windows a network (UNC) or device
+/// path is refused: opening one connects to that server, and Windows sends
+/// it the user's NTLM credentials.
+pub fn is_local_absolute(p: &Path) -> bool {
+    if !p.is_absolute() || p.as_os_str().to_string_lossy().contains('\0') {
+        return false;
+    }
+    #[cfg(windows)]
+    {
+        use std::path::{Component, Prefix};
+        matches!(
+            p.components().next(),
+            Some(Component::Prefix(x)) if matches!(x.kind(), Prefix::Disk(_) | Prefix::VerbatimDisk(_))
+        )
+    }
+    #[cfg(not(windows))]
+    true
+}
+
 /// The user's home directory (`%USERPROFILE%` on Windows, `$HOME` on unix).
 pub fn user_home() -> Option<PathBuf> {
     std::env::home_dir().filter(|p| !p.as_os_str().is_empty())
@@ -303,6 +322,26 @@ pub fn write_private(path: &Path, bytes: &[u8]) -> Result<(), PathsError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn local_absolute_paths_exclude_network_paths() {
+        assert!(!is_local_absolute(Path::new("relative/dir")));
+        #[cfg(windows)]
+        {
+            assert!(is_local_absolute(Path::new(r"C:\Users\me\proj")));
+            assert!(is_local_absolute(Path::new(r"\\?\C:\Users\me")));
+            for p in [
+                r"\\server\share\proj",
+                "//server/share/proj",
+                r"\\?\UNC\server\share",
+                r"\\.\pipe\x",
+            ] {
+                assert!(!is_local_absolute(Path::new(p)), "{p}");
+            }
+        }
+        #[cfg(not(windows))]
+        assert!(is_local_absolute(Path::new("/home/me/proj")));
+    }
 
     #[test]
     fn runtime_roundtrip() {

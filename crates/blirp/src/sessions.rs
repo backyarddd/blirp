@@ -393,9 +393,11 @@ pub async fn launch(state: &SharedState, req: LaunchSession) -> ApiResult<Sessio
     if req
         .cwd
         .as_ref()
-        .is_some_and(|c| !Path::new(c).is_absolute())
+        .is_some_and(|c| !blirp_core::paths::is_local_absolute(Path::new(c)))
     {
-        return Err(ApiError::bad_request("cwd must be an absolute path"));
+        return Err(ApiError::bad_request(
+            "cwd must be an absolute path on this machine (not a network path)",
+        ));
     }
     if req.prompt.as_ref().is_some_and(|p| p.len() > MAX_PROMPT) {
         return Err(ApiError::bad_request("prompt exceeds 64 KiB"));
