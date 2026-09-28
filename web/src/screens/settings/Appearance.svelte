@@ -2,6 +2,14 @@
   import { app } from '../../lib/app.svelte';
   import { setTheme, theme, type ThemePref } from '../../lib/theme.svelte';
   import { NOTIFY_EVENTS, permissionHint, primeSound, type NotifyPrefs } from '../../lib/notify';
+  import { isMac } from '../../lib/prefs';
+  import {
+    LIMITS,
+    resetTerminalSettings,
+    setTerminalSettings,
+    terminalSettings,
+    type CursorStyle,
+  } from '../../lib/terminal/settings.svelte';
 
   const OPTIONS: { id: ThemePref; label: string }[] = [
     { id: 'system', label: 'Match system' },
@@ -42,6 +50,70 @@
         {o.label}
       </button>
     {/each}
+  </div>
+  <p class="hint">Saved in this browser only.</p>
+</section>
+
+<section class="card panel-pad" aria-labelledby="terminal-h">
+  <h2 class="h" id="terminal-h">Terminal</h2>
+  <div class="grid">
+    <label for="term-font">Font size</label>
+    <input
+      id="term-font"
+      type="number"
+      min={LIMITS.fontSize.min}
+      max={LIMITS.fontSize.max}
+      step={LIMITS.fontSize.step}
+      value={terminalSettings.fontSize}
+      onchange={(e) => setTerminalSettings({ fontSize: e.currentTarget.valueAsNumber })}
+    />
+    <label for="term-line">Line height</label>
+    <input
+      id="term-line"
+      type="number"
+      min={LIMITS.lineHeight.min}
+      max={LIMITS.lineHeight.max}
+      step={LIMITS.lineHeight.step}
+      value={terminalSettings.lineHeight}
+      onchange={(e) => setTerminalSettings({ lineHeight: e.currentTarget.valueAsNumber })}
+    />
+    <label for="term-spacing">Letter spacing (px)</label>
+    <input
+      id="term-spacing"
+      type="number"
+      min={LIMITS.letterSpacing.min}
+      max={LIMITS.letterSpacing.max}
+      step={LIMITS.letterSpacing.step}
+      value={terminalSettings.letterSpacing}
+      onchange={(e) => setTerminalSettings({ letterSpacing: e.currentTarget.valueAsNumber })}
+    />
+    <label for="term-cursor">Cursor</label>
+    <select
+      id="term-cursor"
+      value={terminalSettings.cursorStyle}
+      onchange={(e) => setTerminalSettings({ cursorStyle: e.currentTarget.value as CursorStyle })}
+    >
+      <option value="block">Block</option>
+      <option value="underline">Underline</option>
+      <option value="bar">Bar</option>
+    </select>
+  </div>
+  <label class="check">
+    <input type="checkbox" checked={terminalSettings.cursorBlink} onchange={(e) => setTerminalSettings({ cursorBlink: e.currentTarget.checked })} />
+    <span>Blinking cursor</span>
+  </label>
+  {#if isMac}
+    <label class="check">
+      <input
+        type="checkbox"
+        checked={terminalSettings.macOptionIsMeta}
+        onchange={(e) => setTerminalSettings({ macOptionIsMeta: e.currentTarget.checked })}
+      />
+      <span>Use Option as Meta (Option+Enter, Option+letter reach the program as Alt; off types special characters)</span>
+    </label>
+  {/if}
+  <div class="row">
+    <button type="button" class="btn" onclick={resetTerminalSettings}>Reset to defaults</button>
   </div>
   <p class="hint">Saved in this browser only.</p>
 </section>
@@ -102,6 +174,13 @@
   .h {
     font-size: 15px;
     margin: 0 0 10px;
+  }
+  .grid {
+    display: grid;
+    grid-template-columns: max-content minmax(0, 160px);
+    align-items: center;
+    gap: 8px 12px;
+    margin-bottom: 8px;
   }
   .events {
     border: 0;

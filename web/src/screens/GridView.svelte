@@ -36,7 +36,7 @@
             <a class="icon-btn sm" href={href.sessions(s.id)} aria-label="Open {sessionTitle(s)}" title="Open session"><Maximize size={14} /></a>
           </header>
           <div class="term">
-            <Terminal sessionId={s.id} label="Terminal: {sessionTitle(s)}" webgl={tiles.length <= WEBGL_TILE_LIMIT} fontSize={12} />
+            <Terminal sessionId={s.id} label="Terminal: {sessionTitle(s)}" webgl={tiles.length <= WEBGL_TILE_LIMIT} compact />
           </div>
         </section>
       {/each}
