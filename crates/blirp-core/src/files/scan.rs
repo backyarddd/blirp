@@ -188,17 +188,12 @@ impl Walk<'_> {
     fn dir(&mut self, dir: &Path, rel: &str, frames: &mut Vec<Frame>) -> bool {
         frames.push(Frame::load(dir));
         let folder = rel.trim_end_matches('/').to_string();
-        let mut entries: Vec<std::fs::DirEntry> = match std::fs::read_dir(dir) {
-            Ok(r) => {
-                let mut ok = Vec::new();
-                for e in r {
-                    match e {
-                        Ok(e) => ok.push(e),
-                        Err(_) => self.out.unreadable.push(folder.clone()),
-                    }
-                }
-                ok
-            }
+        let list = || match std::fs::read_dir(dir) {
+            Ok(r) => Ok(r.collect::<Vec<_>>()),
+            Err(e) => Err(e),
+        };
+        let mut listed = match list() {
+            Ok(l) => l,
             Err(e) => {
                 tracing::debug!(dir = %dir.display(), error = %e, "cannot list folder; skipped");
                 self.out.unreadable.push(folder);
@@ -206,6 +201,31 @@ impl Walk<'_> {
                 return true;
             }
         };
+        // A write that stopped midway (a crash) may have moved a file
+        // aside: it goes back before anything is read, so it is never
+        // taken for a delete.
+        let asides = listed.iter().flatten().any(|e| {
+            e.file_name()
+                .to_str()
+                .is_some_and(|n| n.starts_with(super::write::ASIDE_PREFIX))
+        });
+        if asides {
+            let names: Vec<String> = listed
+                .iter()
+                .flatten()
+                .filter_map(|e| e.file_name().to_str().map(str::to_string))
+                .collect();
+            if super::write::restore_asides(dir, names.iter().map(String::as_str)) > 0 {
+                listed = list().unwrap_or_default();
+            }
+        }
+        let mut entries = Vec::new();
+        for e in listed {
+            match e {
+                Ok(e) => entries.push(e),
+                Err(_) => self.out.unreadable.push(folder.clone()),
+            }
+        }
         entries.sort_by_key(std::fs::DirEntry::file_name);
         let mut go_on = true;
         for entry in entries {
@@ -551,6 +571,28 @@ mod tests {
 
     fn paths(s: &Scan) -> Vec<&str> {
         s.found.iter().map(|f| f.path.as_str()).collect()
+    }
+
+    #[test]
+    fn a_file_left_aside_by_a_crash_goes_back_before_the_scan() {
+        let dir = tempfile::tempdir().unwrap();
+        let r = dir.path();
+        std::fs::create_dir(r.join("sub")).unwrap();
+        let aside = |p: &str| format!("{}{p}", super::super::write::ASIDE_PREFIX);
+        // Crashed midway: the target is missing, its aside holds it.
+        std::fs::write(r.join("sub").join(aside("a.txt")), "kept").unwrap();
+        // Finished but not removed yet: the target is there, the aside is
+        // an old version and stays out.
+        std::fs::write(r.join("b.txt"), "new").unwrap();
+        std::fs::write(r.join(aside("b.txt")), "old").unwrap();
+        let s = scan(r, false, &cfg()).unwrap();
+        assert_eq!(paths(&s), ["b.txt", "sub/a.txt"]);
+        assert_eq!(
+            std::fs::read_to_string(r.join("sub/a.txt")).unwrap(),
+            "kept"
+        );
+        assert!(!r.join("sub").join(aside("a.txt")).exists());
+        assert_eq!(std::fs::read_to_string(r.join("b.txt")).unwrap(), "new");
     }
 
     #[test]

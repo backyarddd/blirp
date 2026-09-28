@@ -935,6 +935,31 @@ async fn a_file_over_the_hubs_limit_does_not_hold_up_its_folder() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_write_interrupted_after_moving_a_file_aside_is_not_a_delete() {
+    let w = world(0).await;
+    let (e0, c0) = w.writer(0).unwrap();
+    let root = Path::new(&c0.key);
+    // The state a crash leaves between moving the target aside and moving
+    // the new file in.
+    std::fs::rename(
+        root.join("a.txt"),
+        root.join(format!("{}a.txt", blirp_core::files::write::ASIDE_PREFIX)),
+    )
+    .unwrap();
+    let r = copy::upload(&e0, &c0).await.unwrap();
+    assert_eq!((r.sent, r.held_deletes.len()), (0, 0), "{r:?}");
+    assert_eq!(
+        std::fs::read_to_string(root.join("a.txt")).unwrap(),
+        "origin a"
+    );
+    assert!(
+        w.index()
+            .iter()
+            .any(|e| e.path == "a.txt" && e.content.is_some())
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_returned_folder_holds_even_a_single_delete() {
     let w = world(0).await;
     let (e0, c0) = w.writer(0).unwrap();

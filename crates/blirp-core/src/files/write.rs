@@ -364,11 +364,38 @@ impl Target<'_> {
     }
 }
 
+/// Name prefix of a file moved aside by [`replace`] or [`remove`]; the
+/// rest is the target's own name, so a crash midway can be undone.
+pub const ASIDE_PREFIX: &str = ".blirp-tmp-aside.";
+
+/// Where `target` is moved aside (None when the name would be too long).
+fn aside_of(target: &Path) -> Option<PathBuf> {
+    let name = target.file_name()?.to_str()?;
+    let aside = format!("{ASIDE_PREFIX}{name}");
+    (aside.len() <= 255).then(|| target.with_file_name(aside))
+}
+
+/// Give up a file moved aside once its operation is done: renamed to a
+/// plain temp name (so it is never restored), then removed, or left to
+/// the scan's sweep of day-old temp files while something still holds it.
+fn discard(aside: &Path) {
+    let trash = crate::random_hex::<8>()
+        .ok()
+        .map(|r| aside.with_file_name(format!("{TMP_PREFIX}{r}")));
+    let gone = match &trash {
+        Some(t) if std::fs::rename(aside, t).is_ok() => t.as_path(),
+        _ => aside,
+    };
+    let _ = std::fs::remove_file(gone);
+}
+
 /// Windows can refuse to replace or delete a file (access denied) that it
 /// still lets be renamed: Defender's real-time protection does that to
 /// files it is looking at, for seconds at a time under load. Such a
-/// target is moved aside under a temp name first (never a read-only one,
-/// which stays refused).
+/// target is moved aside first (never a read-only one, which stays
+/// refused), under its [`aside_of`] name: until the operation is done, a
+/// missing target with its aside is a crash midway, which the next scan
+/// of the folder undoes ([`restore_asides`]).
 fn denied_but_movable(e: &std::io::Error, target: &Path) -> Option<PathBuf> {
     if !cfg!(windows) || e.kind() != std::io::ErrorKind::PermissionDenied {
         return None;
@@ -376,16 +403,17 @@ fn denied_but_movable(e: &std::io::Error, target: &Path) -> Option<PathBuf> {
     if std::fs::symlink_metadata(target).map_or(true, |m| m.permissions().readonly()) {
         return None;
     }
-    let aside = target
-        .parent()?
-        .join(format!("{TMP_PREFIX}{}", crate::random_hex::<8>().ok()?));
+    let aside = aside_of(target)?;
+    // One left by an operation that finished but could not remove it.
+    if std::fs::symlink_metadata(&aside).is_ok() {
+        discard(&aside);
+    }
     std::fs::rename(target, &aside).ok()?;
     Some(aside)
 }
 
-/// Move `tmp` onto `target`; see [`denied_but_movable`]. What was moved
-/// aside is removed, or left to the scan's sweep of old temp files while
-/// it is still held; it comes back if the new file cannot go in.
+/// Move `tmp` onto `target`; see [`denied_but_movable`]. The old file
+/// comes back if the new one cannot go in.
 fn replace(tmp: &Path, target: &Path) -> std::io::Result<()> {
     let e = match std::fs::rename(tmp, target) {
         Err(e) => e,
@@ -396,7 +424,7 @@ fn replace(tmp: &Path, target: &Path) -> std::io::Result<()> {
     };
     match std::fs::rename(tmp, target) {
         Ok(()) => {
-            let _ = std::fs::remove_file(&aside);
+            discard(&aside);
             Ok(())
         }
         Err(e) => {
@@ -415,8 +443,36 @@ fn remove(target: &Path) -> std::io::Result<()> {
     let Some(aside) = denied_but_movable(&e, target) else {
         return Err(e);
     };
-    let _ = std::fs::remove_file(&aside);
+    discard(&aside);
     Ok(())
+}
+
+/// Undo a replace or delete that stopped midway (a crash) in `dir`, whose
+/// entries are `names`: a file moved aside whose target is missing goes
+/// back in place. Returns how many came back.
+pub fn restore_asides<'a>(dir: &Path, names: impl IntoIterator<Item = &'a str>) -> usize {
+    let names: Vec<&str> = names.into_iter().collect();
+    let mut restored = 0;
+    for aside in names.iter().filter(|n| n.starts_with(ASIDE_PREFIX)) {
+        let target = &aside[ASIDE_PREFIX.len()..];
+        if target.is_empty() || names.contains(&target) {
+            continue;
+        }
+        let to = dir.join(target);
+        if std::fs::symlink_metadata(&to).is_ok() {
+            continue;
+        }
+        match std::fs::rename(dir.join(aside), &to) {
+            Ok(()) => {
+                tracing::warn!(path = %to.display(), "restored a file an interrupted write had moved aside");
+                restored += 1;
+            }
+            Err(e) => {
+                tracing::warn!(path = %to.display(), error = %e, "restoring a file moved aside failed");
+            }
+        }
+    }
+    restored
 }
 
 /// Time Windows retries may spend in all: one per pass (an apply, a
@@ -793,6 +849,17 @@ mod tests {
             .spawn()
             .unwrap();
         w.remove("b.exe", &Expect::Any).unwrap();
+        assert!(!dir.path().join("b.exe").exists());
+        // Both finished: nothing is left under a name a later scan would
+        // put back (the held old files wait as plain temp files).
+        let asides: Vec<String> = std::fs::read_dir(dir.path())
+            .unwrap()
+            .flatten()
+            .filter_map(|e| e.file_name().to_str().map(str::to_string))
+            .filter(|n| n.starts_with(ASIDE_PREFIX))
+            .collect();
+        assert!(asides.is_empty(), "{asides:?}");
+        assert_eq!(restore_asides(dir.path(), ["held.exe"]), 0);
         assert!(!dir.path().join("b.exe").exists());
         for r in [&mut run, &mut run2] {
             let _ = r.kill();
