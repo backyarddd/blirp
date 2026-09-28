@@ -521,10 +521,13 @@ ALTER TABLE sessions ADD COLUMN context_near_full_at INTEGER NULL;
 /// seqs start at 0 (an ingested transcript's first line), so 0 meant both
 /// "nothing" and "through the first event", and the first event was never
 /// distilled. A session with no successful summary had nothing distilled.
+/// Only this machine's sessions: only the owner distills a session (and
+/// its copies elsewhere keep what replication gave them).
 const V19: &str = r#"
 UPDATE sessions SET distilled_through_seq = -1
  WHERE distilled_through_seq = 0
-   AND (summary_json IS NULL OR json_extract(summary_json, '$.distilled_at') IS NULL);
+   AND (summary_json IS NULL OR json_extract(summary_json, '$.distilled_at') IS NULL)
+   AND machine_id = (SELECT json_extract(value_json, '$') FROM settings WHERE key = 'machine_id');
 "#;
 
 #[derive(Debug, thiserror::Error)]

@@ -1034,13 +1034,23 @@ pub(crate) mod tests {
         );
     }
 
-    // V19: sessions without a successful summary had nothing distilled
-    // (-1); one distilled through seq 0 keeps 0.
+    // V19: this machine's sessions without a successful summary had
+    // nothing distilled (-1); one distilled through seq 0 keeps 0.
     #[test]
     fn undistilled_sessions_migrate_to_not_distilled() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("blirp.db");
         let store = Store::open(&path).unwrap();
+        store
+            .set_setting(engine::MACHINE_ID_KEY, &serde_json::json!("m"))
+            .unwrap();
+        store
+            .insert_session(&crate::model::Session {
+                machine_id: "other".into(),
+                distilled_through_seq: 0,
+                ..super::sessions::tests::session("foreign", "p", 1)
+            })
+            .unwrap();
         for (id, summary) in [
             ("none", None),
             (
@@ -1077,6 +1087,8 @@ pub(crate) mod tests {
             (through("none"), through("failed"), through("done")),
             (-1, -1, 0)
         );
+        // Another machine's session is its owner's to distill: left as is.
+        assert_eq!(through("foreign"), 0);
     }
 
     #[test]
