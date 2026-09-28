@@ -2377,6 +2377,22 @@ mod tests {
             .collect();
         due.sort();
         assert_eq!(due, ["fork", "top"]);
+        // A project in the Trash is not distilled until it is restored.
+        store.delete_project(&pid, "m").unwrap();
+        assert!(
+            store
+                .distill_candidates("m", i64::MAX, 0, 10)
+                .unwrap()
+                .is_empty()
+        );
+        store.restore_project(&pid, "m").unwrap();
+        assert_eq!(
+            store
+                .distill_candidates("m", i64::MAX, 0, 10)
+                .unwrap()
+                .len(),
+            2
+        );
 
         let by_id = |id: &str| sessions.iter().find(|s| s.id == id).unwrap();
         assert_eq!(skip_reason(by_id("top"), "m", false), None);

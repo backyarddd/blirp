@@ -313,8 +313,9 @@ impl Store {
     /// directly (SessionEnd hook, process exit). Ingested subagent children
     /// (external with a parent) are left out: the parent's transcript
     /// already carries their task and result. Sessions of other machines
-    /// are distilled on their origin machine and replicated. Most recently
-    /// active first.
+    /// are distilled on their origin machine and replicated, and sessions
+    /// of a project in the Trash wait for its restore. Most recently active
+    /// first.
     pub fn distill_candidates(
         &self,
         machine_id: &str,
@@ -327,6 +328,8 @@ impl Store {
              WHERE s.machine_id = ?1 AND s.last_activity_at >= ?3 AND s.last_activity_at <= ?2
                AND NOT (s.origin = 'external' AND s.parent_session_id IS NOT NULL)
                AND s.status IN ('idle','completed','failed','detached')
+               AND NOT EXISTS (SELECT 1 FROM projects p WHERE p.id = s.project_id
+                                 AND p.deleted = 1 AND p.merged_into IS NULL)
                AND EXISTS (SELECT 1 FROM events e WHERE e.session_id = s.id AND {NEW_CONTENT})
              ORDER BY s.last_activity_at DESC LIMIT ?4"
         );
