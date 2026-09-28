@@ -355,3 +355,65 @@ test('a merged project loses its pin on this device; a deleted one keeps it for 
   await page.waitForTimeout(1000);
   expect(await pinned()).toContain(`p:${trashed.id}`);
 });
+
+interface RecordRow {
+  id: string;
+  project_id: string;
+  title: string;
+  status: string;
+}
+
+test('records: archive with Undo, move from the context menu, bulk archive and move', async () => {
+  const a = await apiCall<ProjectRow>('POST', '/api/projects', { name: 'Records from' });
+  const b = await apiCall<ProjectRow>('POST', '/api/projects', { name: 'Records to' });
+  const mk = (title: string): Promise<RecordRow> => apiCall<RecordRow>('POST', `/api/projects/${a.id}/records`, { kind: 'note', title, body: '' });
+  const r1 = await mk('Record one');
+  const r2 = await mk('Record two');
+  const r3 = await mk('Record three');
+  const get = async (r: RecordRow): Promise<RecordRow | undefined> => {
+    for (const pid of [a.id, b.id]) {
+      const list = await apiCall<RecordRow[]>('GET', `/api/projects/${pid}/records`);
+      const hit = list.find((x) => x.id === r.id);
+      if (hit) return hit;
+    }
+    return undefined;
+  };
+  await page.goto(`${env.url}/projects/${a.id}/memory`);
+  const records = page.locator('section', { has: page.getByRole('heading', { name: 'Records' }) });
+  const rec = (title: string): Locator => records.locator('article.rec', { hasText: title });
+
+  await rec('Record one').getByRole('button', { name: 'Archive', exact: true }).click();
+  await expect(rec('Record one')).toHaveCount(0);
+  await expect.poll(async () => (await get(r1))?.status).toBe('archived');
+  await page.locator('.toast', { hasText: 'Archived "Record one"' }).getByRole('button', { name: 'Undo' }).click();
+  await expect(rec('Record one')).toBeVisible();
+  await expect.poll(async () => (await get(r1))?.status).toBe('active');
+
+  await rec('Record one').locator('.top').click({ button: 'right' });
+  await page.getByRole('menu', { name: 'Record one', exact: true }).getByRole('menuitem', { name: 'Move to project…' }).click();
+  const move = page.getByRole('dialog', { name: 'Move record' });
+  await move.getByRole('combobox').selectOption({ label: 'Records to' });
+  await move.getByRole('button', { name: 'Move' }).click();
+  await expect(rec('Record one')).toHaveCount(0);
+  await expect.poll(async () => (await get(r1))?.project_id).toBe(b.id);
+
+  await records.getByRole('button', { name: 'Select', exact: true }).click();
+  const bar = records.getByRole('toolbar', { name: 'Selected records' });
+  await rec('Record two').getByRole('checkbox').click();
+  await rec('Record three').getByRole('checkbox').click({ modifiers: ['Shift'] });
+  await expect(bar).toContainText('2 selected');
+  await bar.getByRole('button', { name: 'Archive selected' }).click();
+  await expect(page.locator('.toast', { hasText: 'Archived 2 records.' })).toBeVisible();
+  for (const r of [r2, r3]) await expect.poll(async () => (await get(r))?.status).toBe('archived');
+
+  await records.getByLabel('Record status').selectOption('archived');
+  await bar.getByRole('checkbox').first().check();
+  await expect(bar).toContainText('2 selected');
+  await bar.getByRole('button', { name: 'Move selected' }).click();
+  const moveMany = page.getByRole('dialog', { name: 'Move records' });
+  await moveMany.getByRole('combobox').selectOption({ label: 'Records to' });
+  await moveMany.getByRole('button', { name: 'Move' }).click();
+  await expect(page.locator('.toast', { hasText: 'Moved 2 records to "Records to".' })).toBeVisible();
+  for (const r of [r2, r3]) await expect.poll(async () => (await get(r))?.project_id).toBe(b.id);
+  await bar.getByRole('button', { name: 'Done' }).click();
+});

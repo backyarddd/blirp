@@ -3,11 +3,11 @@
 // end in a toast with Undo, permanent ones (deleting a session) ask first in a dialog.
 import { SvelteSet } from 'svelte/reactivity';
 import { ApiError, api, errorMessage } from './api/client';
-import type { OpenTarget, ProjectSummary, Session } from './api/types.gen';
+import type { OpenTarget, PatchRecord, ProjectSummary, Record as MemoryRecord, RecordStatus, Session } from './api/types.gen';
 import { app } from './app.svelte';
 import { remoteRefusal } from './capabilities';
 import { dialogs } from './dialogs.svelte';
-import { bulkSummary, type ActionEnv, type BulkFailure, type ProjectOps, type SessionOps } from './actions';
+import { bulkSummary, type ActionEnv, type BulkFailure, type ProjectOps, type RecordOps, type SessionOps } from './actions';
 import { projectKey, sessionKey, type MarkKind } from './marks';
 import { navigate, nav } from './router.svelte';
 import { href } from './router';
@@ -511,3 +511,165 @@ export const projectOps: ProjectOps = {
   removeFolder: (p, path) => void removeFolder(p, path),
   restore: (p) => void restoreProject(p),
 };
+
+// ---------------------------------------------------------------- memory records
+
+const RECORD_NOUNS = ['record', 'records'] as const;
+
+interface RecordChange {
+  before: MemoryRecord;
+  after: MemoryRecord;
+}
+
+interface RecordVerbs {
+  /** "Archived" */
+  done: string;
+  /** "Not archived" */
+  notDone: string;
+  /** After the count or title, e.g. ` to "B"`. */
+  where?: string;
+}
+
+/** Why a record action failed, for a message. */
+function recordFailure(e: unknown): string {
+  app.noteForbidden(e);
+  return errorMessage(e);
+}
+
+/** Lists showing these projects' records read them again. */
+function recordsChanged(ids: Iterable<string>): void {
+  for (const id of new Set(ids)) app.bumpMemory(id);
+}
+
+/**
+ * Patch records (one, or a bulk selection): one toast sums it up, naming what failed, with Undo for
+ * what changed. `undo` gives the patch that takes one change back.
+ */
+async function changeRecords(
+  list: readonly MemoryRecord[],
+  patch: PatchRecord,
+  verbs: RecordVerbs,
+  undo: (c: RecordChange) => PatchRecord,
+): Promise<RecordChange[]> {
+  const results = await Promise.allSettled(list.map((r) => api.projects.updateRecord(r.project_id, r.id, patch)));
+  const changed: RecordChange[] = [];
+  const failures: BulkFailure[] = [];
+  for (const [i, r] of results.entries()) {
+    const before = list[i];
+    if (!before) continue;
+    if (r.status === 'fulfilled') changed.push({ before, after: r.value });
+    else failures.push({ title: before.title, reason: recordFailure(r.reason) });
+  }
+  recordsChanged(changed.flatMap((c) => [c.before.project_id, c.after.project_id]));
+  const where = verbs.where ?? '';
+  const only = list.length === 1 ? list[0] : undefined;
+  const text =
+    only === undefined
+      ? bulkSummary(verbs.done, verbs.notDone, list.length, failures, where, RECORD_NOUNS)
+      : failures.length === 0
+        ? `${verbs.done} "${only.title}"${where}`
+        : `Could not change "${only.title}": ${failures[0]?.reason ?? 'unknown error'}`;
+  const action = changed.length > 0 ? { label: 'Undo', run: () => void changeRecordsBack(changed, undo) } : undefined;
+  app.toast(text, failures.length > 0 ? 'error' : 'info', action);
+  return changed;
+}
+
+/** Undo: only records still as the action left them (not edited here or elsewhere since). */
+async function changeRecordsBack(changed: readonly RecordChange[], undo: (c: RecordChange) => PatchRecord): Promise<void> {
+  const current = new Map<string, MemoryRecord>();
+  try {
+    for (const pid of new Set(changed.map((c) => c.after.project_id))) {
+      for (const r of await api.projects.records(pid)) current.set(r.id, r);
+    }
+  } catch (e) {
+    app.toast(`Could not undo: ${recordFailure(e)}`);
+    return;
+  }
+  const still = changed.filter((c) => current.get(c.after.id)?.updated_at === c.after.updated_at);
+  if (still.length === 0) {
+    app.toast(NOT_UNDONE, 'info');
+    return;
+  }
+  const failures: BulkFailure[] = changed
+    .filter((c) => !still.includes(c))
+    .map((c) => ({ title: c.before.title, reason: 'changed again since' }));
+  const results = await Promise.allSettled(still.map((c) => api.projects.updateRecord(c.after.project_id, c.after.id, undo(c))));
+  for (const [i, r] of results.entries()) {
+    const c = still[i];
+    if (c && r.status === 'rejected') failures.push({ title: c.before.title, reason: recordFailure(r.reason) });
+  }
+  recordsChanged(changed.flatMap((c) => [c.before.project_id, c.after.project_id]));
+  app.toast(bulkSummary('Undid', 'Not undone', changed.length, failures, '', RECORD_NOUNS), failures.length > 0 ? 'error' : 'info');
+}
+
+const STATUS_VERBS: Record<RecordStatus, RecordVerbs> = {
+  active: { done: 'Reopened', notDone: 'Not reopened' },
+  resolved: { done: 'Resolved', notDone: 'Not resolved' },
+  archived: { done: 'Archived', notDone: 'Not archived' },
+};
+
+/** Resolve, reopen, archive or unarchive records, with Undo. */
+export async function setRecordsStatus(list: readonly MemoryRecord[], status: RecordStatus): Promise<void> {
+  const todo = list.filter((r) => r.status !== status);
+  if (todo.length === 0) return;
+  const unarchive = status === 'active' && todo.every((r) => r.status === 'archived');
+  const verbs = unarchive ? { done: 'Unarchived', notDone: 'Not unarchived' } : STATUS_VERBS[status];
+  await changeRecords(todo, { status }, verbs, (c) => ({ status: c.before.status }));
+}
+
+export async function setRecordsPinned(list: readonly MemoryRecord[], on: boolean): Promise<void> {
+  const todo = list.filter((r) => r.pinned !== on);
+  if (todo.length === 0) return;
+  const verbs = on ? { done: 'Pinned', notDone: 'Not pinned' } : { done: 'Unpinned', notDone: 'Not unpinned' };
+  await changeRecords(todo, { pinned: on }, verbs, (c) => ({ pinned: c.before.pinned }));
+}
+
+/** Move records to another project (not Chats: it has no project memory), with Undo. */
+export async function moveRecords(list: readonly MemoryRecord[], projectId: string): Promise<boolean> {
+  const todo = list.filter((r) => r.project_id !== projectId);
+  if (todo.length === 0) return true;
+  const name = app.projectById.get(projectId)?.name ?? 'the project';
+  const verbs = { done: 'Moved', notDone: 'Not moved', where: ` to "${name}"` };
+  const changed = await changeRecords(todo, { project_id: projectId }, verbs, (c) => ({ project_id: c.before.project_id }));
+  return changed.length === todo.length;
+}
+
+/** Delete records for good after one confirmation (no Undo: a deleted record never comes back). */
+export async function deleteRecords(list: readonly MemoryRecord[]): Promise<boolean> {
+  if (list.length === 0) return false;
+  const one = list.length === 1 ? list[0] : undefined;
+  const it = one ? 'it' : 'them';
+  const ok = await dialogs.confirm({
+    title: one ? 'Delete record?' : `Delete ${list.length} records?`,
+    body:
+      `${one ? `"${one.title}" is` : 'These records are'} deleted for good on every synced machine and no longer given to ` +
+      `agents. This cannot be undone; archive ${it} instead to keep ${it} out of the way.`,
+    ...(one ? {} : { list: list.map((r) => r.title) }),
+    confirm: one ? 'Delete' : `Delete ${list.length}`,
+    danger: true,
+  });
+  if (!ok) return false;
+  const results = await Promise.allSettled(list.map((r) => api.projects.deleteRecord(r.project_id, r.id)));
+  const failures: BulkFailure[] = [];
+  for (const [i, r] of results.entries()) {
+    const rec = list[i];
+    if (rec && r.status === 'rejected') failures.push({ title: rec.title, reason: recordFailure(r.reason) });
+  }
+  recordsChanged(list.map((r) => r.project_id));
+  const text = one && failures.length === 0 ? 'Record deleted' : bulkSummary('Deleted', 'Not deleted', list.length, failures, '', RECORD_NOUNS);
+  app.toast(text, failures.length > 0 ? 'error' : 'info');
+  return true;
+}
+
+/** The record ops of the menus; `edit` opens the item's own editor, so each item supplies it. */
+export function recordOps(edit: (r: MemoryRecord) => void): RecordOps {
+  return {
+    edit,
+    setPinned: (r, on) => void setRecordsPinned([r], on),
+    setStatus: (r, status) => void setRecordsStatus([r], status),
+    move: (r) => {
+      dialogs.movingRecords = [r];
+    },
+    remove: (r) => void deleteRecords([r]),
+  };
+}

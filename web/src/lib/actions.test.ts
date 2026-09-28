@@ -1,15 +1,17 @@
 import { describe, expect, it, vi } from 'vitest';
-import type { ProjectSummary, Session } from './api/types.gen';
+import type { ProjectSummary, Record as MemoryRecord, Session } from './api/types.gen';
 import {
   bulkSummary,
   folderActions,
   projectActions,
   projectPath,
+  recordActions,
   resumeCommand,
   sessionActions,
   trashActions,
   type ActionEnv,
   type ProjectOps,
+  type RecordOps,
   type SessionOps,
 } from './actions';
 import { actionsOf, isSeparator, SEPARATOR, tidy, type MenuItem } from './menu';
@@ -280,6 +282,53 @@ describe('project actions', () => {
   });
 });
 
+describe('record actions', () => {
+  const record = (over: Partial<MemoryRecord> = {}): MemoryRecord => ({
+    id: 'r1',
+    project_id: 'p',
+    kind: 'note',
+    title: 'T',
+    body: '',
+    status: 'active',
+    pinned: false,
+    source_session_id: null,
+    created_at: 0,
+    updated_at: 0,
+    updated_by: 'user',
+    ...over,
+  });
+  const ops = (): RecordOps => ({ edit: vi.fn(), setPinned: vi.fn(), setStatus: vi.fn(), move: vi.fn(), remove: vi.fn() });
+
+  it('offers resolve and archive for an active record, reopen for a resolved one, unarchive for an archived one', () => {
+    expect(labels(recordActions(record(), env(), ops()))).toEqual([
+      'Edit…',
+      'Pin',
+      'Mark resolved',
+      'Archive',
+      'Move to project…',
+      'Delete…',
+    ]);
+    expect(labels(recordActions(record({ status: 'resolved', pinned: true }), env(), ops()))).toEqual([
+      'Edit…',
+      'Unpin',
+      'Reopen',
+      'Archive',
+      'Move to project…',
+      'Delete…',
+    ]);
+    const o = ops();
+    const archived = recordActions(record({ status: 'archived' }), env(), o);
+    expect(labels(archived)).toEqual(['Edit…', 'Pin', 'Unarchive', 'Move to project…', 'Delete…']);
+    item(archived, 'Unarchive')?.onselect();
+    expect(o.setStatus).toHaveBeenCalledWith(expect.objectContaining({ id: 'r1' }), 'active');
+    expect(item(archived, 'Delete…')?.danger).toBe(true);
+  });
+
+  it('offers nothing without control', () => {
+    expect(recordActions(record(), env({ control: false }), ops())).toEqual([]);
+  });
+});
+
 describe('menus', () => {
   it('tidies separators left by gated items', () => {
     const a = { label: 'a', onselect: () => {} };
@@ -300,5 +349,6 @@ describe('bulk summary', () => {
     expect(bulkSummary('Moved', 'Not moved', 5, [f('a'), f('b'), f('c'), f('d'), f('e')], ' to "X"')).toBe(
       'No sessions moved to "X". Not moved: "a" (laptop is offline); "b" (laptop is offline); "c" (laptop is offline); and 2 more.',
     );
+    expect(bulkSummary('Archived', 'Not archived', 2, [], '', ['record', 'records'])).toBe('Archived 2 records.');
   });
 });

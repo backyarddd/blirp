@@ -1,7 +1,7 @@
 <script lang="ts">
   import { app } from '../app.svelte';
   import { dialogs } from '../dialogs.svelte';
-  import { addProjectFolder, mergeProject, moveSessions, removeWorktreeNow, renameProject, renameSession, type MoveTarget } from '../manage';
+  import { addProjectFolder, mergeProject, moveRecords, moveSessions, removeWorktreeNow, renameProject, renameSession, type MoveTarget } from '../manage';
   import { agentLabel, isChats, sessionTitle } from '../status';
   import Modal from './Modal.svelte';
   import FolderPicker from './FolderPicker.svelte';
@@ -59,6 +59,30 @@
     await moveSessions(list, target);
     moveBusy = false;
     dialogs.moving = null;
+  }
+
+  // ---- Move memory records to another project (never Chats: it has no project memory).
+  let recordsTo = $state('');
+  let recordsBusy = $state(false);
+  const movingRecords = $derived(dialogs.movingRecords);
+  const recordsFrom = $derived(new Set(movingRecords?.map((r) => r.project_id) ?? []));
+  const recordTargets = $derived(
+    app.realProjects
+      .filter((p) => !(recordsFrom.size === 1 && recordsFrom.has(p.id)))
+      .sort((a, b) => a.name.localeCompare(b.name)),
+  );
+  $effect(() => {
+    if (dialogs.movingRecords) recordsTo = '';
+  });
+
+  async function moveRecordsTo(e: SubmitEvent): Promise<void> {
+    e.preventDefault();
+    const list = dialogs.movingRecords;
+    if (!list || !recordsTo) return;
+    recordsBusy = true;
+    await moveRecords(list, recordsTo);
+    recordsBusy = false;
+    dialogs.movingRecords = null;
   }
 
   // ---- Merge project
@@ -203,6 +227,29 @@
   {#snippet footer()}
     <button type="button" class="btn" onclick={() => (dialogs.moving = null)}>Cancel</button>
     <button type="submit" form="move-sessions" class="btn primary" disabled={moveBusy || !moveTo}>Move</button>
+  {/snippet}
+</Modal>
+
+<Modal
+  open={movingRecords !== null}
+  title={movingRecords?.length === 1 ? 'Move record' : 'Move records'}
+  onclose={() => (dialogs.movingRecords = null)}
+>
+  {#if movingRecords}
+    <form id="move-records" onsubmit={moveRecordsTo}>
+      <label class="field">
+        <span>{movingRecords.length === 1 ? `Move "${movingRecords[0]?.title}" to` : `Move ${movingRecords.length} records to`}</span>
+        <select class="select" bind:value={recordsTo} required>
+          <option value="" disabled>Pick a project</option>
+          {#each recordTargets as p (p.id)}<option value={p.id}>{p.name}</option>{/each}
+        </select>
+      </label>
+      <p class="small muted">Agents in the project you pick get it from now on. Its kind, status and source session stay as they are.</p>
+    </form>
+  {/if}
+  {#snippet footer()}
+    <button type="button" class="btn" onclick={() => (dialogs.movingRecords = null)}>Cancel</button>
+    <button type="submit" form="move-records" class="btn primary" disabled={recordsBusy || !recordsTo}>Move</button>
   {/snippet}
 </Modal>
 

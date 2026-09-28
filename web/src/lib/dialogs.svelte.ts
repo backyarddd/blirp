@@ -1,6 +1,6 @@
 // State of the app-wide action dialogs (ActionDialogs.svelte): confirmations and the forms behind
 // menu items that need input (rename, move, merge, add folder, continue in). One of each at a time.
-import type { ProjectSummary, Session } from './api/types.gen';
+import type { ProjectSummary, Record as MemoryRecord, Session } from './api/types.gen';
 
 export interface ConfirmOptions {
   title: string;
@@ -24,6 +24,8 @@ class Dialogs {
   renaming: RenameTarget | null = $state(null);
   /** Sessions to move (one, or a bulk selection). */
   moving: Session[] | null = $state(null);
+  /** Memory records to move to another project (one, or a bulk selection). */
+  movingRecords: MemoryRecord[] | null = $state(null);
   merging: ProjectSummary | null = $state(null);
   addingFolder: ProjectSummary | null = $state(null);
   continuing: Session | null = $state(null);

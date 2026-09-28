@@ -363,8 +363,10 @@ test('records CRUD', async () => {
   await records.getByLabel('Record status').selectOption('all');
   const resolved = records.locator('article.rec', { hasText: 'Use frobnicator v2 for caching' });
   await expect(resolved.locator('.badge', { hasText: 'resolved' })).toBeVisible();
-  await confirmNextDialog();
-  await resolved.getByRole('button', { name: 'Delete' }).click();
+  await resolved.getByRole('button', { name: 'Actions for Use frobnicator v2 for caching' }).click();
+  await page.getByRole('menuitem', { name: 'Delete…' }).click();
+  await expect(page.getByRole('dialog', { name: 'Delete record?' })).toContainText('archive it instead');
+  await confirmIn('Delete record?', 'Delete');
   await expect(resolved).toHaveCount(0);
   await page.reload();
   await expect(page.locator('article.rec', { hasText: 'frobnicator' })).toHaveCount(0);

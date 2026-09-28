@@ -23,7 +23,8 @@ import FolderPlus from '@lucide/svelte/icons/folder-plus';
 import GitMerge from '@lucide/svelte/icons/git-merge';
 import MessagesSquare from '@lucide/svelte/icons/messages-square';
 import RotateCcw from '@lucide/svelte/icons/rotate-ccw';
-import type { AgentInfo, OpenTarget, ProjectSummary, Session } from './api/types.gen';
+import Check from '@lucide/svelte/icons/check';
+import type { AgentInfo, OpenTarget, ProjectSummary, Record as MemoryRecord, RecordStatus, Session } from './api/types.gen';
 import { SEPARATOR, tidy, type MenuItem } from './menu';
 import { projectKey, sessionKey } from './marks';
 import { canResume, isLive, isSubagent } from './status';
@@ -76,6 +77,14 @@ export interface ProjectOps {
   remove(p: ProjectSummary): void;
   removeFolder(p: ProjectSummary, path: string): void;
   restore(p: ProjectSummary): void;
+}
+
+export interface RecordOps {
+  edit(r: MemoryRecord): void;
+  setPinned(r: MemoryRecord, on: boolean): void;
+  setStatus(r: MemoryRecord, status: RecordStatus): void;
+  move(r: MemoryRecord): void;
+  remove(r: MemoryRecord): void;
 }
 
 /** `claude --resume <id>`: resumes the agent's own session outside blirp; null when it has none. */
@@ -205,6 +214,27 @@ export function trashActions(p: ProjectSummary, env: ActionEnv, ops: ProjectOps)
   ]);
 }
 
+/** A memory record: every action changes shared memory, so all of them need control (§11). */
+export function recordActions(r: MemoryRecord, env: Pick<ActionEnv, 'control'>, ops: RecordOps): MenuItem[] {
+  if (!env.control) return [];
+  return tidy([
+    { label: 'Edit…', hint: 'F2', icon: Pencil, onselect: () => ops.edit(r) },
+    { label: r.pinned ? 'Unpin' : 'Pin', icon: r.pinned ? PinOff : Pin, onselect: () => ops.setPinned(r, !r.pinned) },
+    SEPARATOR,
+    ...(r.status === 'archived'
+      ? [{ label: 'Unarchive', icon: ArchiveRestore, onselect: () => ops.setStatus(r, 'active') }]
+      : [
+          r.status === 'active'
+            ? { label: 'Mark resolved', icon: Check, onselect: () => ops.setStatus(r, 'resolved') }
+            : { label: 'Reopen', icon: RotateCcw, onselect: () => ops.setStatus(r, 'active') },
+          { label: 'Archive', icon: Archive, onselect: () => ops.setStatus(r, 'archived') },
+        ]),
+    { label: 'Move to project…', icon: FolderInput, onselect: () => ops.move(r) },
+    SEPARATOR,
+    { label: 'Delete…', icon: Trash, danger: true, onselect: () => ops.remove(r) },
+  ]);
+}
+
 export interface BulkFailure {
   title: string;
   reason: string;
@@ -223,8 +253,9 @@ export function bulkSummary(
   total: number,
   failures: readonly BulkFailure[],
   where = '',
+  nouns: readonly [one: string, many: string] = ['session', 'sessions'],
 ): string {
-  const noun = (n: number): string => (n === 1 ? 'session' : 'sessions');
+  const noun = (n: number): string => (n === 1 ? nouns[0] : nouns[1]);
   const ok = total - failures.length;
   if (failures.length === 0) return `${verb} ${total} ${noun(total)}${where}.`;
   const named = failures

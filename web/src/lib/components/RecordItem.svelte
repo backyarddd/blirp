@@ -14,32 +14,42 @@
   import Pin from '@lucide/svelte/icons/pin';
   import PinOff from '@lucide/svelte/icons/pin-off';
   import Pencil from '@lucide/svelte/icons/pencil';
-  import Trash from '@lucide/svelte/icons/trash-2';
   import Check from '@lucide/svelte/icons/check';
   import RotateCcw from '@lucide/svelte/icons/rotate-ccw';
+  import Archive from '@lucide/svelte/icons/archive';
+  import ArchiveRestore from '@lucide/svelte/icons/archive-restore';
+  import Ellipsis from '@lucide/svelte/icons/ellipsis';
   import { api } from '../api/client';
-  import type { PatchRecord, Record as MemoryRecord } from '../api/types.gen';
+  import type { Record as MemoryRecord } from '../api/types.gen';
   import { app } from '../app.svelte';
+  import { recordActions } from '../actions';
+  import { contextmenu } from '../contextmenu';
+  import { recordOps, setRecordsPinned, setRecordsStatus } from '../manage';
   import { formatRelative } from '../time';
   import { href } from '../router';
   import Markdown from './Markdown.svelte';
+  import Menu from './Menu.svelte';
 
   interface Props {
     record: MemoryRecord;
     onchange: (r: MemoryRecord | null) => void;
     showKind?: boolean;
+    /** Selection mode: a checkbox before the record; Shift+click selects a range. */
+    selecting?: boolean;
+    selected?: boolean;
+    onpick?: (shift: boolean) => void;
   }
 
-  let { record, onchange, showKind = false }: Props = $props();
+  let { record, onchange, showKind = false, selecting = false, selected = false, onpick }: Props = $props();
 
   let editing = $state(false);
   let title = $state('');
   let body = $state('');
   let busy = $state(false);
 
-  async function patch(p: PatchRecord): Promise<void> {
+  async function save(): Promise<void> {
     busy = true;
-    const r = await app.act(() => api.projects.updateRecord(record.project_id, record.id, p));
+    const r = await app.act(() => api.projects.updateRecord(record.project_id, record.id, { title: title.trim(), body }));
     busy = false;
     if (r) {
       editing = false;
@@ -47,22 +57,14 @@
     }
   }
 
-  async function remove(): Promise<void> {
-    if (!confirm(`Delete "${record.title}"? This cannot be undone.`)) return;
-    busy = true;
-    const ok = await app.act(async () => {
-      await api.projects.deleteRecord(record.project_id, record.id);
-      return true;
-    });
-    busy = false;
-    if (ok) onchange(null);
-  }
-
   function edit(): void {
     title = record.title;
     body = record.body;
     editing = true;
   }
+
+  const ops = recordOps(() => edit());
+  const actions = $derived(recordActions(record, { control: app.control }, ops));
 </script>
 
 <article class="rec" class:resolved={record.status !== 'active'}>
@@ -70,7 +72,7 @@
     <form
       onsubmit={(e) => {
         e.preventDefault();
-        void patch({ title: title.trim(), body });
+        void save();
       }}
     >
       <label class="field"><span>Title</span><input class="input" bind:value={title} required /></label>
@@ -82,7 +84,13 @@
       </div>
     </form>
   {:else}
-    <div class="row top">
+    <div
+      class="row top"
+      use:contextmenu={{ items: () => actions, label: record.title, rename: app.control ? edit : undefined }}
+    >
+      {#if selecting}
+        <input type="checkbox" class="pick" aria-label="Select {record.title}" checked={selected} onclick={(e) => onpick?.(e.shiftKey)} />
+      {/if}
       {#if record.pinned}<span class="pinned" title="Pinned"><Pin size={13} aria-label="Pinned" /></span>{/if}
       <strong class="title">{record.title}</strong>
       {#if showKind}<span class="badge">{KIND_LABEL[record.kind]}</span>{/if}
@@ -95,22 +103,32 @@
           class="icon-btn sm"
           aria-label={record.pinned ? 'Unpin' : 'Pin'}
           title={record.pinned ? 'Unpin' : 'Pin'}
-          disabled={busy}
-          onclick={() => patch({ pinned: !record.pinned })}
+          onclick={() => setRecordsPinned([record], !record.pinned)}
         >
           {#if record.pinned}<PinOff size={14} />{:else}<Pin size={14} />{/if}
         </button>
         {#if record.status === 'active'}
-          <button type="button" class="icon-btn sm" aria-label="Mark resolved" title="Mark resolved" disabled={busy} onclick={() => patch({ status: 'resolved' })}>
+          <button type="button" class="icon-btn sm" aria-label="Mark resolved" title="Mark resolved" onclick={() => setRecordsStatus([record], 'resolved')}>
             <Check size={14} />
           </button>
-        {:else}
-          <button type="button" class="icon-btn sm" aria-label="Reopen" title="Reopen" disabled={busy} onclick={() => patch({ status: 'active' })}>
+        {:else if record.status === 'resolved'}
+          <button type="button" class="icon-btn sm" aria-label="Reopen" title="Reopen" onclick={() => setRecordsStatus([record], 'active')}>
             <RotateCcw size={14} />
           </button>
         {/if}
+        {#if record.status === 'archived'}
+          <button type="button" class="icon-btn sm" aria-label="Unarchive" title="Unarchive" onclick={() => setRecordsStatus([record], 'active')}>
+            <ArchiveRestore size={14} />
+          </button>
+        {:else}
+          <button type="button" class="icon-btn sm" aria-label="Archive" title="Archive" onclick={() => setRecordsStatus([record], 'archived')}>
+            <Archive size={14} />
+          </button>
+        {/if}
         <button type="button" class="icon-btn sm" aria-label="Edit" title="Edit" disabled={busy} onclick={edit}><Pencil size={14} /></button>
-        <button type="button" class="icon-btn sm" aria-label="Delete" title="Delete" disabled={busy} onclick={remove}><Trash size={14} /></button>
+        <Menu items={actions} label="Actions for {record.title}" title="More actions" triggerClass="icon-btn sm" align="right"
+          ><Ellipsis size={14} /></Menu
+        >
       </div>
       {/if}
     </div>
@@ -139,6 +157,9 @@
     min-width: 0;
     overflow-wrap: anywhere;
     padding-top: 2px;
+  }
+  .pick {
+    margin-top: 4px;
   }
   .acts {
     display: flex;

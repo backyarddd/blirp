@@ -1,6 +1,7 @@
 <script lang="ts">
   import Plus from '@lucide/svelte/icons/plus';
   import History from '@lucide/svelte/icons/history';
+  import ListChecks from '@lucide/svelte/icons/list-checks';
   import { api } from '../../lib/api/client';
   import type {
     Brief,
@@ -19,6 +20,8 @@
   import Loadable from '../../lib/components/Loadable.svelte';
   import Markdown from '../../lib/components/Markdown.svelte';
   import RecordItem, { KIND_LABEL } from '../../lib/components/RecordItem.svelte';
+  import RecordBulkBar from '../../lib/components/RecordBulkBar.svelte';
+  import { Selection } from '../../lib/selection.svelte';
 
   let { project }: { project: ProjectSummary } = $props();
   const pid = $derived(project.id);
@@ -61,6 +64,9 @@
     }
     return c;
   });
+
+  const selection = new Selection();
+  const order = $derived(visible.map((r) => r.id));
 
   let creating = $state(false);
   let newKind: RecordKind = $state('note');
@@ -198,6 +204,9 @@
         <option value="archived">Archived</option>
         <option value="all">All</option>
       </select>
+      {#if app.control && !selection.active}
+        <button type="button" class="btn ghost sm" onclick={() => selection.start()}><ListChecks size={14} aria-hidden="true" />Select</button>
+      {/if}
       {#if app.control}
         <button type="button" class="btn sm primary" onclick={() => (creating = !creating)} aria-expanded={creating}>
           <Plus size={14} aria-hidden="true" />New record
@@ -210,6 +219,8 @@
         <button type="button" role="tab" class="pill" aria-selected={kind === k} onclick={() => (kind = k)}>{KIND_LABEL[k]} {counts[k] ?? 0}</button>
       {/each}
     </div>
+
+    {#if selection.active && app.control}<div class="bulk"><RecordBulkBar {selection} shown={visible} /></div>{/if}
 
     {#if creating && app.control}
       <form class="create" onsubmit={create}>
@@ -237,7 +248,16 @@
     >
       <ul class="list">
         {#each visible as r (r.id)}
-          <li><RecordItem record={r} showKind={kind === 'all'} onchange={(x) => onRecord(r.id, x)} /></li>
+          <li>
+            <RecordItem
+              record={r}
+              showKind={kind === 'all'}
+              onchange={(x) => onRecord(r.id, x)}
+              selecting={selection.active}
+              selected={selection.ids.has(r.id)}
+              onpick={(shift) => selection.toggle(r.id, shift, order)}
+            />
+          </li>
         {/each}
       </ul>
     </Loadable>
@@ -301,6 +321,9 @@
     border: 1px solid var(--border);
     max-height: 260px;
     overflow: auto;
+  }
+  .bulk {
+    margin-top: 12px;
   }
   .kinds {
     margin: 12px 0 4px;
