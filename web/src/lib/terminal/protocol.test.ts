@@ -10,6 +10,19 @@ describe('decodeServerFrame', () => {
       data: '\u001bc$ ',
     });
   });
+  it('decodes the Windows pty of a snapshot and drops a malformed one', () => {
+    const frame = (pty: string) => `{"type":"snapshot","cols":80,"rows":24,"data":"","windows_pty":${pty}}`;
+    expect(decodeServerFrame(frame('{"build_number":26100,"bundled_conpty":true}'))).toEqual({
+      type: 'snapshot',
+      cols: 80,
+      rows: 24,
+      data: '',
+      windows_pty: { build_number: 26100, bundled_conpty: true },
+    });
+    for (const bad of ['null', '{"build_number":"26100","bundled_conpty":true}', '{"build_number":26100}']) {
+      expect(decodeServerFrame(frame(bad))).toEqual({ type: 'snapshot', cols: 80, rows: 24, data: '' });
+    }
+  });
   it('decodes the readonly frame', () => {
     expect(decodeServerFrame('{"type":"readonly"}')).toEqual({ type: 'readonly' });
   });

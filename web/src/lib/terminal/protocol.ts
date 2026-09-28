@@ -9,7 +9,7 @@
 // (reconnect), 1011 when a relayed terminal's machine is unreachable; a refused upgrade
 // (404 `terminal_not_found`, 401) surfaces as 1006. The `exit` frame says the process ended (also
 // sent, then 1000, when attaching to a session whose process already ended).
-import type { SessionStatus, TerminalClientMessage, TerminalServerMessage } from '../api/types.gen';
+import type { SessionStatus, TerminalClientMessage, TerminalServerMessage, WindowsPty } from '../api/types.gen';
 
 export type ServerFrame =
   | TerminalServerMessage
@@ -30,6 +30,15 @@ const isSize = (n: unknown): n is number => typeof n === 'number' && Number.isIn
 const isStatus = (s: unknown): s is SessionStatus => typeof s === 'string' && STATUSES.has(s);
 const isExitCode = (c: unknown): c is number | null => c === null || (typeof c === 'number' && Number.isInteger(c));
 
+/** A well-formed `windows_pty`, else undefined (absent from daemons before it existed). */
+function windowsPty(v: unknown): WindowsPty | undefined {
+  if (typeof v !== 'object' || v === null) return undefined;
+  const p = v as { build_number?: unknown; bundled_conpty?: unknown };
+  if (typeof p.build_number !== 'number' || !Number.isInteger(p.build_number) || p.build_number < 0) return undefined;
+  if (typeof p.bundled_conpty !== 'boolean') return undefined;
+  return { build_number: p.build_number, bundled_conpty: p.bundled_conpty };
+}
+
 export function decodeServerFrame(raw: string | ArrayBuffer | Uint8Array): ServerFrame {
   if (raw instanceof ArrayBuffer) return { type: 'output', data: new Uint8Array(raw) };
   if (raw instanceof Uint8Array) return { type: 'output', data: raw };
@@ -40,12 +49,23 @@ export function decodeServerFrame(raw: string | ArrayBuffer | Uint8Array): Serve
     return { type: 'ignored', reason: 'invalid JSON text frame' };
   }
   if (typeof parsed !== 'object' || parsed === null) return { type: 'ignored', reason: 'non-object frame' };
-  const f = parsed as { type?: unknown; cols?: unknown; rows?: unknown; data?: unknown; status?: unknown; exit_code?: unknown };
+  const f = parsed as {
+    type?: unknown;
+    cols?: unknown;
+    rows?: unknown;
+    data?: unknown;
+    status?: unknown;
+    exit_code?: unknown;
+    windows_pty?: unknown;
+  };
   switch (f.type) {
-    case 'snapshot':
-      if (isSize(f.cols) && isSize(f.rows) && typeof f.data === 'string')
-        return { type: 'snapshot', cols: f.cols, rows: f.rows, data: f.data };
-      break;
+    case 'snapshot': {
+      if (!isSize(f.cols) || !isSize(f.rows) || typeof f.data !== 'string') break;
+      const pty = windowsPty(f.windows_pty);
+      return pty
+        ? { type: 'snapshot', cols: f.cols, rows: f.rows, data: f.data, windows_pty: pty }
+        : { type: 'snapshot', cols: f.cols, rows: f.rows, data: f.data };
+    }
     case 'readonly':
       return { type: 'readonly' };
     case 'resize':

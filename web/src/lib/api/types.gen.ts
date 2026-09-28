@@ -1021,10 +1021,28 @@ can_access_files?: boolean, };
 export type ServerEvent = { "type": "session_created", session: Session, } | { "type": "session_updated", session: Session, } | { "type": "session_deleted", session_id: string, } | { "type": "project_updated", project_id: string, } | { "type": "memory_updated", project_id: string, part: MemoryPart, } | { "type": "sync_updated", status: SyncStatus, } | { "type": "files_updated" } | { "type": "resync" };
 
 /**
+ * The ConPTY a Windows machine runs its terminals in (xterm.js `windowsPty`).
+ */
+export type WindowsPty = { 
+/**
+ * Windows build number, e.g. 26100.
+ */
+build_number: number, 
+/**
+ * ConPTY is the `conpty.dll` shipped next to `blirp`, not the system's.
+ */
+bundled_conpty: boolean, };
+
+/**
  * Text frames sent by the server on `/api/terminals/:id/ws` (§6). Raw
  * terminal output is sent as binary frames.
  */
-export type TerminalServerMessage = { "type": "snapshot", cols: number, rows: number, data: string, } | { "type": "readonly" } | { "type": "resize", cols: number, rows: number, } | { "type": "exit", status: SessionStatus, exit_code: number | null, };
+export type TerminalServerMessage = { "type": "snapshot", cols: number, rows: number, data: string, 
+/**
+ * Set when the terminal runs on Windows: the client's emulator
+ * wraps, reflows and resizes the way ConPTY does.
+ */
+windows_pty?: WindowsPty, } | { "type": "readonly" } | { "type": "resize", cols: number, rows: number, } | { "type": "exit", status: SessionStatus, exit_code: number | null, };
 
 /**
  * Text frames accepted from clients on `/api/terminals/:id/ws`. Binary frames

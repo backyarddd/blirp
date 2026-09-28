@@ -8,7 +8,7 @@
 //! never block waiting for a terminal.
 
 use anyhow::Context as _;
-use blirp_core::model::SessionStatus;
+use blirp_core::model::{SessionStatus, WindowsPty};
 use blirp_core::proc_tree::ProcessTree;
 use bytes::Bytes;
 use portable_pty::{ChildKiller, CommandBuilder, MasterPty, PtySize, native_pty_system};
@@ -680,6 +680,71 @@ fn write_body(parser: &mut vt100::Parser<Callbacks>, budget: usize, out: &mut Ve
         }
     }
     out.extend(parser.screen().contents_formatted());
+}
+
+/// The ConPTY this machine's terminals run in, sent with every snapshot so
+/// the client's emulator wraps, reflows and resizes the way ConPTY repaints
+/// (as VS Code sets xterm.js `windowsPty`). `None` off Windows.
+pub fn windows_pty() -> Option<WindowsPty> {
+    #[cfg(windows)]
+    {
+        static PTY: std::sync::OnceLock<Option<WindowsPty>> = std::sync::OnceLock::new();
+        *PTY.get_or_init(|| {
+            // portable-pty loads `conpty.dll` by name, which Windows finds
+            // next to the executable first (the release bundles one there).
+            let bundled_conpty = std::env::current_exe()
+                .ok()
+                .and_then(|exe| exe.parent().map(|dir| dir.join("conpty.dll").is_file()))
+                .unwrap_or(false);
+            match windows_build_number() {
+                Some(build_number) => Some(WindowsPty {
+                    build_number,
+                    bundled_conpty,
+                }),
+                None => {
+                    tracing::warn!(
+                        "cannot read the Windows build number; terminals wrap like xterm"
+                    );
+                    None
+                }
+            }
+        })
+    }
+    #[cfg(not(windows))]
+    None
+}
+
+/// `CurrentBuildNumber` from the registry (`GetVersionEx` lies to programs
+/// without a compatibility manifest).
+#[cfg(windows)]
+#[allow(unsafe_code)]
+fn windows_build_number() -> Option<u32> {
+    use windows_sys::Win32::System::Registry::{HKEY_LOCAL_MACHINE, RRF_RT_REG_SZ, RegGetValueW};
+    let key: Vec<u16> = "SOFTWARE\\Microsoft\\Windows NT\\CurrentVersion\0"
+        .encode_utf16()
+        .collect();
+    let value: Vec<u16> = "CurrentBuildNumber\0".encode_utf16().collect();
+    let mut buf = [0u16; 32];
+    let mut len = u32::try_from(std::mem::size_of_val(&buf)).ok()?;
+    // SAFETY: `key` and `value` are NUL-terminated UTF-16 strings that
+    // outlive the call; `buf` is writable for `len` bytes, and `len` is
+    // updated to the bytes written (including the terminating NUL).
+    let rc = unsafe {
+        RegGetValueW(
+            HKEY_LOCAL_MACHINE,
+            key.as_ptr(),
+            value.as_ptr(),
+            RRF_RT_REG_SZ,
+            std::ptr::null_mut(),
+            buf.as_mut_ptr().cast(),
+            &mut len,
+        )
+    };
+    if rc != 0 {
+        return None;
+    }
+    let chars = (len as usize / 2).saturating_sub(1).min(buf.len());
+    String::from_utf16(&buf[..chars]).ok()?.trim().parse().ok()
 }
 
 /// The session's whole process tree (§6); without one, Stop kills only the

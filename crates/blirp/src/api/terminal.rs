@@ -82,6 +82,7 @@ fn snapshot_msg(s: Snapshot) -> Option<Message> {
         cols: s.cols,
         rows: s.rows,
         data: s.data,
+        windows_pty: crate::pty::windows_pty(),
     })
 }
 

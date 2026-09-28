@@ -1582,6 +1582,15 @@ pub enum ServerEvent {
     Resync,
 }
 
+/// The ConPTY a Windows machine runs its terminals in (xterm.js `windowsPty`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS)]
+pub struct WindowsPty {
+    /// Windows build number, e.g. 26100.
+    pub build_number: u32,
+    /// ConPTY is the `conpty.dll` shipped next to `blirp`, not the system's.
+    pub bundled_conpty: bool,
+}
+
 /// Text frames sent by the server on `/api/terminals/:id/ws` (§6). Raw
 /// terminal output is sent as binary frames.
 #[derive(Debug, Clone, Serialize, Deserialize, TS)]
@@ -1589,7 +1598,16 @@ pub enum ServerEvent {
 pub enum TerminalServerMessage {
     /// Reset the terminal and write `data`; reproduces scrollback, screen,
     /// modes, cursor and title. Sent first, and again after the client lagged.
-    Snapshot { cols: u16, rows: u16, data: String },
+    Snapshot {
+        cols: u16,
+        rows: u16,
+        data: String,
+        /// Set when the terminal runs on Windows: the client's emulator
+        /// wraps, reflows and resizes the way ConPTY does.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        #[ts(optional)]
+        windows_pty: Option<WindowsPty>,
+    },
     /// Sent right after the first snapshot when this client may not control
     /// the terminal: its input and resize frames are ignored.
     Readonly,
@@ -1648,7 +1666,7 @@ mod tests {
             LaunchSession, PatchSession, RemoveWorktree, OpenTarget, OpenSession, UploadedFile, EventsPage, SearchHit, SearchResults, AgentInfo,
             AgentIntegration, AgentAuth, AgentToken, SetAgentToken, MachineDirs, MachineDir, CloneRepo, CloneJob, Injection, SummaryItem, DistillFailure, SessionSummary,
             SettingsView, SettingsPatch, Capabilities, DistillStatus, DistillPause, SummarizerPick, SummarizerFallback, SyncStatus, SyncInvite, JoinHub, JoinPreviewRequest, JoinPreview, LeftHub, WsTicketRequest, WsTicket, BrowserInvite, PatchDevice,
-            ServerEvent, TerminalServerMessage, TerminalClientMessage,
+            ServerEvent, WindowsPty, TerminalServerMessage, TerminalClientMessage,
             Config, DaemonConfig, MachineConfig, AgentsConfig, CustomAgent, SessionsConfig,
             FilesScanState, ExcludedGroup, FilesPreview, crate::files::rules::Reason,
             crate::files::FilesMode, crate::files::RootInfo, crate::files::GitManifest, CopyState,
