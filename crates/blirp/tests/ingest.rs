@@ -1000,7 +1000,7 @@ fn codex_subagent_repair_cleans_up_what_earlier_builds_ingested() {
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(&bad, std::fs::Permissions::from_mode(0)).unwrap();
+        std::fs::set_permissions(&bad, std::fs::Permissions::from_mode(0o000)).unwrap();
     }
     let outbox = h.outbox_len();
 
