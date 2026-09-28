@@ -584,11 +584,14 @@ async fn folderless_workspaces_sync_and_land_in_the_other_workspace() {
         .await;
     let pid = p.project.id.clone();
     let ws_b = PathBuf::from(p.workspace.clone().expect("workspace"));
-    write(&ws_b.join("todo.md"), "from the workspace");
-    // Creating it on demand is what the files API does too.
+    // The engine has looked at the new project before its workspace
+    // exists (the race a loaded machine loses): the files API making the
+    // workspace on demand must bring it in, not the next 10 minute rescan.
+    tokio::time::sleep(Duration::from_secs(2)).await;
     let _: FilesPreview =
         r.b.get(&format!("/api/projects/{pid}/files-sync/preview"))
             .await;
+    write(&ws_b.join("todo.md"), "from the workspace");
     eventually("the workspace uploaded", || async {
         hub_files(&r.hub, &pid).await.is_some_and(|(_, n)| n == 1)
     })

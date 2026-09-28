@@ -104,11 +104,17 @@ pub(crate) fn project_root(s: &SharedState, id: &str, root: Option<&str>) -> Api
     let project = s.store.live_project(id)?;
     let mut roots = s.store.local_roots(id, &s.machine.id)?;
     if roots.is_empty() && !project.chats && s.store.project_paths(id)?.is_empty() {
+        let new = s.paths.workspace_dir(id).is_ok_and(|w| !w.is_dir());
         roots.push(
             s.paths
                 .ensure_workspace(id)
                 .map_err(|e| ApiError::internal("creating the project workspace", e))?,
         );
+        // File sync takes a workspace in once it exists: made here, it is
+        // brought in now rather than at the next rescan.
+        if new && let Some(e) = crate::files::engine(s) {
+            e.refresh();
+        }
     }
     match root {
         Some(r) => roots
