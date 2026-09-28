@@ -54,7 +54,16 @@ export default async function globalSetup(): Promise<() => Promise<void>> {
   // keep_awake: live sessions hold a sleep-prevention assertion, shown in the top bar.
   writeFileSync(
     join(home, 'config.toml'),
-    '[sessions]\nkeep_awake = true\n\n[memory]\nsummarizer = "none"\n\n[sync]\nrelay = "disabled"\n',
+    '[sessions]\nkeep_awake = true\n\n[memory]\nsummarizer = "none"\n\n[sync]\nrelay = "disabled"\n' +
+      // keys.spec.ts: agents that log the bytes their terminal receives, one per set of terminal
+      // modes (key-echo.mjs), each into `<root>/keys-<mode>.log`. JSON strings are TOML strings.
+      ['plain', 'app', 'kitty']
+        .map(
+          (mode) =>
+            `\n[[agents.custom]]\nname = "keys-${mode}"\ncommand = ${JSON.stringify(process.execPath)}\n` +
+            `args = ${JSON.stringify([join(repoRoot, 'web', 'e2e', 'key-echo.mjs'), join(root, `keys-${mode}.log`), mode])}\n`,
+        )
+        .join(''),
   );
   // Folders the new-session folder picker lists in the (temp) user home.
   mkdirSync(join(userHome, 'code', 'demo-repo', '.git'), { recursive: true });
