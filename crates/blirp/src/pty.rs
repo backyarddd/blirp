@@ -21,6 +21,8 @@ use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::time::{Duration, Instant};
 use tokio::sync::broadcast;
 
+mod modes;
+
 pub const SCROLLBACK: usize = 10_000;
 /// Scrollback bytes replayed in one attach snapshot at most (oldest lines
 /// are left out beyond it); relayed terminals accept frames of
@@ -136,8 +138,77 @@ impl vt100::Callbacks for Callbacks {
     }
 }
 
-struct ScreenState {
+/// What an attach snapshot reproduces: vt100's screen, the modes it does
+/// not replay ([`modes::Modes`]), and the normal screen hidden behind the
+/// alternate one.
+struct Emulator {
     parser: vt100::Parser<Callbacks>,
+    modes: modes::Modes,
+    /// The normal screen (scrollback and content) as it was when the
+    /// alternate screen was entered: vt100 shows only the active screen, and
+    /// the normal one does not change until the program leaves the other.
+    normal: Option<Vec<u8>>,
+}
+
+impl Emulator {
+    fn new(rows: u16, cols: u16, scrollback: usize) -> Self {
+        Self {
+            parser: vt100::Parser::new_with_callbacks(rows, cols, scrollback, Callbacks::default()),
+            modes: modes::Modes::new(rows),
+            normal: None,
+        }
+    }
+
+    /// Feed PTY output. [`modes::Modes`] sees each byte first, so vt100 can
+    /// be stopped right before or after the sequences that need more than
+    /// vt100 does (see [`modes::Event`]); both parsers keep their state
+    /// across calls, so sequences split across reads work too.
+    fn feed(&mut self, bytes: &[u8]) {
+        let mut start = 0;
+        for (i, &b) in bytes.iter().enumerate() {
+            match self.modes.advance(b) {
+                modes::Event::None => {}
+                modes::Event::EnterAlternate => {
+                    // Everything up to the switch's final byte: vt100 still
+                    // shows the normal screen.
+                    self.parser.process(&bytes[start..i]);
+                    start = i;
+                    if !self.parser.screen().alternate_screen() {
+                        let mut normal = Vec::new();
+                        write_body(&mut self.parser, SNAPSHOT_SCROLLBACK_BYTES, &mut normal);
+                        self.normal = Some(normal);
+                    }
+                }
+                modes::Event::ClearScrollback => {
+                    self.parser.process(&bytes[start..=i]);
+                    start = i + 1;
+                    clear_scrollback(&mut self.parser);
+                }
+                modes::Event::KittyQuery => {
+                    // In order with the replies vt100 gives to earlier queries:
+                    // programs send a DA1 query after it to tell whether the
+                    // terminal answers kitty queries at all.
+                    self.parser.process(&bytes[start..=i]);
+                    start = i + 1;
+                    let reply = self.modes.kitty_reply();
+                    self.parser.callbacks_mut().replies.extend(reply);
+                }
+            }
+        }
+        self.parser.process(&bytes[start..]);
+        if !self.parser.screen().alternate_screen() {
+            self.normal = None;
+        }
+    }
+
+    fn resize(&mut self, rows: u16, cols: u16) {
+        self.parser.screen_mut().set_size(rows, cols);
+        self.modes.resize(rows);
+    }
+}
+
+struct ScreenState {
+    emu: Emulator,
     last_output: Option<Instant>,
     exited: Option<ExitInfo>,
     /// Replies to queries sent while clients were attached, and since when:
@@ -202,12 +273,7 @@ impl Terminal {
         let term = Arc::new(Terminal {
             session_id: session_id.to_string(),
             screen: Mutex::new(ScreenState {
-                parser: vt100::Parser::new_with_callbacks(
-                    req.rows,
-                    req.cols,
-                    SCROLLBACK,
-                    Callbacks::default(),
-                ),
+                emu: Emulator::new(req.rows, req.cols, SCROLLBACK),
                 last_output: None,
                 exited: None,
                 unanswered: None,
@@ -324,9 +390,9 @@ impl Terminal {
 
     fn on_output(&self, bytes: &[u8]) {
         let mut s = lock(&self.screen);
-        feed(&mut s.parser, bytes);
+        s.emu.feed(bytes);
         s.last_output = Some(Instant::now());
-        let replies = std::mem::take(&mut s.parser.callbacks_mut().replies);
+        let replies = std::mem::take(&mut s.emu.parser.callbacks_mut().replies);
         // Attached clients (xterm.js) answer queries themselves; if none
         // does, `answer_stale_queries` does.
         if !replies.is_empty() {
@@ -347,7 +413,7 @@ impl Terminal {
     /// Taken under the screen lock, so no output is lost or duplicated.
     pub fn attach(&self) -> (Snapshot, broadcast::Receiver<TermEvent>, Option<ExitInfo>) {
         let mut s = lock(&self.screen);
-        let snap = snapshot(&mut s.parser);
+        let snap = snapshot(&mut s.emu);
         (snap, self.tx.subscribe(), s.exited)
     }
 
@@ -395,7 +461,7 @@ impl Terminal {
         // which needs `screen`. Holding `master` throughout keeps concurrent
         // resizes from interleaving PTY and parser sizes.
         let master = lock(&self.master);
-        if lock(&self.screen).parser.screen().size() == (rows, cols) {
+        if lock(&self.screen).emu.parser.screen().size() == (rows, cols) {
             return Ok(());
         }
         if let Some(m) = master.as_ref() {
@@ -407,7 +473,7 @@ impl Terminal {
             })
             .context("resize pty")?;
         }
-        lock(&self.screen).parser.screen_mut().set_size(rows, cols);
+        lock(&self.screen).emu.resize(rows, cols);
         let _ = self.tx.send(TermEvent::Resize { cols, rows, by });
         Ok(())
     }
@@ -482,7 +548,7 @@ impl Terminal {
     }
 
     pub fn bracketed_paste(&self) -> bool {
-        lock(&self.screen).parser.screen().bracketed_paste()
+        lock(&self.screen).emu.parser.screen().bracketed_paste()
     }
 
     /// Output heuristic of §7: `starting` before any output, `working` with
@@ -497,28 +563,14 @@ impl Terminal {
 
     /// Plain-text screen contents (tests and diagnostics).
     pub fn screen_text(&self) -> String {
-        lock(&self.screen).parser.screen().contents()
+        lock(&self.screen).emu.parser.screen().contents()
     }
 }
 
-/// Feed PTY output to the screen state. vt100 ignores `CSI 3 J` (erase
-/// saved lines), which TUIs such as Claude Code send before redrawing their
-/// whole history; xterm.js does clear its scrollback then, so without this a
-/// reattach would show the history twice. The screen is rebuilt without
-/// scrollback at that point. A sequence split across two reads is missed
-/// (the history then shows twice, nothing is lost).
-fn feed(parser: &mut vt100::Parser<Callbacks>, bytes: &[u8]) {
-    const ED3: &[u8] = b"\x1b[3J";
-    let mut rest = bytes;
-    while let Some(i) = rest.windows(ED3.len()).position(|w| w == ED3) {
-        let (head, tail) = rest.split_at(i + ED3.len());
-        parser.process(head);
-        clear_scrollback(parser);
-        rest = tail;
-    }
-    parser.process(rest);
-}
-
+/// vt100 ignores `CSI 3 J` (erase saved lines), which TUIs such as Claude
+/// Code send before redrawing their whole history; xterm.js does clear its
+/// scrollback then, so without this a reattach would show the history twice.
+/// The screen is rebuilt without scrollback.
 fn clear_scrollback(parser: &mut vt100::Parser<Callbacks>) {
     // The scrollback belongs to the normal screen, hidden behind the
     // alternate one: an alternate-screen app has none to clear.
@@ -534,8 +586,9 @@ fn clear_scrollback(parser: &mut vt100::Parser<Callbacks>) {
     *parser = fresh;
 }
 
-/// A cursor position report, device status or device attributes reply
-/// (`ESC [ ... R`, `ESC [ ... n`, `ESC [ ? ... c`) as xterm.js sends them.
+/// A cursor position report, device status, device attributes or kitty
+/// keyboard reply (`ESC [ ... R`, `ESC [ ... n`, `ESC [ ? ... c`,
+/// `ESC [ ? flags u`) as xterm.js sends them.
 fn is_query_reply(bytes: &[u8]) -> bool {
     bytes.windows(2).enumerate().any(|(i, w)| {
         w == b"[" && {
@@ -544,59 +597,45 @@ fn is_query_reply(bytes: &[u8]) -> bool {
                 .iter()
                 .take_while(|b| b.is_ascii_digit() || matches!(b, b';' | b'?' | b'>'))
                 .count();
-            matches!(rest.get(params), Some(b'R' | b'n' | b'c')) && params > 0
+            params > 0
+                && match rest.get(params) {
+                    Some(b'R' | b'n' | b'c') => true,
+                    // Kitty key events end in `u` too, but never start with `?`.
+                    Some(b'u') => rest.first() == Some(&b'?'),
+                    _ => false,
+                }
         }
     })
 }
 
-/// Bytes that make a fresh terminal look like `parser`'s: reset, scrollback
-/// lines (normal screen only), the visible screen with attributes and
-/// cursor, input modes and title.
-fn snapshot(parser: &mut vt100::Parser<Callbacks>) -> Snapshot {
-    snapshot_within(parser, SNAPSHOT_SCROLLBACK_BYTES)
+/// Bytes that make a fresh terminal look like `emu`'s: reset, the normal
+/// screen (scrollback lines, the visible screen with attributes and cursor),
+/// the alternate screen on top when a program shows it, every input and
+/// terminal mode, and the title.
+fn snapshot(emu: &mut Emulator) -> Snapshot {
+    snapshot_within(emu, SNAPSHOT_SCROLLBACK_BYTES)
 }
 
 /// [`snapshot`] replaying at most `budget` bytes of scrollback (newest lines).
-fn snapshot_within(parser: &mut vt100::Parser<Callbacks>, budget: usize) -> Snapshot {
-    let (rows, cols) = parser.screen().size();
+fn snapshot_within(emu: &mut Emulator, budget: usize) -> Snapshot {
+    let (rows, cols) = emu.parser.screen().size();
     let mut out: Vec<u8> = b"\x1bc".to_vec();
-    if parser.screen().alternate_screen() {
+    if emu.parser.screen().alternate_screen() {
+        if let Some(normal) = &emu.normal {
+            out.extend(normal);
+        }
+        out.extend(emu.modes.kitty(modes::Screen::Normal));
+        // Saves the normal screen's cursor, restored when the program leaves.
         out.extend(b"\x1b[?1049h");
+        out.extend(emu.parser.screen().contents_formatted());
+        out.extend(emu.modes.kitty(modes::Screen::Alternate));
     } else {
-        // Replay scrollback oldest first, followed by the screen rows, as
-        // plain lines: the client's own scrollback then holds the history.
-        parser.screen_mut().set_scrollback(usize::MAX);
-        let mut offset = parser.screen().scrollback();
-        let mut lines: Vec<Vec<u8>> = Vec::with_capacity(offset + usize::from(rows));
-        while offset > 0 {
-            parser.screen_mut().set_scrollback(offset);
-            let take = offset.min(usize::from(rows));
-            lines.extend(parser.screen().rows_formatted(0, cols).take(take));
-            offset -= take;
-        }
-        parser.screen_mut().set_scrollback(0);
-        // Beyond the budget the oldest lines go (a snapshot is one frame).
-        let mut size: usize = lines.iter().map(|l| l.len() + 5).sum();
-        let mut skip = 0;
-        while size > budget && skip < lines.len() {
-            size -= lines[skip].len() + 5;
-            skip += 1;
-        }
-        lines.drain(..skip);
-        if !lines.is_empty() {
-            lines.extend(parser.screen().rows_formatted(0, cols));
-            for (i, line) in lines.iter().enumerate() {
-                if i > 0 {
-                    out.extend(b"\r\n");
-                }
-                out.extend(line);
-                out.extend(b"\x1b[m");
-            }
-        }
+        write_body(&mut emu.parser, budget, &mut out);
+        out.extend(emu.modes.kitty(modes::Screen::Normal));
     }
-    // Redraw the visible screen exactly (clears it first) plus input modes.
-    out.extend(parser.screen().state_formatted());
-    if let Some(title) = &parser.callbacks().title {
+    out.extend(emu.parser.screen().input_mode_formatted());
+    out.extend(emu.modes.replay(emu.parser.screen().cursor_position()));
+    if let Some(title) = &emu.parser.callbacks().title {
         out.extend(format!("\x1b]0;{title}\x07").as_bytes());
     }
     Snapshot {
@@ -604,6 +643,43 @@ fn snapshot_within(parser: &mut vt100::Parser<Callbacks>, budget: usize) -> Snap
         rows,
         data: String::from_utf8_lossy(&out).into_owned(),
     }
+}
+
+/// The active screen as plain lines, oldest scrollback first (at most
+/// `budget` bytes of it, newest lines), then the visible screen redrawn
+/// exactly (cleared first) with attributes and cursor: the client's own
+/// scrollback then holds the history.
+fn write_body(parser: &mut vt100::Parser<Callbacks>, budget: usize, out: &mut Vec<u8>) {
+    let (rows, cols) = parser.screen().size();
+    parser.screen_mut().set_scrollback(usize::MAX);
+    let mut offset = parser.screen().scrollback();
+    let mut lines: Vec<Vec<u8>> = Vec::with_capacity(offset + usize::from(rows));
+    while offset > 0 {
+        parser.screen_mut().set_scrollback(offset);
+        let take = offset.min(usize::from(rows));
+        lines.extend(parser.screen().rows_formatted(0, cols).take(take));
+        offset -= take;
+    }
+    parser.screen_mut().set_scrollback(0);
+    // Beyond the budget the oldest lines go (a snapshot is one frame).
+    let mut size: usize = lines.iter().map(|l| l.len() + 5).sum();
+    let mut skip = 0;
+    while size > budget && skip < lines.len() {
+        size -= lines[skip].len() + 5;
+        skip += 1;
+    }
+    lines.drain(..skip);
+    if !lines.is_empty() {
+        lines.extend(parser.screen().rows_formatted(0, cols));
+        for (i, line) in lines.iter().enumerate() {
+            if i > 0 {
+                out.extend(b"\r\n");
+            }
+            out.extend(line);
+            out.extend(b"\x1b[m");
+        }
+    }
+    out.extend(parser.screen().contents_formatted());
 }
 
 /// The session's whole process tree (§6); without one, Stop kills only the
@@ -803,26 +879,26 @@ mod tests {
 
     #[test]
     fn snapshot_reproduces_scrollback_screen_and_title() {
-        let mut p = vt100::Parser::new_with_callbacks(4, 20, SCROLLBACK, Callbacks::default());
+        let mut p = Emulator::new(4, 20, SCROLLBACK);
         for i in 0..10 {
-            p.process(format!("line {i}\r\n").as_bytes());
+            p.feed(format!("line {i}\r\n").as_bytes());
         }
-        p.process(b"\x1b]0;my title\x07\x1b[31mred\x1b[m");
+        p.feed(b"\x1b]0;my title\x07\x1b[31mred\x1b[m");
         let snap = snapshot(&mut p);
         assert_eq!((snap.cols, snap.rows), (20, 4));
 
         let mut client = vt100::Parser::new_with_callbacks(4, 20, SCROLLBACK, Callbacks::default());
         client.process(snap.data.as_bytes());
-        assert_eq!(client.screen().contents(), p.screen().contents());
+        assert_eq!(client.screen().contents(), p.parser.screen().contents());
         assert_eq!(
             client.screen().cursor_position(),
-            p.screen().cursor_position()
+            p.parser.screen().cursor_position()
         );
         assert_eq!(client.callbacks().title.as_deref(), Some("my title"));
         client.screen_mut().set_scrollback(usize::MAX);
         assert_eq!(
             client.screen().scrollback(),
-            p.screen_mut().tap_scrollback()
+            p.parser.screen_mut().tap_scrollback()
         );
         assert!(client.screen().contents().contains("line 0"));
     }
@@ -867,15 +943,12 @@ mod tests {
     // the terminal still holds.
     #[test]
     fn reattach_restores_the_whole_scrollback() {
-        let mut p = vt100::Parser::new_with_callbacks(24, 80, SCROLLBACK, Callbacks::default());
+        let mut p = Emulator::new(24, 80, SCROLLBACK);
         for i in 0..12_000 {
-            feed(
-                &mut p,
-                format!("\x1b[3{}mline {i}\x1b[m\r\n", i % 7).as_bytes(),
-            );
+            p.feed(format!("\x1b[3{}mline {i}\x1b[m\r\n", i % 7).as_bytes());
         }
-        feed(&mut p, b"$ ");
-        let want = history(&mut p);
+        p.feed(b"$ ");
+        let want = history(&mut p.parser);
         assert_eq!(want.len(), SCROLLBACK + 24);
         assert_eq!(want[0], "line 1977");
         let snap = snapshot(&mut p);
@@ -883,7 +956,7 @@ mod tests {
         assert_eq!(history(&mut client), want);
         assert_eq!(
             client.screen().cursor_position(),
-            p.screen().cursor_position()
+            p.parser.screen().cursor_position()
         );
         // Colors survive too.
         client.screen_mut().set_scrollback(SCROLLBACK);
@@ -897,15 +970,15 @@ mod tests {
     // still exact.
     #[test]
     fn snapshot_budget_keeps_the_newest_lines() {
-        let mut p = vt100::Parser::new_with_callbacks(4, 20, SCROLLBACK, Callbacks::default());
+        let mut p = Emulator::new(4, 20, SCROLLBACK);
         for i in 0..100 {
-            feed(&mut p, format!("line {i}\r\n").as_bytes());
+            p.feed(format!("line {i}\r\n").as_bytes());
         }
         let snap = snapshot_within(&mut p, 200);
         let mut client = client_of(&snap);
         let got = history(&mut client);
         assert!(got.len() < 40, "{}", got.len());
-        assert_eq!(client.screen().contents(), p.screen().contents());
+        assert_eq!(client.screen().contents(), p.parser.screen().contents());
         assert!(got.contains(&"line 95".to_string()));
         assert!(!got.contains(&"line 10".to_string()));
     }
@@ -914,40 +987,37 @@ mod tests {
     // redraws its history (Claude Code) does not show it twice on reattach.
     #[test]
     fn erase_saved_lines_clears_the_scrollback() {
-        let mut p = vt100::Parser::new_with_callbacks(4, 20, SCROLLBACK, Callbacks::default());
+        let mut p = Emulator::new(4, 20, SCROLLBACK);
         for i in 0..10 {
-            feed(&mut p, format!("old {i}\r\n").as_bytes());
+            p.feed(format!("old {i}\r\n").as_bytes());
         }
-        feed(
-            &mut p,
-            b"\x1b]0;t\x07\x1b[2J\x1b[3J\x1b[H\x1b[1mnew 0\r\nnew 1\r\nnew 2\r\nnew 3\r\nnew 4",
-        );
-        let lines = history(&mut p);
+        p.feed(b"\x1b]0;t\x07\x1b[2J\x1b[3J\x1b[H\x1b[1mnew 0\r\nnew 1\r\nnew 2\r\nnew 3\r\nnew 4");
+        let lines = history(&mut p.parser);
         assert!(!lines.iter().any(|l| l.starts_with("old")), "{lines:?}");
         assert_eq!(lines[0], "new 0");
-        assert!(p.screen().bold(), "attributes survive the rebuild");
-        assert_eq!(p.callbacks().title.as_deref(), Some("t"));
+        assert!(p.parser.screen().bold(), "attributes survive the rebuild");
+        assert_eq!(p.parser.callbacks().title.as_deref(), Some("t"));
         let mut client = client_of(&snapshot(&mut p));
         assert_eq!(history(&mut client), lines);
 
         // Inside the alternate screen it touches nothing.
-        let mut p = vt100::Parser::new_with_callbacks(4, 20, SCROLLBACK, Callbacks::default());
+        let mut p = Emulator::new(4, 20, SCROLLBACK);
         for i in 0..10 {
-            feed(&mut p, format!("old {i}\r\n").as_bytes());
+            p.feed(format!("old {i}\r\n").as_bytes());
         }
-        feed(&mut p, b"\x1b[?1049h\x1b[3Jtui\x1b[?1049l");
-        assert!(history(&mut p).iter().any(|l| l == "old 0"));
+        p.feed(b"\x1b[?1049h\x1b[3Jtui\x1b[?1049l");
+        assert!(history(&mut p.parser).iter().any(|l| l == "old 0"));
     }
 
     #[test]
     fn alternate_screen_snapshot() {
-        let mut p = vt100::Parser::new_with_callbacks(4, 20, SCROLLBACK, Callbacks::default());
-        p.process(b"shell$ \x1b[?1049h\x1b[2;3Htui");
+        let mut p = Emulator::new(4, 20, SCROLLBACK);
+        p.feed(b"shell$ \x1b[?1049h\x1b[2;3Htui");
         let snap = snapshot(&mut p);
         let mut client = vt100::Parser::new(4, 20, 0);
         client.process(snap.data.as_bytes());
         assert!(client.screen().alternate_screen());
-        assert_eq!(client.screen().contents(), p.screen().contents());
+        assert_eq!(client.screen().contents(), p.parser.screen().contents());
     }
 
     #[test]
@@ -958,6 +1028,9 @@ mod tests {
         for other in [&b"[A"[..], b"[c", b"hello", b"[2~", b"["] {
             assert!(!is_query_reply(other), "{other:?}");
         }
+        // Kitty keyboard: the query reply, not a key event (Ctrl+A).
+        assert!(is_query_reply(b"\x1b[?1u"));
+        assert!(!is_query_reply(b"\x1b[97;5u"));
     }
 
     // A client that is attached but never answers (a laptop that went to
@@ -1004,8 +1077,8 @@ mod tests {
 
     #[test]
     fn terminal_queries_are_answered() {
-        let mut p = vt100::Parser::new_with_callbacks(10, 20, 0, Callbacks::default());
-        p.process(b"ab\x1b[6n\x1b[c\x1b[5n");
-        assert_eq!(p.callbacks().replies, b"\x1b[1;3R\x1b[?1;2c\x1b[0n");
+        let mut p = Emulator::new(10, 20, 0);
+        p.feed(b"ab\x1b[6n\x1b[c\x1b[5n");
+        assert_eq!(p.parser.callbacks().replies, b"\x1b[1;3R\x1b[?1;2c\x1b[0n");
     }
 }

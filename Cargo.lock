@@ -611,6 +611,7 @@ dependencies = [
  "tracing-subscriber",
  "uuid",
  "vt100",
+ "vte",
  "windows-sys 0.61.2",
  "zstd",
 ]
