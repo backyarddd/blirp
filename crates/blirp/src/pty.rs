@@ -144,10 +144,11 @@ impl vt100::Callbacks for Callbacks {
 struct Emulator {
     parser: vt100::Parser<Callbacks>,
     modes: modes::Modes,
-    /// The normal screen (scrollback and content) as it was when the
-    /// alternate screen was entered: vt100 shows only the active screen, and
-    /// the normal one does not change until the program leaves the other.
-    normal: Option<Vec<u8>>,
+    /// A copy of the screen as it was when the alternate screen was entered
+    /// (formatted only for a snapshot): vt100 shows only the active screen,
+    /// and the normal one does not change until the program leaves the
+    /// other, except for resizes, which the copy follows.
+    normal: Option<vt100::Screen>,
 }
 
 impl Emulator {
@@ -165,7 +166,14 @@ impl Emulator {
     /// across calls, so sequences split across reads work too.
     fn feed(&mut self, bytes: &[u8]) {
         let mut start = 0;
-        for (i, &b) in bytes.iter().enumerate() {
+        let mut i = 0;
+        while i < bytes.len() {
+            let quiet = self.modes.advance_quiet(&bytes[i..]);
+            if quiet > 0 {
+                i += quiet;
+                continue;
+            }
+            let b = bytes[i];
             match self.modes.advance(b) {
                 modes::Event::None => {}
                 modes::Event::EnterAlternate => {
@@ -174,9 +182,7 @@ impl Emulator {
                     self.parser.process(&bytes[start..i]);
                     start = i;
                     if !self.parser.screen().alternate_screen() {
-                        let mut normal = Vec::new();
-                        write_body(&mut self.parser, SNAPSHOT_SCROLLBACK_BYTES, &mut normal);
-                        self.normal = Some(normal);
+                        self.normal = Some(self.parser.screen().clone());
                     }
                 }
                 modes::Event::ClearScrollback => {
@@ -194,6 +200,7 @@ impl Emulator {
                     self.parser.callbacks_mut().replies.extend(reply);
                 }
             }
+            i += 1;
         }
         self.parser.process(&bytes[start..]);
         if !self.parser.screen().alternate_screen() {
@@ -203,6 +210,9 @@ impl Emulator {
 
     fn resize(&mut self, rows: u16, cols: u16) {
         self.parser.screen_mut().set_size(rows, cols);
+        if let Some(normal) = &mut self.normal {
+            normal.set_size(rows, cols);
+        }
         self.modes.resize(rows);
     }
 }
@@ -621,8 +631,8 @@ fn snapshot_within(emu: &mut Emulator, budget: usize) -> Snapshot {
     let (rows, cols) = emu.parser.screen().size();
     let mut out: Vec<u8> = b"\x1bc".to_vec();
     if emu.parser.screen().alternate_screen() {
-        if let Some(normal) = &emu.normal {
-            out.extend(normal);
+        if let Some(normal) = &mut emu.normal {
+            write_body(normal, budget, &mut out);
         }
         out.extend(emu.modes.kitty(modes::Screen::Normal));
         // Saves the normal screen's cursor, restored when the program leaves.
@@ -630,7 +640,7 @@ fn snapshot_within(emu: &mut Emulator, budget: usize) -> Snapshot {
         out.extend(emu.parser.screen().contents_formatted());
         out.extend(emu.modes.kitty(modes::Screen::Alternate));
     } else {
-        write_body(&mut emu.parser, budget, &mut out);
+        write_body(emu.parser.screen_mut(), budget, &mut out);
         out.extend(emu.modes.kitty(modes::Screen::Normal));
     }
     out.extend(emu.parser.screen().input_mode_formatted());
@@ -649,18 +659,18 @@ fn snapshot_within(emu: &mut Emulator, budget: usize) -> Snapshot {
 /// `budget` bytes of it, newest lines), then the visible screen redrawn
 /// exactly (cleared first) with attributes and cursor: the client's own
 /// scrollback then holds the history.
-fn write_body(parser: &mut vt100::Parser<Callbacks>, budget: usize, out: &mut Vec<u8>) {
-    let (rows, cols) = parser.screen().size();
-    parser.screen_mut().set_scrollback(usize::MAX);
-    let mut offset = parser.screen().scrollback();
+fn write_body(screen: &mut vt100::Screen, budget: usize, out: &mut Vec<u8>) {
+    let (rows, cols) = screen.size();
+    screen.set_scrollback(usize::MAX);
+    let mut offset = screen.scrollback();
     let mut lines: Vec<Vec<u8>> = Vec::with_capacity(offset + usize::from(rows));
     while offset > 0 {
-        parser.screen_mut().set_scrollback(offset);
+        screen.set_scrollback(offset);
         let take = offset.min(usize::from(rows));
-        lines.extend(parser.screen().rows_formatted(0, cols).take(take));
+        lines.extend(screen.rows_formatted(0, cols).take(take));
         offset -= take;
     }
-    parser.screen_mut().set_scrollback(0);
+    screen.set_scrollback(0);
     // Beyond the budget the oldest lines go (a snapshot is one frame).
     let mut size: usize = lines.iter().map(|l| l.len() + 5).sum();
     let mut skip = 0;
@@ -670,7 +680,7 @@ fn write_body(parser: &mut vt100::Parser<Callbacks>, budget: usize, out: &mut Ve
     }
     lines.drain(..skip);
     if !lines.is_empty() {
-        lines.extend(parser.screen().rows_formatted(0, cols));
+        lines.extend(screen.rows_formatted(0, cols));
         for (i, line) in lines.iter().enumerate() {
             if i > 0 {
                 out.extend(b"\r\n");
@@ -679,7 +689,7 @@ fn write_body(parser: &mut vt100::Parser<Callbacks>, budget: usize, out: &mut Ve
             out.extend(b"\x1b[m");
         }
     }
-    out.extend(parser.screen().contents_formatted());
+    out.extend(screen.contents_formatted());
 }
 
 /// The ConPTY this machine's terminals run in, sent with every snapshot so

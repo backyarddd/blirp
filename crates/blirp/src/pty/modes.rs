@@ -148,8 +148,10 @@ impl State {
             // Any other mouse encoding replaces SGR-pixels (vt100 keeps those).
             1005 | 1006 | 1015 if on => self.sgr_pixel_mouse = false,
             1016 => self.sgr_pixel_mouse = on,
-            47 | 1047 | 1049 => {
-                if on && !self.alternate && mode != 1047 {
+            // vt100 switches screens on these two only (not `?1047`): the
+            // per-screen state must follow the screen vt100 shows.
+            47 | 1049 => {
+                if on && !self.alternate {
                     *event = Event::EnterAlternate;
                 }
                 self.set_alternate(on);
@@ -164,6 +166,8 @@ impl State {
 struct Performer<'a> {
     state: &'a mut State,
     event: Event,
+    /// Set by every callback that leaves the parser in its ground state.
+    ground: &'a mut bool,
 }
 
 fn first(params: &vte::Params, default: u16) -> u16 {
@@ -174,6 +178,18 @@ fn first(params: &vte::Params, default: u16) -> u16 {
 }
 
 impl vte::Perform for Performer<'_> {
+    fn print(&mut self, _c: char) {
+        *self.ground = true;
+    }
+
+    fn osc_dispatch(&mut self, _params: &[&[u8]], _bell_terminated: bool) {
+        *self.ground = true;
+    }
+
+    fn unhook(&mut self) {
+        *self.ground = true;
+    }
+
     fn execute(&mut self, byte: u8) {
         match byte {
             0x0e => self.state.gl = 1, // SO
@@ -183,6 +199,7 @@ impl vte::Perform for Performer<'_> {
     }
 
     fn esc_dispatch(&mut self, intermediates: &[u8], _ignore: bool, byte: u8) {
+        *self.ground = true;
         let s = &mut *self.state;
         match (intermediates, byte) {
             ([], b'c') => *s = State::new(s.rows), // RIS
@@ -203,6 +220,7 @@ impl vte::Perform for Performer<'_> {
         ignore: bool,
         action: char,
     ) {
+        *self.ground = true;
         if ignore {
             return;
         }
@@ -297,6 +315,9 @@ impl vte::Perform for Performer<'_> {
 pub(super) struct Modes {
     parser: vte::Parser,
     state: State,
+    /// No sequence is in progress (conservatively: after a cancelled one
+    /// this stays false until the next printed character).
+    ground: bool,
 }
 
 impl Modes {
@@ -304,17 +325,43 @@ impl Modes {
         Self {
             parser: vte::Parser::new(),
             state: State::new(rows),
+            ground: true,
         }
     }
 
     /// Follow one byte of program output.
     pub(super) fn advance(&mut self, byte: u8) -> Event {
+        if byte == 0x1b {
+            self.ground = false;
+        }
         let mut p = Performer {
             state: &mut self.state,
             event: Event::None,
+            ground: &mut self.ground,
         };
         self.parser.advance(&mut p, &[byte]);
         p.event
+    }
+
+    /// Follow the leading run of `bytes` that cannot raise an [`Event`] in
+    /// one call: outside a sequence, up to the next ESC (the only way into
+    /// one; C1 bytes are UTF-8 here). Returns its length, 0 when the caller
+    /// must go byte by byte.
+    pub(super) fn advance_quiet(&mut self, bytes: &[u8]) -> usize {
+        if !self.ground {
+            return 0;
+        }
+        let n = bytes.iter().position(|&b| b == 0x1b).unwrap_or(bytes.len());
+        if n > 0 {
+            let mut p = Performer {
+                state: &mut self.state,
+                event: Event::None,
+                ground: &mut self.ground,
+            };
+            self.parser.advance(&mut p, &bytes[..n]);
+            debug_assert_eq!(p.event, Event::None);
+        }
+        n
     }
 
     /// Like xterm.js, a resize resets the scroll regions.
@@ -600,6 +647,46 @@ mod tests {
         p.feed(b"J");
         p.parser.screen_mut().set_scrollback(usize::MAX);
         assert_eq!(p.parser.screen().scrollback(), 0);
+    }
+
+    // The saved normal screen follows a resize made while the program
+    // shows the alternate screen.
+    #[test]
+    fn normal_screen_follows_a_resize_behind_the_alternate_one() {
+        let mut p = Emulator::new(4, 20, SCROLLBACK);
+        p.feed(b"$ htop\x1b[?1049hbusy");
+        p.resize(6, 30);
+        let mut c = reattach(&mut p);
+        assert_eq!(c.parser.screen().size(), (6, 30));
+        c.feed(b"\x1b[?1049l");
+        p.feed(b"\x1b[?1049l");
+        assert_eq!(c.parser.screen().contents(), p.parser.screen().contents());
+        assert_eq!(c.parser.screen().contents().trim(), "$ htop");
+    }
+
+    // vt100 does not switch screens on `?1047`, so neither do the modes.
+    #[test]
+    fn mode_1047_is_not_a_screen_switch() {
+        let mut p = Emulator::new(4, 20, SCROLLBACK);
+        p.feed(b"\x1b[>1u\x1b[?1047h\x1b[>5u");
+        assert!(!p.modes.state.alternate && !p.parser.screen().alternate_screen());
+        assert_eq!(p.modes.state.kitty.normal_stack, [0, 1]);
+        assert_same(&mut p);
+    }
+
+    // Plain runs go through in one call; state set by C0 in them and
+    // sequences right after them, and UTF-8 split across reads, still work.
+    #[test]
+    fn plain_runs_and_sequences_around_them() {
+        let mut p = Emulator::new(4, 20, SCROLLBACK);
+        p.feed("h\u{e9}llo \x0e".as_bytes());
+        assert_eq!(p.modes.state.gl, 1);
+        p.feed(b"x\x0f\x1b[?1004hmore\xc3");
+        p.feed(b"\xa9\x1b[>2u");
+        assert_eq!(p.modes.state.gl, 0);
+        assert!(p.modes.state.focus_reporting);
+        assert_eq!(p.modes.state.kitty.flags, 2);
+        assert!(p.parser.screen().contents().contains("more\u{e9}"));
     }
 
     // RIS resets everything tracked.
