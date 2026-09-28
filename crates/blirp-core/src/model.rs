@@ -679,6 +679,14 @@ pub struct CreateWikiPage {
     pub body_md: String,
 }
 
+/// `POST /api/projects/:id/wiki/:slug/rename`.
+#[derive(Debug, Clone, Serialize, Deserialize, TS)]
+#[serde(deny_unknown_fields)]
+pub struct RenameWikiPage {
+    /// The new slug: `[a-z0-9-]`, 1-100 chars, unused in the project.
+    pub slug: String,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, TS)]
 #[serde(deny_unknown_fields)]
 pub struct PutWikiPage {
@@ -1690,7 +1698,7 @@ mod tests {
             BriefProposal, RecordProposal, WikiProposal, Resource, Device,
             ErrorBody, ErrorDetail, Health, UpdateStatus, UpdateOutcome, ProjectPathInfo, ProjectSummary, CreateProject,
             PatchProject, MergeProject, AddProjectFolder, RemoveProjectFolder, MoveSession, ProjectMemory, PutBrief, RevertBrief, CreateRecord,
-            PatchRecord, CreateWikiPage, PutWikiPage, CreateResource, PatchResource,
+            PatchRecord, CreateWikiPage, PutWikiPage, RenameWikiPage, CreateResource, PatchResource,
             GitStatusEntry, GitStatus, GitDiff, FileEntry, DirListing, FileContent, SessionsPage, SessionDetail,
             LaunchSession, PatchSession, RemoveWorktree, OpenTarget, OpenSession, OpenProject, UploadedFile, EventsPage, SearchHit, SearchResults, AgentInfo,
             AgentIntegration, AgentAuth, AgentToken, SetAgentToken, MachineDirs, MachineDir, CloneRepo, CloneJob, Injection, SummaryItem, DistillFailure, SessionSummary,

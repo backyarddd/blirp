@@ -1022,6 +1022,8 @@ const MUTATING_ROUTES: &[(&str, &str, Need)] = &[
     ("POST", "/api/projects/p1/wiki", Need::Control),
     ("PUT", "/api/projects/p1/wiki/w1", Need::Control),
     ("DELETE", "/api/projects/p1/wiki/w1", Need::Control),
+    ("POST", "/api/projects/p1/wiki/w1/restore", Need::Control),
+    ("POST", "/api/projects/p1/wiki/w1/rename", Need::Control),
     ("POST", "/api/projects/p1/resources", Need::Control),
     ("PATCH", "/api/projects/p1/resources/r1", Need::Control),
     ("DELETE", "/api/projects/p1/resources/r1", Need::Control),
@@ -1967,6 +1969,72 @@ async fn records_archive_and_move_to_another_project() {
     assert_eq!(in_b.len(), 1);
     // It belongs to B now: A's path no longer finds it.
     assert_eq!(patch(json!({"pinned": true})).await.status(), 404);
+}
+
+// Deleted wiki pages are listed with ?deleted=true and come back with
+// restore; rename gives a live page a new slug, refusing one another page
+// (also a deleted one) holds.
+#[tokio::test]
+async fn wiki_pages_restore_and_rename() {
+    use blirp_core::model::WikiPage;
+    let h = Harness::start().await;
+    let p = bare_project(&h, "Wiki").await;
+    let wiki = format!("/api/projects/{p}/wiki");
+    for (slug, title) in [("setup", "Setup"), ("old", "Old")] {
+        let r = h
+            .send(
+                reqwest::Method::POST,
+                &wiki,
+                json!({"slug": slug, "title": title, "body_md": "text"}),
+            )
+            .await;
+        assert_eq!(r.status(), 201);
+    }
+    let r = h
+        .send(reqwest::Method::DELETE, &format!("{wiki}/old"), json!({}))
+        .await;
+    assert_eq!(r.status(), 204);
+    let deleted: Vec<WikiPage> = h.get(&format!("{wiki}?deleted=true")).await;
+    assert_eq!(deleted.len(), 1);
+    assert_eq!(deleted[0].slug, "old");
+    let live: Vec<WikiPage> = h.get(&wiki).await;
+    assert_eq!(live.len(), 1);
+
+    let rename = |from: &str, to: &str| {
+        let (path, body) = (format!("{wiki}/{from}/rename"), json!({ "slug": to }));
+        let h = &h;
+        async move { h.send(reqwest::Method::POST, &path, body).await }
+    };
+    // Held by a deleted page, invalid, or missing.
+    assert_eq!(rename("setup", "old").await.status(), 409);
+    assert_eq!(rename("setup", "Bad Slug").await.status(), 400);
+    assert_eq!(rename("nope", "fine").await.status(), 404);
+    let r = rename("setup", "getting-started").await;
+    assert_eq!(r.status(), 200);
+    let renamed: WikiPage = r.json().await.unwrap();
+    assert_eq!(
+        (renamed.slug.as_str(), renamed.title.as_str()),
+        ("getting-started", "Setup")
+    );
+    let r = h
+        .http
+        .get(h.url(&format!("{wiki}/setup")))
+        .bearer_auth(&h.token)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(r.status(), 404);
+
+    let restore_path = format!("{wiki}/old/restore");
+    let restore = || h.send(reqwest::Method::POST, &restore_path, json!({}));
+    let r = restore().await;
+    assert_eq!(r.status(), 200);
+    assert!(!r.json::<WikiPage>().await.unwrap().deleted);
+    let live: Vec<WikiPage> = h.get(&wiki).await;
+    assert_eq!(live.len(), 2);
+    // Only a deleted page is restored; a live one now holds the slug.
+    assert_eq!(restore().await.status(), 404);
+    assert_eq!(rename("getting-started", "old").await.status(), 409);
 }
 
 // A folder to register must be on a local disk (a network path would make

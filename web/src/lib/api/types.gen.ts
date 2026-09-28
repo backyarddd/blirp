@@ -375,6 +375,15 @@ slug: string, title: string, body_md: string, };
 
 export type PutWikiPage = { title: string, body_md: string, };
 
+/**
+ * `POST /api/projects/:id/wiki/:slug/rename`.
+ */
+export type RenameWikiPage = { 
+/**
+ * The new slug: `[a-z0-9-]`, 1-100 chars, unused in the project.
+ */
+slug: string, };
+
 export type CreateResource = { kind: ResourceKind, url: string, title: string, meta?: JsonValue, };
 
 export type PatchResource = { kind?: ResourceKind, url?: string, title?: string, meta?: JsonValue, };

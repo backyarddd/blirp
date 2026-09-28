@@ -8,8 +8,8 @@ use axum::routing::{get, post};
 use axum::{Json, Router};
 use blirp_core::model::{
     Brief, CreateRecord, CreateResource, CreateWikiPage, MemoryPart, PatchRecord, PatchResource,
-    PutBrief, PutWikiPage, Record, RecordKind, RecordStatus, Resource, RevertBrief, ServerEvent,
-    Suggestion, SuggestionStatus, WikiPage,
+    PutBrief, PutWikiPage, Record, RecordKind, RecordStatus, RenameWikiPage, Resource, RevertBrief,
+    ServerEvent, Suggestion, SuggestionStatus, WikiPage,
 };
 use blirp_core::store::{RecordFilter, Store};
 use serde::Deserialize;
@@ -36,6 +36,8 @@ pub fn routes() -> Router<SharedState> {
             "/api/projects/{id}/wiki/{slug}",
             get(get_wiki).put(put_wiki).delete(delete_wiki),
         )
+        .route("/api/projects/{id}/wiki/{slug}/restore", post(restore_wiki))
+        .route("/api/projects/{id}/wiki/{slug}/rename", post(rename_wiki))
         .route(
             "/api/projects/{id}/resources",
             get(list_resources).post(create_resource),
@@ -262,13 +264,55 @@ async fn delete_record(
 
 // ---------------------------------------------------------------- wiki
 
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct WikiQuery {
+    /// Deleted pages (restorable) instead of the live ones.
+    deleted: Option<bool>,
+}
+
 async fn list_wiki(
     State(s): State<SharedState>,
     ApiPath(id): ApiPath<String>,
+    ApiQuery(q): ApiQuery<WikiQuery>,
 ) -> ApiResult<Json<Vec<WikiPage>>> {
-    project_op(&s, id, None, |st, pid| Ok(st.list_wiki(pid)?))
-        .await
-        .map(Json)
+    project_op(&s, id, None, move |st, pid| {
+        Ok(if q.deleted.unwrap_or(false) {
+            st.list_deleted_wiki(pid)?
+        } else {
+            st.list_wiki(pid)?
+        })
+    })
+    .await
+    .map(Json)
+}
+
+async fn restore_wiki(
+    State(s): State<SharedState>,
+    _: Control,
+    ApiPath((id, slug)): ApiPath<(String, String)>,
+) -> ApiResult<Json<WikiPage>> {
+    project_op(&s, id, Some(MemoryPart::Wiki), move |st, pid| {
+        Ok(st.restore_wiki_page(pid, &slug, BY_USER)?)
+    })
+    .await
+    .map(Json)
+}
+
+/// A new slug for a page. Nothing refers to pages by slug except links a
+/// user or agent wrote into text, which are left as they are; the web UI
+/// follows the page to its new address.
+async fn rename_wiki(
+    State(s): State<SharedState>,
+    _: Control,
+    ApiPath((id, slug)): ApiPath<(String, String)>,
+    ApiJson(b): ApiJson<RenameWikiPage>,
+) -> ApiResult<Json<WikiPage>> {
+    project_op(&s, id, Some(MemoryPart::Wiki), move |st, pid| {
+        Ok(st.rename_wiki_page(pid, &slug, b.slug.trim(), BY_USER)?)
+    })
+    .await
+    .map(Json)
 }
 
 async fn create_wiki(

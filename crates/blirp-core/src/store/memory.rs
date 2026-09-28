@@ -349,6 +349,19 @@ impl Store {
         })
     }
 
+    /// Deleted pages (restorable), most recently deleted first.
+    pub fn list_deleted_wiki(&self, project_id: &str) -> Result<Vec<WikiPage>> {
+        self.read(|c| {
+            all(
+                c,
+                "SELECT * FROM wiki_pages WHERE project_id = ?1 AND deleted = 1
+                 ORDER BY updated_at DESC",
+                params![project_id],
+                wiki_row,
+            )
+        })
+    }
+
     /// A live (not deleted) wiki page.
     pub fn get_wiki_page(&self, project_id: &str, slug: &str) -> Result<Option<WikiPage>> {
         Ok(self
@@ -399,6 +412,55 @@ impl Store {
             w.updated_by = by.to_string();
             apply_in(tx, &Change::WikiPage(w))?;
             Ok(())
+        })
+    }
+
+    /// Bring a deleted page back as it was (a newer version of its row).
+    pub fn restore_wiki_page(&self, project_id: &str, slug: &str, by: &str) -> Result<WikiPage> {
+        self.write(|tx| {
+            let mut w = get_wiki_in(tx, project_id, slug)?
+                .filter(|w| w.deleted)
+                .ok_or(StoreError::NotFound("deleted wiki page"))?;
+            w.deleted = false;
+            w.updated_at = crate::now_ms();
+            w.updated_by = by.to_string();
+            apply_in(tx, &Change::WikiPage(w.clone()))?;
+            Ok(w)
+        })
+    }
+
+    /// Give a live page a new slug (its id, title and text stay). A slug
+    /// held by another page, also a deleted one, is a conflict: slugs are
+    /// unique per project, deleted pages included, so they can be restored.
+    pub fn rename_wiki_page(
+        &self,
+        project_id: &str,
+        slug: &str,
+        new_slug: &str,
+        by: &str,
+    ) -> Result<WikiPage> {
+        validate_slug(new_slug)?;
+        self.write(|tx| {
+            let mut w = get_wiki_in(tx, project_id, slug)?
+                .filter(|w| !w.deleted)
+                .ok_or(StoreError::NotFound("wiki page"))?;
+            if new_slug == slug {
+                return Ok(w);
+            }
+            if let Some(other) = get_wiki_in(tx, project_id, new_slug)? {
+                return Err(StoreError::Conflict(if other.deleted {
+                    format!(
+                        "a deleted wiki page uses {new_slug:?}; restore it or pick another slug"
+                    )
+                } else {
+                    format!("wiki page {new_slug:?} already exists")
+                }));
+            }
+            w.slug = new_slug.to_string();
+            w.updated_at = crate::now_ms();
+            w.updated_by = by.to_string();
+            apply_in(tx, &Change::WikiPage(w.clone()))?;
+            Ok(w)
         })
     }
 
