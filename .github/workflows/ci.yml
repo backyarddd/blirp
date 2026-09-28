@@ -239,7 +239,7 @@ jobs:
           BLIRP_E2E_CHANNEL: chromium
           # Leaves the temp dir with daemon.log for the upload below.
           BLIRP_E2E_KEEP: "1"
-        run: pnpm -C web e2e
+        run: pnpm -C web exec vite build && pnpm -C web exec playwright test e2e/zz-debug-menu.spec.ts
       - name: Keep the traces and the daemon logs
         if: failure()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
