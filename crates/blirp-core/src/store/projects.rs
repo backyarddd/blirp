@@ -1149,12 +1149,15 @@ impl Store {
                 |r| r.get(0),
             )?;
             // Folders saved by an older delete (restored and deleted again
-            // elsewhere since) do not belong to this one. An unreadable
-            // entry restores no folders rather than failing the restore.
+            // elsewhere since) do not belong to this one. Entries written
+            // before the delete's version was stored with them (a bare list)
+            // are taken as they are. An unreadable entry restores no
+            // folders rather than failing the restore.
             let saved = raw
-                .and_then(|raw| serde_json::from_str::<TrashedFolders>(&raw).ok())
-                .filter(|t| t.deleted_at == p.updated_at)
-                .map(|t| t.folders)
+                .and_then(|raw| match serde_json::from_str::<TrashedFolders>(&raw) {
+                    Ok(t) => (t.deleted_at == p.updated_at).then_some(t.folders),
+                    Err(_) => serde_json::from_str::<Vec<ProjectPath>>(&raw).ok(),
+                })
                 .unwrap_or_default();
             p.deleted = false;
             p.updated_at = crate::now_ms();
@@ -2377,6 +2380,25 @@ mod tests {
             store.restore_project(&p.id, "m"),
             Err(StoreError::NotFound(_))
         ));
+    }
+
+    #[test]
+    fn restore_reads_folders_saved_as_a_bare_list() {
+        let (dir, store) = temp_store();
+        let a = dir.path().join("a");
+        std::fs::create_dir(&a).unwrap();
+        let p = store.register_project("m", &a, Some("Old")).unwrap();
+        let folders = store.project_paths(&p.id).unwrap();
+        store.delete_project(&p.id, "m").unwrap();
+        // As a build before the delete's version was stored wrote it.
+        store
+            .set_setting(
+                &trashed_folders_key(&p.id),
+                &serde_json::to_value(&folders).unwrap(),
+            )
+            .unwrap();
+        store.restore_project(&p.id, "m").unwrap();
+        assert_eq!(store.project_paths(&p.id).unwrap().len(), 1);
     }
 
     #[test]
