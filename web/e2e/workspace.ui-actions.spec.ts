@@ -272,3 +272,27 @@ test('Stop and delete stops a running session, then deletes it', async () => {
   await expect(page.locator('.toast', { hasText: 'Session stopped and deleted' })).toBeVisible({ timeout: 35_000 });
   expect((await page.request.get(`${env.url}/api/sessions/${s.id}`, { headers: AUTH })).status()).toBe(404);
 });
+
+test('the Trash reads again when a project is deleted, not when one is renamed', async () => {
+  const p = await project('Trash reload');
+  await page.goto(`${env.url}/projects`);
+  await expect(page.locator('.pcard', { hasText: 'Trash reload' })).toBeVisible();
+  let reads = 0;
+  const count = (r: { url(): string }): void => {
+    if (r.url().includes('/api/projects?deleted=true')) reads += 1;
+  };
+  page.on('request', count);
+  try {
+    await page.getByRole('link', { name: 'Trash', exact: true }).click();
+    await expect.poll(() => reads).toBe(1);
+    await apiCall('PATCH', `/api/projects/${p.id}`, { name: 'Trash reload renamed' });
+    // Time for the pushed update to arrive; it must not read the Trash again.
+    await page.waitForTimeout(1500);
+    expect(reads).toBe(1);
+    await apiCall('DELETE', `/api/projects/${p.id}`);
+    await expect.poll(() => reads).toBe(2);
+    await expect(page.locator('.rows li', { hasText: 'Trash reload renamed' })).toBeVisible();
+  } finally {
+    page.off('request', count);
+  }
+});

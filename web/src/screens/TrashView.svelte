@@ -28,9 +28,16 @@
     }
   }
 
-  // A delete or restore anywhere (this client or another) changes the live projects: read again.
+  // A delete, restore or merge anywhere (this client or another) changes which projects are live:
+  // read again then, not on every other project update (a rename, a new session).
+  const liveIds = $derived(
+    app.projects
+      .map((p) => p.id)
+      .sort()
+      .join(' '),
+  );
   $effect(() => {
-    void app.projects;
+    void liveIds;
     void load();
   });
 
