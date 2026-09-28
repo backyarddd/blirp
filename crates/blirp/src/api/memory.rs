@@ -204,9 +204,21 @@ async fn patch_record(
             check_len(f, v)?;
         }
     }
-    project_op(&s, id, Some(MemoryPart::Records), move |st, pid| {
+    let target = p.project_id.clone().filter(|to| *to != id);
+    let moved_to = target.clone();
+    let rec = project_op(&s, id, Some(MemoryPart::Records), move |st, pid| {
         owned_record(st, pid, &rid)?;
+        if let Some(to) = &target
+            && st.live_project(to)?.chats
+        {
+            return Err(ApiError::bad_request(
+                "Chats has no project memory; move the record to a project",
+            ));
+        }
         Ok(st.modify_record(&rid, |r| {
+            if let Some(to) = target {
+                r.project_id = to;
+            }
             if let Some(k) = p.kind {
                 r.kind = k;
             }
@@ -225,8 +237,14 @@ async fn patch_record(
             r.updated_by = BY_USER.into();
         })?)
     })
-    .await
-    .map(Json)
+    .await?;
+    if let Some(project_id) = moved_to {
+        s.emit(ServerEvent::MemoryUpdated {
+            project_id,
+            part: MemoryPart::Records,
+        });
+    }
+    Ok(Json(rec))
 }
 
 async fn delete_record(

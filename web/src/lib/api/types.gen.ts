@@ -361,7 +361,11 @@ id?: string, };
 
 export type CreateRecord = { kind: RecordKind, title: string, body: string, status?: RecordStatus, pinned?: boolean, };
 
-export type PatchRecord = { kind?: RecordKind, title?: string, body?: string, status?: RecordStatus, pinned?: boolean, };
+export type PatchRecord = { kind?: RecordKind, title?: string, body?: string, status?: RecordStatus, pinned?: boolean, 
+/**
+ * Move the record to another live project (not Chats).
+ */
+project_id?: string, };
 
 export type CreateWikiPage = { 
 /**

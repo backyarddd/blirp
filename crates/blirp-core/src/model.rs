@@ -664,6 +664,10 @@ pub struct PatchRecord {
     #[serde(default)]
     #[ts(optional)]
     pub pinned: Option<bool>,
+    /// Move the record to another live project (not Chats).
+    #[serde(default)]
+    #[ts(optional)]
+    pub project_id: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, TS)]

@@ -1904,6 +1904,71 @@ async fn folderless_projects_start_in_their_workspace() {
 // Delete moves a project to the Trash with its sessions hidden; restore
 // brings both back. Folders are added only when they exist, projects are
 // opened only in their own folders, and Chats keeps its name.
+/// A folderless project for a test.
+async fn bare_project(h: &Harness, name: &str) -> String {
+    let r = h
+        .send(
+            reqwest::Method::POST,
+            "/api/projects",
+            json!({ "name": name }),
+        )
+        .await;
+    assert_eq!(r.status(), 201);
+    r.json::<ProjectSummary>().await.unwrap().project.id
+}
+
+// A record is archived with a status patch and moved to another project by
+// its project_id (a changed column of the replicated row); never into Chats.
+#[tokio::test]
+async fn records_archive_and_move_to_another_project() {
+    let h = Harness::start().await;
+    let a = bare_project(&h, "A").await;
+    let b = bare_project(&h, "B").await;
+    let r = h
+        .send(
+            reqwest::Method::POST,
+            &format!("/api/projects/{a}/records"),
+            json!({"kind": "note", "title": "Moves", "body": "x"}),
+        )
+        .await;
+    let rec: Record = r.json().await.unwrap();
+    let path = format!("/api/projects/{a}/records/{}", rec.id);
+    let patch = |body: serde_json::Value| h.send(reqwest::Method::PATCH, &path, body);
+    let r = patch(json!({"status": "archived"})).await;
+    assert_eq!(r.status(), 200);
+    assert_eq!(
+        r.json::<Record>().await.unwrap().status,
+        blirp_core::model::RecordStatus::Archived
+    );
+    let r = patch(json!({"project_id": "no-such-project"})).await;
+    assert_eq!(r.status(), 404);
+    // A session in the home folder is a chat: this machine's Chats bucket.
+    let state = &h.daemon.state;
+    let chats = state
+        .store
+        .resolve_project(
+            &state.machine.id,
+            &state.machine.name,
+            &std::env::home_dir().unwrap(),
+        )
+        .unwrap()
+        .project
+        .id;
+    let r = patch(json!({ "project_id": chats })).await;
+    assert_eq!(r.status(), 400);
+
+    let r = patch(json!({"project_id": b, "status": "active"})).await;
+    assert_eq!(r.status(), 200);
+    let moved: Record = r.json().await.unwrap();
+    assert_eq!(moved.project_id, b);
+    let in_a: Vec<Record> = h.get(&format!("/api/projects/{a}/records")).await;
+    let in_b: Vec<Record> = h.get(&format!("/api/projects/{b}/records")).await;
+    assert!(in_a.is_empty());
+    assert_eq!(in_b.len(), 1);
+    // It belongs to B now: A's path no longer finds it.
+    assert_eq!(patch(json!({"pinned": true})).await.status(), 404);
+}
+
 // A folder to register must be on a local disk (a network path would make
 // Windows connect to its server with the user's credentials) and must not be
 // the home folder or contain it.
