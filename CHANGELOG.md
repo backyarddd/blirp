@@ -34,12 +34,18 @@ so every tag needs one.
   project's workspace made again after it was deleted) never deletes
   files on the hub on its own, even a single one: it waits for Restore
   from hub or Delete on hub too. A workspace takes its files back from
-  the hub by itself.
+  the hub by itself. This also holds for a folder emptied and made again
+  while blirp was not running.
 - Project file sync: a project deleted, or a folder removed, on another
   machine stops syncing on this one at once instead of after the next
   10 minute rescan.
 - Project file sync on Windows: files that real-time protection was still
-  scanning no longer fail to update with "Access is denied".
+  scanning no longer fail to update with "Access is denied". A crash in the
+  middle of such an update puts the old file back on the next scan instead
+  of deleting it on the hub.
+- Project file sync: a project without folders whose workspace was first
+  opened from the Files tab uploads right away instead of after up to 10
+  minutes.
 - Project file sync: upload errors are logged when they start or change,
   not on every pass, and name the folder.
 - The hub's storage quota no longer loses track of uploads that stop
