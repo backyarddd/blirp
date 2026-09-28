@@ -17,8 +17,7 @@ use blirp_core::files::scan::ScanState;
 use blirp_core::files::{FilesMode, RootInfo};
 use blirp_core::model::{CopyState, LocalFiles, ServerEvent};
 use blirp_core::store::{CopyMode, FileCopy};
-use notify_debouncer_full::notify::{RecommendedWatcher, RecursiveMode};
-use notify_debouncer_full::{DebounceEventResult, Debouncer, RecommendedCache, new_debouncer};
+use notify_debouncer_full::notify::{self, RecommendedWatcher, RecursiveMode, Watcher as _};
 use std::collections::{BTreeSet, HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError, Weak};
@@ -873,21 +872,24 @@ fn tracked_folders(
     Ok(out)
 }
 
-type Watcher = Debouncer<RecommendedWatcher, RecommendedCache>;
-
-fn start_watcher(tx: mpsc::UnboundedSender<Kick>) -> Option<Watcher> {
-    let res = new_debouncer(DEBOUNCE, None, move |res: DebounceEventResult| match res {
-        Ok(events) => {
-            let paths: Vec<PathBuf> = events.into_iter().flat_map(|e| e.event.paths).collect();
-            if !paths.is_empty() {
-                let _ = tx.send(Kick::Paths(paths));
+/// Raw events, settled in [`run`]: only the paths matter here. A debouncer
+/// that folds events (notify-debouncer-full) drops a create followed by a
+/// remove, and FSEvents reports a folder made shortly before as both
+/// created and removed when it is deleted: a watched folder deleted on
+/// macOS then went unnoticed until the next rescan.
+fn start_watcher(tx: mpsc::UnboundedSender<Kick>) -> Option<RecommendedWatcher> {
+    let res = notify::recommended_watcher(move |res: notify::Result<notify::Event>| match res {
+        // Missed events (FSEvents drops, inotify queue overflow): rescan.
+        Ok(e) if e.need_rescan() => {
+            let _ = tx.send(Kick::Rescan);
+        }
+        Ok(e) => {
+            if !e.paths.is_empty() {
+                let _ = tx.send(Kick::Paths(e.paths));
             }
         }
-        Err(errors) => {
-            for e in &errors {
-                tracing::warn!(error = %e, "project folder watcher error; rescanning");
-            }
-            // Missed events (inotify limits, FSEvents drops): rescan.
+        Err(e) => {
+            tracing::warn!(error = %e, "project folder watcher error; rescanning");
             let _ = tx.send(Kick::Rescan);
         }
     });
@@ -978,6 +980,11 @@ async fn run(
         })
     };
     let mut pending: BTreeSet<String> = BTreeSet::new();
+    // Copies a watcher event woke, queued once the first of those events is
+    // DEBOUNCE old: a burst of writes (a checkout, a save) makes one pass,
+    // and a folder written to all the time still gets its passes.
+    let mut settling: BTreeSet<String> = BTreeSet::new();
+    let mut settled_at = tokio::time::Instant::now();
     let mut full = false;
     // Reconcile only: new folders are scanned, known ones are not.
     let mut refresh = false;
@@ -989,6 +996,9 @@ async fn run(
             tokio::select! {
                 _ = stop.changed() => break,
                 _ = rescan.tick() => full = true,
+                _ = tokio::time::sleep_until(settled_at), if !settling.is_empty() => {
+                    pending.append(&mut settling);
+                }
                 _ = gc.tick() => {
                     sweep_downloads(&engine.env.hub).await;
                     if let blirp_sync::files::FileHub::Local(l) = &engine.env.hub {
@@ -1025,7 +1035,10 @@ async fn run(
                     Some(Kick::Paths(paths)) => {
                         for p in &paths {
                             if let Some(k) = engine.copy_for(p) {
-                                pending.insert(k);
+                                if settling.is_empty() {
+                                    settled_at = tokio::time::Instant::now() + DEBOUNCE;
+                                }
+                                settling.insert(k);
                             }
                         }
                     }
@@ -1101,7 +1114,10 @@ async fn run(
                     Kick::Paths(paths) => {
                         for p in &paths {
                             if let Some(k) = engine.copy_for(p) {
-                                pending.insert(k);
+                                if settling.is_empty() {
+                                    settled_at = tokio::time::Instant::now() + DEBOUNCE;
+                                }
+                                settling.insert(k);
                             }
                         }
                     }
