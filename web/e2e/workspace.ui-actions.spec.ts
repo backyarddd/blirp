@@ -292,7 +292,8 @@ test('the Trash reads again when a project is deleted, not when one is renamed',
     await page.waitForTimeout(1500);
     expect(reads).toBe(1);
     await apiCall('DELETE', `/api/projects/${p.id}`);
-    await expect.poll(() => reads).toBe(2);
+    // The Trash view reads it again; the app also asks the Trash whether the project was merged away.
+    await expect.poll(() => reads).toBeGreaterThanOrEqual(2);
     await expect(page.locator('.rows li', { hasText: 'Trash reload renamed' })).toBeVisible();
   } finally {
     page.off('request', count);
