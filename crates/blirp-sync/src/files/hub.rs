@@ -520,11 +520,13 @@ mod tests {
     }
 
     struct T {
-        _dir: tempfile::TempDir,
         hub: HubFiles,
         root: String,
         folder: String,
         src: std::path::PathBuf,
+        // Last: fields drop in order, and Windows cannot remove the folder
+        // while the handles above are open.
+        _dir: tempfile::TempDir,
     }
 
     fn setup(quota: u64) -> T {

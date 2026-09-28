@@ -224,13 +224,15 @@ fn write(path: &Path, text: &str) {
 }
 
 struct Rig {
-    _tmp: tempfile::TempDir,
     hub: Node,
     b: Node,
     c: Node,
     project: String,
     origin: PathBuf,
     root: String,
+    // Last: fields drop in order, and Windows cannot remove the folder
+    // while the handles above are open.
+    _tmp: tempfile::TempDir,
 }
 
 /// Hub A, nodes B and C; B's folder uploaded.

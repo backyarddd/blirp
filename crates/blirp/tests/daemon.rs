@@ -20,11 +20,13 @@ type Ws =
     tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>;
 
 struct Harness {
-    _home: tempfile::TempDir,
     daemon: Daemon,
     http: reqwest::Client,
     base: String,
     token: String,
+    // Last: fields drop in order, and Windows cannot remove the folder
+    // while the handles above are open.
+    _home: tempfile::TempDir,
 }
 
 impl Harness {
@@ -1737,6 +1739,7 @@ async fn update_status_check_and_apply() {
     let st: UpdateStatus = h.get("/api/update").await;
     assert!(!st.enabled && st.latest.is_none() && !st.available);
     assert_eq!(hits.load(Ordering::SeqCst), 1);
+    h.daemon.shutdown().await.unwrap();
 }
 
 #[tokio::test]
@@ -1752,6 +1755,7 @@ async fn update_apply_needs_a_newer_release() {
         (code, body["error"]["code"].as_str()),
         (409, Some("no_update"))
     );
+    h.daemon.shutdown().await.unwrap();
 
     // Offline: the error is reported and nothing can be applied.
     let closed = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
@@ -1773,6 +1777,7 @@ async fn update_apply_needs_a_newer_release() {
         (409, Some("no_update"))
     );
     assert!(spawned.lock().unwrap().is_empty() && offline.lock().unwrap().is_empty());
+    h.daemon.shutdown().await.unwrap();
 }
 
 // A project without folders: created with a name and brief, its sessions

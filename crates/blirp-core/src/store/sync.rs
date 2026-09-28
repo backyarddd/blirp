@@ -3397,10 +3397,12 @@ mod tests {
 
     /// Hub H with N and X paired and projects p, p2, p3 everywhere.
     struct Three {
-        _dirs: [tempfile::TempDir; 3],
         hub: Store,
         n: Store,
         x: Store,
+        // Last: fields drop in order, and Windows cannot remove the folder
+        // while the handles above are open.
+        _dirs: [tempfile::TempDir; 3],
     }
 
     fn three() -> Three {

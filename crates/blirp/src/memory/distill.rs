@@ -2647,6 +2647,17 @@ cat '{}'
         .unwrap_err();
         assert!(err.contains("timed out"), "{err}");
         assert!(begin.elapsed() < Duration::from_secs(8));
+        // Windows lets go of the killed script a moment after the kill;
+        // TempDir would give up at once and leave the folder behind.
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        while std::fs::remove_dir_all(d.path()).is_err() && d.path().exists() {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "the killed summarizer kept {} open",
+                d.path().display()
+            );
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
     }
 
     /// Platform script that prints `json` (or sleeps) and ignores its args.

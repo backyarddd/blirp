@@ -38,13 +38,15 @@ fn fixture(name: &str) -> String {
 }
 
 struct H {
-    _tmp: tempfile::TempDir,
     root: PathBuf,
     home: PathBuf,
     cwd: PathBuf,
     store: Arc<Store>,
     engine: Arc<Engine>,
     emitted: Arc<Mutex<Vec<ServerEvent>>>,
+    // Last: fields drop in order, and Windows cannot remove the folder
+    // while the handles above are open.
+    _tmp: tempfile::TempDir,
 }
 
 impl H {
@@ -3116,4 +3118,18 @@ fn ingested_headless_runs_are_removed_once() {
     );
     h.engine.remove_headless();
     assert!(exists("later"));
+}
+
+#[test]
+fn the_harness_leaves_no_folder_behind() {
+    let h = H::new();
+    let rel = format!(".claude/projects/C--work-proj/{CLAUDE_SID}.jsonl");
+    let line = claude_line("u-1", "first prompt", &h);
+    h.put(&rel, format!("{line}\n").as_bytes());
+    h.pass();
+    let root = h.root.clone();
+    drop(h);
+    // Windows refuses to remove a folder with open handles, and TempDir
+    // ignores that: every run leaked one.
+    assert!(!root.exists(), "{} left behind", root.display());
 }

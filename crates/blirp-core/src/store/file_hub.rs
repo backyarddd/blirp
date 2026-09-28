@@ -884,10 +884,12 @@ mod tests {
     }
 
     struct Hub {
-        _dir: tempfile::TempDir,
         store: Store,
         root: String,
         folder: String,
+        // Last: fields drop in order, and Windows cannot remove the folder
+        // while the handles above are open.
+        _dir: tempfile::TempDir,
     }
 
     fn hub() -> Hub {

@@ -14,12 +14,14 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
 struct World {
-    dir: tempfile::TempDir,
     store: Arc<Store>,
     hub: Arc<HubFiles>,
     writers: Vec<(Env, Copy)>,
     /// Test hooks: a write to do right after the next scan of a writer.
     pending_write: Arc<Mutex<Option<(PathBuf, String)>>>,
+    // Last: fields drop in order, and Windows cannot remove the folder
+    // while the handles above are open.
+    dir: tempfile::TempDir,
 }
 
 const FILES: &[&str] = &["a.txt", "d/b.txt", "c.txt"];
@@ -999,4 +1001,17 @@ async fn an_empty_file_syncs_with_the_rest_of_its_folder() {
     let files = files_of(Path::new(&c1.key));
     assert_eq!(files.get("empty.txt").map(String::as_str), Some(""));
     assert_eq!(files.get("next.txt").map(String::as_str), Some("next"));
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_world_leaves_no_folder_behind() {
+    let w = world(1).await;
+    let (e1, c1) = w.writer(1).unwrap();
+    copy::apply(&e1, &c1, false).await.unwrap();
+    drop((e1, c1));
+    let dir = w.dir.path().to_path_buf();
+    drop(w);
+    // Windows refuses to remove a folder with open handles, and TempDir
+    // ignores that: every run leaked one.
+    assert!(!dir.exists(), "{} left behind", dir.display());
 }

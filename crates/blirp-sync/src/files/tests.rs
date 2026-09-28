@@ -14,7 +14,6 @@ use iroh::{Endpoint, SecretKey};
 use std::sync::{Arc, Mutex};
 
 struct Rig {
-    _dir: tempfile::TempDir,
     hub: Arc<HubFiles>,
     hub_ep: Endpoint,
     node_ep: Endpoint,
@@ -24,6 +23,9 @@ struct Rig {
     notes: Arc<Mutex<Vec<Notify>>>,
     parts: BlobStore,
     dir: std::path::PathBuf,
+    // Last: fields drop in order, and Windows cannot remove the folder
+    // while the handles above are open.
+    _dir: tempfile::TempDir,
 }
 
 async fn rig(alpn: &'static [u8]) -> Rig {

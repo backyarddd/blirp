@@ -294,10 +294,12 @@ mod tests {
     /// A temp dir, the state, its shutdown switch and a session `src` of
     /// this machine with two events and no summary.
     struct Fixture {
-        _dir: tempfile::TempDir,
         st: SharedState,
         src: Session,
         stop: tokio::sync::watch::Sender<bool>,
+        // Last: fields drop in order, and Windows cannot remove the folder
+        // while the handles above are open.
+        _dir: tempfile::TempDir,
     }
 
     fn state(summarizer: Summarizer, limit: u32) -> Fixture {

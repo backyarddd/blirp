@@ -15,11 +15,13 @@ use serde_json::{Value, json};
 use std::time::Duration;
 
 struct Harness {
-    home: tempfile::TempDir,
     daemon: Daemon,
     http: reqwest::Client,
     base: String,
     token: String,
+    // Last: fields drop in order, and Windows cannot remove the folder
+    // while the handles above are open.
+    home: tempfile::TempDir,
 }
 
 impl Harness {
