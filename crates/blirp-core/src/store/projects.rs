@@ -4,6 +4,7 @@ use super::{Change, Result, Store, StoreError, all, apply_in, one};
 use crate::git;
 use crate::model::{Project, ProjectPath, ProjectPathInfo, ProjectSummary, Session};
 use rusqlite::{Connection, Row, Transaction, params};
+use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
@@ -1094,14 +1095,20 @@ impl Store {
                 params![id, machine_id],
                 path_row,
             )?;
-            tx.execute(
-                "INSERT INTO settings(key, value_json) VALUES (?1, ?2)
-                 ON CONFLICT(key) DO UPDATE SET value_json = excluded.value_json",
-                params![trashed_folders_key(id), serde_json::to_string(&mine)?],
-            )?;
             p.deleted = true;
             p.updated_at = crate::now_ms();
             apply_in(tx, &Change::Project(p))?;
+            // The version as stored (the stamp may have moved past `now`):
+            // a restore brings the folders back only for this very delete.
+            let saved = TrashedFolders {
+                deleted_at: get_project_in(tx, id)?.map_or(0, |p| p.updated_at),
+                folders: mine,
+            };
+            tx.execute(
+                "INSERT INTO settings(key, value_json) VALUES (?1, ?2)
+                 ON CONFLICT(key) DO UPDATE SET value_json = excluded.value_json",
+                params![trashed_folders_key(id), serde_json::to_string(&saved)?],
+            )?;
             Ok(())
         })
     }
@@ -1117,19 +1124,25 @@ impl Store {
             let mut p = get_project_in(tx, id)?
                 .filter(|p| p.deleted && p.merged_into.is_none() && !p.chats)
                 .ok_or(StoreError::NotFound("project in the Trash"))?;
-            p.deleted = false;
-            p.updated_at = crate::now_ms();
-            apply_in(tx, &Change::Project(p))?;
             let key = trashed_folders_key(id);
-            let saved: Vec<ProjectPath> = one(
+            let raw: Option<String> = one(
                 tx,
                 "SELECT value_json FROM settings WHERE key = ?1",
                 params![key],
-                |r| r.get::<_, String>(0),
-            )?
-            .map(|raw| serde_json::from_str(&raw))
-            .transpose()?
-            .unwrap_or_default();
+                |r| r.get(0),
+            )?;
+            // Folders saved by an older delete (restored and deleted again
+            // elsewhere since) do not belong to this one. An unreadable
+            // entry restores no folders rather than failing the restore.
+            let saved = raw
+                .and_then(|raw| serde_json::from_str::<TrashedFolders>(&raw).ok())
+                .filter(|t| t.deleted_at == p.updated_at)
+                .map(|t| t.folders)
+                .unwrap_or_default();
+            p.deleted = false;
+            p.updated_at = crate::now_ms();
+            // Also drops the saved folders (`write_row`).
+            apply_in(tx, &Change::Project(p))?;
             for pp in saved {
                 let path = PathBuf::from(&pp.path);
                 if !path.is_dir() {
@@ -1145,7 +1158,6 @@ impl Store {
                     attach_path(tx, id, machine_id, &path, pp.git_remote)?;
                 }
             }
-            tx.execute("DELETE FROM settings WHERE key = ?1", params![key])?;
             // As stored: the version stamp may have moved past `now`.
             live_project_in(tx, id)
         })
@@ -1461,9 +1473,18 @@ fn merge_in(tx: &Transaction<'_>, from: &str, into: &str, retire: bool) -> Resul
 }
 
 /// Local setting (never replicated) with this machine's folders of a
-/// project in the Trash, for [`Store::restore_project`].
-fn trashed_folders_key(id: &str) -> String {
+/// project in the Trash, for [`Store::restore_project`]. Dropped when any
+/// version that is not deleted is written (`write_row`).
+pub(super) fn trashed_folders_key(id: &str) -> String {
     format!("projects.trash.{id}.folders")
+}
+
+/// Value of [`trashed_folders_key`]: the folders, and the `updated_at` of
+/// the deleted version they were saved with.
+#[derive(Serialize, Deserialize)]
+struct TrashedFolders {
+    deleted_at: i64,
+    folders: Vec<ProjectPath>,
 }
 
 fn chats_name(machine_name: &str) -> String {
@@ -2339,6 +2360,53 @@ mod tests {
             store.restore_project(&p.id, "m"),
             Err(StoreError::NotFound(_))
         ));
+    }
+
+    #[test]
+    fn restore_brings_back_only_the_folders_of_the_same_delete() {
+        let (dir, store) = temp_store();
+        let a = dir.path().join("a");
+        std::fs::create_dir(&a).unwrap();
+        let p = store.register_project("m", &a, Some("Proj")).unwrap();
+        store.delete_project(&p.id, "m").unwrap();
+        // Restored on another machine, then deleted again there: its
+        // folders here were not part of that delete.
+        let deleted = store.get_project(&p.id).unwrap().unwrap();
+        let restored = Project {
+            deleted: false,
+            updated_at: deleted.updated_at + 1,
+            ..deleted.clone()
+        };
+        store
+            .apply_remote(&Change::Project(restored.clone()))
+            .unwrap();
+        assert!(
+            store
+                .get_setting(&trashed_folders_key(&p.id))
+                .unwrap()
+                .is_none()
+        );
+        store
+            .apply_remote(&Change::Project(Project {
+                deleted: true,
+                updated_at: restored.updated_at + 1,
+                ..restored
+            }))
+            .unwrap();
+        store.restore_project(&p.id, "m").unwrap();
+        assert!(store.project_paths(&p.id).unwrap().is_empty());
+
+        // Deleted and restored here: its folders come back.
+        store.add_project_folder(&p.id, "m", &a).unwrap();
+        store.delete_project(&p.id, "m").unwrap();
+        store.restore_project(&p.id, "m").unwrap();
+        assert_eq!(store.project_paths(&p.id).unwrap().len(), 1);
+        assert!(
+            store
+                .get_setting(&trashed_folders_key(&p.id))
+                .unwrap()
+                .is_none()
+        );
     }
 
     #[test]

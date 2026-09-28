@@ -639,6 +639,13 @@ fn write_row(tx: &Transaction<'_>, change: &Change) -> Result<usize> {
                     "DELETE FROM project_paths WHERE project_id = ?1",
                     params![p.id],
                 )?;
+            } else if n > 0 {
+                // Restored (here or elsewhere): folders saved by its delete
+                // here must never come back with a later delete's restore.
+                tx.execute(
+                    "DELETE FROM settings WHERE key = ?1",
+                    params![projects::trashed_folders_key(&p.id)],
+                )?;
             }
             n
         }
