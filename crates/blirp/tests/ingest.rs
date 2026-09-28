@@ -952,6 +952,9 @@ fn codex_subagent_repair_cleans_up_what_earlier_builds_ingested() {
         .modify_session(&s.id, |x| {
             x.title.clone_from(&parent.title);
             x.parent_session_id = None;
+            // Summarized with the copied turns.
+            x.summary = Some(json!({"summary": "renamed the build script", "distilled_at": 120}));
+            x.distilled_through_seq = 8 * 1024;
         })
         .unwrap();
     h.store
@@ -1042,6 +1045,8 @@ fn codex_subagent_repair_cleans_up_what_earlier_builds_ingested() {
         ]
     );
     assert_eq!(s.title.as_deref(), Some("subagent (Feynman): rename_check"));
+    // Its summary came from the copy too: summarized again from its own.
+    assert_eq!((s.summary.clone(), s.distilled_through_seq), (None, 0));
     let left: Vec<String> = h
         .store
         .list_records(&s.project_id, &Default::default())

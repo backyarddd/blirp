@@ -508,6 +508,7 @@ impl Engine {
                     events_dropped = n.events_dropped,
                     forks_unconfirmed = n.forks_unconfirmed,
                     titles_fixed = n.titles_fixed,
+                    summaries_cleared = n.summaries_cleared,
                     records_removed = n.records_removed,
                     "repaired codex subagent sessions"
                 );

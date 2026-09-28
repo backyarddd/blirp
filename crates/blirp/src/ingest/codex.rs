@@ -308,6 +308,8 @@ pub struct SubagentRepair {
     pub forks_unconfirmed: usize,
     /// Fork titles taken from the parent's copied first prompt, replaced.
     pub titles_fixed: usize,
+    /// Summaries of truncated forks, made from the copy too, cleared.
+    pub summaries_cleared: usize,
     /// Distiller records of forks removed (nothing else relied on them).
     pub records_removed: usize,
 }
@@ -376,6 +378,15 @@ pub fn repair_subagents(
             })?;
             out.forks_truncated += 1;
             out.events_dropped += n;
+            // Its summary was made from the parent's copied turns too: gone,
+            // so the fork is summarized again from its own events.
+            if s.summary.is_some() || s.distilled_through_seq > 0 {
+                store.modify_session(&s.id, |x| {
+                    x.summary = None;
+                    x.distilled_through_seq = 0;
+                })?;
+                out.summaries_cleared += 1;
+            }
         }
         let parent = match &sub.parent {
             Some(p) => store.session_by_agent_id("codex", p)?,
