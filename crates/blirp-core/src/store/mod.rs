@@ -1034,6 +1034,51 @@ pub(crate) mod tests {
         );
     }
 
+    // V19: sessions without a successful summary had nothing distilled
+    // (-1); one distilled through seq 0 keeps 0.
+    #[test]
+    fn undistilled_sessions_migrate_to_not_distilled() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("blirp.db");
+        let store = Store::open(&path).unwrap();
+        for (id, summary) in [
+            ("none", None),
+            (
+                "failed",
+                Some(serde_json::json!({"error": {"message": "x", "at": 1, "through_seq": 0}})),
+            ),
+            (
+                "done",
+                Some(serde_json::json!({"summary": "s", "distilled_at": 5, "through_seq": 0})),
+            ),
+        ] {
+            store
+                .insert_session(&crate::model::Session {
+                    summary,
+                    distilled_through_seq: 0,
+                    ..super::sessions::tests::session(id, "p", 1)
+                })
+                .unwrap();
+        }
+        drop(store);
+        Connection::open(&path)
+            .unwrap()
+            .pragma_update(None, "user_version", 18)
+            .unwrap();
+        let store = Store::open(&path).unwrap();
+        let through = |id: &str| {
+            store
+                .get_session(id)
+                .unwrap()
+                .unwrap()
+                .distilled_through_seq
+        };
+        assert_eq!(
+            (through("none"), through("failed"), through("done")),
+            (-1, -1, 0)
+        );
+    }
+
     #[test]
     fn newer_schema_is_refused() {
         let dir = tempfile::tempdir().unwrap();

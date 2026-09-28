@@ -345,7 +345,7 @@ mod tests {
             last_activity_at: started_at,
             exit_code: None,
             summary: None,
-            distilled_through_seq: 0,
+            distilled_through_seq: crate::model::NOT_DISTILLED,
             tokens_in: 0,
             tokens_out: 0,
             cost_usd: 0.0,

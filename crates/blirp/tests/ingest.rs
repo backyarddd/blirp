@@ -1048,7 +1048,10 @@ fn codex_subagent_repair_cleans_up_what_earlier_builds_ingested() {
     );
     assert_eq!(s.title.as_deref(), Some("subagent (Feynman): rename_check"));
     // Its summary came from the copy too: summarized again from its own.
-    assert_eq!((s.summary.clone(), s.distilled_through_seq), (None, 0));
+    assert_eq!(
+        (s.summary.clone(), s.distilled_through_seq),
+        (None, blirp_core::model::NOT_DISTILLED)
+    );
     let left: Vec<String> = h
         .store
         .list_records(&s.project_id, &Default::default())

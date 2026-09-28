@@ -83,7 +83,12 @@ agent_session_id: string | null, origin: SessionOrigin, cwd: string, title: stri
 /**
  * Distill output (§9), null until the session is distilled.
  */
-summary: JsonValue | null, distilled_through_seq: number, tokens_in: number, tokens_out: number, cost_usd: number, parent_session_id: string | null, 
+summary: JsonValue | null, 
+/**
+ * Highest event seq the summary covers; [`NOT_DISTILLED`] before the
+ * first distill (seqs start at 0).
+ */
+distilled_through_seq: number, tokens_in: number, tokens_out: number, cost_usd: number, parent_session_id: string | null, 
 /**
  * Ended by a user Stop: `status` is `completed` and `exit_code` null.
  */
@@ -471,7 +476,12 @@ agent_session_id: string | null, origin: SessionOrigin, cwd: string, title: stri
 /**
  * Distill output (§9), null until the session is distilled.
  */
-summary: JsonValue | null, distilled_through_seq: number, tokens_in: number, tokens_out: number, cost_usd: number, parent_session_id: string | null, 
+summary: JsonValue | null, 
+/**
+ * Highest event seq the summary covers; [`NOT_DISTILLED`] before the
+ * first distill (seqs start at 0).
+ */
+distilled_through_seq: number, tokens_in: number, tokens_out: number, cost_usd: number, parent_session_id: string | null, 
 /**
  * Ended by a user Stop: `status` is `completed` and `exit_code` null.
  */

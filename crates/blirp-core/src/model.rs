@@ -243,6 +243,10 @@ pub struct ProjectPath {
     pub git_remote: Option<String>,
 }
 
+/// `Session::distilled_through_seq` of a session nothing of which was
+/// distilled yet: event seqs start at 0, so 0 means "through seq 0".
+pub const NOT_DISTILLED: i64 = -1;
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
 pub struct Session {
     pub id: String,
@@ -265,6 +269,8 @@ pub struct Session {
     pub exit_code: Option<i32>,
     /// Distill output (§9), null until the session is distilled.
     pub summary: Option<JsonValue>,
+    /// Highest event seq the summary covers; [`NOT_DISTILLED`] before the
+    /// first distill (seqs start at 0).
     pub distilled_through_seq: i64,
     pub tokens_in: i64,
     pub tokens_out: i64,

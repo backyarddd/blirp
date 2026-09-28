@@ -5,7 +5,7 @@ use rusqlite::Connection;
 
 /// Index `i` holds the migration that moves the schema from version `i` to `i + 1`.
 pub(crate) const MIGRATIONS: &[&str] = &[
-    V1, V2, V3, V4, V5, V6, V7, V8, V9, V10, V11, V12, V13, V14, V15, V16, V17, V18,
+    V1, V2, V3, V4, V5, V6, V7, V8, V9, V10, V11, V12, V13, V14, V15, V16, V17, V18, V19,
 ];
 
 /// Schema of §5. Note on the FTS tables: they are external-content tables keyed
@@ -515,6 +515,16 @@ CREATE TABLE event_floors(
 /// window (codex reports both), for the "start a fresh session" suggestion.
 const V18: &str = r#"
 ALTER TABLE sessions ADD COLUMN context_near_full_at INTEGER NULL;
+"#;
+
+/// `sessions.distilled_through_seq` is -1 before the first distill: event
+/// seqs start at 0 (an ingested transcript's first line), so 0 meant both
+/// "nothing" and "through the first event", and the first event was never
+/// distilled. A session with no successful summary had nothing distilled.
+const V19: &str = r#"
+UPDATE sessions SET distilled_through_seq = -1
+ WHERE distilled_through_seq = 0
+   AND (summary_json IS NULL OR json_extract(summary_json, '$.distilled_at') IS NULL);
 "#;
 
 #[derive(Debug, thiserror::Error)]

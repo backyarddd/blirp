@@ -388,10 +388,10 @@ pub fn repair_subagents(
         // Its summary was made from the parent's copied turns too (also when
         // an earlier, interrupted run already dropped them): gone, so the
         // fork is summarized again from its own events.
-        if s.summary.is_some() || s.distilled_through_seq > 0 {
+        if s.summary.is_some() || s.distilled_through_seq >= 0 {
             store.modify_session(&s.id, |x| {
                 x.summary = None;
-                x.distilled_through_seq = 0;
+                x.distilled_through_seq = blirp_core::model::NOT_DISTILLED;
             })?;
             out.summaries_cleared += 1;
         }

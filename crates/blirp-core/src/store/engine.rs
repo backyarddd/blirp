@@ -27,7 +27,7 @@ pub const BY_DISTILLER: &str = "distiller";
 /// make a session due again. A distill that failed (`summary.error`) is
 /// tried again only once something newer than what it covered arrived.
 const NEW_CONTENT: &str = "e.seq > s.distilled_through_seq AND e.kind IN ('user','assistant')
-    AND e.seq > COALESCE(json_extract(s.summary_json, '$.error.through_seq'), 0)";
+    AND e.seq > COALESCE(json_extract(s.summary_json, '$.error.through_seq'), -1)";
 
 /// How a distill result changes the project brief.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

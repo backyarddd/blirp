@@ -433,7 +433,7 @@ impl<'e> StoreSink<'e> {
                 last_activity_at: started,
                 exit_code: None,
                 summary: None,
-                distilled_through_seq: 0,
+                distilled_through_seq: blirp_core::model::NOT_DISTILLED,
                 tokens_in: 0,
                 tokens_out: 0,
                 cost_usd: 0.0,

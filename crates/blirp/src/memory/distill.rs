@@ -980,9 +980,9 @@ pub async fn run_distill<S: Summarize>(
         // (a manual re-run) the whole session again.
         let (head, tail) = (max / 5, max - max / 5);
         let mut events = st.distill_events(&sid, session.distilled_through_seq, head, tail)?;
-        let continued = session.distilled_through_seq > 0 && !events.head.is_empty();
+        let continued = session.distilled_through_seq >= 0 && !events.head.is_empty();
         if events.head.is_empty() {
-            events = st.distill_events(&sid, 0, head, tail)?;
+            events = st.distill_events(&sid, blirp_core::model::NOT_DISTILLED, head, tail)?;
         }
         let (brief, records) = if chats {
             (None, Vec::new())
@@ -2056,6 +2056,42 @@ mod tests {
             "brief_md": "new brief"
         })
         .to_string()
+    }
+
+    // Seqs start at 0 (an ingested transcript's first line): a session whose
+    // only prompt is seq 0 is due, its prompt reaches the summarizer, and
+    // once distilled through it the session is not due again.
+    #[tokio::test]
+    async fn the_first_event_seq_zero_is_distilled() {
+        let (_d, store, pid) = project_store("Z");
+        store.insert_session(&session("z", &pid, 1000)).unwrap();
+        event(&store, "z", 0, EventKind::User, "the very first prompt");
+        let due = |store: &Store| {
+            store
+                .distill_candidates("m", i64::MAX, 0, 10)
+                .unwrap()
+                .into_iter()
+                .map(|s| s.id)
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(due(&store), ["z"]);
+        assert!(store.has_new_content("z").unwrap());
+        let store = Arc::new(store);
+        let fake = Fake::new(vec![Ok(reply(&[]))]);
+        run_distill(store.clone(), "z", &fake, &cfg(BriefMode::Auto))
+            .await
+            .unwrap();
+        assert!(fake.prompts()[0].contains("the very first prompt"));
+        assert_eq!(
+            store
+                .get_session("z")
+                .unwrap()
+                .unwrap()
+                .distilled_through_seq,
+            0
+        );
+        assert!(due(&store).is_empty());
+        assert!(!store.has_new_content("z").unwrap());
     }
 
     #[tokio::test]
