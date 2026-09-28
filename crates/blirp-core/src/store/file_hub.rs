@@ -117,9 +117,12 @@ fn root_info_row(r: &Row<'_>) -> rusqlite::Result<RootInfo> {
     })
 }
 
+/// A root whose origin machine the hub no longer knows (forgotten after it
+/// was revoked) counts as revoked.
 const ROOTS_SQL: &str = "SELECT r.root_id,
        coalesce(pp.project_id, m2.merged_into, m1.merged_into, r.project_id) AS project_id,
-       r.machine_id, coalesce(m.name, '') AS machine_name, coalesce(m.revoked, 0) AS revoked,
+       r.machine_id, coalesce(m.name, 'forgotten machine') AS machine_name,
+       CASE WHEN m.id IS NULL THEN 1 ELSE m.revoked END AS revoked,
        r.path, r.head, r.created_at, r.updated_at, r.manifest_json, r.incarnation,
        (SELECT count(*) FROM file_entries e WHERE e.root_id = r.root_id
           AND (e.hash IS NOT NULL OR e.link IS NOT NULL)) AS files,
@@ -933,6 +936,33 @@ mod tests {
                 })
                 .unwrap()
         }
+    }
+
+    // A root whose origin machine was forgotten (its row deleted) counts as
+    // revoked, so its hub copy can still be deleted.
+    #[test]
+    fn a_forgotten_origin_counts_as_revoked() {
+        let h = hub();
+        let machine = |revoked: bool| {
+            crate::store::Change::Machine(crate::model::Machine {
+                id: "origin".into(),
+                name: "laptop".into(),
+                os: "linux".into(),
+                role: crate::model::MachineRole::Node,
+                last_seen: 1,
+                revoked,
+            })
+        };
+        h.store.apply(machine(false)).unwrap();
+        h.commit("origin", true, &[put("x", 0, "a")]).unwrap();
+        let info = h.store.hub_file_root(&h.root).unwrap().unwrap();
+        assert!(!info.origin_revoked);
+        assert_eq!(info.machine_name, "laptop");
+        h.store.apply(machine(true)).unwrap();
+        assert!(h.store.hub_forget_machine("origin").unwrap());
+        let info = h.store.hub_file_root(&h.root).unwrap().unwrap();
+        assert!(info.origin_revoked);
+        assert_eq!(info.machine_name, "forgotten machine");
     }
 
     #[test]
