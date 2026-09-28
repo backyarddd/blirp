@@ -410,7 +410,12 @@ impl Store {
             args.push(v);
             format!("?{}", args.len())
         };
-        let mut sql = format!("SELECT *, {LIVE} AS live FROM sessions WHERE 1=1");
+        // Sessions of a project in the Trash are hidden with it until it is
+        // restored.
+        let mut sql = format!(
+            "SELECT *, {LIVE} AS live FROM sessions WHERE NOT EXISTS
+               (SELECT 1 FROM projects p WHERE p.id = sessions.project_id AND p.deleted = 1)"
+        );
         if let Some(p) = &f.project_id {
             sql += &format!(" AND project_id = {}", bind(p.clone().into()));
         }
