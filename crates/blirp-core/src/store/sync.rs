@@ -1003,10 +1003,13 @@ impl Store {
                 session_row,
             )?;
             let n = legacy.len();
+            // Only a missing time (0): -1 is an edit this machine gave up
+            // (`forget_refused_edit_in`) and must keep losing.
+            let stamp = |t: i64| if t == 0 { 1 } else { t };
             for s in legacy {
                 let s = Session {
-                    title_updated_at: s.title_updated_at.max(1),
-                    project_updated_at: s.project_updated_at.max(1),
+                    title_updated_at: stamp(s.title_updated_at),
+                    project_updated_at: stamp(s.project_updated_at),
                     ..s
                 };
                 let change = Change::Session(s);
@@ -3680,6 +3683,29 @@ mod tests {
             );
         }
         assert_eq!(title(&hub).as_deref(), Some("aaa"));
+    }
+
+    // The legacy stamp only fills a missing time: an edit given up (-1)
+    // keeps losing to the owner's next row.
+    #[test]
+    fn the_legacy_stamp_leaves_given_up_edits_alone() {
+        let (_h, hub) = temp_store();
+        hub.apply(project("p", "p")).unwrap();
+        hub.apply(Change::Session(session_of("s", "X"))).unwrap();
+        hub.write(|tx| {
+            tx.execute(
+                "UPDATE sessions SET title_updated_at = -1, project_updated_at = 0",
+                [],
+            )?;
+            Ok(tx.execute(
+                "INSERT INTO settings(key, value_json) VALUES ('sync.stamp_sessions', 'true')",
+                [],
+            )?)
+        })
+        .unwrap();
+        assert_eq!(hub.hub_stamp_legacy_sessions().unwrap(), 1);
+        let s = hub.get_session("s").unwrap().unwrap();
+        assert_eq!((s.title_updated_at, s.project_updated_at), (-1, 1));
     }
 
     // Renames from another machine that the owner's later writes carry on
