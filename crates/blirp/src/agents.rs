@@ -195,6 +195,31 @@ impl Agent {
         matches!(self.resume, Resume::Args(_))
     }
 
+    /// What a user types to resume one of the agent's sessions, before the
+    /// agent's session id (`claude --resume`); None without id-based resume.
+    pub fn resume_command(&self) -> Option<Vec<String>> {
+        let Resume::Args(args) = self.resume else {
+            return None;
+        };
+        let program = self
+            .path
+            .as_deref()
+            .and_then(Path::file_stem)
+            .map(|s| s.to_string_lossy().into_owned())
+            .or_else(|| {
+                BUILTINS
+                    .iter()
+                    .find(|b| b.id == self.id)
+                    .and_then(|b| b.binaries.first())
+                    .map(|b| (*b).to_string())
+            })?;
+        Some(
+            std::iter::once(program)
+                .chain(args.iter().map(|a| (*a).to_string()))
+                .collect(),
+        )
+    }
+
     /// Whether blirp assigns the agent's session id at launch (claude only).
     pub fn assigns_session_id(&self) -> bool {
         self.id == "claude"
@@ -573,6 +598,7 @@ pub fn detect_all(config: &Config, paths: &Paths) -> Vec<AgentInfo> {
                         path: a.path.as_ref().map(|p| p.display().to_string()),
                         version,
                         can_resume: a.can_resume(),
+                        resume_command: a.resume_command(),
                         integration: integration(&a.id),
                         auth,
                         token: token_status(&a.id, paths),
@@ -592,6 +618,7 @@ pub fn detect_all(config: &Config, paths: &Paths) -> Vec<AgentInfo> {
                     path: None,
                     version: None,
                     can_resume: a.can_resume(),
+                    resume_command: a.resume_command(),
                     integration: integration(&a.id),
                     auth: None,
                     token: token_status(&a.id, paths),
@@ -659,6 +686,27 @@ mod tests {
         let mut a = Agent::resolve(id, &Config::default()).unwrap();
         a.path = Some(PathBuf::from(path));
         a
+    }
+
+    #[test]
+    fn resume_commands_name_the_program_users_type() {
+        let cmd = |id: &str, path: Option<&str>| {
+            let mut a = Agent::resolve(id, &Config::default()).unwrap();
+            a.path = path.map(PathBuf::from);
+            a.resume_command()
+        };
+        assert_eq!(
+            cmd("claude", Some("/opt/npm/claude.cmd")).unwrap(),
+            ["claude", "--resume"]
+        );
+        assert_eq!(cmd("codex", None).unwrap(), ["codex", "resume"]);
+        assert_eq!(
+            cmd("cursor", Some("/usr/local/bin/agent")).unwrap(),
+            ["agent", "--resume"]
+        );
+        assert_eq!(cmd("amp", None).unwrap(), ["amp", "threads", "continue"]);
+        assert_eq!(cmd("aider", None), None);
+        assert_eq!(cmd("shell", None), None);
     }
 
     fn argv(a: &Agent, resume: bool, sid: Option<&str>) -> Vec<String> {

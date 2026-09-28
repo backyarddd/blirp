@@ -1010,6 +1010,12 @@ pub struct AgentInfo {
 /// `~/.claude/.credentials.json`, which a daemon started by launchd on a
 /// locked Mac or over SSH cannot use.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+    /// What a user types to resume one of its sessions, followed by the
+    /// agent's session id (`["claude", "--resume"]`); null without id-based
+    /// resume.
+    // Default: older daemons do not send it.
+    #[serde(default)]
+    pub resume_command: Option<Vec<String>>,
 pub struct AgentToken {
     /// A token is stored in `BLIRP_HOME/secrets/claude_oauth_token`
     /// (`blirp agents set-token claude`).

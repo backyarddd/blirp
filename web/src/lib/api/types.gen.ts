@@ -595,7 +595,13 @@ version: string | null,
 /**
  * Resume by the agent's own session id is supported.
  */
-can_resume: boolean, integration: AgentIntegration, 
+can_resume: boolean, 
+/**
+ * What a user types to resume one of its sessions, followed by the
+ * agent's session id (`["claude", "--resume"]`); null without id-based
+ * resume.
+ */
+resume_command: Array<string> | null, integration: AgentIntegration, 
 /**
  * Whether the agent is logged in for this machine's daemon, where that
  * can be checked without a model call (claude: `claude auth status`);
