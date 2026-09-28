@@ -214,6 +214,22 @@ async fn worktrees_list_and_prune() {
         tokio::time::sleep(std::time::Duration::from_millis(100)).await;
     }
 
+    // The API lists the same, as JSON.
+    let api_list: Vec<blirp_core::model::WorktreeInfo> =
+        api(reqwest::Method::GET, "/api/worktrees")
+            .send()
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+    assert_eq!(api_list.len(), 1);
+    assert_eq!(
+        api_list[0].session.as_ref().map(|s| s.id.as_str()),
+        Some(s.id.as_str())
+    );
+    assert_eq!(api_list[0].state, blirp_core::model::WorktreeState::Clean);
+
     let o = blirp(&home, &user, &["worktrees", "list"]);
     assert!(o.status.success(), "{}", text(&o));
     let listed = text(&o);

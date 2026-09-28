@@ -1003,6 +1003,7 @@ const MUTATING_ROUTES: &[(&str, &str, Need)] = &[
     ("POST", "/api/sessions", Need::Control),
     ("DELETE", "/api/sessions/s1", Need::Control),
     ("POST", "/api/sessions/s1/worktree/remove", Need::Control),
+    ("POST", "/api/worktrees/prune", Need::Control),
     ("PATCH", "/api/sessions/s1", Need::Control),
     ("POST", "/api/sessions/s1/stop", Need::Control),
     ("POST", "/api/sessions/s1/resume", Need::Control),

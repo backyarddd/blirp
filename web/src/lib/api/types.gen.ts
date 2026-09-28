@@ -1385,6 +1385,40 @@ export type LocalCopyAction = {
  */
 path: string, };
 
+/**
+ * A session worktree on disk: `clean`, `changed` (uncommitted changes,
+ * untracked files included), `missing` (the folder is gone) or
+ * `unknown` (git status failed).
+ */
+export type WorktreeState = "clean" | "changed" | "missing" | "unknown";
+
+/**
+ * `GET /api/worktrees`: a git worktree blirp made for a session on this
+ * machine, or a folder under `BLIRP_HOME/worktrees` no session refers to.
+ */
+export type WorktreeInfo = { path: string, 
+/**
+ * The session it was made for; null for a folder without one.
+ */
+session: Session | null, state: WorktreeState, 
+/**
+ * Uncommitted changes (`changed`).
+ */
+changes: number, 
+/**
+ * Why the state is `unknown`.
+ */
+error: string | null, };
+
+/**
+ * One worktree of `POST /api/worktrees/prune`.
+ */
+export type PrunedWorktree = { path: string, session_id: string, removed: boolean, 
+/**
+ * Why it was kept.
+ */
+reason: string | null, };
+
 export type Summarizer = "auto" | "claude" | "codex" | "ollama" | "none";
 
 export type BriefMode = "auto" | "review";

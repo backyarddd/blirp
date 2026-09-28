@@ -585,6 +585,42 @@ pub struct RemoveProjectFolder {
     pub path: String,
 }
 
+str_enum!(
+    /// A session worktree on disk: `clean`, `changed` (uncommitted changes,
+    /// untracked files included), `missing` (the folder is gone) or
+    /// `unknown` (git status failed).
+    WorktreeState {
+        Clean = "clean",
+        Changed = "changed",
+        Missing = "missing",
+        Unknown = "unknown",
+    }
+);
+
+/// `GET /api/worktrees`: a git worktree blirp made for a session on this
+/// machine, or a folder under `BLIRP_HOME/worktrees` no session refers to.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
+pub struct WorktreeInfo {
+    pub path: String,
+    /// The session it was made for; null for a folder without one.
+    pub session: Option<Session>,
+    pub state: WorktreeState,
+    /// Uncommitted changes (`changed`).
+    pub changes: i64,
+    /// Why the state is `unknown`.
+    pub error: Option<String>,
+}
+
+/// One worktree of `POST /api/worktrees/prune`.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
+pub struct PrunedWorktree {
+    pub path: String,
+    pub session_id: String,
+    pub removed: bool,
+    /// Why it was kept.
+    pub reason: Option<String>,
+}
+
 /// `POST /api/sessions/:id/move`.
 #[derive(Debug, Clone, Serialize, Deserialize, TS)]
 #[serde(deny_unknown_fields)]
@@ -1746,7 +1782,8 @@ mod tests {
             crate::files::FilesMode, crate::files::RootInfo, crate::files::GitManifest, CopyState,
             LocalFiles, FilesRoot, ProjectFiles, SetFilesMode, FilesOverview, PauseFiles, IncomingAction,
             IncomingFile, FilesIncoming, ApplyFiles, AppliedFiles, DownloadFiles, DownloadJob,
-            HeldAction, ResolveHeld, LocalCopyMode, LocalCopy, LocalCopyAction,
+            HeldAction, ResolveHeld, LocalCopyMode, LocalCopy, LocalCopyAction, WorktreeState, WorktreeInfo,
+            PrunedWorktree,
             Summarizer, BriefMode, MemoryConfig, SyncConfig, PortalConfig, UpdateConfig, FilesConfig,
         );
         let body = format!(

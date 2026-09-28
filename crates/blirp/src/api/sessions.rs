@@ -8,8 +8,8 @@ use axum::response::Response;
 use axum::routing::{get, post};
 use axum::{Json, Router};
 use blirp_core::model::{
-    EventsPage, LaunchSession, MoveSession, PatchSession, RemoveWorktree, ServerEvent, Session,
-    SessionDetail, SessionStatus, SessionsPage,
+    EventsPage, LaunchSession, MoveSession, PatchSession, PrunedWorktree, RemoveWorktree,
+    ServerEvent, Session, SessionDetail, SessionStatus, SessionsPage, WorktreeInfo,
 };
 use blirp_core::store::SessionFilter;
 use serde::Deserialize;
@@ -26,6 +26,8 @@ pub fn routes() -> Router<SharedState> {
         .route("/api/sessions/{id}/resume", post(resume))
         .route("/api/sessions/{id}/worktree/remove", post(remove_worktree))
         .route("/api/sessions/{id}/move", post(move_session))
+        .route("/api/worktrees", get(worktrees))
+        .route("/api/worktrees/prune", post(prune_worktrees))
 }
 
 #[derive(Deserialize)]
@@ -191,6 +193,25 @@ async fn resume(
     }
     let session = crate::sessions::resume(&s, &id).await?;
     Ok(axum::response::IntoResponse::into_response(Json(session)))
+}
+
+/// `GET /api/worktrees`: this machine's session worktrees and their state
+/// (`blirp worktrees list`).
+async fn worktrees(State(s): State<SharedState>) -> ApiResult<Json<Vec<WorktreeInfo>>> {
+    let (store, paths) = (s.store.clone(), s.paths.clone());
+    let list = blocking(move || Ok(crate::worktrees::list(&store, &paths)?)).await?;
+    Ok(Json(list))
+}
+
+/// `POST /api/worktrees/prune`: remove the worktrees of ended sessions
+/// without changes (`blirp worktrees prune`).
+async fn prune_worktrees(
+    State(s): State<SharedState>,
+    _: Control,
+) -> ApiResult<Json<Vec<PrunedWorktree>>> {
+    let st = s.clone();
+    let out = blocking(move || crate::worktrees::prune(&st)).await?;
+    Ok(Json(out))
 }
 
 async fn remove_worktree(
