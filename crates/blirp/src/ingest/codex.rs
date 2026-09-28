@@ -13,7 +13,7 @@ use super::pricing::{self, Usage};
 use super::text::{self, content_text, parse_ts};
 use super::{
     Adapter, Cursor, EventSink, IngestEnv, Launches, Result, SessionMeta, Source, file_sources,
-    walk_files,
+    find_file, walk_files,
 };
 use blirp_core::model::EventKind;
 use blirp_core::store::Store;
@@ -417,16 +417,13 @@ impl Codex {
     /// The rollout of session `id` (`rollout-<date>-<id>.jsonl[.zst]`).
     pub(crate) fn rollout_of(&self, id: &str) -> Option<PathBuf> {
         let names = [format!("-{id}.jsonl"), format!("-{id}.jsonl.zst")];
-        self.roots().iter().find_map(|r| {
-            walk_files(r, 4, &|p: &Path| {
-                is_rollout(p)
-                    && p.file_name()
-                        .and_then(|n| n.to_str())
-                        .is_some_and(|n| names.iter().any(|s| n.ends_with(s.as_str())))
-            })
-            .into_iter()
-            .next()
-        })
+        let keep = |p: &Path| {
+            is_rollout(p)
+                && p.file_name()
+                    .and_then(|n| n.to_str())
+                    .is_some_and(|n| names.iter().any(|s| n.ends_with(s.as_str())))
+        };
+        self.roots().iter().find_map(|r| find_file(r, 4, &keep))
     }
 
     /// Whether the rollout of session `parent` is a scripted run
@@ -480,9 +477,12 @@ impl Adapter for Codex {
             st = State::default();
         }
         let mut launch = Launches::resume(st.launch.take(), st.pos.line);
-        // A subagent of a scripted run goes with it; judged again at every
-        // read, since the parent may have turned into a session since.
-        if let Some(parent) = &st.parent {
+        // A subagent of a scripted run goes with it. Judged when its own
+        // `session_meta` is read, then again only while the parent is still
+        // scripted: a parent that is a session stays one.
+        if let Some(parent) = &st.parent
+            && launch.parent_scripted()
+        {
             launch.set_parent_scripted(self.parent_is_scripted(parent));
         }
         let fallback = id_from_name(&src.path).unwrap_or_else(|| src.key.clone());

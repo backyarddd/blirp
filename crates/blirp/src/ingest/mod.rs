@@ -303,6 +303,10 @@ impl Launches {
         self.parent_scripted = yes;
     }
 
+    pub(crate) fn parent_scripted(&self) -> bool {
+        self.parent_scripted
+    }
+
     /// Nothing later in the transcript can make it headless again (its own
     /// lines; a scripted parent is judged apart).
     pub(crate) fn settled(&self) -> bool {
@@ -507,6 +511,25 @@ pub(crate) fn walk_files(
     max_depth: usize,
     keep: &dyn Fn(&Path) -> bool,
 ) -> Vec<PathBuf> {
+    walk_files_up_to(root, max_depth, keep, usize::MAX)
+}
+
+/// The first file below `root` that `keep` accepts (see [`walk_files`]),
+/// without walking the rest.
+pub(crate) fn find_file(
+    root: &Path,
+    max_depth: usize,
+    keep: &dyn Fn(&Path) -> bool,
+) -> Option<PathBuf> {
+    walk_files_up_to(root, max_depth, keep, 1).pop()
+}
+
+fn walk_files_up_to(
+    root: &Path,
+    max_depth: usize,
+    keep: &dyn Fn(&Path) -> bool,
+    limit: usize,
+) -> Vec<PathBuf> {
     let mut out = Vec::new();
     let mut stack = vec![(root.to_path_buf(), 0usize)];
     while let Some((dir, depth)) = stack.pop() {
@@ -522,6 +545,9 @@ pub(crate) fn walk_files(
                 }
             } else if ft.is_file() && keep(&p) {
                 out.push(p);
+                if out.len() >= limit {
+                    return out;
+                }
             }
         }
     }
