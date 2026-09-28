@@ -1238,6 +1238,16 @@ async fn changes_to_a_remote_launch_before_its_row_replicates() {
         (Some("renamed on b"), &on_c.project_id)
     );
     assert!(a.store().get_session(&id).unwrap().is_none());
+    // Launched on C from the hub: the hub keeps no copy of a row it has not
+    // logged (other machines' writes to it would get lost).
+    let from_hub: Session = a
+        .ok(
+            Method::POST,
+            "/api/sessions",
+            Some(json!({"cwd": dir, "agent": "shell", "machine": c_id})),
+        )
+        .await;
+    assert!(a.store().get_session(&from_hub.id).unwrap().is_none());
     // Anything B queued reaches the hub before C's row can.
     eventually("B pushed", || async {
         sync_status(&b).await.pending_outbox == 0

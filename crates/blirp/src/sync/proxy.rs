@@ -170,6 +170,13 @@ pub async fn launch_remote(
         }
         Ok(session) => {
             state.sync.remember_remote(&session.id, machine);
+            // Not on the hub: it accepts other machines' writes to rows it
+            // holds, and one to a row it never logged would reach nodes that
+            // lack the row (they skip it) and never again. The owner pushes
+            // its row to the hub within a second anyway.
+            if state.config().sync.role == MachineRole::Hub {
+                return Ok(Response::from_parts(parts, Body::from(bytes)));
+            }
             // The row replicates later (seconds on a slow link); until then
             // the session must already be readable and changeable here.
             let (store, s) = (state.store.clone(), session.clone());
