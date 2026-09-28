@@ -458,9 +458,22 @@ mod tests {
         s.save_file_hash_cache("/p", &[], Some(&HashSet::from(["a".to_string()])))
             .unwrap();
         assert_eq!(s.file_hash_cache("/p").unwrap().len(), 1);
-        // The same folder as a copy of another root starts over.
-        s.put_file_copy(&copy).unwrap();
+        // Saved again unchanged (every reconcile does): bases and the
+        // folder's identity stay, so a restart still tells a replaced
+        // folder apart.
+        s.set_file_copy_identity("/p", "7:100").unwrap();
+        s.put_file_copy(&FileCopy {
+            seen: 9,
+            incarnation: "i2".into(),
+            ..copy.clone()
+        })
+        .unwrap();
         assert_eq!(s.file_bases("/p").unwrap().len(), 1, "unchanged: kept");
+        assert_eq!(
+            s.file_copy_identity("/p").unwrap().as_deref(),
+            Some("7:100")
+        );
+        // The same folder as a copy of another root starts over.
         s.put_file_copy(&FileCopy {
             root_id: "1".repeat(32),
             origin: false,
@@ -469,6 +482,7 @@ mod tests {
         .unwrap();
         assert!(s.file_bases("/p").unwrap().is_empty());
         assert!(s.file_hash_cache("/p").unwrap().is_empty());
+        assert_eq!(s.file_copy_identity("/p").unwrap(), None);
         s.detach_file_copy("/p").unwrap();
         assert_eq!(s.file_copy("/p").unwrap().unwrap().mode, CopyMode::Detached);
         s.remove_file_copy("/p").unwrap();
