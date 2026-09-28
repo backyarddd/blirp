@@ -35,7 +35,7 @@ import { NONE_DENIED, denyFor, rightsFrom, type Denied } from './capabilities';
 import { nav, navigate } from './router.svelte';
 import { href } from './router';
 import { readOpenSessions, remoteMachine, sessionToRestore, type RemoteMachine } from './machines';
-import { readMarks, sessionKey, writeMarks, type MarkKind } from './marks';
+import { projectKey, readMarks, sessionKey, writeMarks, type MarkKind } from './marks';
 
 export type AuthState = 'checking' | 'ok' | 'unauthorized' | 'offline';
 export type ConnState = 'connecting' | 'open' | 'reconnecting';
@@ -396,9 +396,31 @@ class AppState {
     try {
       this.upsertProject(await api.projects.get(id));
     } catch (e) {
-      if (e instanceof ApiError && e.status === 404) this.removeProject(id);
-      else console.warn(`blirp: could not refresh project ${id}`, e);
+      if (e instanceof ApiError && e.status === 404) {
+        this.removeProject(id);
+        void this.#forgetIfMerged(id);
+      } else console.warn(`blirp: could not refresh project ${id}`, e);
     }
+  }
+
+  /** Gone and not in the Trash (merged away, here or elsewhere): its marks go too. */
+  async #forgetIfMerged(id: string): Promise<void> {
+    try {
+      if (!(await api.projects.trash()).some((p) => p.id === id)) this.forgetProjectMarks(id);
+    } catch (e) {
+      // Only tidies this device's marks; they are kept until the next time.
+      console.warn(`blirp: could not read the Trash for project ${id}`, e);
+    }
+  }
+
+  /**
+   * A project merged away never comes back: its pin and archive marks are dropped. A project in the
+   * Trash keeps them, so a restore brings them back.
+   */
+  forgetProjectMarks(id: string): void {
+    const key = projectKey({ id });
+    if (this.pinned.has(key)) this.setMark('pinned', key, false);
+    if (this.archived.has(key)) this.setMark('archived', key, false);
   }
 
   upsertProject(p: ProjectSummary): void {

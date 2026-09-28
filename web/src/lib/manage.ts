@@ -417,6 +417,7 @@ export async function mergeProject(from: ProjectSummary, into: ProjectSummary): 
   app.upsertProject(merged);
   // Its sessions now belong to the target; removing the project re-reads the list.
   app.removeProject(from.id);
+  app.forgetProjectMarks(from.id);
   if (nav.route.name === 'project' && nav.route.projectId === from.id) navigate(href.project(merged.id));
   return true;
 }

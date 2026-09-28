@@ -316,3 +316,42 @@ test('Undo leaves an item alone that was changed again since', async () => {
   await page.waitForTimeout(500);
   expect((await apiCall<SessionRow>('GET', `/api/sessions/${s.id}`)).title).toBe('Third title');
 });
+
+test('a merged project loses its pin on this device; a deleted one keeps it for a restore', async () => {
+  const from = await project('Pinned merged');
+  const into = await project('Merge target');
+  const trashed = await project('Pinned trashed');
+  const pinned = async (): Promise<string[]> =>
+    page.evaluate(() => JSON.parse(localStorage.getItem('blirp.pinned') ?? '[]') as string[]);
+  for (const p of [from, trashed]) {
+    await page.goto(`${env.url}/projects/${p.id}`);
+    await page.getByRole('button', { name: 'Project actions' }).click();
+    await page.getByRole('menuitem', { name: 'Pin', exact: true }).click();
+  }
+  expect(await pinned()).toEqual(expect.arrayContaining([`p:${from.id}`, `p:${trashed.id}`]));
+
+  await page.goto(`${env.url}/projects/${from.id}`);
+  await page.getByRole('button', { name: 'Project actions' }).click();
+  await page.getByRole('menuitem', { name: 'Merge into…' }).click();
+  const dialog = page.getByRole('dialog', { name: 'Merge project' });
+  await dialog.getByRole('combobox').selectOption({ label: 'Merge target' });
+  await dialog.getByRole('button', { name: 'Merge' }).click();
+  await expect(page).toHaveURL(`${env.url}/projects/${into.id}`);
+  await expect.poll(pinned).not.toContain(`p:${from.id}`);
+
+  // Merged by another client: the pushed update drops the pin too.
+  const remote = await project('Pinned merged elsewhere');
+  await page.goto(`${env.url}/projects/${remote.id}`);
+  await page.getByRole('button', { name: 'Project actions' }).click();
+  await page.getByRole('menuitem', { name: 'Pin', exact: true }).click();
+  await expect.poll(pinned).toContain(`p:${remote.id}`);
+  await page.goto(`${env.url}/projects`);
+  await apiCall('POST', `/api/projects/${remote.id}/merge`, { into: into.id });
+  await expect.poll(pinned).not.toContain(`p:${remote.id}`);
+
+  // Deleted by another client: the pin stays (a restore brings it back).
+  await apiCall('DELETE', `/api/projects/${trashed.id}`);
+  await expect(page.locator('.toast', { hasText: 'Pinned trashed' })).toHaveCount(0);
+  await page.waitForTimeout(1000);
+  expect(await pinned()).toContain(`p:${trashed.id}`);
+});
