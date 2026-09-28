@@ -1,5 +1,10 @@
 <script lang="ts">
   import ChevronRight from '@lucide/svelte/icons/chevron-right';
+  import Ellipsis from '@lucide/svelte/icons/ellipsis';
+  import { sessionActions } from '../actions';
+  import { actionEnv, sessionOps } from '../manage';
+  import { contextmenu } from '../contextmenu';
+  import Menu from './Menu.svelte';
   import { api, errorMessage } from '../api/client';
   import type { Session } from '../api/types.gen';
   import { app } from '../app.svelte';
@@ -45,12 +50,24 @@
         <ul class="list-plain">
           {#each children as c (c.id)}
             {@const live = app.sessionById.get(c.id) ?? c}
-            <li>
-              <a class="child" href={href.sessions(c.id)} onclick={() => onnavigate?.()}>
+            <li class="line">
+              <a
+                class="child"
+                href={href.sessions(c.id)}
+                onclick={() => onnavigate?.()}
+                use:contextmenu={{
+                  items: () => sessionActions(live, actionEnv(), sessionOps),
+                  label: sessionTitle(live),
+                  rename: app.control ? () => sessionOps.rename(live) : undefined,
+                }}
+              >
                 <span class="ellipsis">{sessionTitle(live)}</span>
                 <span class="faint small">{formatRelative(live.last_activity_at)}</span>
                 <StatusChip session={live} />
               </a>
+              <Menu items={sessionActions(live, actionEnv(), sessionOps)} label="Actions for {sessionTitle(live)}" title="More actions" triggerClass="icon-btn sm" align="right"
+                ><Ellipsis size={13} /></Menu
+              >
             </li>
           {/each}
         </ul>
@@ -90,7 +107,15 @@
     display: grid;
     gap: 2px;
   }
+  .line {
+    display: flex;
+    align-items: center;
+    gap: 2px;
+    min-width: 0;
+  }
   .child {
+    flex: 1;
+    min-width: 0;
     display: flex;
     align-items: center;
     gap: 8px;

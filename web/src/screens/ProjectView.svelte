@@ -1,15 +1,14 @@
 <script lang="ts">
   import Pencil from '@lucide/svelte/icons/pencil';
   import Plus from '@lucide/svelte/icons/plus';
-  import Trash from '@lucide/svelte/icons/trash-2';
-  import Merge from '@lucide/svelte/icons/git-merge';
-  import X from '@lucide/svelte/icons/x';
-  import { api } from '../lib/api/client';
+  import Ellipsis from '@lucide/svelte/icons/ellipsis';
   import { app } from '../lib/app.svelte';
-  import { navigate } from '../lib/router.svelte';
   import { href, type ProjectTab } from '../lib/router';
+  import { folderActions, projectActions } from '../lib/actions';
+  import { actionEnv, projectOps, renameProject } from '../lib/manage';
+  import { contextmenu } from '../lib/contextmenu';
+  import Menu from '../lib/components/Menu.svelte';
   import ProjectBadge from '../lib/components/ProjectBadge.svelte';
-  import Modal from '../lib/components/Modal.svelte';
   import Overview from './project/Overview.svelte';
   import Sessions from './project/Sessions.svelte';
   import Memory from './project/Memory.svelte';
@@ -54,71 +53,11 @@
 
   async function rename(e: SubmitEvent): Promise<void> {
     e.preventDefault();
-    const name = newName.trim();
-    if (!name || !project) return;
-    const p = await app.act(() => api.projects.rename(project.id, name));
-    if (p) {
-      app.upsertProject(p);
-      renaming = false;
-    }
-  }
-
-  async function removeFolder(path: string): Promise<void> {
     if (!project) return;
-    const last = project.paths.length === 1;
-    const msg =
-      `Remove ${path} from "${project.name}"? The folder itself is not touched, and the project keeps its sessions and memory.` +
-      (last ? ' With no folder left, its new sessions start in a blirp workspace.' : '');
-    if (!confirm(msg)) return;
-    const p = await app.act(() => api.projects.removeFolder(project.id, path), 'Folder removed');
-    if (p) app.upsertProject(p);
+    if (await renameProject(project, newName)) renaming = false;
   }
 
-  async function remove(): Promise<void> {
-    if (!project) return;
-    const msg =
-      `Delete "${project.name}" from blirp? It is hidden and its folders are unregistered on every synced machine. ` +
-      'Files on disk are not touched, and its sessions and memory stay in the database. ' +
-      'A new session in one of its folders starts a new project.';
-    if (!confirm(msg)) return;
-    const ok = await app.act(async () => {
-      await api.projects.remove(project.id);
-      return true;
-    });
-    if (ok) {
-      app.removeProject(project.id);
-      navigate(href.projects());
-    }
-  }
-
-  let merging = $state(false);
-  let mergeInto = $state('');
-  let mergeBusy = $state(false);
-  const mergeTargets = $derived(
-    app.realProjects.filter((p) => p.id !== projectId).sort((a, b) => a.name.localeCompare(b.name)),
-  );
-  const mergeTarget = $derived(app.projectById.get(mergeInto));
-
-  function openMerge(): void {
-    mergeInto = '';
-    merging = true;
-  }
-
-  async function merge(): Promise<void> {
-    const from = project;
-    const into = mergeTarget;
-    if (!from || !into) return;
-    mergeBusy = true;
-    const merged = await app.act(() => api.projects.merge(from.id, into.id), `Merged "${from.name}" into "${into.name}"`);
-    mergeBusy = false;
-    if (!merged) return;
-    merging = false;
-    app.upsertProject(merged);
-    app.removeProject(from.id);
-    // Moved sessions keep their ids; the daemon only reports the two projects.
-    void app.refreshSessions();
-    navigate(href.project(merged.id));
-  }
+  const actions = $derived(project ? projectActions(project, actionEnv(), projectOps) : []);
 </script>
 
 <div class="page">
@@ -129,8 +68,11 @@
       {:else}
         <div class="card panel-pad">
           <h1 class="page-title">Project not found</h1>
-          <p class="muted">It may have been removed or merged into another project.</p>
-          <a class="btn" href={href.projects()}>All projects</a>
+          <p class="muted">It may be in the Trash, or merged into another project.</p>
+          <div class="row">
+            <a class="btn" href={href.projects()}>All projects</a>
+            <a class="btn" href={href.trash()}>Trash</a>
+          </div>
         </div>
       {/if}
     {:else}
@@ -169,21 +111,23 @@
           {/if}
         {/if}
         <span class="spacer"></span>
+        <Menu items={actions} label="Project actions" title="More actions" triggerClass="btn ghost sm" align="right"
+          ><Ellipsis size={15} aria-hidden="true" />Actions</Menu
+        >
         {#if app.control}
-          <button type="button" class="btn ghost sm" onclick={openMerge} disabled={mergeTargets.length === 0}
-            ><Merge size={14} aria-hidden="true" />Merge into…</button
-          >
-          <button type="button" class="btn ghost sm" onclick={remove}><Trash size={14} aria-hidden="true" />Delete</button>
           <button type="button" class="btn primary" onclick={() => app.openNewSession(project.id)}><Plus size={16} aria-hidden="true" />New session</button>
         {/if}
       </div>
       <ul class="paths small muted" aria-label="Folders">
         {#each project.paths as p (p.machine_id + p.path)}
-          <li class="row">
+          <li class="row" use:contextmenu={{ items: () => (p.local ? folderActions(project, p.path, actionEnv(), projectOps) : []), label: p.path }}>
             <span class="mono ellipsis" title={p.path}>{p.path}{p.git_remote ? `  ·  ${p.git_remote}` : ''}{p.local ? '' : ` (${app.machineName(p.machine_id)})`}</span>
-            {#if p.local && app.control}
-              <button type="button" class="icon-btn sm" aria-label="Remove folder {p.path}" title="Remove folder from project" onclick={() => removeFolder(p.path)}
-                ><X size={13} /></button
+            {#if p.local}
+              <Menu
+                items={folderActions(project, p.path, actionEnv(), projectOps)}
+                label="Actions for folder {p.path}"
+                title="Folder actions"
+                triggerClass="icon-btn sm"><Ellipsis size={13} /></Menu
               >
             {/if}
           </li>
@@ -237,30 +181,6 @@
     {/if}
   </div>
 </div>
-
-<Modal open={merging && project !== undefined} title="Merge project" onclose={() => (merging = false)}>
-  {#if project}
-    <form id="merge-project" onsubmit={(e) => (e.preventDefault(), void merge())}>
-      <label class="field">
-        <span>Merge "{project.name}" into</span>
-        <select class="select" bind:value={mergeInto} required>
-          <option value="" disabled>Pick a project</option>
-          {#each mergeTargets as p (p.id)}<option value={p.id}>{p.name}</option>{/each}
-        </select>
-      </label>
-      <p class="small">
-        Everything in "{project.name}" moves to {mergeTarget ? `"${mergeTarget.name}"` : 'the project you pick'}: its folders, sessions,
-        records, wiki pages (a clashing page name gets a number added), resources and pending suggestions. Its brief moves only when
-        the target has none; otherwise the target's brief is kept. "{project.name}" is then deleted.
-      </p>
-      <p class="small muted">The change syncs to every paired machine and cannot be undone. Files on disk are not touched.</p>
-    </form>
-  {/if}
-  {#snippet footer()}
-    <button type="button" class="btn" onclick={() => (merging = false)}>Cancel</button>
-    <button type="submit" form="merge-project" class="btn primary" disabled={!mergeTarget || mergeBusy}>{mergeBusy ? 'Merging…' : 'Merge'}</button>
-  {/snippet}
-</Modal>
 
 <style>
   .crumbs a {

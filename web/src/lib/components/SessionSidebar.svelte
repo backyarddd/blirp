@@ -2,18 +2,28 @@
   import Plus from '@lucide/svelte/icons/plus';
   import GitBranch from '@lucide/svelte/icons/git-branch';
   import Folder from '@lucide/svelte/icons/folder';
+  import Pin from '@lucide/svelte/icons/pin';
+  import Ellipsis from '@lucide/svelte/icons/ellipsis';
+  import ListChecks from '@lucide/svelte/icons/list-checks';
   import { untrack } from 'svelte';
   import { SvelteSet } from 'svelte/reactivity';
   import { api, errorMessage } from '../api/client';
-  import type { Session } from '../api/types.gen';
+  import type { ProjectSummary, Session } from '../api/types.gen';
   import { app } from '../app.svelte';
   import { href } from '../router';
   import { GROUP_PREVIEW, agentLabel, basename, groupSessions, previewSessions, sessionOrder, sessionTitle } from '../status';
   import { formatRelative } from '../time';
+  import { projectActions, sessionActions } from '../actions';
+  import { actionEnv, projectOps, sessionOps } from '../manage';
+  import { contextmenu } from '../contextmenu';
+  import { markedFirst, projectKey, sessionArchived, sessionKey } from '../marks';
+  import { Selection } from '../selection.svelte';
   import StatusChip from './StatusChip.svelte';
   import Loadable from './Loadable.svelte';
   import Subagents from './Subagents.svelte';
   import MachineBadge from './MachineBadge.svelte';
+  import Menu from './Menu.svelte';
+  import BulkBar from './BulkBar.svelte';
 
   /** `selectedChildren`: subagent count of the selected session (lists leave subagents out). */
   let { selectedId, selectedChildren }: { selectedId: string | null; selectedChildren: number } = $props();
@@ -23,12 +33,16 @@
   let filter = $state('');
   let machine = $state('');
   const expanded = new SvelteSet<string>();
+  const selection = new Selection();
 
   const q = $derived(filter.trim());
   const filtering = $derived(q !== '' || machine !== '');
   const matches = (s: Session): boolean =>
     (machine === '' || s.machine_id === machine) &&
     (q === '' || `${sessionTitle(s)} ${s.branch ?? ''} ${s.cwd} ${s.agent}`.toLowerCase().includes(q.toLowerCase()));
+  // Archived sessions (and those of archived projects) stay out unless asked for.
+  const visible = (s: Session): boolean => app.showArchived || !sessionArchived(s, app.archived, app.projectById);
+  const pinned = (s: Session): boolean => app.pinned.has(sessionKey(s.id));
 
   // A filter asks the daemon, so sessions beyond the pages loaded here are found too.
   let found: Session[] = $state.raw([]);
@@ -74,26 +88,39 @@
     return () => clearTimeout(timer);
   });
 
+  // Pinned sessions first; grouping keeps that order inside each project.
   const list = $derived.by(() => {
-    if (!filtering) return app.topSessions;
+    if (!filtering) return markedFirst(app.topSessions.filter(visible), pinned);
     // Results take the live copy when this client has one; new sessions matching the filter
     // appear without asking the daemon again.
     const byId = new Map<string, Session>();
     for (const s of found) byId.set(s.id, app.sessionById.get(s.id) ?? s);
     for (const s of app.topSessions) if (matches(s)) byId.set(s.id, s);
-    return [...byId.values()].filter((s) => !app.deletedSessions.has(s.id) && matches(s)).sort(sessionOrder(app.liveContext()));
+    const hits = [...byId.values()].filter((s) => !app.deletedSessions.has(s.id) && matches(s) && visible(s));
+    return markedFirst(hits.sort(sessionOrder(app.liveContext())), pinned);
   });
+
+  /** The Chats group's menu acts on this machine's bucket, else on one of its sessions' buckets. */
+  function chatsProject(sessions: readonly Session[]): ProjectSummary | undefined {
+    return app.projects.find((p) => p.chats && p.is_home) ?? app.projectById.get(sessions[0]?.project_id ?? '');
+  }
+
   const groups = $derived.by(() => {
     const ctx = app.liveContext();
-    return groupSessions(list, app.projectById).map((g) => ({
+    const key = (projectId: string | null): string => (projectId === null ? projectKey({ id: 'chats', chats: true }) : projectKey({ id: projectId }));
+    const all = groupSessions(list, app.projectById).filter((g) => app.showArchived || !app.archived.has(key(g.projectId)));
+    return markedFirst(all, (g) => app.pinned.has(key(g.projectId))).map((g) => ({
       ...g,
+      pinned: app.pinned.has(key(g.projectId)),
+      menuProject: g.projectId === null ? chatsProject(g.sessions) : g.project,
       open: expanded.has(g.key),
-      preview: previewSessions(g.sessions, expanded.has(g.key) ? Infinity : GROUP_PREVIEW, selectedId, ctx),
+      preview: previewSessions(g.sessions, expanded.has(g.key) ? Infinity : GROUP_PREVIEW, selectedId, ctx, pinned),
     }));
   });
+  const shown = $derived(groups.flatMap((g) => g.preview.shown));
   // Previous/next session shortcuts walk the cards as shown here.
   $effect(() => {
-    app.sidebarOrder = groups.flatMap((g) => g.preview.shown.map((s) => s.id));
+    app.sidebarOrder = shown.map((s) => s.id);
   });
   $effect(() => () => {
     app.sidebarOrder = [];
@@ -114,6 +141,16 @@
         {/each}
       </select>
     {/if}
+    <div class="tools">
+      <label class="toggle small">
+        <input type="checkbox" bind:checked={app.showArchived} />
+        <span>Show archived</span>
+      </label>
+      {#if !selection.active}
+        <button type="button" class="btn ghost sm" onclick={() => selection.start()}><ListChecks size={14} aria-hidden="true" />Select</button>
+      {/if}
+    </div>
+    {#if selection.active}<BulkBar {selection} {shown} />{/if}
   </div>
   <div class="scroll">
     <Loadable
@@ -127,12 +164,23 @@
         {#if !filtering && app.control}<button class="btn primary sm" type="button" onclick={() => app.openNewSession()}>New session</button>{/if}
       {/snippet}
       {#each groups as g (g.key)}
+        {@const gp = g.menuProject}
         <section class="group" aria-label={g.name}>
-          <header>
-            {#if g.projectId === null}
-              <span class="gname ellipsis" title="Sessions that belong to no project">{g.name}</span>
-            {:else}
+          <header use:contextmenu={{ items: () => (gp ? projectActions(gp, actionEnv(), projectOps) : []), label: g.name }}>
+            {#if g.projectId !== null && g.project}
               <a class="gname ellipsis" href={href.project(g.projectId)}>{g.name}</a>
+            {:else}
+              <!-- Chats, or a project this machine does not know (yet): nothing to link to. -->
+              <span class="gname ellipsis" title={g.projectId === null ? 'Sessions that belong to no project' : 'A project this machine has not received yet'}
+                >{g.name}</span
+              >
+            {/if}
+            {#if g.pinned}<Pin size={11} class="pin-mark" aria-label="Pinned" />{/if}
+            <span class="spacer"></span>
+            {#if gp}
+              <Menu items={projectActions(gp, actionEnv(), projectOps)} label="Actions for {g.name}" title="More actions" triggerClass="icon-btn sm" align="right"
+                ><Ellipsis size={14} /></Menu
+              >
             {/if}
             {#if app.control}
               <button
@@ -146,15 +194,39 @@
           </header>
           <ul class="list-plain">
             {#each g.preview.shown as s (s.id)}
-              <li>
+              {@const isPinned = pinned(s)}
+              {@const isArchived = sessionArchived(s, app.archived, app.projectById)}
+              <li class="item" class:selecting={selection.active}>
+                {#if selection.active}
+                  <input
+                    type="checkbox"
+                    class="pick"
+                    aria-label="Select {sessionTitle(s)}"
+                    checked={selection.ids.has(s.id)}
+                    onclick={(e) =>
+                      selection.toggle(
+                        s.id,
+                        e.shiftKey,
+                        shown.map((x) => x.id),
+                      )}
+                  />
+                {/if}
                 <a
                   class="scard"
                   class:selected={s.id === selectedId}
+                  class:archived={isArchived}
                   href={href.sessions(s.id)}
                   aria-current={s.id === selectedId ? 'page' : undefined}
                   onclick={() => (app.sidebarOpen = false)}
+                  use:contextmenu={{
+                    items: () => sessionActions(s, actionEnv(), sessionOps),
+                    label: sessionTitle(s),
+                    rename: app.control ? () => sessionOps.rename(s) : undefined,
+                  }}
                 >
-                  <span class="title ellipsis">{sessionTitle(s)}</span>
+                  <span class="title ellipsis"
+                    >{#if isPinned}<Pin size={11} class="pin-mark" aria-label="Pinned" />{/if}{sessionTitle(s)}</span
+                  >
                   <span class="meta">
                     <span class="where ellipsis">
                       {#if s.branch}
@@ -166,10 +238,23 @@
                     <StatusChip session={s} />
                   </span>
                   <span class="sub">
-                    <span class="faint ellipsis">{agentLabel(s.agent)} · {formatRelative(s.last_activity_at)}{s.origin === 'external' ? ' · external' : ''}</span>
+                    <span class="faint ellipsis"
+                      >{agentLabel(s.agent)} · {formatRelative(s.last_activity_at)}{s.origin === 'external' ? ' · external' : ''}{isArchived
+                        ? ' · archived'
+                        : ''}</span
+                    >
                     <MachineBadge machineId={s.machine_id} />
                   </span>
                 </a>
+                <span class="more">
+                  <Menu
+                    items={sessionActions(s, actionEnv(), sessionOps)}
+                    label="Actions for {sessionTitle(s)}"
+                    title="More actions"
+                    triggerClass="icon-btn sm"
+                    align="right"><Ellipsis size={14} /></Menu
+                  >
+                </span>
                 {#if s.id === selectedId}
                   <Subagents parentId={s.id} count={selectedChildren} onnavigate={() => (app.sidebarOpen = false)} />
                 {/if}
@@ -187,7 +272,7 @@
       {#if more}
         <button
           type="button"
-          class="btn sm more"
+          class="btn sm more-btn"
           disabled={loadingMore}
           onclick={() => (filtering ? search(false) : app.loadMoreSessions())}>{loadingMore ? 'Loading…' : 'Load older sessions'}</button
         >
@@ -208,6 +293,19 @@
     gap: 6px;
     padding: 12px 12px 4px;
   }
+  .tools {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 8px;
+    min-height: 28px;
+  }
+  .toggle {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    color: var(--text-2);
+  }
   .link-btn {
     margin: 4px 0 0 6px;
     padding: 2px 0;
@@ -221,7 +319,7 @@
     color: var(--text);
     text-decoration: underline;
   }
-  .more {
+  .more-btn {
     width: 100%;
     margin-top: 12px;
   }
@@ -240,7 +338,7 @@
   header {
     display: flex;
     align-items: center;
-    justify-content: space-between;
+    gap: 2px;
     padding: 0 4px 4px 6px;
   }
   .gname {
@@ -250,6 +348,7 @@
     text-transform: uppercase;
     color: var(--text-3);
     text-decoration: none;
+    min-width: 0;
   }
   .gname:hover {
     color: var(--text);
@@ -260,6 +359,39 @@
     padding: 0;
     display: grid;
     gap: 6px;
+  }
+  .item {
+    position: relative;
+    min-width: 0;
+  }
+  .item.selecting {
+    display: grid;
+    grid-template-columns: auto minmax(0, 1fr);
+    align-items: start;
+    column-gap: 6px;
+  }
+  .item.selecting > :global(*:not(.pick):not(.more)) {
+    grid-column: 2;
+  }
+  .pick {
+    margin-top: 14px;
+  }
+  /* The "⋯" button sits on the card's top right: shown on hover and focus, always on touch screens. */
+  .more {
+    position: absolute;
+    top: 6px;
+    right: 6px;
+    opacity: 0;
+  }
+  .item:hover .more,
+  .more:focus-within,
+  .scard:focus-visible + .more {
+    opacity: 1;
+  }
+  @media (hover: none) {
+    .more {
+      opacity: 1;
+    }
   }
   .scard {
     display: grid;
@@ -277,8 +409,12 @@
     background: var(--selected);
     border-color: color-mix(in srgb, var(--accent) 40%, var(--border));
   }
+  .scard.archived {
+    opacity: 0.7;
+  }
   .title {
     font-weight: 600;
+    padding-right: 24px;
   }
   .meta {
     display: flex;
@@ -303,5 +439,11 @@
     gap: 6px;
     min-width: 0;
     font-size: 11.5px;
+  }
+  :global(.pin-mark) {
+    flex: none;
+    margin-right: 4px;
+    color: var(--accent);
+    vertical-align: -1px;
   }
 </style>

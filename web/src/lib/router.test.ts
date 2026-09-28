@@ -11,6 +11,8 @@ describe('matchRoute', () => {
   });
   it('matches project tabs', () => {
     expect(matchRoute('/projects')).toEqual({ name: 'projects' });
+    expect(matchRoute('/trash')).toEqual({ name: 'trash' });
+    expect(matchRoute('/trash/x').name).toBe('not_found');
     expect(matchRoute('/projects/p1')).toEqual({ name: 'project', projectId: 'p1', tab: 'overview', sub: null });
     expect(matchRoute('/projects/p1/wiki/setup')).toEqual({ name: 'project', projectId: 'p1', tab: 'wiki', sub: 'setup' });
     expect(matchRoute('/projects/p1/bogus').name).toBe('not_found');

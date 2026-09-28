@@ -1,5 +1,10 @@
 <script lang="ts">
   import Maximize from '@lucide/svelte/icons/maximize-2';
+  import Ellipsis from '@lucide/svelte/icons/ellipsis';
+  import { sessionActions } from '../lib/actions';
+  import { actionEnv, sessionOps } from '../lib/manage';
+  import { contextmenu } from '../lib/contextmenu';
+  import Menu from '../lib/components/Menu.svelte';
   import { app } from '../lib/app.svelte';
   import { href } from '../lib/router';
   import { agentLabel, sessionTitle } from '../lib/status';
@@ -27,12 +32,22 @@
     <div class="grid">
       {#each tiles as s (s.id)}
         <section class="tile card" aria-label={sessionTitle(s)}>
-          <header>
+          <!-- The menu is on the header only: right-click in the terminal below belongs to xterm. -->
+          <header
+            use:contextmenu={{
+              items: () => sessionActions(s, actionEnv(), sessionOps),
+              label: sessionTitle(s),
+              rename: app.control ? () => sessionOps.rename(s) : undefined,
+            }}
+          >
             <a class="name ellipsis" href={href.sessions(s.id)}>{sessionTitle(s)}</a>
             <span class="faint small ellipsis hide-sm">{app.projectLabel(s.project_id)} · {agentLabel(s.agent)}</span>
             <span class="spacer"></span>
             <MachineBadge machineId={s.machine_id} />
             <StatusChip session={s} />
+            <Menu items={sessionActions(s, actionEnv(), sessionOps)} label="Actions for {sessionTitle(s)}" title="More actions" triggerClass="icon-btn sm" align="right"
+              ><Ellipsis size={14} /></Menu
+            >
             <a class="icon-btn sm" href={href.sessions(s.id)} aria-label="Open {sessionTitle(s)}" title="Open session"><Maximize size={14} /></a>
           </header>
           <div class="term">

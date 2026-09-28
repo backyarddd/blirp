@@ -1,5 +1,13 @@
 <script lang="ts">
   import Plus from '@lucide/svelte/icons/plus';
+  import Pin from '@lucide/svelte/icons/pin';
+  import Ellipsis from '@lucide/svelte/icons/ellipsis';
+  import Trash from '@lucide/svelte/icons/trash-2';
+  import { projectActions } from '../lib/actions';
+  import { actionEnv, chatCandidates, projectOps } from '../lib/manage';
+  import { contextmenu } from '../lib/contextmenu';
+  import { markedFirst, projectKey } from '../lib/marks';
+  import Menu from '../lib/components/Menu.svelte';
   import { api, errorMessage } from '../lib/api/client';
   import { app } from '../lib/app.svelte';
   import { navigate } from '../lib/router.svelte';
@@ -18,8 +26,14 @@
   let saving = $state(false);
   let formError: string | null = $state(null);
 
+  // Pinned first, then by activity; archived ones only with "Show archived".
   const projects = $derived(
-    [...app.realProjects].sort((a, b) => (b.last_activity_at ?? b.updated_at) - (a.last_activity_at ?? a.updated_at)),
+    markedFirst(
+      app.realProjects
+        .filter((p) => app.showArchived || !app.archived.has(projectKey(p)))
+        .sort((a, b) => (b.last_activity_at ?? b.updated_at) - (a.last_activity_at ?? a.updated_at)),
+      (p) => app.pinned.has(projectKey(p)),
+    ),
   );
 
   const machineCount = (p: ProjectSummary): number => new Set(p.paths.map((x) => x.machine_id)).size;
@@ -35,6 +49,8 @@
       .then((list) => {
         candidates = list;
         picked = Object.fromEntries(list.map((p) => [p.id, true]));
+        chatCandidates.clear();
+        for (const p of list) chatCandidates.add(p.id);
       })
       .catch((e: unknown) => console.warn('blirp: could not check for projects that look like chats', e));
   });
@@ -48,6 +64,7 @@
         app.removeProject(id);
       }
       await api.projects.dismissChatCandidates();
+      chatCandidates.clear();
       return true;
     }, ids.length === 1 ? 'Moved 1 project to Chats' : `Moved ${ids.length} projects to Chats`);
     movingChats = false;
@@ -58,7 +75,10 @@
   }
 
   async function dismissCandidates(): Promise<void> {
-    if (await app.act(async () => (await api.projects.dismissChatCandidates(), true))) candidates = [];
+    if (await app.act(async () => (await api.projects.dismissChatCandidates(), true))) {
+      candidates = [];
+      chatCandidates.clear();
+    }
   }
 
   function openAdd(): void {
@@ -98,12 +118,17 @@
 
 <div class="page">
   <div class="page-inner">
-    <div class="row head">
+    <div class="row wrap head">
       <div>
         <h1 class="page-title">Projects</h1>
         <p class="muted sub">A project is a folder, several, or none at all. Git is optional.</p>
       </div>
       <span class="spacer"></span>
+      <label class="toggle small">
+        <input type="checkbox" bind:checked={app.showArchived} />
+        <span>Show archived</span>
+      </label>
+      <a class="btn ghost" href={href.trash()}><Trash size={15} aria-hidden="true" />Trash</a>
       {#if app.control}
         <button type="button" class="btn primary" onclick={openAdd}><Plus size={16} aria-hidden="true" />New project</button>
       {/if}
@@ -144,11 +169,23 @@
     >
       <ul class="cards">
         {#each projects as p (p.id)}
-          <li>
-            <a class="pcard card" href={href.project(p.id)}>
-              <div class="row">
+          {@const archived = app.archived.has(projectKey(p))}
+          <li class="cell">
+            <a
+              class="pcard card"
+              class:archived
+              href={href.project(p.id)}
+              use:contextmenu={{
+                items: () => projectActions(p, actionEnv(), projectOps),
+                label: p.name,
+                rename: app.control ? () => projectOps.rename(p) : undefined,
+              }}
+            >
+              <div class="row top">
+                {#if app.pinned.has(projectKey(p))}<Pin size={12} class="pin-mark" aria-label="Pinned" />{/if}
                 <strong class="name ellipsis">{p.name}</strong>
                 <span class="spacer"></span>
+                {#if archived}<span class="badge">archived</span>{/if}
                 <ProjectBadge project={p} />
               </div>
               <ul class="paths">
@@ -165,6 +202,11 @@
                 <span>{p.last_activity_at ? formatRelative(p.last_activity_at) : 'No activity yet'}</span>
               </div>
             </a>
+            <span class="more">
+              <Menu items={projectActions(p, actionEnv(), projectOps)} label="Actions for {p.name}" title="More actions" triggerClass="icon-btn sm" align="right"
+                ><Ellipsis size={15} /></Menu
+              >
+            </span>
           </li>
         {/each}
       </ul>
@@ -223,6 +265,31 @@
   }
   .pcard:hover {
     border-color: var(--border-strong);
+  }
+  .pcard.archived {
+    opacity: 0.7;
+  }
+  .cell {
+    position: relative;
+    min-width: 0;
+  }
+  .top {
+    padding-right: 28px;
+  }
+  .more {
+    position: absolute;
+    top: 12px;
+    right: 10px;
+  }
+  .toggle {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    color: var(--text-2);
+  }
+  .pcard :global(.pin-mark) {
+    flex: none;
+    color: var(--accent);
   }
   .name {
     font-size: 15px;

@@ -87,6 +87,25 @@ async function confirmNextDialog(): Promise<void> {
   page.once('dialog', (d) => void d.accept());
 }
 
+/** Answer blirp's own confirmation dialog (session and project actions do not use `confirm()`). */
+async function confirmIn(title: string, button: string): Promise<void> {
+  const dialog = page.getByRole('dialog', { name: title });
+  await dialog.getByRole('button', { name: button, exact: true }).click();
+  await expect(dialog).toBeHidden();
+}
+
+/** Stop the open session from its toolbar, confirming in the dialog. */
+async function stopFromToolbar(): Promise<void> {
+  await page.getByRole('toolbar', { name: 'Session actions' }).getByRole('button', { name: 'Stop', exact: true }).click();
+  await confirmIn('Stop session?', 'Stop');
+}
+
+/** Open the session toolbar's "⋯" menu. */
+async function toolbarMenu(): Promise<void> {
+  await page.getByRole('toolbar', { name: 'Session actions' }).getByRole('button', { name: 'More session actions' }).click();
+  await expect(page.getByRole('menu', { name: 'More session actions' })).toBeVisible();
+}
+
 test.beforeAll(async ({ browser }) => {
   const context = await browser.newContext();
   await context.addInitScript(() => {
@@ -277,8 +296,7 @@ test('resizing the pane resizes the PTY', async () => {
 });
 
 test('stops the session and shows the exit state in the pane', async () => {
-  await confirmNextDialog();
-  await page.getByRole('button', { name: 'Stop' }).click();
+  await stopFromToolbar();
   const exit = page.getByTestId('terminal-exit');
   await expect(exit).toContainText('Process exited');
   await expect(exit).toContainText(STOPPED);
@@ -298,8 +316,7 @@ test('stops the session and shows the exit state in the pane', async () => {
   await expect(exit).toBeHidden();
   await expect(card.locator('.chip')).toHaveText('Idle', { timeout: 30_000 });
   await runInTerminal(sessionId, isWindows ? "Write-Output ('again-' + (6*7))" : 'echo again-$((6*7))', 'again-42');
-  await confirmNextDialog();
-  await page.getByRole('button', { name: 'Stop' }).click();
+  await stopFromToolbar();
   await expect(exit).toContainText(STOPPED);
 
   await exit.getByRole('button', { name: 'Show details' }).click();
@@ -718,8 +735,11 @@ test('deletes an ended session here, and follows a delete made by another client
   await expect(sidebar.locator(`a[href="/sessions/${mine.id}"]`)).toBeVisible();
   await expect(sidebar.locator(`a[href="/sessions/${other.id}"]`)).toBeVisible();
 
-  await confirmNextDialog();
-  await page.getByRole('button', { name: 'Delete session' }).click();
+  await toolbarMenu();
+  await page.getByRole('menuitem', { name: 'Delete…', exact: true }).click();
+  // Permanent, and says what it does not touch.
+  await expect(page.getByRole('dialog', { name: 'Delete session?' })).toContainText("The agent's own transcript file is not touched");
+  await confirmIn('Delete session?', 'Delete');
   await expect(page.getByText('Session deleted')).toBeVisible();
   await expect(page).toHaveURL(`${env.url}/sessions`);
   await expect(sidebar.locator(`a[href="/sessions/${mine.id}"]`)).toHaveCount(0);
@@ -733,9 +753,11 @@ test('deletes an ended session here, and follows a delete made by another client
   await page.goto(`${env.url}/sessions/${sessionId}`);
   await page.getByRole('button', { name: 'Resume' }).click();
   await expect(page.getByRole('button', { name: 'Stop' })).toBeVisible();
-  await expect(page.getByRole('button', { name: 'Delete session' })).toHaveCount(0);
-  await confirmNextDialog();
-  await page.getByRole('button', { name: 'Stop' }).click();
+  await toolbarMenu();
+  await expect(page.getByRole('menuitem', { name: 'Delete…', exact: true })).toHaveCount(0);
+  await expect(page.getByRole('menuitem', { name: 'Stop and delete…' })).toBeVisible();
+  await page.keyboard.press('Escape');
+  await stopFromToolbar();
   await expect(page.getByTestId('terminal-exit')).toContainText(STOPPED);
 });
 
@@ -747,8 +769,9 @@ test('removes a dirty session worktree only after an explicit force', async () =
   writeFileSync(join(wt, 'scratch.txt'), 'uncommitted\n');
 
   await page.goto(`${env.url}/sessions/${s.id}`);
-  await confirmNextDialog();
-  await page.getByRole('button', { name: 'Remove worktree' }).click();
+  await toolbarMenu();
+  await page.getByRole('menuitem', { name: 'Remove worktree…' }).click();
+  await confirmIn('Remove worktree?', 'Remove worktree');
   const dialog = page.getByRole('dialog', { name: 'Uncommitted changes' });
   await expect(dialog).toContainText('uncommitted change');
   // The browser logs the expected 409 `worktree_dirty` as a failed resource load.
@@ -757,7 +780,9 @@ test('removes a dirty session worktree only after an explicit force', async () =
   await dialog.getByRole('button', { name: 'Force remove' }).click();
   await expect(page.getByText('Worktree removed')).toBeVisible();
   await expect(dialog).toBeHidden();
-  await expect(page.getByRole('button', { name: 'Remove worktree' })).toHaveCount(0);
+  await toolbarMenu();
+  await expect(page.getByRole('menuitem', { name: 'Remove worktree…' })).toHaveCount(0);
+  await page.keyboard.press('Escape');
   expect((await apiCall<SessionRow>('GET', `/api/sessions/${s.id}`)).worktree).toBeNull();
   await expect.poll(() => existsSync(wt)).toBe(false);
 });
@@ -859,8 +884,7 @@ test('creates a project without a folder; its session runs in the blirp workspac
   await expect(panel).toContainText('Screens live in the design tool');
   await expect(panel.getByTestId('chats-memory')).toHaveCount(0);
 
-  await confirmNextDialog();
-  await page.getByRole('button', { name: 'Stop' }).click();
+  await stopFromToolbar();
   await expect(page.getByTestId('terminal-exit')).toContainText(STOPPED);
 });
 
@@ -884,11 +908,12 @@ test('a session in no project is a chat, kept out of projects, and moves into on
   await expect(page.locator('.pcard', { hasText: 'Chats' })).toHaveCount(0);
 
   await page.goto(`${env.url}/sessions/${chat.id}`);
-  await page.getByRole('button', { name: 'Move to project' }).click();
+  await toolbarMenu();
+  await page.getByRole('menuitem', { name: 'Move…' }).click();
   const dialog = page.getByRole('dialog', { name: 'Move session' });
   await dialog.getByRole('combobox').selectOption({ label: 'Design notes' });
   await dialog.getByRole('button', { name: 'Move' }).click();
-  await expect(page.getByText('Moved to Design notes')).toBeVisible();
+  await expect(page.getByText(/^Moved ".*" to "Design notes"$/)).toBeVisible();
   await expect(sidebar.getByRole('region', { name: 'Design notes' }).locator(`a[href="/sessions/${chat.id}"]`)).toBeVisible();
   const moved = await apiCall<{ project_id: string }>('GET', `/api/sessions/${chat.id}`);
   expect(moved.project_id).not.toBe(chat.project_id);

@@ -13,12 +13,15 @@
   import CommandPalette from './lib/components/CommandPalette.svelte';
   import NewSessionDialog from './lib/components/NewSessionDialog.svelte';
   import Toasts from './lib/components/Toasts.svelte';
+  import ContextMenuHost from './lib/components/ContextMenuHost.svelte';
+  import ActionDialogs from './lib/components/ActionDialogs.svelte';
   import UpdateBanner from './lib/components/UpdateBanner.svelte';
   import logo from './lib/assets/logo.svg';
   import SessionsView from './screens/SessionsView.svelte';
   import GridView from './screens/GridView.svelte';
   import ProjectsView from './screens/ProjectsView.svelte';
   import ProjectView from './screens/ProjectView.svelte';
+  import TrashView from './screens/TrashView.svelte';
   import SearchView from './screens/SearchView.svelte';
   import SettingsView from './screens/SettingsView.svelte';
 
@@ -112,6 +115,8 @@
         <GridView />
       {:else if route.name === 'projects'}
         <ProjectsView />
+      {:else if route.name === 'trash'}
+        <TrashView />
       {:else if route.name === 'project'}
         <ProjectView projectId={route.projectId} tab={route.tab} sub={route.sub} />
       {:else if route.name === 'search'}
@@ -131,6 +136,8 @@
   </div>
   <CommandPalette />
   <NewSessionDialog />
+  <ActionDialogs />
+  <ContextMenuHost />
 {:else}
   <div class="gate">
     <div class="card gate-card">

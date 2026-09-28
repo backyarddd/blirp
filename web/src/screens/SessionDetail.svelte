@@ -7,6 +7,8 @@
   import FilePen from '@lucide/svelte/icons/file-pen';
   import Info from '@lucide/svelte/icons/info';
   import Sparkles from '@lucide/svelte/icons/sparkles';
+  import Pencil from '@lucide/svelte/icons/pencil';
+  import { renameSession } from '../lib/manage';
   import { api, errorMessage } from '../lib/api/client';
   import type { Event as SessionEvent, EventKind, Session } from '../lib/api/types.gen';
   import { parseSummary } from '../lib/memory';
@@ -56,6 +58,27 @@
   // Session rows (list, detail and pushed updates) carry the summary; no extra fetch needed.
   const summary = $derived(parseSummary(session.summary));
 
+  // Inline rename of the title: Enter saves (an empty title goes back to the default), Esc cancels.
+  let editing = $state(false);
+  let draft = $state('');
+  let saving = $state(false);
+  let titleInput: HTMLInputElement | undefined = $state();
+  $effect(() => {
+    void sid;
+    editing = false;
+  });
+  $effect(() => {
+    if (editing) titleInput?.select();
+  });
+
+  async function saveTitle(e: SubmitEvent): Promise<void> {
+    e.preventDefault();
+    saving = true;
+    const ok = await renameSession(session, draft);
+    saving = false;
+    if (ok) editing = false;
+  }
+
   let busy = $state(false);
   async function distill(): Promise<void> {
     busy = true;
@@ -86,7 +109,42 @@
 <div class="detail">
   <header class="head">
     <div class="titles">
-      <h1 class="ellipsis">{sessionTitle(session)}</h1>
+      {#if editing}
+        <form class="rename" onsubmit={saveTitle}>
+          <input
+            bind:this={titleInput}
+            class="input"
+            bind:value={draft}
+            aria-label="Session title"
+            maxlength="300"
+            placeholder={sessionTitle({ ...session, title: null })}
+            onkeydown={(e) => {
+              if (e.key === 'Escape') {
+                e.preventDefault();
+                editing = false;
+              }
+            }}
+          />
+          <button type="submit" class="btn sm primary" disabled={saving}>Save</button>
+          <button type="button" class="btn sm" onclick={() => (editing = false)}>Cancel</button>
+        </form>
+      {:else}
+        <div class="title-row">
+          <h1 class="ellipsis">{sessionTitle(session)}</h1>
+          {#if app.control}
+            <button
+              type="button"
+              class="icon-btn sm"
+              aria-label="Rename session"
+              title="Rename"
+              onclick={() => {
+                draft = session.title ?? '';
+                editing = true;
+              }}><Pencil size={14} /></button
+            >
+          {/if}
+        </div>
+      {/if}
       <div class="row wrap small muted">
         <StatusChip {session} />
         <span>{agentLabel(session.agent)}</span>
@@ -214,7 +272,20 @@
   }
   h1 {
     font-size: 18px;
+    margin: 0;
+    min-width: 0;
+  }
+  .title-row,
+  .rename {
+    display: flex;
+    align-items: center;
+    gap: 6px;
     margin: 0 0 6px;
+    min-width: 0;
+  }
+  .rename .input {
+    flex: 1;
+    min-width: 0;
   }
   .body {
     padding: 16px 20px 24px;

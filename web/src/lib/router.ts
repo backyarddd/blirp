@@ -10,6 +10,7 @@ export type Route =
   | { name: 'sessions'; sessionId: string | null }
   | { name: 'grid' }
   | { name: 'projects' }
+  | { name: 'trash' }
   | { name: 'project'; projectId: string; tab: ProjectTab; sub: string | null }
   | { name: 'search'; q: string; project: string | null; kind: string | null }
   | { name: 'settings'; section: SettingsSection }
@@ -48,6 +49,9 @@ export function matchRoute(pathname: string, search = ''): Route {
       if (c === undefined) return { name: 'project', projectId: b, tab: 'overview', sub: null };
       if (isTab(c) && seg.length <= 4) return { name: 'project', projectId: b, tab: c, sub: d ?? null };
       break;
+    case 'trash':
+      if (seg.length === 1) return { name: 'trash' };
+      break;
     case 'search':
       if (seg.length === 1)
         return { name: 'search', q: params.get('q') ?? '', project: params.get('project'), kind: params.get('kind') };
@@ -66,6 +70,7 @@ export const href = {
   sessions: (id?: string | null): string => (id ? `/sessions/${e(id)}` : '/sessions'),
   grid: (): string => '/grid',
   projects: (): string => '/projects',
+  trash: (): string => '/trash',
   project: (id: string, tab: ProjectTab = 'overview', sub?: string): string =>
     `/projects/${e(id)}${tab === 'overview' && !sub ? '' : `/${tab}`}${sub ? `/${e(sub)}` : ''}`,
   search: (q = '', project?: string | null, kind?: string | null): string => {

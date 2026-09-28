@@ -14,7 +14,7 @@
   import { updates } from '../update.svelte';
 
   const section = $derived(
-    nav.route.name === 'projects' || nav.route.name === 'project'
+    nav.route.name === 'projects' || nav.route.name === 'project' || nav.route.name === 'trash'
       ? 'projects'
       : nav.route.name === 'sessions'
         ? 'sessions'

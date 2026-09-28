@@ -6,10 +6,14 @@
   import { toggleTheme } from '../theme.svelte';
   import { isMac } from '../prefs';
   import { shortcutLabel } from '../shortcuts';
+  import { projectActions, sessionActions } from '../actions';
+  import { actionEnv, projectOps, sessionOps } from '../manage';
+  import { actionsOf } from '../menu';
+  import { projectKey, sessionArchived } from '../marks';
 
   interface Item {
     id: string;
-    group: 'Actions' | 'Sessions' | 'Projects';
+    group: 'Actions' | 'This session' | 'This project' | 'Sessions' | 'Projects';
     label: string;
     hint: string;
     run: () => void;
@@ -49,19 +53,42 @@
         run: go(nav.route.name === 'grid' ? href.sessions() : href.grid()),
       },
       { id: 'a:projects', group: 'Actions', label: 'Go to projects', hint: '', run: go(href.projects()) },
+      { id: 'a:trash', group: 'Actions', label: 'Open the Trash', hint: 'deleted projects', run: go(href.trash()) },
+      {
+        id: 'a:archived',
+        group: 'Actions',
+        label: app.showArchived ? 'Hide archived items' : 'Show archived items',
+        hint: '',
+        run: () => (app.showArchived = !app.showArchived),
+      },
       { id: 'a:sessions', group: 'Actions', label: 'Go to sessions', hint: '', run: go(href.sessions()) },
       { id: 'a:searchpage', group: 'Actions', label: 'Open search', hint: '', run: go(href.search()) },
       { id: 'a:settings', group: 'Actions', label: 'Settings', hint: '', run: go(href.settings()) },
       { id: 'a:theme', group: 'Actions', label: 'Toggle light / dark theme', hint: '', run: toggleTheme },
     ];
-    const sessions: Item[] = app.topSessions.map((s) => ({
+    // What the menus of the session or project on screen offer.
+    const r = nav.route;
+    const current = r.name === 'sessions' && r.sessionId ? app.sessionById.get(r.sessionId) : undefined;
+    const currentProject = r.name === 'project' ? app.projectById.get(r.projectId) : undefined;
+    const here: Item[] = current
+      ? actionsOf(sessionActions(current, actionEnv(), sessionOps))
+          .filter((a) => !a.disabled)
+          .map((a, i) => ({ id: `c:s${i}`, group: 'This session' as const, label: a.label, hint: sessionTitle(current), run: a.onselect }))
+      : currentProject
+        ? actionsOf(projectActions(currentProject, actionEnv(), projectOps))
+            .filter((a) => !a.disabled)
+            .map((a, i) => ({ id: `c:p${i}`, group: 'This project' as const, label: a.label, hint: currentProject.name, run: a.onselect }))
+        : [];
+    const shownSession = (x: (typeof app.topSessions)[number]): boolean =>
+      app.showArchived || !sessionArchived(x, app.archived, app.projectById);
+    const sessions: Item[] = app.topSessions.filter(shownSession).map((s) => ({
       id: `s:${s.id}`,
       group: 'Sessions',
       label: sessionTitle(s),
       hint: `${agentLabel(s.agent)} · ${app.projectLabel(s.project_id)} · ${sessionStatusInfo(s).label}`,
       run: go(href.sessions(s.id)),
     }));
-    const projects: Item[] = app.realProjects.map((p) => ({
+    const projects: Item[] = app.realProjects.filter((p) => app.showArchived || !app.archived.has(projectKey(p))).map((p) => ({
       id: `p:${p.id}`,
       group: 'Projects',
       label: p.name,
@@ -75,7 +102,7 @@
     };
     const found = [...sessions.filter(match).slice(0, 30), ...projects.filter(match).slice(0, 20)];
     // With a query, jumping to a match is the common case; without one, actions lead.
-    return q ? [...found, ...actions.filter(match)] : [...actions, ...found];
+    return q ? [...here.filter(match), ...found, ...actions.filter(match)] : [...here, ...actions, ...found];
   });
 
   $effect(() => {
