@@ -384,15 +384,16 @@ pub fn repair_subagents(
             })?;
             out.forks_truncated += 1;
             out.events_dropped += n;
-            // Its summary was made from the parent's copied turns too: gone,
-            // so the fork is summarized again from its own events.
-            if s.summary.is_some() || s.distilled_through_seq > 0 {
-                store.modify_session(&s.id, |x| {
-                    x.summary = None;
-                    x.distilled_through_seq = 0;
-                })?;
-                out.summaries_cleared += 1;
-            }
+        }
+        // Its summary was made from the parent's copied turns too (also when
+        // an earlier, interrupted run already dropped them): gone, so the
+        // fork is summarized again from its own events.
+        if s.summary.is_some() || s.distilled_through_seq > 0 {
+            store.modify_session(&s.id, |x| {
+                x.summary = None;
+                x.distilled_through_seq = 0;
+            })?;
+            out.summaries_cleared += 1;
         }
         let parent = match &sub.parent {
             Some(p) => store.session_by_agent_id("codex", p)?,
