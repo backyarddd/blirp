@@ -26,6 +26,7 @@ pub fn scan_config(cfg: &FilesConfig, data_dir: &Path) -> ScanConfig {
         max_root_bytes: u64::from(cfg.max_root_gb) << 30,
         max_files: MAX_ROOT_FILES,
         data_dir: Some(data_dir.to_path_buf()),
+        restore_asides: true,
     }
 }
 

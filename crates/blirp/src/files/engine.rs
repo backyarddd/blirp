@@ -373,7 +373,9 @@ impl Engine {
                 if permit.is_err() {
                     return;
                 }
-                let cfg = super::copy::scan_config(&env);
+                let mut cfg = super::copy::scan_config(&env);
+                // Outside the work lock: leave interrupted writes to a pass.
+                cfg.restore_asides = false;
                 let (store, k) = (env.store.clone(), key.clone());
                 let scanned = tokio::task::spawn_blocking(move || {
                     let root = PathBuf::from(&k);

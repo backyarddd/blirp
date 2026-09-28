@@ -33,6 +33,7 @@ fn scan_cfg(dir: &Path) -> ScanConfig {
         max_root_bytes: 1 << 30,
         max_files: 1000,
         data_dir: Some(dir.join("data")),
+        restore_asides: true,
     }
 }
 

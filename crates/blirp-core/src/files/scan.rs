@@ -26,6 +26,10 @@ pub struct ScanConfig {
     pub max_files: usize,
     /// blirp's data folder: never scanned into.
     pub data_dir: Option<PathBuf>,
+    /// Put back files an interrupted write moved aside
+    /// ([`super::write::restore_asides`]). Only for a scan that holds the
+    /// copy's work lock: another one could race a write in progress.
+    pub restore_asides: bool,
 }
 
 /// A file or symlink that passed the exclusion layers.
@@ -209,7 +213,7 @@ impl Walk<'_> {
                 .to_str()
                 .is_some_and(|n| n.starts_with(super::write::ASIDE_PREFIX))
         });
-        if asides {
+        if asides && self.cfg.restore_asides {
             let names: Vec<String> = listed
                 .iter()
                 .flatten()
@@ -566,6 +570,7 @@ mod tests {
             max_root_bytes: 1 << 30,
             max_files: 100_000,
             data_dir: None,
+            restore_asides: true,
         }
     }
 
@@ -593,6 +598,27 @@ mod tests {
         );
         assert!(!r.join("sub").join(aside("a.txt")).exists());
         assert_eq!(std::fs::read_to_string(r.join("b.txt")).unwrap(), "new");
+    }
+
+    /// A scan outside the work lock (Preview, the grace-period scan) could
+    /// race a write that has the file aside right now: it leaves it alone.
+    #[test]
+    fn a_scan_without_the_work_lock_leaves_files_moved_aside() {
+        let dir = tempfile::tempdir().unwrap();
+        let r = dir.path();
+        let aside = r.join(format!("{}a.txt", super::super::write::ASIDE_PREFIX));
+        std::fs::write(&aside, "old").unwrap();
+        let s = scan(
+            r,
+            false,
+            &ScanConfig {
+                restore_asides: false,
+                ..cfg()
+            },
+        )
+        .unwrap();
+        assert!(paths(&s).is_empty());
+        assert!(aside.exists() && !r.join("a.txt").exists());
     }
 
     #[test]

@@ -326,7 +326,9 @@ async fn preview(
         let root = local_root(&st, &id, q.root.as_deref())?;
         let project = st.store.live_project(&id)?;
         let never = super::local::never_synced(&st.store, st.paths.home(), &project, &root);
-        let cfg = super::local::scan_config(&st.config().files, st.paths.home());
+        let mut cfg = super::local::scan_config(&st.config().files, st.paths.home());
+        // Outside the work lock: leave interrupted writes to the next pass.
+        cfg.restore_asides = false;
         let key = root.display().to_string();
         let ls = super::local::scan_copy(&st.store, &key, &root, &cfg).map_err(|e| {
             ApiError::new(
