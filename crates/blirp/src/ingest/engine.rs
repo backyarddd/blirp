@@ -265,6 +265,14 @@ impl Engine {
         }
         // None: first read.
         let was_headless = cursor.as_ref().map(Cursor::headless);
+        // A read that starts the source over next time resets its state.
+        let asid_of = |c: &Cursor| {
+            c.state
+                .get("asid")
+                .and_then(|a| a.as_str())
+                .map(str::to_string)
+        };
+        let prev_asid = cursor.as_ref().and_then(asid_of);
         let mut sink = StoreSink::new(self, id, &src.key, src.mtime_ms);
         let mut next = adapter.ingest(src, cursor, &mut sink)?;
         next.fp = if next.retry {
@@ -273,10 +281,39 @@ impl Engine {
             src.fingerprint.clone()
         };
         sink.finish(&next)?;
-        if id == "claude" && was_headless != Some(false) && !next.headless() {
-            self.reread_skipped_subagents(&src.path);
+        if was_headless != Some(false) && !next.headless() {
+            match id {
+                "claude" => self.reread_skipped_subagents(&src.path),
+                "codex" => {
+                    if let Some(asid) = asid_of(&next).or(prev_asid) {
+                        self.reread_skipped_codex_subagents(&asid);
+                    }
+                }
+                _ => {}
+            }
         }
         Ok(true)
+    }
+
+    /// [`Engine::reread_skipped_subagents`] for codex: subagent rollouts
+    /// skipped with their parent `parent` (a scripted run then, or not read
+    /// yet) are read again from the start now that it is a session.
+    fn reread_skipped_codex_subagents(&self, parent: &str) {
+        let subs = match self.store.cursors_with_parent("codex", parent) {
+            Ok(s) => s,
+            Err(e) => {
+                tracing::warn!(error = %e, "listing a codex session's subagents failed");
+                return;
+            }
+        };
+        for key in subs {
+            if !super::known_headless(&self.store, "codex", &key) {
+                continue;
+            }
+            if let Err(e) = self.store.delete_cursor("codex", &key) {
+                tracing::warn!(error = %e, "resetting a subagent rollout's cursor failed");
+            }
+        }
     }
 
     /// A claude session that looked scripted (or was not read yet) when its
@@ -377,6 +414,7 @@ impl Engine {
                 return;
             }
         };
+        let codex = super::codex::Codex::new(&self.env);
         let mut ids = Vec::new();
         for s in candidates {
             if self.stopping() {
@@ -385,7 +423,14 @@ impl Engine {
             let Some(path) = &s.transcript_path else {
                 continue;
             };
-            match super::transcript_is_headless(&s.agent, Path::new(path)) {
+            // A codex subagent is judged by its parent's rollout: one of a
+            // scripted run was stored without a parent.
+            let scripted = if s.agent == "codex" {
+                codex.scripted(Path::new(path))
+            } else {
+                super::transcript_is_headless(&s.agent, Path::new(path))
+            };
+            match scripted {
                 Ok(true) => ids.push(s.id),
                 Ok(false) => {}
                 Err(e) => {

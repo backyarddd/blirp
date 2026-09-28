@@ -2640,6 +2640,111 @@ fn codex_exec_runs_make_no_session() {
     assert_eq!(texts.last().unwrap(), "Also update the README");
 }
 
+// A Codex subagent of a `codex exec` run is part of that scripted run: no
+// session of its own (it would sit without a parent). Once the run turns
+// into a conversation, the subagent is read again and hangs under it.
+#[test]
+fn codex_subagents_of_a_scripted_run_go_with_it() {
+    let h = H::new();
+    let fork = "0198a1b2-c3d4-7e5f-8a9b-0c1d2e3f4f0f";
+    let exec = h
+        .fill(&fixture("codex/rollout.jsonl"))
+        .replace(r#""source":"cli""#, r#""source":"exec""#);
+    assert!(exec.contains(r#""source":"exec""#));
+    let parent = h.put(
+        &format!(".codex/sessions/2026/01/02/rollout-2026-01-02T09-00-00-{CODEX_SID}.jsonl"),
+        exec.as_bytes(),
+    );
+    // Read before its parent in the pass or after: the parent's rollout
+    // decides.
+    h.put(
+        &format!(".codex/sessions/2026/01/02/rollout-2026-01-02T10-00-00-{fork}.jsonl"),
+        h.fill(&fixture("codex/fork.jsonl")).as_bytes(),
+    );
+    h.pass();
+    let none = |id: &str| h.store.session_by_agent_id("codex", id).unwrap().is_none();
+    assert!(none(CODEX_SID) && none(fork));
+
+    append(
+        &parent,
+        format!(
+            "{}\n{}",
+            r#"{"timestamp":"2026-01-02T09:04:59.000Z","type":"turn_context","payload":{"turn_id":"t2","model":"gpt-5-codex"}}"#,
+            fixture("codex/append.jsonl")
+        )
+        .as_bytes(),
+    );
+    h.pass();
+    h.pass();
+    let p = h.session("codex", CODEX_SID);
+    let s = h.session("codex", fork);
+    assert_eq!(s.parent_session_id.as_deref(), Some(p.id.as_str()));
+}
+
+// Earlier builds stored such a subagent without a parent: the one-time
+// cleanup removes it with the scripted run.
+#[test]
+fn stored_codex_subagents_of_a_scripted_run_are_removed_once() {
+    let h = H::new();
+    let fork = "0198a1b2-c3d4-7e5f-8a9b-0c1d2e3f4f0f";
+    let sub = h.put(
+        &format!(".codex/sessions/2026/01/02/rollout-2026-01-02T10-00-00-{fork}.jsonl"),
+        h.fill(&fixture("codex/fork.jsonl")).as_bytes(),
+    );
+    let machine = h.store.machine_id().unwrap().unwrap();
+    let project = h
+        .store
+        .resolve_project_with(&machine, "test-box", &h.cwd, &NonProjectDirs::default())
+        .unwrap()
+        .project;
+    h.store
+        .insert_session(&Session {
+            id: "sub".into(),
+            project_id: project.id,
+            machine_id: machine,
+            agent: "codex".into(),
+            agent_session_id: Some(fork.into()),
+            origin: SessionOrigin::External,
+            cwd: h.cwd.display().to_string(),
+            title: None,
+            status: SessionStatus::Completed,
+            branch: None,
+            worktree: None,
+            transcript_path: Some(sub.display().to_string()),
+            started_at: 1_000,
+            ended_at: Some(2_000),
+            last_activity_at: 2_000,
+            exit_code: None,
+            summary: None,
+            distilled_through_seq: 0,
+            tokens_in: 0,
+            tokens_out: 0,
+            cost_usd: 0.0,
+            parent_session_id: None,
+            stopped_by_user: false,
+            title_updated_at: 0,
+            project_updated_at: 0,
+            compacted_at: None,
+            context_near_full_at: None,
+        })
+        .unwrap();
+    // The parent's rollout records a `codex exec` run.
+    let exec = h
+        .fill(&fixture("codex/rollout.jsonl"))
+        .replace(r#""source":"cli""#, r#""source":"exec""#);
+    h.put(
+        &format!(".codex/sessions/2026/01/02/rollout-2026-01-02T09-00-00-{CODEX_SID}.jsonl"),
+        exec.as_bytes(),
+    );
+    h.engine.remove_headless();
+    assert!(
+        h.store
+            .session_by_agent_id("codex", fork)
+            .unwrap()
+            .is_none()
+    );
+}
+
 /// `fixture` with its placeholders filled for a transcript run in `dir`.
 fn fixture_in(name: &str, dir: &Path) -> String {
     let json = serde_json::to_string(&dir.to_string_lossy()).unwrap();

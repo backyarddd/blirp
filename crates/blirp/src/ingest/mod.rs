@@ -276,6 +276,10 @@ pub struct Launches {
     /// what was read then may not be stored.
     #[serde(default)]
     reported: bool,
+    /// A subagent whose parent is a scripted run (codex: its parent's
+    /// rollout, judged again at every read). It goes with its parent.
+    #[serde(default)]
+    parent_scripted: bool,
 }
 
 impl Launches {
@@ -291,10 +295,16 @@ impl Launches {
     }
 
     pub fn is_headless(&self) -> bool {
-        self.headless && !self.interactive && self.turns <= 1
+        self.parent_scripted || (self.headless && !self.interactive && self.turns <= 1)
     }
 
-    /// Nothing later in the transcript can make it headless again.
+    /// Whether the transcript's parent is a scripted run.
+    pub(crate) fn set_parent_scripted(&mut self, yes: bool) {
+        self.parent_scripted = yes;
+    }
+
+    /// Nothing later in the transcript can make it headless again (its own
+    /// lines; a scripted parent is judged apart).
     pub(crate) fn settled(&self) -> bool {
         self.interactive || self.turns > 1
     }

@@ -383,6 +383,40 @@ pub fn repair_subagents(
     Ok(out)
 }
 
+impl Codex {
+    /// The rollout of session `id` (`rollout-<date>-<id>.jsonl[.zst]`).
+    pub(crate) fn rollout_of(&self, id: &str) -> Option<PathBuf> {
+        let names = [format!("-{id}.jsonl"), format!("-{id}.jsonl.zst")];
+        self.roots().iter().find_map(|r| {
+            walk_files(r, 4, &|p: &Path| {
+                is_rollout(p)
+                    && p.file_name()
+                        .and_then(|n| n.to_str())
+                        .is_some_and(|n| names.iter().any(|s| n.ends_with(s.as_str())))
+            })
+            .into_iter()
+            .next()
+        })
+    }
+
+    /// Whether the rollout of session `parent` is a scripted run
+    /// (`codex exec`, §8). A parent not on disk (yet), or one that cannot
+    /// be read, is not.
+    pub(crate) fn parent_is_scripted(&self, parent: &str) -> bool {
+        self.rollout_of(parent)
+            .is_some_and(|p| matches!(super::transcript_is_headless("codex", &p), Ok(true)))
+    }
+
+    /// Whether the rollout at `path` is a scripted run, or a subagent of
+    /// one (judged by its parent's rollout, as ingest does).
+    pub(crate) fn scripted(&self, path: &Path) -> Result<bool> {
+        match inspect_subagent(path)?.and_then(|s| s.parent) {
+            Some(parent) => Ok(self.parent_is_scripted(&parent)),
+            None => super::transcript_is_headless("codex", path),
+        }
+    }
+}
+
 impl Adapter for Codex {
     fn id(&self) -> &'static str {
         "codex"
@@ -416,6 +450,11 @@ impl Adapter for Codex {
             st = State::default();
         }
         let mut launch = Launches::resume(st.launch.take(), st.pos.line);
+        // A subagent of a scripted run goes with it; judged again at every
+        // read, since the parent may have turned into a session since.
+        if let Some(parent) = &st.parent {
+            launch.set_parent_scripted(self.parent_is_scripted(parent));
+        }
         let fallback = id_from_name(&src.path).unwrap_or_else(|| src.key.clone());
         launch.report(
             false,
@@ -444,12 +483,16 @@ impl Adapter for Codex {
                 .get("id")
                 .or_else(|| p.get("session_id"))
                 .and_then(Value::as_str);
+            let before = launch.is_headless();
             if ty == "session_meta" && st.asid.is_none() {
                 // The session's own (first) `session_meta`.
                 st.asid = id.map(str::to_string);
                 st.own_meta(p, ts);
                 meta.parent.clone_from(&st.parent);
                 meta.title.clone_from(&st.title);
+                if let Some(parent) = &st.parent {
+                    launch.set_parent_scripted(self.parent_is_scripted(parent));
+                }
             } else {
                 // The parent's history copied into a fork is the parent's:
                 // its events are in the parent's session already, and its
@@ -466,14 +509,13 @@ impl Adapter for Codex {
             // this session either.
             let parents_meta = ty == "session_meta" && id.is_some() && id != st.asid.as_deref();
             if !parents_meta {
-                let before = launch.is_headless();
                 launch_line(&v, &mut launch);
-                launch.report(
-                    before,
-                    sink,
-                    &st.asid.clone().unwrap_or_else(|| fallback.clone()),
-                );
             }
+            launch.report(
+                before,
+                sink,
+                &st.asid.clone().unwrap_or_else(|| fallback.clone()),
+            );
             if let Some(t) = ts {
                 meta.started_at = Some(meta.started_at.map_or(t, |s| s.min(t)));
             }

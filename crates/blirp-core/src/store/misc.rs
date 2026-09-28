@@ -207,6 +207,20 @@ impl Store {
         })
     }
 
+    /// Sources of `adapter` whose cursor state names `parent` as their
+    /// parent session (`state.parent`, e.g. codex subagent rollouts).
+    pub fn cursors_with_parent(&self, adapter: &str, parent: &str) -> Result<Vec<String>> {
+        self.read(|c| {
+            all(
+                c,
+                "SELECT source FROM ingest_cursors WHERE adapter = ?1
+                   AND json_extract(cursor_json, '$.state.parent') = ?2 ORDER BY source",
+                params![adapter, parent],
+                |r| r.get(0),
+            )
+        })
+    }
+
     pub fn set_cursor(&self, adapter: &str, source: &str, cursor: &JsonValue) -> Result<()> {
         self.write(|tx| {
             tx.execute(
