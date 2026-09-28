@@ -24,8 +24,10 @@ pub const BY_DISTILLER: &str = "distiller";
 /// SQL condition on event `e` of session `s`: something worth distilling
 /// past the last summary. Only prompts and replies count: tool traffic
 /// without a reply, injected context and compaction markers alone never
-/// make a session due again.
-const NEW_CONTENT: &str = "e.seq > s.distilled_through_seq AND e.kind IN ('user','assistant')";
+/// make a session due again. A distill that failed (`summary.error`) is
+/// tried again only once something newer than what it covered arrived.
+const NEW_CONTENT: &str = "e.seq > s.distilled_through_seq AND e.kind IN ('user','assistant')
+    AND e.seq > COALESCE(json_extract(s.summary_json, '$.error.through_seq'), 0)";
 
 /// How a distill result changes the project brief.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -301,8 +303,8 @@ impl Store {
 
     /// Sessions on `machine_id` due for distillation (§9 trigger): quiet
     /// since `idle_before` (idle or ended), active after `active_after`,
-    /// with new prompts or replies past `distilled_through_seq`
-    /// ([`NEW_CONTENT`]), and not already failed at the same point.
+    /// with new prompts or replies past `distilled_through_seq` and past a
+    /// failed attempt ([`NEW_CONTENT`]).
     ///
     /// Ended sessions wait for `idle_before` too: an external session is
     /// marked `completed` after two quiet minutes and back to `working` by
@@ -325,8 +327,7 @@ impl Store {
              WHERE s.machine_id = ?1 AND s.last_activity_at >= ?3 AND s.last_activity_at <= ?2
                AND NOT (s.origin = 'external' AND s.parent_session_id IS NOT NULL)
                AND s.status IN ('idle','completed','failed','detached')
-               AND EXISTS (SELECT 1 FROM events e WHERE e.session_id = s.id AND {NEW_CONTENT}
-                           AND e.seq > COALESCE(json_extract(s.summary_json, '$.error.through_seq'), 0))
+               AND EXISTS (SELECT 1 FROM events e WHERE e.session_id = s.id AND {NEW_CONTENT})
              ORDER BY s.last_activity_at DESC LIMIT ?4"
         );
         self.read(|c| {
@@ -340,7 +341,8 @@ impl Store {
     }
 
     /// True when session `id` has new prompts or replies past its last
-    /// summary ([`NEW_CONTENT`]).
+    /// summary and past a failed attempt ([`NEW_CONTENT`]), the rule of the
+    /// distill trigger.
     pub fn has_new_content(&self, id: &str) -> Result<bool> {
         let sql = format!(
             "SELECT 1 FROM sessions s WHERE s.id = ?1

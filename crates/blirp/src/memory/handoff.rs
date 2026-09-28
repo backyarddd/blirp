@@ -95,7 +95,15 @@ pub async fn refresh_summary(
         }
     };
     if fresh {
-        return None;
+        // Nothing new since a failed attempt either: that failure stands,
+        // and the run is not repeated (as the distill loop does).
+        return source
+            .summary
+            .clone()
+            .and_then(|v| serde_json::from_value::<SessionSummary>(v).ok())
+            .and_then(|s| s.error)
+            .filter(|e| e.through_seq > source.distilled_through_seq)
+            .map(|e| format!("summarizing failed: {}", e.message));
     }
     if source.machine_id != state.machine.id {
         return Some(
@@ -400,6 +408,11 @@ mod tests {
         });
         let why = refresh_summary(&f.st, &f.src, WAIT).await.unwrap();
         assert_eq!(why, "summarizing failed: summarizer failed: boom");
+        // Nothing new since: the known failure is reported, not run again.
+        let src = f.st.store.get_session("src").unwrap().unwrap();
+        let why = refresh_summary(&f.st, &src, WAIT).await.unwrap();
+        assert_eq!(why, "summarizing failed: summarizer failed: boom");
+        assert!(!f.st.distiller.is_queued("src"));
     }
 
     #[tokio::test]

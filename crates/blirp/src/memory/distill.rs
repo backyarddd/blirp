@@ -2444,6 +2444,13 @@ mod tests {
         event(&store, "ext", 7, EventKind::Assistant, "done");
         assert_eq!(due(i64::MAX), ["ext"]);
         assert!(store.has_new_content("ext").unwrap());
+        // A failed attempt at that point: neither due nor new until
+        // something newer arrives (the handoff refresh asks the same).
+        record_failure(&store, "ext", "boom").unwrap();
+        assert!(due(i64::MAX).is_empty());
+        assert!(!store.has_new_content("ext").unwrap());
+        event(&store, "ext", 8, EventKind::User, "again");
+        assert!(store.has_new_content("ext").unwrap());
     }
 
     #[tokio::test]
