@@ -216,9 +216,13 @@ export const api = {
   },
   projects: {
     list: () => request<ProjectSummary[]>('GET', '/api/projects'),
+    /** Projects deleted by the user, most recently deleted first. */
+    trash: () => request<ProjectSummary[]>('GET', '/api/projects', undefined, { deleted: true }),
     get: (id: string) => request<ProjectSummary>('GET', p(id)),
     /** Without `path` the project has no folder (`name` required); its sessions start in a blirp workspace. */
     create: (body: CreateProject) => request<ProjectSummary>('POST', '/api/projects', body),
+    /** Register an existing folder on this machine (its git top level inside a repository). */
+    addFolder: (id: string, path: string) => request<ProjectSummary>('POST', `${p(id)}/folders`, { path }),
     /** Unregister one of this machine's folders; the project stays, also with no folder left. */
     removeFolder: (id: string, path: string) => request<ProjectSummary>('POST', `${p(id)}/folders/remove`, { path }),
     /** Projects earlier versions made for plain folders that look like chats; empty once dismissed. */
@@ -227,7 +231,12 @@ export const api = {
     /** Sessions and records move to Chats; folders and brief stay with the removed project. */
     toChats: (id: string) => request<void>('POST', `${p(id)}/to-chats`),
     rename: (id: string, name: string) => request<ProjectSummary>('PATCH', p(id), { name }),
+    /** Admin: to the Trash; its sessions are hidden until it is restored. */
     remove: (id: string) => request<void>('DELETE', p(id)),
+    /** Admin: back from the Trash, with the folders it had on this machine. */
+    restore: (id: string) => request<ProjectSummary>('POST', `${p(id)}/restore`),
+    /** Admin: `path` is one of its folders on this machine or its blirp workspace. */
+    open: (id: string, target: OpenTarget, path: string) => request<void>('POST', `${p(id)}/open`, { target, path }),
     merge: (id: string, into: string) => request<ProjectSummary>('POST', `${p(id)}/merge`, { into }),
     memory: (id: string) => request<ProjectMemory>('GET', `${p(id)}/memory`),
     putBrief: (id: string, body_md: string) => request<Brief>('PUT', `${p(id)}/brief`, { body_md }),

@@ -35,6 +35,7 @@ import { NONE_DENIED, denyFor, rightsFrom, type Denied } from './capabilities';
 import { nav, navigate } from './router.svelte';
 import { href } from './router';
 import { readOpenSessions, remoteMachine, sessionToRestore, type RemoteMachine } from './machines';
+import { readMarks, sessionKey, writeMarks, type MarkKind } from './marks';
 
 export type AuthState = 'checking' | 'ok' | 'unauthorized' | 'offline';
 export type ConnState = 'connecting' | 'open' | 'reconnecting';
@@ -140,6 +141,17 @@ class AppState {
 
   /** Deleted this run: views holding their own fetched session lists filter these out. */
   readonly deletedSessions = new SvelteSet<string>();
+  /**
+   * Projects that went away this run (deleted, merged): pushed updates of their sessions are
+   * ignored, since the daemon's lists leave the sessions of a deleted project out.
+   */
+  readonly #goneProjects = new Set<string>();
+
+  /** Per-device marks (marks.ts): pinned and archived session and project keys. */
+  readonly pinned = new SvelteSet<string>(readMarks('pinned'));
+  readonly archived = new SvelteSet<string>(readMarks('archived'));
+  /** Lists include archived items (marked as such). */
+  showArchived = $state(false);
 
   projectById: Map<string, ProjectSummary> = $derived(new Map(this.projects.map((p) => [p.id, p])));
   /** Projects as listed and picked: without the machines' Chats buckets. */
@@ -354,6 +366,7 @@ class AppState {
   }
 
   upsertSession(s: Session): void {
+    if (this.#goneProjects.has(s.project_id)) return;
     const prev = this.sessionById.get(s.id);
     // A session started or ended somewhere: keep-awake follows within a status tick.
     if (!prev || hasTerminal(prev) !== hasTerminal(s)) this.#awakeSoon();
@@ -369,6 +382,9 @@ class AppState {
     const gone = this.sessionById.get(id);
     this.deletedSessions.add(id);
     this.#seen(id);
+    const key = sessionKey(id);
+    if (this.pinned.has(key)) this.setMark('pinned', key, false);
+    if (this.archived.has(key)) this.setMark('archived', key, false);
     this.sessions = this.sessions.filter((s) => s.id !== id && !(isSubagent(s) && s.parent_session_id === id));
     if (nav.route.name === 'sessions' && nav.route.sessionId === id) navigate(href.sessions(), { replace: true });
     // Session counts are part of the project summary; the daemon only reports the delete.
@@ -386,6 +402,8 @@ class AppState {
   }
 
   upsertProject(p: ProjectSummary): void {
+    // Back from the Trash (here or on another client): its sessions are listed again.
+    if (this.#goneProjects.delete(p.id)) void this.refreshSessions();
     this.projects = this.projectById.has(p.id)
       ? this.projects.map((x) => (x.id === p.id ? p : x))
       : [...this.projects, p];
@@ -398,8 +416,34 @@ class AppState {
     return p.chats ? 'Chats' : p.name;
   }
 
+  /**
+   * A project deleted (to the Trash) or merged away, here or on another client: its sessions leave
+   * the lists with it. After a merge they live on in the target project, so the list is re-read.
+   */
   removeProject(id: string): void {
+    this.#goneProjects.add(id);
     this.projects = this.projects.filter((p) => p.id !== id);
+    const kept = this.sessions.filter((s) => s.project_id !== id);
+    if (kept.length === this.sessions.length) return;
+    const open = nav.route.name === 'sessions' ? nav.route.sessionId : null;
+    if (open !== null && this.sessionById.get(open)?.project_id === id) navigate(href.sessions(), { replace: true });
+    this.sessions = kept;
+    void this.refreshSessions();
+  }
+
+  /** A project back from the Trash (restored here): listed again with its sessions. */
+  projectRestored(p: ProjectSummary): void {
+    this.#goneProjects.delete(p.id);
+    this.upsertProject(p);
+    void this.refreshSessions();
+  }
+
+  /** Set or clear a per-device mark (pin, archive) and save it. */
+  setMark(kind: MarkKind, key: string, on: boolean): void {
+    const set = kind === 'pinned' ? this.pinned : this.archived;
+    if (on) set.add(key);
+    else set.delete(key);
+    writeMarks(kind, set);
   }
 
   bumpMemory(projectId: string): void {

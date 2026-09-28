@@ -184,15 +184,17 @@ export function sessionOrder(ctx: LiveContext): (a: Session, b: Session) => numb
 export const GROUP_PREVIEW = 5;
 
 /**
- * The first `limit` sessions of a group, plus any later pinned or `keepId` (selected) session, so
- * one busy project does not push every other project off screen. `hidden` is how many are left.
+ * The first `limit` sessions of a group, plus any later live (pinned in the list order), `keepId`
+ * (selected) or `keep` (pinned by the user) session, so one busy project does not push every other
+ * project off screen. `hidden` is how many are left.
  */
 export function previewSessions(
   sessions: readonly Session[],
   limit: number,
   keepId: string | null,
   ctx: LiveContext,
+  keep: (s: Session) => boolean = () => false,
 ): { shown: Session[]; hidden: number } {
-  const shown = sessions.filter((s, i) => i < limit || s.id === keepId || isPinned(s, ctx));
+  const shown = sessions.filter((s, i) => i < limit || s.id === keepId || isPinned(s, ctx) || keep(s));
   return { shown, hidden: sessions.length - shown.length };
 }
