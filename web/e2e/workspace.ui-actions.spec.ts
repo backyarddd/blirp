@@ -296,3 +296,23 @@ test('the Trash reads again when a project is deleted, not when one is renamed',
     page.off('request', count);
   }
 });
+
+test('Undo leaves an item alone that was changed again since', async () => {
+  const p = await project('Undo guard');
+  const s = await endedShell(p.id, 'First title');
+  await page.goto(`${env.url}/sessions/${s.id}`);
+  await card(s.id).click({ button: 'right' });
+  await openMenu().getByRole('menuitem', { name: 'Rename…' }).click();
+  const dialog = page.getByRole('dialog', { name: 'Rename session' });
+  await dialog.getByLabel('Session title').fill('Second title');
+  await dialog.getByRole('button', { name: 'Rename' }).click();
+  const toast = page.locator('.toast', { hasText: 'Renamed to "Second title"' });
+  await expect(toast).toBeVisible();
+  // Another client renames it meanwhile.
+  await apiCall('PATCH', `/api/sessions/${s.id}`, { title: 'Third title' });
+  await expect(card(s.id)).toContainText('Third title');
+  await toast.getByRole('button', { name: 'Undo' }).click();
+  await expect(page.locator('.toast', { hasText: 'Not undone: it was changed again since.' })).toBeVisible();
+  await page.waitForTimeout(500);
+  expect((await apiCall<SessionRow>('GET', `/api/sessions/${s.id}`)).title).toBe('Third title');
+});

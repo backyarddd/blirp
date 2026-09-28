@@ -77,6 +77,20 @@ export async function copyText(text: string, what: string): Promise<void> {
   }
 }
 
+/** What an Undo says when the item was changed again after the action (here or on another client). */
+export const NOT_UNDONE = 'Not undone: it was changed again since.';
+
+/** An Undo that runs only while `still()` holds (the item is as the action left it). */
+function undoIf(still: () => boolean, run: () => void): { label: string; run: () => void } {
+  return {
+    label: 'Undo',
+    run: () => {
+      if (still()) run();
+      else app.toast(NOT_UNDONE, 'info');
+    },
+  };
+}
+
 /** Rename a session; an empty title goes back to the default one. */
 export async function renameSession(s: Session, title: string, undoable = true): Promise<boolean> {
   const next = title.trim() || null;
@@ -87,7 +101,12 @@ export async function renameSession(s: Session, title: string, undoable = true):
   app.toast(
     `Renamed to "${sessionTitle(out)}"`,
     'info',
-    undoable ? { label: 'Undo', run: () => void renameSession(out, s.title ?? '', false) } : undefined,
+    undoable
+      ? undoIf(
+          () => app.sessionById.get(out.id)?.title === out.title,
+          () => void renameSession(out, s.title ?? '', false),
+        )
+      : undefined,
   );
   return true;
 }
@@ -137,9 +156,17 @@ export async function moveSessions(list: readonly Session[], target: MoveTarget)
   return failures.length === 0;
 }
 
-async function moveBack(moved: readonly { before: Session; after: Session }[]): Promise<void> {
+async function moveBack(all: readonly { before: Session; after: Session }[]): Promise<void> {
+  // Sessions moved again since (here or on another client) stay where they are now.
+  const moved = all.filter(({ after }) => app.sessionById.get(after.id)?.project_id === after.project_id);
+  if (moved.length === 0) {
+    app.toast(NOT_UNDONE, 'info');
+    return;
+  }
   const results = await Promise.allSettled(moved.map(({ before }) => api.sessions.move(before.id, moveBackTarget(before))));
-  const failures: BulkFailure[] = [];
+  const failures: BulkFailure[] = all
+    .filter((m) => !moved.includes(m))
+    .map((m) => ({ title: sessionTitle(m.before), reason: 'moved again since' }));
   for (const [i, r] of results.entries()) {
     const m = moved[i];
     if (!m) continue;
@@ -147,7 +174,7 @@ async function moveBack(moved: readonly { before: Session; after: Session }[]): 
     else failures.push({ title: sessionTitle(m.before), reason: await sessionFailure(m.after, r.reason) });
   }
   app.toast(
-    bulkSummary('Moved', 'Not moved', moved.length, failures, ' back'),
+    bulkSummary('Moved', 'Not moved', all.length, failures, ' back'),
     failures.length === 0 ? 'info' : 'error',
   );
 }
@@ -169,7 +196,13 @@ export function markSessions(kind: MarkKind, list: readonly Session[], on: boole
   app.toast(
     `${MARK_TEXT[kind][on ? 0 : 1]} ${what}${hint}`,
     'info',
-    undoable ? { label: 'Undo', run: () => markSessions(kind, changed, !on, false) } : undefined,
+    undoable
+      ? undoIf(
+          () => changed.some((s) => set.has(sessionKey(s.id)) === on),
+          // Only the ones still as this left them.
+          () => markSessions(kind, changed.filter((s) => set.has(sessionKey(s.id)) === on), !on, false),
+        )
+      : undefined,
   );
 }
 
@@ -183,7 +216,7 @@ export function markProject(kind: MarkKind, p: ProjectSummary, on: boolean, undo
   app.toast(
     `${MARK_TEXT[kind][on ? 0 : 1]} ${name}${hint}`,
     'info',
-    undoable ? { label: 'Undo', run: () => markProject(kind, p, !on, false) } : undefined,
+    undoable ? undoIf(() => set.has(key) === on, () => markProject(kind, p, !on, false)) : undefined,
   );
 }
 
@@ -356,7 +389,12 @@ export async function renameProject(p: ProjectSummary, name: string, undoable = 
   app.toast(
     `Renamed to "${out.name}"`,
     'info',
-    undoable ? { label: 'Undo', run: () => void renameProject(out, p.name, false) } : undefined,
+    undoable
+      ? undoIf(
+          () => app.projectById.get(out.id)?.name === out.name,
+          () => void renameProject(out, p.name, false),
+        )
+      : undefined,
   );
   return true;
 }
@@ -415,7 +453,12 @@ async function deleteProject(p: ProjectSummary, ask = true): Promise<void> {
   if (!done) return;
   app.removeProject(p.id);
   if (nav.route.name === 'project' && nav.route.projectId === p.id) navigate(href.projects());
-  app.toast(`Moved "${p.name}" to the Trash`, 'info', { label: 'Undo', run: () => void restoreProject(p, false) });
+  app.toast(
+    `Moved "${p.name}" to the Trash`,
+    'info',
+    // Restored meanwhile (another client): nothing to undo.
+    undoIf(() => !app.projectById.has(p.id), () => void restoreProject(p, false)),
+  );
 }
 
 export async function restoreProject(p: ProjectSummary, undoable = true): Promise<ProjectSummary | undefined> {
@@ -426,7 +469,7 @@ export async function restoreProject(p: ProjectSummary, undoable = true): Promis
   app.toast(
     `Restored "${out.name}"`,
     'info',
-    undoable ? { label: 'Undo', run: () => void deleteProject(out, false) } : undefined,
+    undoable ? undoIf(() => app.projectById.has(out.id), () => void deleteProject(out, false)) : undefined,
   );
   return out;
 }
