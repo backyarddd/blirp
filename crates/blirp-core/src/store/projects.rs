@@ -376,7 +376,7 @@ pub(super) fn live_local_paths(c: &Connection, machine_id: &str) -> Result<Vec<P
     )
 }
 
-fn get_project_in(c: &Connection, id: &str) -> Result<Option<Project>> {
+pub(super) fn get_project_in(c: &Connection, id: &str) -> Result<Option<Project>> {
     one(
         c,
         "SELECT * FROM projects WHERE id = ?1",
@@ -1350,7 +1350,7 @@ pub(super) fn follow_merged(c: &Connection, id: &str) -> Result<Option<Project>>
 
 /// `id`'s live project (Chats included), following merges; None for a
 /// removed project.
-fn current_project_in(c: &Connection, id: &str) -> Result<Option<Project>> {
+pub(super) fn current_project_in(c: &Connection, id: &str) -> Result<Option<Project>> {
     let mut id = id.to_string();
     // Merge chains are short; the bound only guards against a cycle.
     for _ in 0..16 {
@@ -2339,6 +2339,44 @@ mod tests {
             store.restore_project(&p.id, "m"),
             Err(StoreError::NotFound(_))
         ));
+    }
+
+    #[test]
+    fn sessions_filed_under_a_merged_project_are_listed_under_its_target() {
+        use crate::store::SessionFilter;
+        let (dir, store) = temp_store();
+        let (a, b) = (dir.path().join("a"), dir.path().join("b"));
+        std::fs::create_dir(&a).unwrap();
+        std::fs::create_dir(&b).unwrap();
+        let from = store.register_project("m", &a, Some("From")).unwrap();
+        let into = store.register_project("m", &b, Some("Into")).unwrap();
+        store.merge_projects(&from.id, &into.id).unwrap();
+        // Written on another machine before it applied the merge.
+        store
+            .apply_remote(&Change::Session(external("late", &from.id, "m2")))
+            .unwrap();
+        let listed = |project: Option<&str>| -> Vec<(String, String)> {
+            let f = SessionFilter {
+                limit: 50,
+                project_id: project.map(str::to_string),
+                ..SessionFilter::default()
+            };
+            store
+                .list_sessions(&f)
+                .unwrap()
+                .items
+                .into_iter()
+                .map(|s| (s.id, s.project_id))
+                .collect()
+        };
+        let under_into = vec![("late".to_string(), into.id.clone())];
+        assert_eq!(listed(None), under_into);
+        assert_eq!(listed(Some(&into.id)), under_into);
+        // A merge chain that ends in the Trash is hidden like the Trash.
+        store.delete_project(&into.id, "m").unwrap();
+        assert!(listed(None).is_empty());
+        store.restore_project(&into.id, "m").unwrap();
+        assert_eq!(listed(None), under_into);
     }
 
     #[test]

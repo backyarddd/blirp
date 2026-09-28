@@ -3,6 +3,7 @@
 use super::{Change, Result, Store, StoreError, all, apply_in, json_col, one, write_row};
 use crate::model::{Event, SearchHit, SearchHitKind, Session, SessionStatus, SessionsPage};
 use rusqlite::{Row, params, params_from_iter, types::Value};
+use std::collections::HashMap;
 
 pub(super) fn session_row(r: &Row<'_>) -> rusqlite::Result<Session> {
     Ok(Session {
@@ -411,13 +412,20 @@ impl Store {
             format!("?{}", args.len())
         };
         // Sessions of a project in the Trash are hidden with it until it is
-        // restored.
+        // restored. A session filed under a project merged away (it arrived
+        // after the merge) is listed under the project it was merged into.
         let mut sql = format!(
             "SELECT *, {LIVE} AS live FROM sessions WHERE NOT EXISTS
-               (SELECT 1 FROM projects p WHERE p.id = sessions.project_id AND p.deleted = 1)"
+               (SELECT 1 FROM projects p WHERE p.id = sessions.project_id
+                  AND p.deleted = 1 AND p.merged_into IS NULL)"
         );
         if let Some(p) = &f.project_id {
-            sql += &format!(" AND project_id = {}", bind(p.clone().into()));
+            sql += &format!(
+                " AND project_id IN (WITH RECURSIVE merged(id) AS (SELECT {}
+                   UNION SELECT p.id FROM projects p JOIN merged m ON p.merged_into = m.id
+                   WHERE p.deleted = 1) SELECT id FROM merged)",
+                bind(p.clone().into())
+            );
         }
         if let Some(s) = f.status {
             sql += &format!(" AND status = {}", bind(s.as_str().to_string().into()));
@@ -459,10 +467,27 @@ impl Store {
             " ORDER BY live DESC, last_activity_at DESC, id DESC LIMIT {}",
             limit + 1
         );
-        let mut rows = self.read(|c| {
-            all(c, &sql, params_from_iter(args), |r| {
+        let (mut rows, current) = self.read(|c| {
+            let rows = all(c, &sql, params_from_iter(args), |r| {
                 Ok((session_row(r)?, r.get::<_, i64>("live")?))
-            })
+            })?;
+            // Only merged-away projects are resolved; a project row not
+            // replicated yet leaves the session as it is.
+            let mut current: HashMap<String, Option<String>> = HashMap::new();
+            for (s, _) in &rows {
+                if current.contains_key(&s.project_id) {
+                    continue;
+                }
+                let merged = super::projects::get_project_in(c, &s.project_id)?
+                    .is_some_and(|p| p.deleted && p.merged_into.is_some());
+                let id = if merged {
+                    super::projects::current_project_in(c, &s.project_id)?.map(|p| p.id)
+                } else {
+                    Some(s.project_id.clone())
+                };
+                current.insert(s.project_id.clone(), id);
+            }
+            Ok((rows, current))
         })?;
         let next_cursor = if rows.len() as i64 > limit {
             rows.truncate(limit as usize);
@@ -471,10 +496,21 @@ impl Store {
         } else {
             None
         };
-        Ok(SessionsPage {
-            items: rows.into_iter().map(|(s, _)| s).collect(),
-            next_cursor,
-        })
+        // The cursor follows the rows read; a page can come out shorter
+        // when a merge chain ends in the Trash (hidden like the Trash).
+        let items = rows
+            .into_iter()
+            .filter_map(|(mut s, _)| match current.get(&s.project_id) {
+                Some(Some(id)) => {
+                    s.project_id.clone_from(id);
+                    Some(s)
+                }
+                Some(None) => None,
+                // Not reached: every row's project was looked up.
+                None => Some(s),
+            })
+            .collect();
+        Ok(SessionsPage { items, next_cursor })
     }
 
     /// Subagent sessions recorded under `id` (see [`SessionFilter::parent`]).
