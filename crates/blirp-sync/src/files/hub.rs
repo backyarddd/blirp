@@ -536,6 +536,18 @@ mod tests {
         std::fs::create_dir(&folder).unwrap();
         let p = store.register_project("m", &folder, None).unwrap();
         let folder = store.project_paths(&p.id).unwrap()[0].path.clone();
+        // The origin is a known machine (a root of a forgotten one counts
+        // as revoked).
+        store
+            .upsert_machine(&blirp_core::model::Machine {
+                id: "m".into(),
+                name: "m".into(),
+                os: "linux".into(),
+                role: blirp_core::model::MachineRole::Node,
+                last_seen: 1,
+                revoked: false,
+            })
+            .unwrap();
         let hub = HubFiles::new(store, &dir.path().join("files"), quota, 1000);
         T {
             root: blirp_core::files::root_id("m", &folder),
