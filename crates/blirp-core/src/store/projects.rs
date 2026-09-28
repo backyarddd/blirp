@@ -490,7 +490,18 @@ impl Store {
                       AND s.status IN ('starting','working','idle','waiting')) AS live_count,
                    (SELECT MAX(s.last_activity_at) FROM sessions s WHERE s.project_id = p.id) AS last_activity
                  FROM projects p
-                 WHERE p.deleted = ?1 AND (?1 = 0 OR (p.merged_into IS NULL AND p.chats = 0))
+                 WHERE p.deleted = ?1 AND (?1 = 0 OR (p.merged_into IS NULL AND p.chats = 0
+                   -- Only what a restore brings something back for: a project
+                   -- deleted here, or one with sessions or memory of the user.
+                   -- Projects the headless cleanup emptied and deleted are not.
+                   -- (The settings key is `trashed_folders_key`.)
+                   AND (EXISTS (SELECT 1 FROM settings WHERE key = 'projects.trash.' || p.id || '.folders')
+                     OR EXISTS (SELECT 1 FROM sessions s WHERE s.project_id = p.id)
+                     OR EXISTS (SELECT 1 FROM records r WHERE r.project_id = p.id)
+                     OR EXISTS (SELECT 1 FROM wiki_pages w WHERE w.project_id = p.id AND w.deleted = 0)
+                     OR EXISTS (SELECT 1 FROM resources x WHERE x.project_id = p.id AND x.deleted = 0)
+                     OR EXISTS (SELECT 1 FROM brief_history b WHERE b.project_id = p.id
+                                  AND b.updated_by = 'user'))))
                  ORDER BY CASE WHEN ?1 THEN p.updated_at
                                ELSE COALESCE(last_activity, p.updated_at) END DESC",
                 params![trash],
@@ -2366,6 +2377,53 @@ mod tests {
             store.restore_project(&p.id, "m"),
             Err(StoreError::NotFound(_))
         ));
+    }
+
+    #[test]
+    fn the_trash_lists_only_projects_with_something_to_restore() {
+        let (_d, store) = temp_store();
+        let trashed = |store: &Store| -> Vec<String> {
+            store
+                .list_trashed_projects("m")
+                .unwrap()
+                .into_iter()
+                .map(|p| p.project.name)
+                .collect()
+        };
+        // Deleted elsewhere (as the headless cleanup deletes the projects it
+        // emptied): nothing to restore.
+        let delete_elsewhere = |name: &str| -> Project {
+            let p = store.create_project(name, None).unwrap();
+            store
+                .apply_remote(&Change::Project(Project {
+                    deleted: true,
+                    updated_at: p.updated_at + 1,
+                    ..p.clone()
+                }))
+                .unwrap();
+            p
+        };
+        delete_elsewhere("Emptied");
+        assert!(trashed(&store).is_empty());
+        let with_session = delete_elsewhere("With session");
+        store
+            .apply_remote(&Change::Session(external("s1", &with_session.id, "m2")))
+            .unwrap();
+        let with_record = delete_elsewhere("With record");
+        store
+            .apply_remote(&Change::Record(record(
+                "r1",
+                &with_record.id,
+                "user",
+                false,
+            )))
+            .unwrap();
+        // Deleted here, even empty.
+        let here = store.create_project("Here", None).unwrap();
+        store.delete_project(&here.id, "m").unwrap();
+        let mut names = trashed(&store);
+        names.sort();
+        assert_eq!(names, ["Here", "With record", "With session"]);
     }
 
     #[test]
