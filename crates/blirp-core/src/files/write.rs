@@ -449,7 +449,11 @@ fn remove(target: &Path) -> std::io::Result<()> {
 
 /// Undo a replace or delete that stopped midway (a crash) in `dir`, whose
 /// entries are `names`: a file moved aside whose target is missing goes
-/// back in place. Returns how many came back.
+/// back in place. An aside whose target is there belongs to an operation
+/// that finished (a crash before the aside was discarded, or one still
+/// running that is about to discard it): it is discarded, so a later delete
+/// of the target never brings the old file back. Returns how many came
+/// back.
 pub fn restore_asides<'a>(dir: &Path, names: impl IntoIterator<Item = &'a str>) -> usize {
     let names: Vec<&str> = names.into_iter().collect();
     let mut restored = 0;
@@ -460,6 +464,7 @@ pub fn restore_asides<'a>(dir: &Path, names: impl IntoIterator<Item = &'a str>) 
         }
         let (from, to) = (dir.join(aside), dir.join(target));
         if names.contains(&target) || std::fs::symlink_metadata(&to).is_ok() {
+            discard(&from);
             continue;
         }
         match put_back(&from, &to) {

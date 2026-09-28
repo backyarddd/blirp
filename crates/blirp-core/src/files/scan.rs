@@ -598,6 +598,12 @@ mod tests {
         );
         assert!(!r.join("sub").join(aside("a.txt")).exists());
         assert_eq!(std::fs::read_to_string(r.join("b.txt")).unwrap(), "new");
+        // That finished operation's aside is discarded: deleting the file
+        // later never brings the old version back.
+        assert!(!r.join(aside("b.txt")).exists());
+        std::fs::remove_file(r.join("b.txt")).unwrap();
+        let s = scan(r, false, &cfg()).unwrap();
+        assert_eq!(paths(&s), ["sub/a.txt"]);
     }
 
     /// A scan outside the work lock (Preview, the grace-period scan) could
