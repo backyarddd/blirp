@@ -238,7 +238,9 @@ impl Engine {
         // Removed and made again since its last settled pass (another
         // folder now under the same name), even while the daemon was
         // stopped or before any reconcile saw it missing.
-        if id.is_some() && known.is_some() && id != known {
+        if let (Some(id), Some(known)) = (&id, &known)
+            && replaced_folder(known, id)
+        {
             lock(&self.returned).insert(copy.key.clone());
         }
         let returned = lock(&self.returned).contains(&copy.key);
@@ -571,6 +573,18 @@ pub(crate) fn folder_missing(p: &Path) -> bool {
 /// name has another. None when it cannot be read.
 fn folder_identity(p: &Path) -> Option<String> {
     folder_id_parts(p).map(|(dev, ino)| format!("{dev}:{ino}"))
+}
+
+/// Whether identity `now` (`<device>:<inode>`) is another folder than
+/// `known`: the same device with another inode. A device number alone can
+/// change across a reboot or remount (btrfs subvolumes, NFS, LVM, macOS
+/// external drives), so a changed device says nothing: the folder is not
+/// held and its identity is recorded again at the next settled pass.
+fn replaced_folder(known: &str, now: &str) -> bool {
+    match (known.split_once(':'), now.split_once(':')) {
+        (Some((dev, ino)), Some((dev_now, ino_now))) => dev == dev_now && ino != ino_now,
+        _ => false,
+    }
 }
 
 fn folder_id_parts(p: &Path) -> Option<(u64, u64)> {
@@ -1203,7 +1217,15 @@ mod tests {
         std::fs::remove_dir(&f).unwrap();
         assert_eq!(folder_identity(&f), None);
         std::fs::create_dir(&f).unwrap();
-        assert_ne!(folder_identity(&f).unwrap(), first);
+        let again = folder_identity(&f).unwrap();
+        assert!(replaced_folder(&first, &again), "{first} -> {again}");
+        // Only another inode on the same device is another folder: a device
+        // number that changed across a remount alone holds nothing.
+        assert!(!replaced_folder(&first, &first));
+        assert!(!replaced_folder("7:100", "9:100"));
+        assert!(!replaced_folder("7:100", "9:200"));
+        assert!(replaced_folder("7:100", "7:200"));
+        assert!(!replaced_folder("garbage", "7:200"));
         // Drives and shares that are not there count as missing.
         #[cfg(windows)]
         assert!(gone_volume(21) && gone_volume(67) && !gone_volume(5));
