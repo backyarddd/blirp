@@ -10,6 +10,51 @@ so every tag needs one.
 
 ## [Unreleased]
 
+### Added
+
+- Right-click menus for sessions and projects everywhere they are listed
+  (sidebar cards and group headers, project Sessions rows, subagent links,
+  grid tile headers, project cards, folder rows, Trash rows), with a "⋯"
+  button on each for keyboard and touch, the ContextMenu key and Shift+F10,
+  and F2 to rename. Terminal panes keep their own right-click.
+- Session actions: rename (also inline on an ended session's title), move,
+  pin, archive, stop, resume, stop and delete, delete, start new session
+  from it, continue in another agent, open a shell in its folder, open its
+  folder or editor, copy its id, resume command or folder path, remove its
+  worktree. The command palette lists the open session's or project's
+  actions.
+- Project actions: add a folder, open a folder or editor, open a shell in
+  it, copy path or id, pin, archive, merge, move to Chats, delete.
+- Trash: deleting a project moves it to Projects > Trash, hidden with its
+  sessions; Restore brings both back with the folders it had on this
+  machine (folders on other machines do not come back).
+- Pin and archive sessions and projects, per device: pinned items stay on
+  top, archived ones leave the lists until Show archived.
+- Selection mode in the Sessions sidebar and a project's Sessions tab: move,
+  pin, archive or delete many sessions at once, with one notice naming what
+  failed.
+- Undo for rename, move, pin, archive, delete to the Trash and restore.
+- API: `GET /api/projects?deleted=true`, `POST /api/projects/:id/restore`,
+  `POST /api/projects/:id/folders`, `POST /api/projects/:id/open`;
+  `AgentInfo.resume_command`.
+
+### Changed
+
+- Deleting and merging projects now needs this machine's own app or CLI
+  (admin), like opening folders; LAN portal devices no longer get them.
+- Deleting a session, stopping it, removing a worktree or a folder and
+  deleting a project confirm in a dialog that says what is and is not
+  removed (deleting a session is permanent; the agent's own transcript file
+  is never touched).
+- The session toolbar keeps Stop/Resume, fork, the agent chip and the memory
+  panel; its other actions moved into its "⋯" menu.
+- Renaming a Chats bucket is refused (400).
+
+### Fixed
+
+- Sessions of a deleted project no longer stay in the Sessions list under an
+  "Unknown project" group whose link led nowhere.
+
 ## [0.2.2] - 2026-09-28
 
 ### Added

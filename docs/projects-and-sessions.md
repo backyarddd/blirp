@@ -38,17 +38,28 @@ After upgrading, projects that earlier versions created for scratch places (the 
 Chats are the sessions that belong to no project: everything you run in your home folder, a scratch folder or a folder that is no project. The Sessions list shows them in one **Chats** group (over all paired machines), search finds them, and they are summarized like other sessions, but:
 
 - chats share no memory: nothing is injected when one starts, and distilling a chat writes only its own summary (no brief, no records);
-- **Move** in the session toolbar (the folder icon) files a session into a project, into a **New project** (created without a folder), or back into Chats. Its subagent sessions and the records it produced move with it; into Chats only its summarized records do, while records you wrote or pinned stay in the project. A session of another machine moves into that machine's Chats, once that machine has one (it creates it with its first chat). Subagents that show up later follow their parent, and a moved session stays where you put it. Moving never registers the session's folder; run **Distill now** afterwards to add what the chat decided to the project's memory.
+- **Move…** in a session's menu files a session into a project, into a **New project** (created without a folder), or back into Chats. Its subagent sessions and the records it produced move with it; into Chats only its summarized records do, while records you wrote or pinned stay in the project. A session of another machine moves into that machine's Chats, once that machine has one (it creates it with its first chat). Subagents that show up later follow their parent, and a moved session stays where you put it. Moving never registers the session's folder; run **Distill now** afterwards to add what the chat decided to the project's memory.
 
 Each machine keeps its chats in a bucket of its own (a project flagged `chats`, id `chats-<machine id>`, called `Chats (<machine name>)`); the UI never lists it among projects, and it cannot be deleted or merged. blirp 0.1.0 filed such sessions in a `Home (<machine name>)` project: after upgrading it is merged into Chats, unless you renamed it or wrote memory for it (a brief version, a record, a pinned record, a wiki page or a resource): then it stays a project and Chats starts empty. API: `POST /api/sessions/:id/move {"project_id": "<id>" | null}`.
 
 ### Managing projects
 
-- **New project** on the Projects page: a name, a folder (any absolute path on this machine), or both, and an optional brief.
-- **Rename** on the project page (pencil next to the name).
-- **Remove folder** (the **x** next to one of this machine's folders): unregisters it, the project stays.
-- **Delete** unregisters the project's folders and hides it. Its sessions and memory stay in the database, but a new session in one of its folders starts a new project.
-- **Merge into…** moves folders, sessions, records, wiki pages and resources into another project. Use it to join the same non-git folder on two machines, since those cannot be matched by remote.
+**New project** on the Projects page takes a name, a folder (any absolute path on this machine), or both, and an optional brief.
+
+Every project has a menu: right-click its card on the Projects page or its group header in the Sessions sidebar, use the **⋯** button there, or **Actions** on the project page. It offers:
+
+- **New session**, **Rename…** (also the pencil next to the name; Chats keeps its name), **Pin** and **Archive** (see [Pin and archive](#pin-and-archive)).
+- **Add folder…**: register another folder on this machine (typed or picked with **Browse…**); inside a git repository its top folder is added.
+- **Open folder**, **Open in editor** (this machine's own app or CLI only) and **Open terminal here** (a blirp Shell session in the project's folder), **Copy folder path**, **Copy project id**.
+- **Merge into…** moves folders, sessions, records, wiki pages and resources into another project. Use it to join the same non-git folder on two machines, since those cannot be matched by remote. Merging cannot be undone.
+- **Move to Chats…** for projects an earlier version made for folders that look like chats (the Projects page also offers these once).
+- **Delete…** moves the project to the Trash.
+
+Each of this machine's folders on the project page has its own **⋯** menu: open it, open a shell there, copy its path, or **Remove folder…** (unregisters it; the project stays). Merge, Delete, Restore and Open folder need this machine's own app or CLI; devices on the LAN portal do not get them.
+
+#### Trash
+
+Deleting a project moves it to the **Trash** (Projects > Trash): it is hidden together with its sessions, and its folders are unregistered on every synced machine, so a new session in one of them starts a new project. Files on disk are never touched, and its sessions and memory are kept. **Restore** (or **Undo** right after deleting) brings the project back with its sessions and with the folders it had on the machine where it was deleted, unless a folder is gone or now belongs to another project. Folders registered on other machines do not come back: add them again there with **Add folder…**. There is no permanent delete for projects.
 
 The project page has tabs: Overview (brief, open threads, recent sessions, a prompt box to start a session), Sessions, Memory, Wiki, Resources, Files (read-only browser, text files up to 1 MiB; the workspace for a project without folders) and Git (git projects only).
 
@@ -87,6 +98,25 @@ Paste a screenshot or a copied file into a terminal pane (Ctrl+V or Ctrl+Shift+V
 - On Linux (and macOS) plain Ctrl+V still goes to the program in the terminal, as in native terminals: Claude Code then reads the clipboard of the machine it runs on, which only works for sessions on this machine. On Windows plain Ctrl+V pastes, as in Windows Terminal (Claude Code's own image paste there is Alt+V, which still reaches it).
 - Needs **Terminal control** on portal devices, like typing.
 
+### Session actions
+
+Right-click a session card in the sidebar, a row on a project's Sessions tab, a subagent link or a grid tile's header, or use its **⋯** button (the same menu is behind **⋯** in the session toolbar, and in the command palette under "This session"):
+
+- **Rename…** (F2 on a focused card or row; on an ended session also the pencil next to its title), **Move…**, **Pin**, **Archive**.
+- **Resume**, **Stop**, **Start new session from this session**, **Continue in…**, **Open terminal here** (a new blirp Shell session in the session's folder, on its machine), **Open folder** and **Open in editor** (sessions of this machine, from its own app or CLI).
+- **Copy session id**, **Copy resume command** (`claude --resume <id>` and the like, for agents that resume by id; run it in the session's folder) and **Copy folder path**.
+- **Remove worktree…** and **Delete…** for ended sessions; **Stop and delete…** for a running one stops it, waits for it to end and deletes it.
+
+Deleting a session is permanent on every synced machine and removes its subagent sessions; the agent's own transcript file is never deleted, and memory records it produced stay. A session of another machine is deleted, stopped or resumed by that machine: while it is offline this fails with a message naming it. Rename, move, pin and archive show **Undo** for a few seconds.
+
+**Select** above the sidebar (or on a project's Sessions tab) switches to selection mode: tick sessions, Shift+click another to take the whole range, or select all; then move, pin, archive or delete them together. One notice sums up the result and names the sessions that failed and why (running, their machine offline).
+
+The context menu never opens over a terminal: right-click there belongs to the terminal (copy, paste, selection). Menus work from the keyboard: the ContextMenu key or Shift+F10 on a focused item, arrows and Home/End to move, Enter to choose, Esc to close.
+
+### Pin and archive
+
+**Pin** keeps a session at the top of its group, a project's group at the top of the Sessions sidebar and a project at the top of the Projects page. **Archive** puts a session or project away: it leaves the sidebar, the Projects page, a project's Sessions tab and the command palette (archiving a project hides its sessions too) until **Show archived** is on, where it is marked "archived" and its menu offers **Unarchive**. Both are stored in this browser only (per device, never synced) and change nothing on the daemon: search and direct links still find archived sessions.
+
 ### The Sessions list
 
 The Sessions sidebar lists every session this machine knows: its own, and on paired machines the other machines' sessions, which replicate. Order:
@@ -94,7 +124,7 @@ The Sessions sidebar lists every session this machine knows: its own, and on pai
 - Running sessions (Starting, Working, Idle, Waiting) come first: a process is attached, so they are the ones you can act on, even after hours of idling. Another machine's running session stays on top while that machine is connected to the hub, however long it idles. When the machine goes offline its session sorts by its last activity and its chip reads **Offline** (hover it for the last status the machine reported and when it was last seen), since nothing can correct that status until it is back. When this machine cannot tell (it is not connected to the hub itself, or the hub runs an older blirp), a running session of another machine stays on top until 30 minutes pass without an update, then reads **No update**.
 - Then by most recent activity, not by start time: for sessions started outside blirp the time of the latest transcript event, for sessions blirp launched the last status change (working, idle, waiting, ended) reported by hooks or detected from terminal output. So a session started yesterday that is working now is not buried.
 
-Sessions are grouped by project, groups ordered by their first session in that order. A group shows its first 5 sessions, plus any running one and the one that is open; **Show N more** lists the rest. The sidebar loads the first 200 sessions and **Load older sessions** fetches the next 200. The previous/next session shortcuts follow the cards as the sidebar shows them.
+Sessions are grouped by project, groups ordered by their first session in that order, pinned groups and pinned sessions first. A group shows its first 5 sessions, plus any running or pinned one and the one that is open; **Show N more** lists the rest. The sidebar loads the first 200 sessions and **Load older sessions** fetches the next 200. The previous/next session shortcuts follow the cards as the sidebar shows them.
 
 The filter box matches title, folder, branch and agent over all sessions (it asks the daemon, so it also finds sessions not loaded yet). On paired machines each card shows the machine it runs on, this machine's included, and a machine picker narrows the list to one machine. The project page's Sessions tab lists one project's sessions in the same order, with a status filter.
 
@@ -172,6 +202,6 @@ Aider has no central store: its `.aider.chat.history.md` is read only in folders
 
 ### Titles, cost and history
 
-Titles come from the agent (Claude's AI title, opencode/pi/Amp/Cursor names, Gemini summaries, dsh titles), else the first prompt, The distiller sets a title only when the session has none. Rename a session through the API (`PATCH /api/sessions/:id {"title": ...}`). Tokens and cost are the transcript's own totals when it records cost (Claude Code, opencode, pi, Aider), else an estimate from a static, dated price table (unknown models cost 0).
+Titles come from the agent (Claude's AI title, opencode/pi/Amp/Cursor names, Gemini summaries, dsh titles), else the first prompt, The distiller sets a title only when the session has none. Rename a session from its menu (see [Session actions](#session-actions)) or through the API (`PATCH /api/sessions/:id {"title": ...}`); an empty title goes back to the default one. Tokens and cost are the transcript's own totals when it records cost (Claude Code, opencode, pi, Aider), else an estimate from a static, dated price table (unknown models cost 0).
 
 History is permanent: deleting an agent's transcript file never deletes anything in blirp.
