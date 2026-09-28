@@ -67,6 +67,75 @@ pub const ENV_REMOVE: &[&str] = &[
     "CODEX_SANDBOX",
 ];
 
+/// Env vars that tell a program which terminal it runs in, inherited from
+/// wherever the daemon was started (Windows Terminal, VS Code, iTerm2, tmux,
+/// ...). Left in place they make programs assume that terminal's features in
+/// blirp's (kitty graphics, VS Code's shell integration, WT-only keys);
+/// `TERM_PROGRAM` is set to blirp instead, as VS Code sets its own.
+const TERMINAL_ENV_REMOVE: &[&str] = &[
+    "WT_SESSION",
+    "WT_PROFILE_ID",
+    "VSCODE_INJECTION",
+    "VSCODE_GIT_IPC_HANDLE",
+    "VSCODE_GIT_ASKPASS_NODE",
+    "VSCODE_GIT_ASKPASS_MAIN",
+    "VSCODE_GIT_ASKPASS_EXTRA_ARGS",
+    "VSCODE_IPC_HOOK_CLI",
+    "VSCODE_SHELL_INTEGRATION",
+    "VSCODE_NONCE",
+    "TERM_SESSION_ID",
+    "ITERM_SESSION_ID",
+    "ITERM_PROFILE",
+    "LC_TERMINAL",
+    "LC_TERMINAL_VERSION",
+    "KITTY_WINDOW_ID",
+    "KITTY_PID",
+    "KITTY_PUBLIC_KEY",
+    "KITTY_LISTEN_ON",
+    "WEZTERM_PANE",
+    "WEZTERM_UNIX_SOCKET",
+    "WEZTERM_EXECUTABLE",
+    "ALACRITTY_WINDOW_ID",
+    "ALACRITTY_SOCKET",
+    "GHOSTTY_RESOURCES_DIR",
+    "GHOSTTY_BIN_DIR",
+    "KONSOLE_VERSION",
+    "KONSOLE_DBUS_SESSION",
+    "KONSOLE_DBUS_WINDOW",
+    "VTE_VERSION",
+    "TERMINAL_EMULATOR",
+    "TMUX",
+    "TMUX_PANE",
+    "STY",
+    "ConEmuANSI",
+    "ConEmuPID",
+];
+
+/// The env a session's terminal adds: what the attached xterm.js is, like
+/// VS Code's `TERM_PROGRAM=vscode`, and (off Windows) a UTF-8 `LANG` when
+/// the daemon has none, as VS Code's `terminal.integrated.detectLocale`
+/// does, so programs read and echo non-ASCII keys (a launchd or systemd
+/// daemon starts with no locale).
+fn terminal_env(lang: Option<&str>) -> Vec<(String, String)> {
+    let mut env = vec![
+        ("TERM".to_string(), "xterm-256color".to_string()),
+        ("COLORTERM".to_string(), "truecolor".to_string()),
+        ("TERM_PROGRAM".to_string(), "blirp".to_string()),
+        (
+            "TERM_PROGRAM_VERSION".to_string(),
+            env!("CARGO_PKG_VERSION").to_string(),
+        ),
+    ];
+    let utf8 = lang.is_some_and(|l| {
+        let l = l.to_ascii_lowercase();
+        l.ends_with(".utf-8") || l.ends_with(".utf8")
+    });
+    if cfg!(unix) && !utf8 {
+        env.push(("LANG".to_string(), "en_US.UTF-8".to_string()));
+    }
+    env
+}
+
 fn agent_error(e: AgentError) -> ApiError {
     match e {
         AgentError::Unknown(_) => {
@@ -621,9 +690,8 @@ async fn start(
             "BLIRP_MEMORY_FILE".to_string(),
             integ.memory_file.display().to_string(),
         ),
-        ("TERM".to_string(), "xterm-256color".to_string()),
-        ("COLORTERM".to_string(), "truecolor".to_string()),
     ];
+    env.extend(terminal_env(std::env::var("LANG").ok().as_deref()));
     env.extend(integ.env);
     env.extend(command.env);
     env.extend(login);
@@ -632,7 +700,11 @@ async fn start(
         args: command.args,
         cwd: PathBuf::from(&session.cwd),
         env,
-        env_remove: ENV_REMOVE.iter().map(|s| s.to_string()).collect(),
+        env_remove: ENV_REMOVE
+            .iter()
+            .chain(TERMINAL_ENV_REMOVE)
+            .map(|s| s.to_string())
+            .collect(),
         cols: cols.unwrap_or(DEFAULT_COLS).clamp(10, 1000),
         rows: rows.unwrap_or(DEFAULT_ROWS).clamp(4, 1000),
     };
@@ -970,5 +1042,30 @@ mod tests {
         assert_eq!(parts.len(), 3, "{n}");
         assert_eq!(parts[2].len(), 4);
         assert!(parts[2].chars().all(|c| c.is_ascii_hexdigit()));
+    }
+
+    #[test]
+    fn terminal_env_names_blirp_and_a_utf8_locale() {
+        let get = |env: &[(String, String)], k: &str| {
+            env.iter().find(|(n, _)| n == k).map(|(_, v)| v.clone())
+        };
+        let env = super::terminal_env(None);
+        assert_eq!(get(&env, "TERM").as_deref(), Some("xterm-256color"));
+        assert_eq!(get(&env, "TERM_PROGRAM").as_deref(), Some("blirp"));
+        assert_eq!(
+            get(&env, "LANG").as_deref(),
+            cfg!(unix).then_some("en_US.UTF-8")
+        );
+        for kept in ["de_DE.UTF-8", "C.utf8"] {
+            assert_eq!(
+                get(&super::terminal_env(Some(kept)), "LANG"),
+                None,
+                "{kept}"
+            );
+        }
+        assert_eq!(
+            get(&super::terminal_env(Some("C")), "LANG").as_deref(),
+            cfg!(unix).then_some("en_US.UTF-8")
+        );
     }
 }
