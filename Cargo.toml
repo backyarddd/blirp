@@ -28,7 +28,7 @@ getrandom = "0.4"
 hex = "0.4"
 hmac = "0.13"
 iroh = "1.2"
-iroh-mdns-address-lookup = "0.5"
+iroh-mdns-address-lookup = "0.6"
 ignore = "0.4.33"
 hyper = { version = "1", features = ["client", "http1", "server"] }
 hyper-util = { version = "0.1", features = ["tokio", "service"] }
