@@ -166,22 +166,38 @@ export function isPinned(s: Session, ctx: LiveContext): boolean {
   return isLive(s.status) && remoteLiveState(s, ctx) === null;
 }
 
+/** Ended sessions older than this leave the sidebar's Recent view. */
+export const RECENT_MS = 3 * 24 * 60 * 60_000;
+
+/** Shown in the Recent view: live with a trusted status, or active within RECENT_MS. */
+export function isRecent(s: Session, ctx: LiveContext): boolean {
+  return isPinned(s, ctx) || ctx.now - s.last_activity_at <= RECENT_MS;
+}
+
+/** Sort rank: working first, then waiting, then other live; ended last. */
+function rank(s: Session, ctx: LiveContext): number {
+  if (!isPinned(s, ctx)) return 0;
+  if (s.status === 'working' || s.status === 'starting') return 3;
+  return s.status === 'waiting' ? 2 : 1;
+}
+
 /**
- * The daemon's list order (`GET /api/sessions`): pinned sessions first, since a process is
- * attached and the user can act on them even after hours of idling, then most recent activity
- * (a long-running session started yesterday but working now is not buried), then id.
+ * The list order: working sessions first, then waiting, then other live ones, since a process is
+ * attached and the user can act on them even after hours of idling; ended ones last. Within a rank,
+ * most recent activity first (a long-running session started yesterday but working now is not
+ * buried), then id. The daemon's order is only a start: the client re-sorts every list with this.
  */
 export function sessionOrder(ctx: LiveContext): (a: Session, b: Session) => number {
   return (a, b) => {
-    const pinned = Number(isPinned(b, ctx)) - Number(isPinned(a, ctx));
-    if (pinned !== 0) return pinned;
+    const byRank = rank(b, ctx) - rank(a, ctx);
+    if (byRank !== 0) return byRank;
     if (a.last_activity_at !== b.last_activity_at) return b.last_activity_at - a.last_activity_at;
     return a.id < b.id ? 1 : a.id > b.id ? -1 : 0;
   };
 }
 
 /** Sessions a project group in the sidebar shows before "Show N more". */
-export const GROUP_PREVIEW = 5;
+export const GROUP_PREVIEW = 3;
 
 /**
  * The first `limit` sessions of a group, plus any later live (pinned in the list order), `keepId`

@@ -7,6 +7,7 @@ import {
   groupSessions,
   hasTerminal,
   isChats,
+  isRecent,
   projectPlace,
   isLive,
   remoteLiveState,
@@ -126,7 +127,7 @@ describe('groupSessions', () => {
       ['Alpha', ['2']],
     ]);
   });
-  it('orders live sessions first, then by last activity, then id (as the daemon does)', () => {
+  it('orders working, then waiting, then other live sessions, then ended by last activity, then id', () => {
     const at = (id: string, status: SessionStatus, last: number, started = 0): Session => ({
       ...mk(id, 'a'),
       status,
@@ -140,15 +141,32 @@ describe('groupSessions', () => {
       at('long-running', 'completed', 100, -1000),
       at('tie-b', 'completed', 50),
       at('working', 'working', 2),
+      at('waiting', 'waiting', 3),
     ];
     expect([...list].sort(sessionOrder({ selfId: 'm', machines: new Map(), now: 100 })).map((s) => s.id)).toEqual([
       'working',
+      'waiting',
       'idle-live',
       'long-running',
       'tie-b',
       'tie-a',
       'old',
     ]);
+  });
+  it('keeps live and recent sessions in the Recent view', () => {
+    const DAY = 24 * 60 * 60_000;
+    const now = 100 * DAY;
+    const ctx: LiveContext = { selfId: 'm', machines: new Map([['off', { online: false }]]), now };
+    const s = (status: SessionStatus, ageDays: number, machine_id = 'm'): Session => ({
+      ...mk('x', 'a'),
+      machine_id,
+      status,
+      last_activity_at: now - ageDays * DAY,
+    });
+    expect(isRecent(s('completed', 1), ctx)).toBe(true);
+    expect(isRecent(s('completed', 4), ctx)).toBe(false);
+    expect(isRecent(s('working', 10), ctx)).toBe(true);
+    expect(isRecent(s('working', 10, 'off'), ctx)).toBe(false);
   });
   it('previews a group without hiding live or selected sessions', () => {
     const list = ['1', '2', '3', '4', '5'].map((id) => ({ ...mk(id, 'a'), status: 'completed' as const }));

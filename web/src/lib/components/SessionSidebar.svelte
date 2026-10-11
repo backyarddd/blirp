@@ -5,18 +5,32 @@
   import Pin from '@lucide/svelte/icons/pin';
   import Ellipsis from '@lucide/svelte/icons/ellipsis';
   import ListChecks from '@lucide/svelte/icons/list-checks';
+  import ChevronRight from '@lucide/svelte/icons/chevron-right';
+  import ChevronDown from '@lucide/svelte/icons/chevron-down';
   import { untrack } from 'svelte';
   import { SvelteSet } from 'svelte/reactivity';
   import { api, errorMessage } from '../api/client';
   import type { ProjectSummary, Session } from '../api/types.gen';
   import { app } from '../app.svelte';
   import { href } from '../router';
-  import { GROUP_PREVIEW, agentLabel, basename, groupSessions, previewSessions, sessionOrder, sessionTitle } from '../status';
+  import {
+    GROUP_PREVIEW,
+    agentLabel,
+    basename,
+    groupSessions,
+    isPinned as trusted,
+    isRecent,
+    previewSessions,
+    sessionOrder,
+    sessionTitle,
+    type LiveContext,
+  } from '../status';
   import { formatRelative } from '../time';
   import { projectActions, sessionActions } from '../actions';
   import { actionEnv, projectOps, sessionOps } from '../manage';
   import { contextmenu } from '../contextmenu';
-  import { markedFirst, projectKey, sessionArchived, sessionKey } from '../marks';
+  import { markedFirst, parseMarks, projectKey, sessionArchived, sessionKey } from '../marks';
+  import { readPref, writePref } from '../prefs';
   import { Selection } from '../selection.svelte';
   import StatusChip from './StatusChip.svelte';
   import Loadable from './Loadable.svelte';
@@ -33,6 +47,34 @@
   let filter = $state('');
   let machine = $state('');
   const expanded = new SvelteSet<string>();
+
+  // Recent hides ended sessions older than RECENT_MS; "All + archived" is the old "Show archived".
+  // Archived follows the app-wide toggle (palette, other lists); the recency cut is this list's own.
+  type View = 'recent' | 'all' | 'archived';
+  const VIEWS: readonly View[] = ['recent', 'all', 'archived'];
+  let older: 'recent' | 'all' = $state(readPref('blirp.sidebar.view', ['recent', 'all'], 'recent'));
+  const view: View = $derived(app.showArchived ? 'archived' : older);
+  function setView(v: View): void {
+    app.showArchived = v === 'archived';
+    if (v !== 'archived') {
+      older = v;
+      writePref('blirp.sidebar.view', v);
+    }
+  }
+
+  function readCollapsed(): string[] {
+    try {
+      return parseMarks(localStorage.getItem('blirp.sidebar.collapsed'));
+    } catch {
+      return [];
+    }
+  }
+  // A collapsed group shows only its live, pinned and selected sessions.
+  const collapsed = new SvelteSet<string>(readCollapsed());
+  function toggleCollapsed(key: string): void {
+    if (!collapsed.delete(key)) collapsed.add(key);
+    writePref('blirp.sidebar.collapsed', JSON.stringify([...collapsed]));
+  }
   const selection = new Selection();
 
   const q = $derived(filter.trim());
@@ -88,9 +130,23 @@
     return () => clearTimeout(timer);
   });
 
+  // Searching looks at everything; only the unfiltered Recent view cuts old ended sessions.
+  const inRecent = (s: Session, ctx: LiveContext): boolean => isRecent(s, ctx) || pinned(s) || s.id === selectedId;
+  const hiddenOld = $derived.by(() => {
+    if (filtering || view !== 'recent') return false;
+    const ctx = app.liveContext();
+    return app.topSessions.some((s) => visible(s) && !inRecent(s, ctx));
+  });
+
   // Pinned sessions first; grouping keeps that order inside each project.
   const list = $derived.by(() => {
-    if (!filtering) return markedFirst(app.topSessions.filter(visible), pinned);
+    if (!filtering) {
+      const ctx = app.liveContext();
+      return markedFirst(
+        app.topSessions.filter((s) => visible(s) && (view !== 'recent' || inRecent(s, ctx))),
+        pinned,
+      );
+    }
     // Results take the live copy when this client has one; new sessions matching the filter
     // appear without asking the daemon again.
     const byId = new Map<string, Session>();
@@ -114,7 +170,11 @@
       pinned: app.pinned.has(key(g.projectId)),
       menuProject: g.projectId === null ? chatsProject(g.sessions) : g.project,
       open: expanded.has(g.key),
-      preview: previewSessions(g.sessions, expanded.has(g.key) ? Infinity : GROUP_PREVIEW, selectedId, ctx, pinned),
+      collapsed: collapsed.has(g.key),
+      running: g.sessions.filter((s) => trusted(s, ctx)).length,
+      preview: collapsed.has(g.key)
+        ? { shown: g.sessions.filter((s) => s.id === selectedId || trusted(s, ctx) || pinned(s)), hidden: 0 }
+        : previewSessions(g.sessions, expanded.has(g.key) ? Infinity : GROUP_PREVIEW, selectedId, ctx, pinned),
     }));
   });
   const shown = $derived(groups.flatMap((g) => g.preview.shown));
@@ -142,10 +202,12 @@
       </select>
     {/if}
     <div class="tools">
-      <label class="toggle small">
-        <input type="checkbox" bind:checked={app.showArchived} />
-        <span>Show archived</span>
-      </label>
+      <select class="select sm" aria-label="Which sessions" value={view}
+        onchange={(e) => setView(VIEWS.find((v) => v === e.currentTarget.value) ?? 'recent')}>
+        <option value="recent">Recent</option>
+        <option value="all">All</option>
+        <option value="archived">All + archived</option>
+      </select>
       {#if !selection.active}
         <button type="button" class="btn ghost sm" onclick={() => selection.start()}><ListChecks size={14} aria-hidden="true" />Select</button>
       {/if}
@@ -157,16 +219,33 @@
       loading={!app.sessionsLoaded || (filtering && foundLoading && list.length === 0)}
       error={filtering ? (list.length === 0 ? foundError : null) : app.sessionsError}
       empty={groups.length === 0}
-      emptyText={filtering ? 'No sessions match.' : 'No sessions yet. Start one and it shows up here, along with sessions you run outside blirp.'}
+      emptyText={filtering
+        ? 'No sessions match.'
+        : hiddenOld
+          ? 'Nothing in the last 3 days.'
+          : 'No sessions yet. Start one and it shows up here, along with sessions you run outside blirp.'}
       onretry={() => (filtering ? search(true) : app.refreshSessions())}
     >
       {#snippet emptyAction()}
-        {#if !filtering && app.control}<button class="btn primary sm" type="button" onclick={() => app.openNewSession()}>New session</button>{/if}
+        {#if !filtering && hiddenOld}
+          <button class="btn sm" type="button" onclick={() => setView('all')}>Show all</button>
+        {:else if !filtering && app.control}
+          <button class="btn primary sm" type="button" onclick={() => app.openNewSession()}>New session</button>
+        {/if}
       {/snippet}
       {#each groups as g (g.key)}
         {@const gp = g.menuProject}
         <section class="group" aria-label={g.name}>
           <header use:contextmenu={{ items: () => (gp ? projectActions(gp, actionEnv(), projectOps) : []), label: g.name }}>
+            <button
+              type="button"
+              class="icon-btn sm chev"
+              aria-label={g.collapsed ? `Expand ${g.name}` : `Collapse ${g.name}`}
+              aria-expanded={!g.collapsed}
+              onclick={() => toggleCollapsed(g.key)}
+            >
+              {#if g.collapsed}<ChevronRight size={13} />{:else}<ChevronDown size={13} />{/if}
+            </button>
             {#if g.projectId !== null && g.project}
               <a class="gname ellipsis" href={href.project(g.projectId)}>{g.name}</a>
             {:else}
@@ -176,6 +255,7 @@
               >
             {/if}
             {#if g.pinned}<Pin size={11} class="pin-mark" aria-label="Pinned" />{/if}
+            {#if g.running > 0}<span class="running faint small">{g.running} running</span>{/if}
             <span class="spacer"></span>
             {#if gp}
               <Menu items={projectActions(gp, actionEnv(), projectOps)} label="Actions for {g.name}" title="More actions" triggerClass="icon-btn sm" align="right"
@@ -227,23 +307,20 @@
                   <span class="title ellipsis"
                     >{#if isPinned}<Pin size={11} class="pin-mark" aria-label="Pinned" />{/if}{sessionTitle(s)}</span
                   >
-                  <span class="meta">
-                    <span class="where ellipsis">
-                      {#if s.branch}
-                        <GitBranch size={12} aria-label="Branch" />{s.branch}
-                      {:else}
-                        <Folder size={12} aria-label="Folder" />{basename(s.cwd)}
-                      {/if}
-                    </span>
-                    <StatusChip session={s} />
-                  </span>
                   <span class="sub">
-                    <span class="faint ellipsis"
-                      >{agentLabel(s.agent)} · {formatRelative(s.last_activity_at)}{s.origin === 'external' ? ' · external' : ''}{isArchived
-                        ? ' · archived'
-                        : ''}</span
-                    >
-                    <MachineBadge machineId={s.machine_id} />
+                    <span class="where faint">
+                      {#if s.branch}
+                        <GitBranch size={12} aria-label="Branch" />
+                      {:else}
+                        <Folder size={12} aria-label="Folder" />
+                      {/if}
+                      <span class="ellipsis"
+                        >{s.branch ?? basename(s.cwd)} · {agentLabel(s.agent)} · {formatRelative(s.last_activity_at)}{s.origin === 'external'
+                          ? ' · external'
+                          : ''}{isArchived ? ' · archived' : ''}</span
+                      >
+                    </span>
+                    <span class="right"><MachineBadge machineId={s.machine_id} /><StatusChip session={s} /></span>
                   </span>
                 </a>
                 <span class="more">
@@ -261,7 +338,9 @@
               </li>
             {/each}
           </ul>
-          {#if g.preview.hidden > 0}
+          {#if g.collapsed}
+            <!-- Collapsed groups list only live, pinned and selected sessions; there is nothing to expand here. -->
+          {:else if g.preview.hidden > 0}
             <button type="button" class="link-btn" onclick={() => expanded.add(g.key)}>Show {g.preview.hidden} more</button>
           {:else if g.open && g.sessions.length > GROUP_PREVIEW}
             <button type="button" class="link-btn" onclick={() => expanded.delete(g.key)}>Show fewer</button>
@@ -300,11 +379,11 @@
     gap: 8px;
     min-height: 28px;
   }
-  .toggle {
-    display: inline-flex;
-    align-items: center;
-    gap: 6px;
-    color: var(--text-2);
+  .tools .select {
+    width: auto;
+    min-height: 28px;
+    padding: 2px 8px;
+    font-size: 12.5px;
   }
   .link-btn {
     margin: 4px 0 0 6px;
@@ -395,8 +474,8 @@
   }
   .scard {
     display: grid;
-    gap: 4px;
-    padding: 10px 12px;
+    gap: 3px;
+    padding: 8px 10px;
     border-radius: 10px;
     border: 1px solid var(--border);
     background: var(--panel);
@@ -416,18 +495,11 @@
     font-weight: 600;
     padding-right: 24px;
   }
-  .meta {
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
-    gap: 8px;
-  }
   .where {
     display: inline-flex;
     align-items: center;
     gap: 4px;
-    color: var(--text-2);
-    font-size: 12.5px;
+    min-width: 0;
   }
   .where :global(svg) {
     flex: none;
@@ -438,7 +510,17 @@
     justify-content: space-between;
     gap: 6px;
     min-width: 0;
-    font-size: 11.5px;
+    font-size: 12px;
+  }
+  .right {
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+    flex: none;
+  }
+  .running {
+    margin-left: 4px;
+    white-space: nowrap;
   }
   :global(.pin-mark) {
     flex: none;

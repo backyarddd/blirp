@@ -151,7 +151,7 @@ test('the context menu never opens over a terminal, in the session pane or the g
   }
 });
 
-test('archive hides a session until Show archived; Unarchive brings it back', async () => {
+test('archive hides a session until All + archived; Unarchive brings it back', async () => {
   const p = await project('Archive project');
   const s = await endedShell(p.id, 'To be archived');
   await page.goto(`${env.url}/sessions`);
@@ -161,15 +161,15 @@ test('archive hides a session until Show archived; Unarchive brings it back', as
   await expect(card(s.id)).toHaveCount(0);
   await expect(page.locator('.toast', { hasText: 'Archived "To be archived"' })).toBeVisible();
 
-  const show = sidebar().getByLabel('Show archived');
-  await show.check();
+  const show = sidebar().getByLabel('Which sessions');
+  await show.selectOption('archived');
   await expect(card(s.id)).toBeVisible();
   await expect(card(s.id)).toContainText('archived');
   // Per device: nothing changed on the daemon.
   expect((await apiCall<SessionRow>('GET', `/api/sessions/${s.id}`)).title).toBe('To be archived');
   await card(s.id).click({ button: 'right' });
   await page.getByRole('menu', { name: 'To be archived', exact: true }).getByRole('menuitem', { name: 'Unarchive' }).click();
-  await show.uncheck();
+  await show.selectOption('recent');
   await expect(card(s.id)).toBeVisible();
   // Survives a reload (stored per browser).
   await card(s.id).click({ button: 'right' });
@@ -177,10 +177,10 @@ test('archive hides a session until Show archived; Unarchive brings it back', as
   await page.reload();
   await expect(sidebar().getByRole('region', { name: 'Menu project' })).toBeVisible();
   await expect(card(s.id)).toHaveCount(0);
-  await sidebar().getByLabel('Show archived').check();
+  await sidebar().getByLabel('Which sessions').selectOption('archived');
   await card(s.id).click({ button: 'right' });
   await page.getByRole('menu', { name: 'To be archived', exact: true }).getByRole('menuitem', { name: 'Unarchive' }).click();
-  await sidebar().getByLabel('Show archived').uncheck();
+  await sidebar().getByLabel('Which sessions').selectOption('recent');
 });
 
 test('bulk move: shift-click selects a range; one toast names the session that could not move', async () => {
