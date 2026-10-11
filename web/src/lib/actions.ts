@@ -25,6 +25,7 @@ import MessagesSquare from '@lucide/svelte/icons/messages-square';
 import RotateCcw from '@lucide/svelte/icons/rotate-ccw';
 import Check from '@lucide/svelte/icons/check';
 import Download from '@lucide/svelte/icons/download';
+import Columns2 from '@lucide/svelte/icons/columns-2';
 import type { AgentInfo, OpenTarget, ProjectSummary, Record as MemoryRecord, RecordStatus, Session } from './api/types.gen';
 import type { ExportFormat } from './export';
 import { SEPARATOR, tidy, type MenuItem } from './menu';
@@ -46,6 +47,8 @@ export interface ActionEnv {
   handingOff: (sessionId: string) => boolean;
   /** Projects offered to move to Chats (they look like chats). */
   chatCandidate: (projectId: string) => boolean;
+  /** "Open in split view" applies: another session is open and this one is not a pane yet. */
+  canSplit: (sessionId: string) => boolean;
 }
 
 export interface SessionOps {
@@ -58,6 +61,7 @@ export interface SessionOps {
   fork(s: Session): void;
   continueIn(s: Session): void;
   terminalHere(s: Session): void;
+  split(s: Session): void;
   open(s: Session, target: OpenTarget): void;
   copy(text: string, what: string): void;
   removeWorktree(s: Session): void;
@@ -139,6 +143,7 @@ export function sessionActions(s: Session, env: ActionEnv, ops: SessionOps): Men
   });
   add(env.control, { label: 'Continue in…', icon: ArrowRightLeft, disabled: env.handingOff(s.id), onselect: () => ops.continueIn(s) });
   add(env.control, { label: 'Open terminal here', icon: SquareTerminal, onselect: () => ops.terminalHere(s) });
+  add(!child && env.canSplit(s.id), { label: 'Open in split view', icon: Columns2, onselect: () => ops.split(s) });
   // A window on this machine's desktop: its own clients, its own sessions.
   add(env.admin && local, { label: 'Open folder', icon: FolderOpen, onselect: () => ops.open(s, 'folder') });
   add(env.admin && local, { label: 'Open in editor', icon: Code, onselect: () => ops.open(s, 'editor') });

@@ -20,6 +20,7 @@ import {
 } from './export';
 import { bulkSummary, type ActionEnv, type BulkFailure, type ProjectOps, type RecordOps, type SessionOps } from './actions';
 import { projectKey, sessionKey, type MarkKind } from './marks';
+import { splitWith } from './panes';
 import { navigate, nav } from './router.svelte';
 import { href } from './router';
 import { isChats, isLive, sessionTitle } from './status';
@@ -38,6 +39,7 @@ export function actionEnv(): ActionEnv {
     archived: app.archived,
     handingOff: (id) => app.handoffFrom.has(id),
     chatCandidate: (id) => chatCandidates.has(id),
+    canSplit: (id) => nav.route.name === 'sessions' && nav.route.sessionId !== null && nav.route.sessionId !== id && !app.panes.includes(id),
   };
 }
 
@@ -402,6 +404,11 @@ export const sessionOps: SessionOps = {
   // A shell in the session's folder, on its machine; the daemon files it under the same project.
   terminalHere: (s) =>
     void app.launch({ cwd: s.cwd, agent: 'shell', ...(s.machine_id !== app.selfId ? { machine: s.machine_id } : {}) }),
+  split: (s) => {
+    const cur = nav.route.name === 'sessions' ? nav.route.sessionId : null;
+    app.setPanes(splitWith(app.panes, cur, s.id));
+    navigate(href.sessions(s.id));
+  },
   open: (s, target) => void app.act(() => api.sessions.open(s.id, target)),
   copy: (text, what) => void copyText(text, what),
   removeWorktree: (s) => void removeWorktree(s),

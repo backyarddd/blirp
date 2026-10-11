@@ -77,6 +77,7 @@ const env = (over: Partial<ActionEnv> = {}): ActionEnv => ({
   archived: new Set(),
   handingOff: () => false,
   chatCandidate: () => false,
+  canSplit: () => false,
   ...over,
 });
 
@@ -90,6 +91,7 @@ const sessionOps = (): SessionOps => ({
   fork: vi.fn(),
   continueIn: vi.fn(),
   terminalHere: vi.fn(),
+  split: vi.fn(),
   open: vi.fn(),
   copy: vi.fn(),
   removeWorktree: vi.fn(),
@@ -183,6 +185,16 @@ describe('session actions', () => {
     expect(labels(sessionActions(session({ machine_id: 'other', worktree: '/wt' }), env(), sessionOps()))).not.toContain(
       'Remove worktree…',
     );
+  });
+
+  it('offers split view only when canSplit', () => {
+    const ops = sessionOps();
+    expect(labels(sessionActions(session(), env(), ops))).not.toContain('Open in split view');
+    const on = env({ canSplit: () => true });
+    item(sessionActions(session(), on, ops), 'Open in split view')?.onselect();
+    expect(ops.split).toHaveBeenCalledWith(expect.objectContaining({ id: 's1' }));
+    const child = session({ origin: 'external', parent_session_id: 'parent' });
+    expect(labels(sessionActions(child, on, sessionOps()))).not.toContain('Open in split view');
   });
 
   it('leaves out moving, pinning and archiving a subagent session', () => {

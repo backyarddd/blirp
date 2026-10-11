@@ -8,6 +8,7 @@
   import { isMac } from './lib/prefs';
   import { groupSessions } from './lib/status';
   import { forgetOpenSession } from './lib/machines';
+import { closePane } from './lib/panes';
   import TopBar from './lib/components/TopBar.svelte';
   import FilesBanner from './lib/components/FilesBanner.svelte';
   import CommandPalette from './lib/components/CommandPalette.svelte';
@@ -92,8 +93,16 @@
         break;
       case 'close':
         if (route.name === 'sessions' && route.sessionId) {
-          forgetOpenSession(route.sessionId);
-          navigate(href.sessions());
+          const id = route.sessionId;
+          if (app.panes.includes(id)) {
+            const next = closePane(app.panes, id);
+            const to = app.panes.find((x) => x !== id) ?? null;
+            app.setPanes(next);
+            navigate(href.sessions(to));
+          } else {
+            forgetOpenSession(id);
+            navigate(href.sessions());
+          }
         }
         break;
     }

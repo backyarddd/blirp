@@ -1,16 +1,19 @@
 <script lang="ts">
   import { untrack } from 'svelte';
   import Menu from '@lucide/svelte/icons/menu';
-  import { api, errorMessage } from '../lib/api/client';
+  import X from '@lucide/svelte/icons/x';
+  import { ApiError, api, errorMessage } from '../lib/api/client';
   import { app } from '../lib/app.svelte';
+  import { closePane, followRoute } from '../lib/panes';
+  import { navigate } from '../lib/router.svelte';
   import { href } from '../lib/router';
-  import { hasTerminal, sessionTitle } from '../lib/status';
+  import { sessionTitle } from '../lib/status';
   import SessionSidebar from '../lib/components/SessionSidebar.svelte';
   import SessionToolbar from '../lib/components/SessionToolbar.svelte';
   import CompactionHint from '../lib/components/CompactionHint.svelte';
   import MemoryPanel from '../lib/components/MemoryPanel.svelte';
-  import Terminal from '../lib/terminal/Terminal.svelte';
-  import SessionDetail from './SessionDetail.svelte';
+  import SessionPane from '../lib/components/SessionPane.svelte';
+  import StatusChip from '../lib/components/StatusChip.svelte';
   import { rememberOpenSession } from '../lib/machines';
 
   let { sessionId }: { sessionId: string | null } = $props();
@@ -23,26 +26,50 @@
   });
   const project = $derived(session ? app.projectById.get(session.project_id) : undefined);
 
-  // A terminal that was on screen stays (with its exit banner) after the process ends, until
-  // the user asks for the details view or switches sessions. Resuming it remounts the pane
-  // (`epoch`) so it attaches to the new process.
-  let terminalFor: string | null = $state(null);
-  let epoch = $state(0);
-  let wasLive = false;
+  // Two or more sessions tiled side by side; the routed one is the focused pane.
+  const split = $derived(sessionId !== null && app.panes.length >= 2 && app.panes.includes(sessionId));
+  // A session opened while split (sidebar click) takes the focused pane's place.
+  let prevRouted: string | null = null;
   $effect(() => {
     const id = sessionId;
-    const live = session !== undefined && hasTerminal(session);
     untrack(() => {
-      if (live) {
-        if (!wasLive && terminalFor === id) epoch++;
-        terminalFor = id;
-      } else if (terminalFor !== id) {
-        terminalFor = null;
-      }
+      if (id && app.panes.length >= 2 && !app.panes.includes(id)) app.setPanes(followRoute(app.panes, prevRouted, id));
+      prevRouted = id;
     });
-    wasLive = live;
   });
-  const showTerminal = $derived(session !== undefined && (hasTerminal(session) || terminalFor === session.id));
+  $effect(() => {
+    const gone = app.panes.filter((id) => app.deletedSessions.has(id));
+    if (gone.length) untrack(() => app.setPanes(gone.reduce(closePane, app.panes)));
+  });
+
+  // Restored panes can be older than the loaded list: read each once; one that is gone closes.
+  const asked = new Set<string>();
+  $effect(() => {
+    if (!app.sessionsLoaded) return;
+    for (const id of app.panes) {
+      if (id === sessionId || app.sessionById.has(id) || asked.has(id)) continue;
+      asked.add(id);
+      api.sessions.get(id).then(
+        ({ children_count, ...s }) => {
+          void children_count;
+          app.upsertSession(s);
+        },
+        (e: unknown) => {
+          if (e instanceof ApiError && e.status === 404) app.setPanes(closePane(app.panes, id));
+          else console.warn(`blirp: could not read session ${id}`, e);
+        },
+      );
+    }
+  });
+
+  function focusPane(id: string): void {
+    if (id !== sessionId) navigate(href.sessions(id), { replace: true });
+  }
+  function closeSplitPane(id: string): void {
+    const before = app.panes;
+    app.setPanes(closePane(before, id));
+    if (id === sessionId) navigate(href.sessions(app.panes[0] ?? before.find((x) => x !== id) ?? null));
+  }
 
   // The detail carries the subagent count (lists leave subagents out); it is re-read when the
   // status changes, since subagents are ingested while the parent works. Sessions older than
@@ -111,20 +138,49 @@
       {#key session.id}<CompactionHint {session} />{/key}
     {/if}
 
-    <div class="frame card">
-      {#if session}
-        {#if showTerminal}
-          {#key `${session.id}:${epoch}`}
-            <Terminal
-              sessionId={session.id}
-              label="Terminal: {sessionTitle(session)}"
-              autofocus
-              ondetails={() => (terminalFor = null)}
-            />
-          {/key}
-        {:else}
-          <SessionDetail {session} />
-        {/if}
+    <div class="frame card" class:split>
+      {#if split}
+        <div class="panes" style:--cols={app.panes.length === 4 ? 2 : app.panes.length}>
+          {#each app.panes as id (id)}
+            {@const ps = app.sessionById.get(id)}
+            <section
+              class="pane"
+              class:focused={id === sessionId}
+              aria-label={ps ? sessionTitle(ps) : 'Session'}
+              onfocusin={() => focusPane(id)}
+              onpointerdown={() => focusPane(id)}
+            >
+              <header>
+                <span class="ptitle ellipsis">{ps ? sessionTitle(ps) : 'Loading…'}</span>
+                {#if ps}
+                  <span class="faint small ellipsis">{app.projectLabel(ps.project_id)}</span>
+                  <span class="spacer"></span>
+                  <StatusChip session={ps} />
+                {:else}
+                  <span class="spacer"></span>
+                {/if}
+                <button
+                  type="button"
+                  class="icon-btn sm"
+                  aria-label="Close pane"
+                  title="Close pane"
+                  onpointerdown={(e) => e.stopPropagation()}
+                  onclick={(e) => {
+                    e.stopPropagation();
+                    closeSplitPane(id);
+                  }}><X size={14} /></button
+                >
+              </header>
+              {#if ps}
+                <SessionPane session={ps} autofocus={id === sessionId} />
+              {:else}
+                <div class="empty" role="status"><p class="muted">{id === sessionId && missing ? missing : 'Loading session…'}</p></div>
+              {/if}
+            </section>
+          {/each}
+        </div>
+      {:else if session}
+        <SessionPane {session} autofocus />
       {:else if sessionId && missing}
         <div class="empty">
           <h2>Session unavailable</h2>
@@ -207,6 +263,48 @@
     min-height: 0;
     overflow: hidden;
     position: relative;
+  }
+  .frame.split {
+    background: none;
+    border: 0;
+    box-shadow: none;
+    overflow: visible;
+  }
+  .panes {
+    display: grid;
+    grid-template-columns: repeat(var(--cols), minmax(0, 1fr));
+    grid-auto-rows: minmax(0, 1fr);
+    gap: 10px;
+    height: 100%;
+  }
+  .pane {
+    display: flex;
+    flex-direction: column;
+    min-width: 0;
+    min-height: 0;
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    background: var(--panel);
+    overflow: hidden;
+  }
+  .pane.focused {
+    border-color: var(--accent);
+    box-shadow: 0 0 0 2px var(--accent-soft);
+  }
+  .pane > header {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 4px 6px 4px 10px;
+    border-bottom: 1px solid var(--border);
+    min-width: 0;
+    font-size: 12.5px;
+  }
+  .ptitle {
+    font-weight: 600;
+  }
+  .pane > :global(.pane-body) {
+    flex: 1;
   }
   .memory {
     min-height: 0;
@@ -298,6 +396,12 @@
     }
     .frame {
       border-radius: 8px;
+    }
+    .panes {
+      grid-template-columns: minmax(0, 1fr);
+    }
+    .pane:not(.focused) {
+      display: none;
     }
   }
 </style>

@@ -16,6 +16,7 @@ import type {
 import { backoffDelay } from './terminal/protocol';
 import { hasTerminal, isSubagent, sessionOrder, sessionTitle, type LiveContext } from './status';
 import { readPref, writePref } from './prefs';
+import { readPanes, writePanes } from './panes';
 import {
   EVENT_TEXT,
   backend,
@@ -131,6 +132,12 @@ class AppState {
   /** Sessions a launch with `continue_from` is waiting on (the daemon may summarize them first, §9). */
   handoffFrom = new SvelteSet<string>();
   sidebarOpen = $state(false);
+  /** Sessions tiled side by side on the Sessions screen (panes.ts); empty: single view. */
+  panes: string[] = $state.raw(readPanes());
+  setPanes(ids: string[]): void {
+    this.panes = ids;
+    writePanes(ids);
+  }
   // Defaults to open only where it fits beside the terminal; an explicit choice is remembered.
   memoryPanel = $state(MEMORY_PANEL_PREF === 'unset' ? window.innerWidth > 1100 : MEMORY_PANEL_PREF === 'open');
   notifyPrefs: NotifyPrefs = $state(readNotifyPrefs());
