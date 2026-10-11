@@ -113,6 +113,8 @@ pub struct LaunchContext<'a> {
     pub args_before: &'a [OsString],
     /// Memory integration args placed after them.
     pub args_after: &'a [OsString],
+    /// Claude: `--dangerously-skip-permissions`; ignored by other agents.
+    pub bypass_permissions: bool,
 }
 
 /// Default interactive shell: `$SHELL` (unix), else pwsh / Windows PowerShell / cmd.
@@ -258,6 +260,9 @@ impl Agent {
                 }
             }
             _ => {}
+        }
+        if ctx.bypass_permissions && self.id == "claude" {
+            args.push("--dangerously-skip-permissions".into());
         }
         args.extend(ctx.args_after.iter().cloned());
         wrap_for_platform(path, args)
@@ -710,12 +715,17 @@ mod tests {
     }
 
     fn argv(a: &Agent, resume: bool, sid: Option<&str>) -> Vec<String> {
+        argv_with(a, resume, sid, false)
+    }
+
+    fn argv_with(a: &Agent, resume: bool, sid: Option<&str>, bypass: bool) -> Vec<String> {
         let PlatformCommand { args, .. } = a
             .command(&LaunchContext {
                 agent_session_id: sid,
                 resume,
                 args_before: &[],
                 args_after: &[],
+                bypass_permissions: bypass,
             })
             .unwrap();
         args.into_iter()
@@ -740,6 +750,7 @@ mod tests {
                     resume: true,
                     args_before: &[],
                     args_after: &[],
+                    bypass_permissions: false,
                 });
                 assert!(matches!(r, Err(AgentError::InvalidArgument(_))), "{bad:?}");
             }
@@ -756,6 +767,21 @@ mod tests {
     }
 
     #[test]
+    fn bypass_is_claude_only() {
+        let claude = agent("claude", "/bin/claude");
+        assert_eq!(
+            argv_with(&claude, false, Some("u1"), true),
+            ["--session-id", "u1", "--dangerously-skip-permissions"]
+        );
+        assert_eq!(
+            argv_with(&claude, true, Some("u1"), true),
+            ["--resume", "u1", "--dangerously-skip-permissions"]
+        );
+        let codex = agent("codex", "/bin/codex");
+        assert!(argv_with(&codex, false, None, true).is_empty());
+    }
+
+    #[test]
     fn integration_args_surround_launch_args() {
         let codex = agent("codex", "/bin/codex");
         let PlatformCommand { args, .. } = codex
@@ -764,6 +790,7 @@ mod tests {
                 resume: true,
                 args_before: &["-c".into(), "a=1".into()],
                 args_after: &["--x".into()],
+                bypass_permissions: false,
             })
             .unwrap();
         let args: Vec<String> = args
@@ -897,6 +924,7 @@ endLocal & goto #_undefined_# 2>NUL || title %COMSPEC% & "%_prog%"  "%dp0%\node_
                 resume: false,
                 args_before: &[],
                 args_after: &[],
+                bypass_permissions: false,
             })
             .unwrap_err();
         assert!(matches!(err, AgentError::NotInstalled(_)));

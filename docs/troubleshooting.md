@@ -112,6 +112,12 @@ Symptoms: the new-session dialog says Claude Code is not logged in on a machine,
 
 If `blirp doctor` says `CLAUDE_CODE_OAUTH_TOKEN from the environment`, the daemon's own environment sets the variable and that value wins over the stored token; fix or remove it where the daemon is started. `blirp agents clear-token claude` removes the stored token. Details: [agents.md](agents.md#headless-login-for-a-hub).
 
+## No scrollback / the wheel does not scroll in a Claude Code session
+
+Claude Code's fullscreen renderer (`"tui": "fullscreen"` in its settings, or `/tui fullscreen`) draws on the terminal's alternate screen and takes the mouse wheel through mouse tracking, so the pane has no scrollback to scroll. Sessions launched from blirp pass Claude a settings file with `"tui": "default"` (Claude's main-screen renderer), which keeps the transcript in the pane's scrollback on every machine.
+
+To keep fullscreen in blirp sessions, set `CLAUDE_CODE_NO_FLICKER=1` in the environment of the daemon on that machine; Claude reads it before its settings. Sessions started outside blirp are not affected either way.
+
 ## Hooks are not firing / status stays Idle
 
 - `blirp hooks status` shows per agent whether hooks and MCP are installed.

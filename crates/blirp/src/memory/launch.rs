@@ -10,6 +10,14 @@ use std::path::{Path, PathBuf};
 
 pub const MEMORY_FILE: &str = "memory.md";
 pub const HANDOFF_FILE: &str = "handoff.md";
+/// Empty marker in a session's launch dir: it was launched with
+/// `bypass_permissions`, so resumes pass the flag again.
+pub const BYPASS_MARKER: &str = "bypass-permissions";
+/// Empty marker in a session's launch dir: launched with
+/// `inject_memory: false`, so resumes and SessionStart hooks inject nothing.
+pub const NO_MEMORY_MARKER: &str = "no-memory";
+/// Empty marker: launched with `inject_memory: true` (inject even where config is off).
+pub const MEMORY_MARKER: &str = "memory";
 const CODEX_MAX_INSTRUCTIONS: usize = 24_000;
 
 /// Claude events wired at launch; SessionStart covers every source.
@@ -18,6 +26,7 @@ pub const CLAUDE_EVENTS: &[(&str, Option<&str>)] = &[
     ("UserPromptSubmit", None),
     ("Stop", None),
     ("Notification", None),
+    ("PostToolUse", None),
     ("SessionEnd", None),
     ("PreCompact", None),
 ];
@@ -165,7 +174,11 @@ pub fn prepare(agent: &str, inp: &LaunchInput<'_>) -> anyhow::Result<LaunchInteg
                 hooks.insert((*event).into(), json!([group]));
             }
             let settings = inp.launch_dir.join("settings.json");
-            write_json(&settings, &json!({ "hooks": hooks }))?;
+            // The classic renderer keeps the transcript in the terminal's own scrollback, which
+            // blirp's pane scrolls and snapshots; fullscreen ("tui": "fullscreen") takes the
+            // wheel through mouse tracking on an alternate screen. CLAUDE_CODE_NO_FLICKER=1 in
+            // the daemon's env still wins.
+            write_json(&settings, &json!({ "hooks": hooks, "tui": "default" }))?;
             let mcp = inp.launch_dir.join("mcp.json");
             write_json(
                 &mcp,
@@ -384,6 +397,7 @@ mod tests {
             &std::fs::read_to_string(dir.path().join("settings.json")).unwrap(),
         )
         .unwrap();
+        assert_eq!(s["tui"], "default");
         for (ev, _) in CLAUDE_EVENTS {
             let cmd = s["hooks"][ev][0]["hooks"][0]["command"].as_str().unwrap();
             assert_eq!(cmd, format!("/opt/blirp hook claude {ev}"));

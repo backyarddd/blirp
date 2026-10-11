@@ -5,7 +5,7 @@ pub mod install;
 
 use crate::api::{ApiError, ApiResult};
 use crate::memory::distill::DISTILLING_ENV;
-use crate::memory::launch::{MEMORY_FILE, inject_mode};
+use crate::memory::launch::{MEMORY_FILE, MEMORY_MARKER, NO_MEMORY_MARKER, inject_mode};
 use crate::memory::render::render_injection;
 use crate::state::SharedState;
 use blirp_core::config::MemoryConfig;
@@ -72,6 +72,8 @@ pub enum HookEvent {
     PromptSubmit,
     Stop,
     Notification,
+    /// A tool call finished (claude PostToolUse, gemini AfterTool): a permission prompt before it was answered.
+    ToolDone,
     SessionEnd,
     PreCompact,
     Other,
@@ -86,6 +88,7 @@ impl HookEvent {
             "userpromptsubmit" | "beforeagent" | "beforesubmitprompt" => Self::PromptSubmit,
             "stop" | "afteragent" => Self::Stop,
             "notification" => Self::Notification,
+            "posttooluse" | "aftertool" => Self::ToolDone,
             "sessionend" => Self::SessionEnd,
             "precompact" | "precompress" => Self::PreCompact,
             _ => Self::Other,
@@ -137,7 +140,18 @@ fn session_start_context(
     {
         return Ok(Some(text));
     }
-    if !memory.inject_enabled(&session.agent) {
+    // Launched without memory (per launch): later starts (resume, compact,
+    // clear) stay without it too; with memory forced on, they get it.
+    let marker = |name: &str| {
+        session.origin == SessionOrigin::Blirp
+            && paths
+                .launch_dir(&session.id)
+                .is_ok_and(|d| d.join(name).exists())
+    };
+    if marker(NO_MEMORY_MARKER) {
+        return Ok(None);
+    }
+    if !marker(MEMORY_MARKER) && !memory.inject_enabled(&session.agent) {
         return Ok(None);
     }
     Ok(Some(render_injection(
@@ -311,6 +325,9 @@ pub fn handle(
             HookEvent::PromptSubmit => Some(SessionStatus::Working),
             HookEvent::Stop => Some(SessionStatus::Idle),
             HookEvent::Notification => Some(SessionStatus::Waiting),
+            HookEvent::ToolDone => {
+                (s.status == SessionStatus::Waiting).then_some(SessionStatus::Working)
+            }
             HookEvent::SessionStart
                 if !s.status.is_live() || s.status == SessionStatus::Starting =>
             {
@@ -598,7 +615,9 @@ mod tests {
         assert_eq!(HookEvent::parse("BeforeAgent"), HookEvent::PromptSubmit);
         assert_eq!(HookEvent::parse("sessionEnd"), HookEvent::SessionEnd);
         assert_eq!(HookEvent::parse("PreCompress"), HookEvent::PreCompact);
-        assert_eq!(HookEvent::parse("PostToolUse"), HookEvent::Other);
+        assert_eq!(HookEvent::parse("PostToolUse"), HookEvent::ToolDone);
+        assert_eq!(HookEvent::parse("AfterTool"), HookEvent::ToolDone);
+        assert_eq!(HookEvent::parse("PreToolUse"), HookEvent::Other);
     }
 
     fn env_fn(vars: Vec<(&'static str, String)>) -> impl Fn(&str) -> Option<String> {
@@ -709,6 +728,32 @@ mod tests {
         })
         .unwrap();
         assert!(out.contains("offline brief"), "{out}");
+    }
+
+    #[test]
+    fn no_memory_marker_skips_session_start_memory() {
+        let (d, store, pid) = crate::memory::testutil::project_store("Proj");
+        store.put_brief(&pid, "the brief", "user").unwrap();
+        let paths = Paths::at(d.path());
+        let session = crate::memory::testutil::session("S1", &pid, 1);
+        let dir = paths.launch_dir("S1").unwrap();
+        std::fs::create_dir_all(&dir).unwrap();
+        let start = |memory: &MemoryConfig| {
+            session_start_context(&store, &paths, &session, Some("resume"), memory).unwrap()
+        };
+        let on = MemoryConfig::default();
+        assert!(start(&on).is_some_and(|m| m.contains("the brief")));
+        std::fs::write(dir.join(NO_MEMORY_MARKER), b"").unwrap();
+        assert_eq!(start(&on), None);
+        std::fs::remove_file(dir.join(NO_MEMORY_MARKER)).unwrap();
+        // Forced on where config turns injection off.
+        let off = MemoryConfig {
+            inject: false,
+            ..MemoryConfig::default()
+        };
+        assert_eq!(start(&off), None);
+        std::fs::write(dir.join(MEMORY_MARKER), b"").unwrap();
+        assert!(start(&off).is_some_and(|m| m.contains("the brief")));
     }
 
     #[test]

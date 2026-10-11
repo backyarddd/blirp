@@ -545,7 +545,18 @@ continue_from?: string,
 /**
  * Target machine id; defaults to this machine.
  */
-machine?: string, cols?: number, rows?: number, };
+machine?: string, 
+/**
+ * Claude Code only: start with `--dangerously-skip-permissions` (every
+ * tool runs without asking). Kept for resumes of the session.
+ */
+bypass_permissions?: boolean, 
+/**
+ * Inject project memory at start: false starts without it (a handoff
+ * pack is still passed), true even where config turns it off; omitted,
+ * config `memory.inject` decides. Kept for resumes of the session.
+ */
+inject_memory?: boolean, cols?: number, rows?: number, };
 
 export type PatchSession = { 
 /**

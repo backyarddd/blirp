@@ -2,7 +2,10 @@
 
 use crate::agents::{Agent, AgentError, LaunchContext};
 use crate::api::{ApiError, ApiResult};
-use crate::memory::launch::{HANDOFF_FILE, LaunchInput, LaunchIntegration, continue_prompt};
+use crate::memory::launch::{
+    BYPASS_MARKER, HANDOFF_FILE, LaunchInput, LaunchIntegration, MEMORY_MARKER, NO_MEMORY_MARKER,
+    continue_prompt,
+};
 use crate::memory::render::render_injection;
 use crate::pty::{ExitInfo, Reservation, SpawnRequest, Terminal};
 use crate::state::SharedState;
@@ -406,6 +409,24 @@ pub async fn launch(state: &SharedState, req: LaunchSession) -> ApiResult<Sessio
     if agent.path.is_none() {
         return Err(agent_error(AgentError::NotInstalled(agent.display_name)));
     }
+    if req.bypass_permissions == Some(true) && agent.id != "claude" {
+        return Err(ApiError::bad_request(
+            "bypass_permissions is only supported for Claude Code",
+        ));
+    }
+    // A continuation keeps the source's bypass unless the request says
+    // otherwise (options live in the source's launch dir, so only a source
+    // of this machine can tell).
+    let bypass = match req.bypass_permissions {
+        Some(b) => b,
+        None => match &source {
+            Some(s) if s.machine_id == state.machine.id && agent.id == "claude" => {
+                let (st, id) = (state.clone(), s.id.clone());
+                crate::api::blocking(move || Ok(read_launch_options(&st, &id).0)).await?
+            }
+            _ => false,
+        },
+    };
     // §9: the pack carries the source's summary as of now, not as of its
     // last idle distill (bounded; never fails the launch). Before anything
     // is created for the new session (a worktree), since it can take a while.
@@ -459,6 +480,8 @@ pub async fn launch(state: &SharedState, req: LaunchSession) -> ApiResult<Sessio
     let row = session.clone();
     let src = source.clone();
     let repo_root = prepared.repo_root;
+    let st = state.clone();
+    let inject_memory = req.inject_memory;
     let handoff = crate::api::blocking(move || {
         if let Err(e) = store.insert_session(&row) {
             // No session will ever own the worktree just added for it.
@@ -468,6 +491,9 @@ pub async fn launch(state: &SharedState, req: LaunchSession) -> ApiResult<Sessio
                 tracing::warn!(worktree = %wt, error = %ge, "removing the worktree of a failed launch failed");
             }
             return Err(e.into());
+        }
+        if let Err(e) = write_launch_options(&st, &row.id, bypass, inject_memory) {
+            tracing::warn!(session = %row.id, error = %e, "saving launch options failed; a resume starts without them");
         }
         Ok(match src {
             Some(s) => {
@@ -502,6 +528,8 @@ pub async fn launch(state: &SharedState, req: LaunchSession) -> ApiResult<Sessio
             rows: req.rows,
             prompt: req.prompt,
             handoff,
+            bypass,
+            inject: req.inject_memory,
         },
     )
     .await
@@ -544,6 +572,10 @@ pub async fn resume(state: &SharedState, id: &str) -> ApiResult<Session> {
         )));
     }
     let agent = resolve_agent(state, &session.agent).await?;
+    let (bypass, inject) = {
+        let (st, id) = (state.clone(), session.id.clone());
+        crate::api::blocking(move || Ok(read_launch_options(&st, &id))).await?
+    };
     start(
         state,
         session,
@@ -555,6 +587,8 @@ pub async fn resume(state: &SharedState, id: &str) -> ApiResult<Session> {
             rows: None,
             prompt: None,
             handoff: None,
+            bypass,
+            inject,
         },
     )
     .await
@@ -567,6 +601,47 @@ struct StartOptions {
     prompt: Option<String>,
     /// Handoff pack of the `continue_from` session.
     handoff: Option<String>,
+    /// `--dangerously-skip-permissions` (claude).
+    bypass: bool,
+    /// Per-launch memory override; None: config.
+    inject: Option<bool>,
+}
+
+/// Launch options kept as marker files in the session's launch dir (per
+/// machine, never synced), read back on resume.
+fn read_launch_options(state: &SharedState, id: &str) -> (bool, Option<bool>) {
+    let Ok(dir) = state.paths.launch_dir(id) else {
+        return (false, None);
+    };
+    let inject = if dir.join(NO_MEMORY_MARKER).exists() {
+        Some(false)
+    } else if dir.join(MEMORY_MARKER).exists() {
+        Some(true)
+    } else {
+        None
+    };
+    (dir.join(BYPASS_MARKER).exists(), inject)
+}
+
+fn write_launch_options(
+    state: &SharedState,
+    id: &str,
+    bypass: bool,
+    inject: Option<bool>,
+) -> std::io::Result<()> {
+    let dir = state.paths.launch_dir(id).map_err(std::io::Error::other)?;
+    std::fs::create_dir_all(&dir)?;
+    let markers = [
+        (bypass, BYPASS_MARKER),
+        (inject == Some(false), NO_MEMORY_MARKER),
+        (inject == Some(true), MEMORY_MARKER),
+    ];
+    for (on, name) in markers {
+        if on {
+            std::fs::write(dir.join(name), b"")?;
+        }
+    }
+    Ok(())
 }
 
 /// §7 step 3: render memory to the launch dir and build the agent's
@@ -576,6 +651,7 @@ fn integrate(
     session: &Session,
     agent: &Agent,
     handoff: Option<&str>,
+    inject: Option<bool>,
 ) -> LaunchIntegration {
     let launch_dir = match state.paths.launch_dir(&session.id) {
         Ok(d) => d,
@@ -586,9 +662,9 @@ fn integrate(
     };
     let config = state.config().memory;
     let max = config.inject_max_chars as usize;
-    // Turned off by the user (§12): no memory, but a handoff pack the user
-    // asked for with continue/fork is still passed on.
-    let memory = if !config.inject_enabled(&agent.id) {
+    // Turned off by the user (§12) or for this launch: no memory, but a
+    // handoff pack the user asked for with continue/fork is still passed on.
+    let memory = if !inject.unwrap_or_else(|| config.inject_enabled(&agent.id)) {
         String::new()
     } else {
         match render_injection(&state.store, &session.project_id, Some(&session.id), max) {
@@ -642,6 +718,8 @@ async fn start(
         rows,
         prompt,
         handoff,
+        bypass,
+        inject,
     } = opts;
     // Resumed rows go back to `starting` before the process exists, so a
     // fast exit can never be overwritten by this update.
@@ -667,12 +745,13 @@ async fn start(
     let (s2, a2, h2) = (session.clone(), agent.clone(), handoff.clone());
     // All touch the filesystem (launch files, shim parsing, the token file).
     let (integ, command, login) = crate::api::blocking(move || {
-        let integ = integrate(&st, &s2, &a2, h2.as_deref());
+        let integ = integrate(&st, &s2, &a2, h2.as_deref(), inject);
         let command = a2.command(&LaunchContext {
             agent_session_id: s2.agent_session_id.as_deref(),
             resume,
             args_before: &integ.args_before,
             args_after: &integ.args_after,
+            bypass_permissions: bypass,
         });
         Ok((integ, command, login_env(&a2, &st.paths)))
     })

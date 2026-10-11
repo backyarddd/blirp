@@ -147,7 +147,10 @@ async fn hook_lifecycle_of_an_external_session() {
             json!({"notification_type": "permission_prompt"}),
             SessionStatus::Waiting,
         ),
+        // Approving the prompt fires no prompt hook; the finished tool is the first signal.
+        ("PostToolUse", json!({}), SessionStatus::Working),
         ("Stop", json!({}), SessionStatus::Idle),
+        ("PostToolUse", json!({}), SessionStatus::Idle),
         (
             "SessionEnd",
             json!({"reason": "clear"}),
@@ -344,6 +347,51 @@ summarizer = \"none\"
         )
         .await;
     assert_eq!(r.status(), 404);
+    h.daemon.shutdown().await.unwrap();
+}
+
+#[tokio::test]
+async fn launch_options_validate_and_persist() {
+    let h = Harness::start().await;
+    let (dir, _pid) = h.project("options").await;
+    let r = h
+        .post(
+            "/api/sessions",
+            json!({"agent": "shell", "cwd": dir, "bypass_permissions": true}),
+        )
+        .await;
+    assert_eq!(r.status(), 400);
+    let err = r.json::<ErrorBody>().await.unwrap().error;
+    assert_eq!(err.code, "invalid_request");
+    assert_eq!(
+        err.message,
+        "bypass_permissions is only supported for Claude Code"
+    );
+
+    let launch = |opts: Value| {
+        let mut body = json!({"agent": "shell", "cwd": dir});
+        body.as_object_mut()
+            .unwrap()
+            .extend(opts.as_object().unwrap().clone());
+        h.post("/api/sessions", body)
+    };
+    let r = launch(json!({"inject_memory": false})).await;
+    assert_eq!(r.status(), 201, "{}", r.text().await.unwrap_or_default());
+    let s: Session = r.json().await.unwrap();
+    let launch_dir = h.daemon.state.paths.launch_dir(&s.id).unwrap();
+    assert!(launch_dir.join("no-memory").is_file());
+    assert!(!launch_dir.join("memory").exists());
+    let memory = std::fs::read_to_string(launch_dir.join("memory.md")).unwrap();
+    assert!(!memory.contains("options is a test project."), "{memory}");
+
+    // Omitted: config decides, and nothing is recorded.
+    let r = launch(json!({})).await;
+    assert_eq!(r.status(), 201, "{}", r.text().await.unwrap_or_default());
+    let s: Session = r.json().await.unwrap();
+    let launch_dir = h.daemon.state.paths.launch_dir(&s.id).unwrap();
+    assert!(!launch_dir.join("no-memory").exists());
+    let memory = std::fs::read_to_string(launch_dir.join("memory.md")).unwrap();
+    assert!(memory.contains("options is a test project."), "{memory}");
     h.daemon.shutdown().await.unwrap();
 }
 

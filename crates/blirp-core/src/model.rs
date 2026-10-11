@@ -956,6 +956,17 @@ pub struct LaunchSession {
     #[serde(default)]
     #[ts(optional)]
     pub machine: Option<String>,
+    /// Claude Code only: start with `--dangerously-skip-permissions` (every
+    /// tool runs without asking). Kept for resumes of the session.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub bypass_permissions: Option<bool>,
+    /// Inject project memory at start: false starts without it (a handoff
+    /// pack is still passed), true even where config turns it off; omitted,
+    /// config `memory.inject` decides. Kept for resumes of the session.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub inject_memory: Option<bool>,
     #[serde(default)]
     #[ts(optional)]
     pub cols: Option<u16>,

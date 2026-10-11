@@ -25,6 +25,11 @@
   let agent = $state('');
   let prompt = $state('');
   let worktree = $state(false);
+  let injectMemory = $state(true);
+  /** Set once the user toggles the box: the agent's default no longer overrides it. */
+  let injectTouched = false;
+  let bypass = $state(false);
+  let memoryDefaults: { inject: boolean; disabled: string[] } = { inject: true, disabled: [] };
   /** Machine to run on; '' is this machine. */
   let target = $state('');
   let submitting = $state(false);
@@ -161,6 +166,9 @@
     target = '';
     agent = '';
     worktree = false;
+    injectMemory = true;
+    injectTouched = false;
+    bypass = false;
     remoteAgents = null;
     resetTargetState();
     const [settings] = await Promise.all([
@@ -176,7 +184,22 @@
     defaultAgent = settings?.config.agents.default;
     if (!agent) agent = installed.find((a) => a.id === defaultAgent)?.id ?? installed[0]?.id ?? '';
     if (!worktree) worktree = settings?.config.sessions.worktree_default ?? false;
+    memoryDefaults = {
+      inject: settings?.config.memory.inject ?? true,
+      disabled: settings?.config.memory.inject_disabled_agents ?? [],
+    };
+    if (!injectTouched) injectMemory = injectDefault(agent);
   }
+
+  function injectDefault(a: string): boolean {
+    return memoryDefaults.inject && !memoryDefaults.disabled.includes(a);
+  }
+
+  // Another agent can have memory turned off in settings: follow it until the box is touched.
+  $effect(() => {
+    const a = agent;
+    if (!injectTouched) untrack(() => (injectMemory = injectDefault(a)));
+  });
 
   let agentsSeq = 0;
   async function pickTarget(id: string): Promise<void> {
@@ -282,6 +305,10 @@
       req.cwd = p;
     }
     if (prompt.trim()) req.prompt = prompt.trim();
+    // Only a choice made here is sent: left alone, the running machine's own config decides, now
+    // and on resume, and machines that predate the field still accept the launch.
+    if (injectTouched) req.inject_memory = injectMemory;
+    if (agent === 'claude' && bypass) req.bypass_permissions = true;
     if (remote) req.machine = target;
     submitting = true;
     try {
@@ -563,6 +590,20 @@
         <input type="checkbox" bind:checked={worktree} />
         <span>Run in a new git worktree <span class="faint">(isolated branch blirp/&lt;name&gt;)</span></span>
       </label>
+    {/if}
+
+    <label class="check field">
+      <input type="checkbox" bind:checked={injectMemory} onchange={() => (injectTouched = true)} />
+      <span>Inject memory <span class="faint">(brief, decisions and open threads at start)</span></span>
+    </label>
+    {#if agent === 'claude'}
+      <label class="check field">
+        <input type="checkbox" bind:checked={bypass} />
+        <span>Bypass permissions <span class="faint">(--dangerously-skip-permissions)</span></span>
+      </label>
+      {#if bypass}
+        <span class="hint warn" role="alert">Claude Code runs every tool and command without asking. Use it only in folders you trust.</span>
+      {/if}
     {/if}
 
     {#if formError}<p class="error" role="alert">{formError}</p>{/if}
