@@ -76,12 +76,21 @@ async fn list(
 async fn launch(
     State(s): State<SharedState>,
     Control(principal): Control,
-    ApiJson(body): ApiJson<LaunchSession>,
+    ApiJson(mut body): ApiJson<LaunchSession>,
 ) -> ApiResult<Response> {
     // A launch can wait for a summary (up to 90 s with `continue_from`);
     // run it as its own task, so a client that goes away meanwhile (a
     // closed tab, a dropped forward) cannot stop it halfway.
     tokio::spawn(async move {
+        if let Some(src) = body.continue_from.clone()
+            && body.machine.is_none()
+        {
+            let source_machine = remote_machine(&s, &src).await?;
+            let online = source_machine
+                .as_ref()
+                .and_then(|m| s.sync.presence(&s.machine.id).get(m).map(|p| p.online));
+            body.machine = continuation_machine(&body, source_machine.as_deref(), online);
+        }
         if let Some(m) = body.machine.clone()
             && m != s.machine.id
         {
@@ -111,6 +120,27 @@ async fn launch_remote(
         None => None,
     };
     crate::sync::launch_remote(s, m, principal, body).await
+}
+
+/// The machine a `continue_from` launch without a folder or target goes to:
+/// the source session's, so it starts where that session's folder is.
+/// `None` keeps it here: a target is given, the source is local or unknown,
+/// or its machine is known to be offline (a local folder of the project may
+/// still work).
+fn continuation_machine(
+    body: &LaunchSession,
+    source_machine: Option<&str>,
+    online: Option<bool>,
+) -> Option<String> {
+    if body.continue_from.is_none()
+        || body.machine.is_some()
+        || body.cwd.is_some()
+        || body.project_id.is_some()
+        || online == Some(false)
+    {
+        return None;
+    }
+    source_machine.map(str::to_string)
 }
 
 /// The machine a session runs on when that is not this one.
@@ -430,4 +460,59 @@ async fn move_session(
         s.emit(ServerEvent::ProjectUpdated { project_id });
     }
     Ok(axum::response::IntoResponse::into_response(Json(session)))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn cont() -> LaunchSession {
+        LaunchSession {
+            continue_from: Some("s".into()),
+            agent: "claude".into(),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn continuation_machine_follows_the_source() {
+        let hub = Some("hub".to_string());
+        assert_eq!(continuation_machine(&cont(), Some("hub"), Some(true)), hub);
+        assert_eq!(continuation_machine(&cont(), Some("hub"), None), hub);
+        assert_eq!(
+            continuation_machine(&cont(), Some("hub"), Some(false)),
+            None
+        );
+        assert_eq!(continuation_machine(&cont(), None, None), None);
+
+        let with_cwd = LaunchSession {
+            cwd: Some("/x".into()),
+            ..cont()
+        };
+        assert_eq!(
+            continuation_machine(&with_cwd, Some("hub"), Some(true)),
+            None
+        );
+        let with_project = LaunchSession {
+            project_id: Some("p".into()),
+            ..cont()
+        };
+        assert_eq!(
+            continuation_machine(&with_project, Some("hub"), Some(true)),
+            None
+        );
+        let with_machine = LaunchSession {
+            machine: Some("pc".into()),
+            ..cont()
+        };
+        assert_eq!(
+            continuation_machine(&with_machine, Some("hub"), Some(true)),
+            None
+        );
+        let plain = LaunchSession {
+            continue_from: None,
+            ..cont()
+        };
+        assert_eq!(continuation_machine(&plain, Some("hub"), Some(true)), None);
+    }
 }
