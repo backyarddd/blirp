@@ -152,6 +152,7 @@ impl Store {
             readers: Mutex::new(Vec::new()),
             pulled_to_head: std::sync::atomic::AtomicBool::new(false),
             remote_projects: std::sync::RwLock::default(),
+            remote_sessions: std::sync::RwLock::default(),
         })
     }
 

@@ -560,7 +560,12 @@ struct Arrived {
 /// was parked for a removed row, by a machine no longer paired, or a folder
 /// merge whose folder its owner filed elsewhere meanwhile (in no project
 /// merged into the target).
-fn unpark_in(tx: &Transaction<'_>, arrived: &[Arrived], touched: &mut Vec<String>) -> Result<()> {
+fn unpark_in(
+    tx: &Transaction<'_>,
+    arrived: &[Arrived],
+    touched: &mut Vec<String>,
+    sessions: &mut Vec<String>,
+) -> Result<()> {
     let mut seen = std::collections::BTreeSet::new();
     for a in arrived {
         if !seen.insert((&a.entity, &a.key, a.deleted)) {
@@ -585,13 +590,17 @@ fn unpark_in(tx: &Transaction<'_>, arrived: &[Arrived], touched: &mut Vec<String
                     Ok(Some(change)) => match check_owner(tx, &origin, None, change) {
                         Ok(change) => {
                             let project = project_of(tx, &change)?;
+                            let session = session_of(&change);
                             let applied = savepoint(tx, || {
                                 check_ids(&change)?;
                                 write_row(tx, &change)?;
                                 super::queue_in(tx, &change)
                             })?;
                             match applied {
-                                Ok(_) => touched.extend(project),
+                                Ok(_) => {
+                                    touched.extend(project);
+                                    sessions.extend(session);
+                                }
                                 Err(err) => {
                                     tracing::warn!(origin, origin_seq, error = %err, "hub could not apply a parked entry");
                                 }
@@ -709,6 +718,15 @@ fn project_of(tx: &Transaction<'_>, change: &Change) -> Result<Option<String>> {
             .optional()?,
         _ => None,
     })
+}
+
+/// The session a replicated change writes or deletes.
+fn session_of(change: &Change) -> Option<String> {
+    match change {
+        Change::Session(s) => Some(s.id.clone()),
+        Change::DeleteSession { id } => Some(id.clone()),
+        _ => None,
+    }
 }
 
 /// Run `f` inside a savepoint: its writes are rolled back if it fails, the
@@ -1089,12 +1107,17 @@ impl Store {
     /// Write a replicated change received from another machine: the row
     /// only, never the outbox. Returns false for a duplicate event.
     pub fn apply_remote(&self, change: &Change) -> Result<bool> {
-        let (out, touched) = self.write(|tx| {
+        let (out, touched, sessions) = self.write(|tx| {
             let project = project_of(tx, change)?;
             let out = write_row(tx, change)? > 0 || !matches!(change, Change::Event(_));
-            Ok((out, project.into_iter().collect()))
+            Ok((
+                out,
+                project.into_iter().collect(),
+                session_of(change).into_iter().collect(),
+            ))
         })?;
         self.remote_projects_changed(touched);
+        self.remote_sessions_changed(sessions);
         Ok(out)
     }
 
@@ -1203,6 +1226,7 @@ impl Store {
             return Err(StoreError::Invalid("hub cannot ingest its own id".into()));
         }
         let mut touched = Vec::new();
+        let mut sessions: Vec<String> = Vec::new();
         let out = self.write(|tx| {
             flush_own_in(tx, own)?;
             let mut cur = cursors_in(tx, origin)?;
@@ -1271,9 +1295,11 @@ impl Store {
                 }
                 inserted += 1;
                 let project = project_of(tx, &change)?;
+                let session = session_of(&change);
                 match savepoint(tx, || write_row(tx, &change))? {
                     Ok(_) => {
                         touched.extend(project);
+                        sessions.extend(session);
                         // A delete drops what was parked for the row.
                         let deleted = match change {
                             Change::Session(_) | Change::ProjectPath(_) => Some(false),
@@ -1298,7 +1324,7 @@ impl Store {
             }
             // After the whole batch: the parked writes follow every write of
             // the row in it.
-            unpark_in(tx, &arrived, &mut touched)?;
+            unpark_in(tx, &arrived, &mut touched, &mut sessions)?;
             if acked > cur.last_pushed_origin_seq {
                 cur.last_pushed_origin_seq = acked;
                 set_cursors_in(tx, origin, cur)?;
@@ -1311,6 +1337,7 @@ impl Store {
             })
         })?;
         self.remote_projects_changed(touched);
+        self.remote_sessions_changed(sessions);
         Ok(out)
     }
 
@@ -1592,8 +1619,9 @@ impl Store {
     /// Node: apply a pull page from `hub` and advance the pull cursor in the
     /// same transaction. Returns how many remote entries were applied.
     pub fn node_apply_pull(&self, hub: &str, page: &HubPage) -> Result<usize> {
-        let (applied, touched) = self.node_apply_pull_in(hub, page)?;
+        let (applied, touched, sessions) = self.node_apply_pull_in(hub, page)?;
         self.remote_projects_changed(touched);
+        self.remote_sessions_changed(sessions);
         if !page.more {
             self.pulled_to_head
                 .store(true, std::sync::atomic::Ordering::Relaxed);
@@ -1608,17 +1636,22 @@ impl Store {
             .load(std::sync::atomic::Ordering::Relaxed)
     }
 
-    /// Entries applied, and the projects they touched.
-    fn node_apply_pull_in(&self, hub: &str, page: &HubPage) -> Result<(usize, Vec<String>)> {
+    /// Entries applied, and the projects and sessions they touched.
+    fn node_apply_pull_in(
+        &self,
+        hub: &str,
+        page: &HubPage,
+    ) -> Result<(usize, Vec<String>, Vec<String>)> {
         self.write(|tx| {
             let mut cur = cursors_in(tx, hub)?;
             if page.up_to <= cur.last_pulled_hub_seq {
-                return Ok((0, Vec::new()));
+                return Ok((0, Vec::new(), Vec::new()));
             }
             let me = super::local_machine_in(tx)?;
             let mut own_seen = page.own_seen;
             let mut applied = 0;
             let mut touched = Vec::new();
+            let mut sessions = Vec::new();
             let mut later_own = tx.prepare_cached(
                 "SELECT 1 FROM outbox WHERE entity = ?1 AND key = ?2 AND origin_seq > ?3
                  UNION ALL SELECT 1 FROM outbox_deferred WHERE entity = ?1 AND key = ?2
@@ -1687,10 +1720,12 @@ impl Store {
                             continue;
                         }
                         let project = project_of(tx, &change)?;
+                        let session = session_of(&change);
                         match savepoint(tx, || write_row(tx, &change))? {
                             Ok(_) => {
                                 applied += 1;
                                 touched.extend(project);
+                                sessions.extend(session);
                             }
                             Err(err) => {
                                 tracing::warn!(origin = %origin_machine, hub_seq, entity = %entry.entity, error = %err, "could not apply replicated entry");
@@ -1708,7 +1743,7 @@ impl Store {
             // Never past what the hub acknowledged: `own_seen` is the hub's
             // word, and an unpushed entry dropped here would be lost.
             prune_in(tx, own_seen.min(cur.last_pushed_origin_seq))?;
-            Ok((applied, touched))
+            Ok((applied, touched, sessions))
         })
     }
 
@@ -1950,6 +1985,43 @@ mod tests {
         // Nothing replicated, nothing announced.
         pull(&b, "B", &hub, "H");
         assert!(take(&on_b).is_empty());
+    }
+
+    #[test]
+    fn replicated_session_changes_are_announced() {
+        let (_h, hub) = temp_store();
+        let (_a, a) = temp_store();
+        let (_b, b) = temp_store();
+        let seen = |s: &Store| {
+            let log: std::sync::Arc<std::sync::Mutex<Vec<Vec<String>>>> = Default::default();
+            let l = log.clone();
+            s.on_remote_sessions(std::sync::Arc::new(move |ids: &[String]| {
+                l.lock().unwrap().push(ids.to_vec());
+            }));
+            log
+        };
+        let (on_hub, on_a) = (seen(&hub), seen(&a));
+        let take =
+            |log: &std::sync::Mutex<Vec<Vec<String>>>| std::mem::take(&mut *log.lock().unwrap());
+        b.apply(project("p", "shared")).unwrap();
+        b.apply(Change::Session(session_of("s1", "B"))).unwrap();
+        push(&b, "B", &hub, "H");
+        // The hub ingesting a node's session change announces it.
+        assert_eq!(take(&on_hub), [vec!["s1".to_string()]]);
+        assert_eq!(pull(&a, "A", &hub, "H"), 2);
+        assert_eq!(take(&on_a), [vec!["s1".to_string()]]);
+
+        // A delete announces the id too, when the row is already gone.
+        b.delete_session("s1").unwrap();
+        push(&b, "B", &hub, "H");
+        assert_eq!(take(&on_hub), [vec!["s1".to_string()]]);
+        pull(&a, "A", &hub, "H");
+        assert_eq!(take(&on_a), [vec!["s1".to_string()]]);
+        assert!(a.get_session("s1").unwrap().is_none());
+
+        // Nothing replicated, nothing announced.
+        pull(&a, "A", &hub, "H");
+        assert!(take(&on_a).is_empty());
     }
 
     fn project_at(id: &str, name: &str, updated_at: i64) -> Change {

@@ -161,6 +161,9 @@ pub struct Store {
     /// Told which projects a replicated change touched (their row or a
     /// folder), after it is committed.
     remote_projects: std::sync::RwLock<Option<ProjectsHook>>,
+    /// Told which sessions a replicated change wrote or deleted, after it
+    /// is committed.
+    remote_sessions: std::sync::RwLock<Option<ProjectsHook>>,
 }
 
 /// See [`Store::on_remote_projects`].
@@ -196,6 +199,7 @@ impl Store {
             readers: Mutex::new(Vec::new()),
             pulled_to_head: std::sync::atomic::AtomicBool::new(false),
             remote_projects: std::sync::RwLock::default(),
+            remote_sessions: std::sync::RwLock::default(),
         })
     }
 
@@ -276,6 +280,33 @@ impl Store {
         ids.dedup();
         let hook = self
             .remote_projects
+            .read()
+            .unwrap_or_else(PoisonError::into_inner)
+            .clone();
+        if let Some(h) = hook {
+            h(&ids);
+        }
+    }
+
+    /// Call `hook` with the ids of the sessions each committed batch of
+    /// replicated changes from other machines wrote or deleted, so the
+    /// daemon can tell its clients (their status changes on the owning
+    /// machine).
+    pub fn on_remote_sessions(&self, hook: ProjectsHook) {
+        *self
+            .remote_sessions
+            .write()
+            .unwrap_or_else(PoisonError::into_inner) = Some(hook);
+    }
+
+    fn remote_sessions_changed(&self, mut ids: Vec<String>) {
+        if ids.is_empty() {
+            return;
+        }
+        ids.sort();
+        ids.dedup();
+        let hook = self
+            .remote_sessions
             .read()
             .unwrap_or_else(PoisonError::into_inner)
             .clone();

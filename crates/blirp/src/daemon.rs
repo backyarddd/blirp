@@ -266,6 +266,35 @@ impl Daemon {
                 }
             }
         }));
+        // Sessions another machine changed (status, title, summary, delete)
+        // reach this machine's clients too; a catch-up batch asks them to
+        // refetch.
+        let weak = Arc::downgrade(&state);
+        state.store.on_remote_sessions(Arc::new(move |ids| {
+            let Some(st) = weak.upgrade() else { return };
+            if ids.len() > 200 {
+                st.emit(blirp_core::model::ServerEvent::Resync);
+                return;
+            }
+            let now = blirp_core::now_ms();
+            for id in ids {
+                match st.store.get_session(id) {
+                    Ok(Some(session)) => {
+                        if session.status.is_live()
+                            || now - session.last_activity_at <= 24 * 60 * 60 * 1000
+                        {
+                            st.emit(blirp_core::model::ServerEvent::SessionUpdated { session });
+                        }
+                    }
+                    Ok(None) => st.emit(blirp_core::model::ServerEvent::SessionDeleted {
+                        session_id: id.clone(),
+                    }),
+                    Err(e) => {
+                        tracing::warn!(session = %id, error = %e, "reading a replicated session failed");
+                    }
+                }
+            }
+        }));
         crate::sessions::mark_detached(&state)?;
         crate::memory::distill::Distiller::start(state.clone());
         crate::uploads::start_pruning(state.clone());
