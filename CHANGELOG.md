@@ -10,6 +10,48 @@ so every tag needs one.
 
 ## [Unreleased]
 
+## [0.4.0] - 2026-10-11
+
+### Added
+
+- Split view: open up to four sessions side by side on the Sessions screen
+  ("Open in split view" in a session's menu). A sidebar click replaces the
+  focused pane, a click in a pane focuses it, and the panes are kept per
+  browser.
+- New session: "Bypass permissions" for Claude Code (starts it with
+  `--dangerously-skip-permissions`) and "Inject memory" (on by default,
+  following Settings > Memory). Both stay with the session when it is
+  resumed; a session started from a bypassed one keeps bypass.
+- `POST /api/sessions` takes `bypass_permissions` (claude only) and
+  `inject_memory`.
+
+### Changed
+
+- Sessions sidebar: a Recent view (default) hides ended sessions older than
+  three days, with All and All + archived next to it; working sessions sort
+  first, then waiting ones; project groups collapse and show how many
+  sessions run; cards take two lines.
+- Claude Code sessions blirp starts use Claude's classic renderer
+  (`"tui": "default"` in the launch settings), so the terminal keeps its
+  scrollback and the mouse wheel scrolls. `CLAUDE_CODE_NO_FLICKER=1` in the
+  daemon's environment brings fullscreen back.
+
+### Fixed
+
+- Status, title and deletion of another machine's sessions (cloud sessions)
+  now update the UI as they replicate; a stopped session no longer stays on
+  Waiting until a reload.
+- A Claude session that went on working after a permission prompt was
+  answered no longer stays on Waiting (PostToolUse hook).
+- "Start new session from this session" on a cloud session failed with
+  "project has no folder on this machine; pass cwd". It now starts on the
+  source session's machine.
+
+### Notes
+
+- Update every machine: the cloud fixes run on the hub. A launch that sets
+  the new fields is refused by a machine still on 0.3.0.
+
 ## [0.3.0] - 2026-09-28
 
 ### Added
@@ -451,7 +493,8 @@ done before it.
   all-or-nothing) and `blirp uninstall`; classic NSIS, MSI, DMG, deb, rpm
   and AppImage packages.
 
-[Unreleased]: https://github.com/backyarddd/blirp/compare/v0.3.0...HEAD
+[Unreleased]: https://github.com/backyarddd/blirp/compare/v0.4.0...HEAD
+[0.4.0]: https://github.com/backyarddd/blirp/compare/v0.3.0...v0.4.0
 [0.3.0]: https://github.com/backyarddd/blirp/compare/v0.2.1...v0.3.0
 [0.2.1]: https://github.com/backyarddd/blirp/compare/v0.2.0...v0.2.1
 [0.2.0]: https://github.com/backyarddd/blirp/compare/v0.1.0...v0.2.0
