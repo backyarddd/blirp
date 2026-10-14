@@ -349,6 +349,8 @@ test('a merged project loses its pin on this device; a deleted one keeps it for 
   await page.getByRole('menuitem', { name: 'Pin', exact: true }).click();
   await expect.poll(pinned).toContain(`p:${remote.id}`);
   await page.goto(`${env.url}/projects`);
+  // The merge must happen after the reloaded page's event stream is up, or its update is never seen.
+  await expect(page.locator('.conn.open')).toBeAttached();
   await apiCall('POST', `/api/projects/${remote.id}/merge`, { into: into.id });
   await expect.poll(pinned).not.toContain(`p:${remote.id}`);
 
