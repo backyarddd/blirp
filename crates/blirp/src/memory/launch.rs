@@ -336,14 +336,17 @@ pub fn prepare(agent: &str, inp: &LaunchInput<'_>) -> anyhow::Result<LaunchInteg
     Ok(out)
 }
 
-/// Initial prompt for a continued session, given how memory reaches the agent.
+/// Initial prompt for a continued session, given how memory reaches the agent. It asks for the
+/// agent's understanding of where things stand, not to resume work: the user confirms the
+/// picture (and says what is next) before anything changes.
 pub fn continue_prompt(inject: InjectMode, handoff_file: &Path) -> String {
+    const ASK: &str = "Read up on it and tell me your understanding of where we left off: what was being worked on, what is done, and what is still open. Do not change anything yet; wait for me to say what is next.";
     match inject {
         InjectMode::None => format!(
-            "Read the blirp handoff in {} and continue the work described there.",
+            "This continues an earlier session. The blirp handoff is in {}. {ASK}",
             slash_path(handoff_file)
         ),
-        _ => "Continue the work described in the blirp handoff above.".into(),
+        _ => format!("This continues an earlier session; the blirp handoff is above. {ASK}"),
     }
 }
 
