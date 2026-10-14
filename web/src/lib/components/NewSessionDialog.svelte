@@ -3,8 +3,6 @@
   import Cloud from '@lucide/svelte/icons/cloud';
   import Monitor from '@lucide/svelte/icons/monitor';
   import Laptop from '@lucide/svelte/icons/laptop';
-  import { navigate } from '../router.svelte';
-  import { href } from '../router';
   import { api, errorMessage } from '../api/client';
   import type { AgentInfo, CloneJob, DownloadJob, LaunchSession, ProjectFiles } from '../api/types.gen';
   import { app } from '../app.svelte';
@@ -315,7 +313,7 @@
       const s = await api.sessions.launch(req);
       app.upsertSession(s);
       close();
-      navigate(href.sessions(s.id));
+      app.showLaunched(s.id);
     } catch (err) {
       app.noteForbidden(err);
       formError = errorMessage(err);

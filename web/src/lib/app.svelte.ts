@@ -575,7 +575,7 @@ class AppState {
     try {
       const s = await api.sessions.launch(req);
       this.upsertSession(s);
-      navigate(href.sessions(s.id));
+      this.showLaunched(s.id);
       return s;
     } catch (e) {
       // Another tab or device is already starting one from this session (the daemon allows one
@@ -590,6 +590,11 @@ class AppState {
     } finally {
       if (from) this.handoffFrom.delete(from);
     }
+  }
+
+  /** Open a session just started; the grid stays open and gains its tile instead. */
+  showLaunched(id: string): void {
+    if (nav.route.name !== 'grid') navigate(href.sessions(id));
   }
 
   openNewSession(projectId: string | null = null): void {

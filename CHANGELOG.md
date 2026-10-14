@@ -10,6 +10,22 @@ so every tag needs one.
 
 ## [Unreleased]
 
+### Changed
+
+- Grid: tiles keep their place when a session's status changes; drag a tile's
+  grip (or focus it and use the arrow keys) to rearrange them, kept per
+  browser. Tiles are laid out as close to square as the width allows (four
+  as 2x2), and a short last row is stretched to fill the width.
+- Grid: starting a session from the grid keeps the grid open and adds its tile.
+- New session from a session: the first prompt now asks the agent to read the
+  handoff and say where things were left off, then wait for you, instead of
+  continuing the work on its own.
+
+### Fixed
+
+- Claude Code sessions stay Working while background subagents or workflows
+  are still running, instead of showing Idle once the main turn ends.
+
 ## [0.4.0] - 2026-10-11
 
 ### Added
