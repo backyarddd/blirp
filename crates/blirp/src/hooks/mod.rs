@@ -114,6 +114,25 @@ fn agent_session_id(p: &Value) -> Option<String> {
     str_field(p, &["session_id", "conversation_id", "sessionId"]).map(str::to_string)
 }
 
+/// Claude's Stop lists in-flight background work: a subagent or workflow still running wakes
+/// the session with a new turn when it reports back, so the session is still working. Shells,
+/// monitors and teammates can live indefinitely and do not count, nor do tasks already ended.
+fn agents_in_flight(p: &Value) -> bool {
+    p.get("background_tasks")
+        .and_then(Value::as_array)
+        .is_some_and(|tasks| {
+            tasks.iter().any(|t| {
+                matches!(
+                    t.get("type").and_then(Value::as_str),
+                    Some("subagent" | "workflow")
+                ) && !matches!(
+                    t.get("status").and_then(Value::as_str),
+                    Some("completed" | "failed" | "killed" | "stopped" | "cancelled")
+                )
+            })
+        })
+}
+
 fn payload_cwd(p: &Value) -> Option<String> {
     str_field(p, &["cwd"]).map(str::to_string).or_else(|| {
         p.get("workspace_roots")
@@ -323,6 +342,7 @@ pub fn handle(
         }
         let status = match event {
             HookEvent::PromptSubmit => Some(SessionStatus::Working),
+            HookEvent::Stop if agents_in_flight(p) => Some(SessionStatus::Working),
             HookEvent::Stop => Some(SessionStatus::Idle),
             HookEvent::Notification => Some(SessionStatus::Waiting),
             HookEvent::ToolDone => {

@@ -149,6 +149,17 @@ async fn hook_lifecycle_of_an_external_session() {
         ),
         // Approving the prompt fires no prompt hook; the finished tool is the first signal.
         ("PostToolUse", json!({}), SessionStatus::Working),
+        // Background subagents still running keep the session working; a background shell does not.
+        (
+            "Stop",
+            json!({"background_tasks": [{"id": "a", "type": "shell"}, {"id": "b", "type": "subagent", "status": "running"}]}),
+            SessionStatus::Working,
+        ),
+        (
+            "Stop",
+            json!({"background_tasks": [{"id": "a", "type": "shell"}, {"id": "b", "type": "subagent", "status": "killed"}]}),
+            SessionStatus::Idle,
+        ),
         ("Stop", json!({}), SessionStatus::Idle),
         ("PostToolUse", json!({}), SessionStatus::Idle),
         (
