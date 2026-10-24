@@ -133,14 +133,14 @@ jobs:
       - uses: pnpm/action-setup@ea17c68df8912ef543352723c149a84f56e3d413 # v6.1.0
         with:
           version: ${{ env.PNPM_VERSION }}
-      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version: 22
       - run: |
           pnpm -C web install --frozen-lockfile --ignore-scripts
           pnpm -C app install --frozen-lockfile --ignore-scripts
       - run: sh scripts/third-party-notices.sh THIRD_PARTY_NOTICES
-      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: third-party-notices
           path: THIRD_PARTY_NOTICES
@@ -169,7 +169,7 @@ jobs:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
           persist-credentials: false
-      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           name: third-party-notices
           path: app/src-tauri/binaries
@@ -182,7 +182,7 @@ jobs:
       - uses: pnpm/action-setup@ea17c68df8912ef543352723c149a84f56e3d413 # v6.1.0
         with:
           version: ${{ env.PNPM_VERSION }}
-      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version: 22
       - name: Build web UI
@@ -298,7 +298,7 @@ jobs:
         run: gh release upload "$GITHUB_REF_NAME" dist/blirp-"$VERSION"-"$TARGET".* --clobber
       - name: Keep the archive (dry run)
         if: github.event_name == 'workflow_dispatch'
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: dist-cli-${{ matrix.target }}
           path: dist/blirp-${{ env.VERSION }}-${{ matrix.target }}.*
@@ -328,7 +328,7 @@ jobs:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
           persist-credentials: false
-      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           name: third-party-notices
           path: app/src-tauri/binaries
@@ -350,7 +350,7 @@ jobs:
       - uses: pnpm/action-setup@ea17c68df8912ef543352723c149a84f56e3d413 # v6.1.0
         with:
           version: ${{ env.PNPM_VERSION }}
-      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version: 22
       - name: Build web UI
@@ -484,7 +484,7 @@ jobs:
         run: gh release upload "$GITHUB_REF_NAME" dist/* --clobber
       - name: Keep the bundles (dry run)
         if: github.event_name == 'workflow_dispatch'
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: dist-desktop-${{ matrix.target }}
           path: dist/*
@@ -512,7 +512,7 @@ jobs:
         run: gh release download "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" --dir assets
       - name: Download the built assets (dry run)
         if: github.event_name == 'workflow_dispatch'
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           pattern: dist-*
           merge-multiple: true
@@ -555,7 +555,7 @@ jobs:
       - name: Render the packaging manifests (dry run)
         if: github.event_name == 'workflow_dispatch'
         run: sh scripts/render-packaging.sh "$VERSION" assets packaging-out
-      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: sha256sums
           path: SHA256SUMS.txt
@@ -570,7 +570,7 @@ jobs:
     # run next to the key are the shell, coreutils and the pinned minisign.
     permissions: {}
     steps:
-      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           name: sha256sums
       - name: Fetch the pinned minisign
@@ -597,7 +597,7 @@ jobs:
           printf '%s' "$TAURI_SIGNING_PRIVATE_KEY" | base64 -d > "$key"
           printf '%s\n' "$TAURI_SIGNING_PRIVATE_KEY_PASSWORD" |
             "$RUNNER_TEMP/minisign-linux/x86_64/minisign" -S -s "$key" -m SHA256SUMS.txt -x SHA256SUMS.txt.sig
-      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: sha256sums-sig
           path: SHA256SUMS.txt.sig
@@ -616,7 +616,7 @@ jobs:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
           persist-credentials: false
-      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           pattern: sha256sums*
           merge-multiple: true
